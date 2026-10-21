@@ -1191,6 +1191,31 @@ fn decode_server_frame(
     serde_json::from_str(&text).map_err(|error| format!("malformed server frame: {error}"))
 }
 
+/// Count canonical JSON bytes without retaining a second encoded payload.
+/// This uses the same serializer as frames and replay byte validation.
+fn json_byte_count(value: &(impl serde::Serialize + ?Sized)) -> Result<usize, serde_json::Error> {
+    #[derive(Default)]
+    struct ByteCount(usize);
+
+    impl std::io::Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("JSON byte count overflows"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = ByteCount::default();
+    serde_json::to_writer(&mut count, value)?;
+    Ok(count.0)
+}
+
 /// Construct one exact-size application ledger document. ASCII padding does
 /// not escape in JSON, so each padding character adds exactly one byte.
 pub(crate) fn ledger_application_data(
@@ -1199,9 +1224,8 @@ pub(crate) fn ledger_application_data(
     payload_bytes: u32,
 ) -> Result<serde_json::Value, String> {
     let mut data = json!({"ledger_sender": sender, "seq": seq, "padding": ""});
-    let metadata_bytes = serde_json::to_vec(&data)
-        .map_err(|error| format!("serialize ledger metadata: {error}"))?
-        .len();
+    let metadata_bytes =
+        json_byte_count(&data).map_err(|error| format!("serialize ledger metadata: {error}"))?;
     let padding_bytes = count_usize(payload_bytes).checked_sub(metadata_bytes).ok_or_else(|| {
         format!("payload_bytes ({payload_bytes}) is below ledger metadata size ({metadata_bytes}) for {sender} seq {seq}")
     })?;
@@ -1222,7 +1246,7 @@ fn encode_application_frame(
         let application_bytes = count_u64(payload.len());
         return Ok((Message::Binary(payload.into()), application_bytes));
     }
-    let envelope = serde_json::to_string(&ClientMessage::GameData {
+    let envelope_bytes = json_byte_count(&ClientMessage::GameData {
         class,
         key,
         data: serde_json::Value::Null,
@@ -1234,7 +1258,7 @@ fn encode_application_frame(
     let application_bytes = frame
         .len()
         .checked_add(4)
-        .and_then(|size| size.checked_sub(envelope.len()))
+        .and_then(|size| size.checked_sub(envelope_bytes))
         .ok_or_else(|| "serialized GameData frame is smaller than its envelope".to_string())?;
     Ok((Message::Text(frame.into()), count_u64(application_bytes)))
 }
@@ -1247,9 +1271,8 @@ pub(crate) fn validate_payload_size(
     for plan in plans {
         if let Some(seq) = plan.sends.last().map(|send| send.seq) {
             let data = json!({"ledger_sender": plan.name, "seq": seq, "padding": ""});
-            let metadata_bytes = serde_json::to_vec(&data)
-                .map_err(|error| format!("serialize ledger metadata: {error}"))?
-                .len();
+            let metadata_bytes = json_byte_count(&data)
+                .map_err(|error| format!("serialize ledger metadata: {error}"))?;
             if count_usize(payload_bytes) < metadata_bytes {
                 return Err(format!("payload_bytes ({payload_bytes}) is below maximum scheduled ledger metadata size ({metadata_bytes}) for {} seq {seq}", plan.name));
             }
@@ -1727,11 +1750,8 @@ pub(crate) async fn handle_inbound(
                 seq,
                 ..
             }) => {
-                let application_bytes = count_u64(
-                    serde_json::to_vec(&data)
-                        .expect("received JSON value serializes")
-                        .len(),
-                );
+                let application_bytes =
+                    count_u64(json_byte_count(&data).expect("received JSON value serializes"));
                 let encoded_frame_body_bytes = count_u64(text.len());
                 if let Some((ledger_sender, ledger_seq)) =
                     websocket_test_helpers::delivery_ledger::extract(&data)
@@ -2241,6 +2261,33 @@ mod session_poll_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // #775: byte accounting must not allocate another application-sized buffer.
+    #[test]
+    fn json_byte_count_matches_canonical_serialization_for_all_payload_shapes() {
+        let mut documents = vec![
+            serde_json::Value::Null,
+            json!([true, false, 0, u64::MAX, i64::MIN, -12.25]),
+            json!(""),
+            json!("quotes\", slash\\, newline\n, 雪 😀"),
+            json!({"escaped\"key": [null, false, 0, "\t\r漢字"]}),
+            json!({"control": (0_u8..32).map(char::from).collect::<String>()}),
+        ];
+        for bytes in [96, 1_024, 16_384, 65_536, 524_288] {
+            documents.push(ledger_application_data("r0p1", u64::MAX, bytes).expect("ledger"));
+        }
+        for document in documents {
+            assert_eq!(
+                json_byte_count(&document).expect("count canonical bytes"),
+                serde_json::to_vec(&document)
+                    .expect("canonical bytes")
+                    .len()
+            );
+        }
+        // Keep serializer failures visible, including an invalid JSON map key.
+        let invalid = BTreeMap::from([((1, 2), "tuple key")]);
+        assert!(json_byte_count(&invalid).is_err());
+    }
+
     #[test]
     fn outgoing_frame_bytes_match_canonical_body_and_protocol_serializers() {
         let mut documents = vec![
@@ -2378,16 +2425,25 @@ mod session_poll_tests {
         )])));
         let epoch = Instant::now();
         let log = Arc::new(EventLog::new());
+        let mut expected_bytes = Vec::new();
         for seq in 0..3 {
+            let mut data = ledger_application_data(&sender, seq, 96).expect("ledger");
+            if seq == 1 {
+                data["extra"] = json!({"escaped\"key": [null, "雪\n\t\\"]});
+            }
+            let application_bytes = serde_json::to_vec(&data).expect("body bytes").len();
             let frame = serde_json::to_string(&ServerMessage::GameData {
                 from_player: player,
-                data: ledger_application_data(&sender, seq, 96).expect("ledger"),
+                data,
                 seq: Some(seq + 1),
                 epoch: Some(1),
                 class: None,
                 key: None,
             })
             .expect("frame");
+            // Wire whitespace changes frame bytes, but not canonical application bytes.
+            let frame = format!(" {frame}\n");
+            expected_bytes.push((application_bytes, frame.len()));
             assert!(
                 handle_inbound(
                     &recipient,
@@ -2405,7 +2461,12 @@ mod session_poll_tests {
         }
         let records = log.take_records();
         assert_eq!(records.receipts.len(), 3);
-        for receipt in &records.receipts {
+        assert!(records.faults.is_empty(), "{:?}", records.faults);
+        for (receipt, (application_bytes, frame_bytes)) in
+            records.receipts.iter().zip(expected_bytes)
+        {
+            assert_eq!(receipt.application_bytes, count_u64(application_bytes));
+            assert_eq!(receipt.encoded_frame_body_bytes, count_u64(frame_bytes));
             assert_eq!(
                 receipt.recipient.as_ptr(),
                 recipient.as_ptr(),

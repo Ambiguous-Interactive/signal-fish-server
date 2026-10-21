@@ -4679,7 +4679,7 @@ fn a_stale_epoch_delivery_after_the_senders_rejoin_is_a_misroute() {
 /// still owed exactly once.
 #[test]
 fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
-    let (context, churn) = churn_context(DeliveryClass::Volatile);
+    let (context, mut churn) = churn_context(DeliveryClass::Volatile);
     let mut records = churned_records(&context, &churn);
     // The recipient r0p0 disconnects at 250 µs, missing the rest of the
     // sender's epoch-1 stream (its snapshot tells it that stream is already
@@ -4707,6 +4707,9 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
             ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
         ]),
     });
+    churn
+        .cycles
+        .extend(snapshot_churn_plan(&[("r0p0", 250_000, 260_000)]).cycles);
     let summary = oracle::summarize(
         &context.plans,
         &context.roster,
@@ -5281,6 +5284,34 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
         "replaying the artifacts must reproduce the outcome summary"
     );
 
+    for mutation in ["missing_disconnect", "missing_epoch"] {
+        let mut changed = records.clone();
+        match mutation {
+            "missing_disconnect" => changed
+                .churn
+                .retain(|event| event.phase != records::ChurnPhase::Disconnect),
+            _ => {
+                changed
+                    .churn
+                    .iter_mut()
+                    .find(|event| event.phase == records::ChurnPhase::Rejoined)
+                    .unwrap()
+                    .epoch = None
+            }
+        }
+        artifacts::write_deliveries(output.path(), &changed).expect("write malformed churn");
+        let invalid = artifacts::replay(output.path()).expect("replay malformed churn");
+        assert!(!invalid.valid, "{mutation}");
+        assert!(
+            invalid
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, oracle::InvalidReason::InvalidChurnEvents { .. })),
+            "{mutation}: {:?}",
+            invalid.reasons
+        );
+    }
+
     let mut records = records;
     let snapshot = records
         .churn
@@ -5418,6 +5449,21 @@ async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
 // times, never guessed.
 // ---------------------------------------------------------------------------
 
+fn snapshot_churn_plan(peers: &[(&str, u64, u64)]) -> ChurnPlan {
+    ChurnPlan {
+        cycles: peers
+            .iter()
+            .map(
+                |&(peer, disconnect_us, reconnect_us)| schedule::ChurnCycle {
+                    peers: vec![peer.to_string()],
+                    disconnect_us,
+                    reconnects_us: BTreeMap::from([(peer.to_string(), reconnect_us)]),
+                },
+            )
+            .collect(),
+    }
+}
+
 /// A three-peer room: `r0p1` sends ledger 0..=3 (epoch 1, one send per
 /// 100 ms); the viewer `r0p0` rejoins at 250 ms. The snapshot race omits
 /// `r0p1` entirely even though it is seated and sending.
@@ -5446,6 +5492,13 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
     plans.retain(|plan| plan.name == "r0p1");
     let plan = &plans[0];
     let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 249_999,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p0".to_string(),
         phase: records::ChurnPhase::Rejoined,
@@ -5523,7 +5576,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         1_000,
         96,
         DeliveryClass::Reliable,
-        &ChurnPlan::default(),
+        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000)]),
         None,
     );
     assert!(
@@ -5548,6 +5601,13 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
     // exactly the derived floor boundary (server seq 3), proving the floor
     // is the send count at the rejoin instant — not zero, not "everything".
     let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 249_999,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p0".to_string(),
         phase: records::ChurnPhase::Rejoined,
@@ -5624,7 +5684,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         1_000,
         96,
         DeliveryClass::Reliable,
-        &ChurnPlan::default(),
+        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000)]),
         None,
     );
     assert!(!summary.valid);
@@ -5672,6 +5732,13 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
     });
     // The viewer rejoins at 250 ms; its snapshot names r0p1 by the
     // second-incarnation id with tail 1 (one frame already accounted).
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 249_999,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p0".to_string(),
         phase: records::ChurnPhase::Rejoined,
@@ -5740,7 +5807,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         1_000,
         96,
         DeliveryClass::Reliable,
-        &ChurnPlan::default(),
+        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000), ("r0p1", 100_000, 150_000)]),
         None,
     );
     assert!(
@@ -5763,7 +5830,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         1_000,
         96,
         DeliveryClass::Reliable,
-        &ChurnPlan::default(),
+        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000), ("r0p1", 100_000, 150_000)]),
         None,
     );
     assert!(

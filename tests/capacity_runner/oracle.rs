@@ -56,6 +56,8 @@ pub enum InvalidReason {
         count: u64,
         first: SnapshotTailViolation,
     },
+    /// Recorded churn actions differ from the declared reconnect workload.
+    InvalidChurnEvents { count: u64, first: ChurnViolation },
     /// A GameData frame lacked a usable ledger or registered sender identity.
     /// Its observed bytes remain raw evidence even though delivery pairing failed.
     UnidentifiedGameData {
@@ -152,6 +154,25 @@ pub enum InvalidReason {
         count: u64,
         bound: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChurnViolation {
+    pub recipient: String,
+    pub phase: ChurnPhase,
+    pub mismatch: ChurnMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChurnMismatch {
+    UnknownRecipient,
+    UnplannedAction,
+    UnexpectedPhase,
+    BeforeScheduledTime,
+    DisconnectMetadata,
+    RejoinEpoch { expected: u32, actual: Option<u32> },
+    UnregisteredEpoch { epoch: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -503,6 +524,123 @@ impl<'a> SendIndex<'a> {
             }
             Self::Reordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
         }
+    }
+}
+
+fn churn_evidence(
+    churn: &ChurnPlan,
+    roster: &[(String, u32)],
+    records: &RunRecords,
+    reasons: &mut Vec<InvalidReason>,
+) {
+    let roster: BTreeSet<_> = roster.iter().map(|(name, _)| name.as_str()).collect();
+    let mut planned: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    for cycle in &churn.cycles {
+        for peer in &cycle.peers {
+            if let Some(reconnect) = cycle.reconnects_us.get(peer) {
+                planned
+                    .entry(peer)
+                    .or_default()
+                    .push((cycle.disconnect_us, *reconnect));
+            }
+        }
+    }
+    let registered: BTreeSet<_> = records
+        .registry
+        .values()
+        .map(|(peer, epoch)| (peer.as_str(), *epoch))
+        .collect();
+    let mut events: Vec<_> = records.churn.iter().map(|event| (event, 0_usize)).collect();
+    events.sort_by_key(|(event, _)| (event.recipient.as_str(), event.at_us));
+    /*
+        Delayed cycles can share a microsecond. Disconnect ordinals and rejoin
+        epochs recover their alternating order only within that timestamp.
+    */
+    let mut disconnect_ordinals: BTreeMap<&str, usize> = BTreeMap::new();
+    for (event, ordinal) in &mut events {
+        *ordinal = match event.phase {
+            ChurnPhase::Disconnect => {
+                let next = disconnect_ordinals
+                    .entry(event.recipient.as_str())
+                    .or_default();
+                let ordinal = next.saturating_mul(2);
+                *next = next.saturating_add(1);
+                ordinal
+            }
+            ChurnPhase::Rejoined => event
+                .epoch
+                .and_then(|epoch| usize::try_from(epoch.checked_sub(2)?).ok())
+                .map_or(usize::MAX, |epoch| {
+                    epoch.saturating_mul(2).saturating_add(1)
+                }),
+        };
+    }
+    events.sort_by_key(|(event, ordinal)| (event.recipient.as_str(), event.at_us, *ordinal));
+    let mut positions: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut count = 0_u64;
+    let mut first = None;
+    for (event, _) in events {
+        let position = positions.entry(event.recipient.as_str()).or_default();
+        let expected_phase = if position.is_multiple_of(2) {
+            ChurnPhase::Disconnect
+        } else {
+            ChurnPhase::Rejoined
+        };
+        let cycle = planned
+            .get(event.recipient.as_str())
+            .and_then(|cycles| cycles.get(*position / 2));
+        let mismatch = if !roster.contains(event.recipient.as_str()) {
+            Some(ChurnMismatch::UnknownRecipient)
+        } else if let Some(&(disconnect, reconnect)) = cycle {
+            if event.phase != expected_phase {
+                Some(ChurnMismatch::UnexpectedPhase)
+            } else {
+                let expected_epoch = u32::try_from(*position / 2)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(2);
+                *position = position.saturating_add(1);
+                if event.at_us
+                    < if event.phase == ChurnPhase::Disconnect {
+                        disconnect
+                    } else {
+                        reconnect
+                    }
+                {
+                    Some(ChurnMismatch::BeforeScheduledTime)
+                } else if event.phase == ChurnPhase::Disconnect
+                    && (event.epoch.is_some() || !event.tails.is_empty())
+                {
+                    Some(ChurnMismatch::DisconnectMetadata)
+                } else if event.phase == ChurnPhase::Rejoined && event.epoch != Some(expected_epoch)
+                {
+                    Some(ChurnMismatch::RejoinEpoch {
+                        expected: expected_epoch,
+                        actual: event.epoch,
+                    })
+                } else if event.phase == ChurnPhase::Rejoined
+                    && !registered.contains(&(event.recipient.as_str(), expected_epoch))
+                {
+                    Some(ChurnMismatch::UnregisteredEpoch {
+                        epoch: expected_epoch,
+                    })
+                } else {
+                    None
+                }
+            }
+        } else {
+            Some(ChurnMismatch::UnplannedAction)
+        };
+        if let Some(mismatch) = mismatch {
+            count = count.saturating_add(1);
+            first.get_or_insert_with(|| ChurnViolation {
+                recipient: event.recipient.clone(),
+                phase: event.phase,
+                mismatch,
+            });
+        }
+    }
+    if let Some(first) = first {
+        reasons.push(InvalidReason::InvalidChurnEvents { count, first });
     }
 }
 
@@ -1143,6 +1281,7 @@ pub fn summarize(
 ) -> OutcomeSummary {
     let mut reasons = records.faults.clone();
     let payload_bytes = payload_size_evidence(records, expected_application_bytes, &mut reasons);
+    churn_evidence(churn, roster, records, &mut reasons);
     if !records.join_failures.is_empty() {
         reasons.push(InvalidReason::JoinFailed {
             failures: records.join_failures.clone(),
@@ -2043,6 +2182,317 @@ mod coverage_tests {
     use super::*;
 
     #[test]
+    fn churn_evidence_cannot_replace_planned_disconnects_with_rejoins() {
+        let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
+        let baseline = crate::churned_records(&context, &churn);
+        for mutation in [
+            "missing_disconnect",
+            "duplicate_disconnect",
+            "extra_rejoin",
+            "unknown_peer",
+            "unplanned_peer",
+            "early_disconnect",
+            "early_rejoin",
+            "rejoin_before_disconnect",
+            "disconnect_epoch",
+            "disconnect_tails",
+            "missing_epoch",
+            "zero_epoch",
+            "reused_epoch",
+            "skipped_epoch",
+            "max_epoch",
+            "missing_identity",
+            "missing_rejoin",
+        ] {
+            let mut records = baseline.clone();
+            let (count, recipient, phase, mismatch) = match mutation {
+                "missing_disconnect" => {
+                    records.churn.remove(0);
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Rejoined,
+                        ChurnMismatch::UnexpectedPhase,
+                    )
+                }
+                "duplicate_disconnect" => {
+                    records.churn.push(records.churn[0].clone());
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Disconnect,
+                        ChurnMismatch::UnexpectedPhase,
+                    )
+                }
+                "extra_rejoin" => {
+                    records.churn.push(records.churn[1].clone());
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Rejoined,
+                        ChurnMismatch::UnplannedAction,
+                    )
+                }
+                "unknown_peer" | "unplanned_peer" => {
+                    let peer = if mutation == "unknown_peer" {
+                        "absent"
+                    } else {
+                        "r0p0"
+                    };
+                    for event in &mut records.churn {
+                        event.recipient = peer.into();
+                    }
+                    (
+                        2,
+                        peer,
+                        ChurnPhase::Disconnect,
+                        if mutation == "unknown_peer" {
+                            ChurnMismatch::UnknownRecipient
+                        } else {
+                            ChurnMismatch::UnplannedAction
+                        },
+                    )
+                }
+                "early_disconnect" => {
+                    records.churn[0].at_us -= 1;
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Disconnect,
+                        ChurnMismatch::BeforeScheduledTime,
+                    )
+                }
+                "early_rejoin" => {
+                    records.churn[1].at_us -= 1;
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Rejoined,
+                        ChurnMismatch::BeforeScheduledTime,
+                    )
+                }
+                "rejoin_before_disconnect" => {
+                    records.churn[1].at_us = records.churn[0].at_us - 1;
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Rejoined,
+                        ChurnMismatch::UnexpectedPhase,
+                    )
+                }
+                "disconnect_epoch" | "disconnect_tails" => {
+                    if mutation == "disconnect_epoch" {
+                        records.churn[0].epoch = Some(1);
+                    } else {
+                        records.churn[0].tails = records.churn[1].tails.clone();
+                    }
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Disconnect,
+                        ChurnMismatch::DisconnectMetadata,
+                    )
+                }
+                "missing_epoch" | "zero_epoch" | "reused_epoch" | "skipped_epoch" | "max_epoch" => {
+                    let actual = match mutation {
+                        "missing_epoch" => None,
+                        "zero_epoch" => Some(0),
+                        "reused_epoch" => Some(1),
+                        "skipped_epoch" => Some(3),
+                        _ => Some(u32::MAX),
+                    };
+                    records.churn[1].epoch = actual;
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Rejoined,
+                        ChurnMismatch::RejoinEpoch {
+                            expected: 2,
+                            actual,
+                        },
+                    )
+                }
+                "missing_identity" => {
+                    records.registry.remove("id-r0p1b");
+                    (
+                        1,
+                        "r0p1",
+                        ChurnPhase::Rejoined,
+                        ChurnMismatch::UnregisteredEpoch { epoch: 2 },
+                    )
+                }
+                "missing_rejoin" => {
+                    records.churn.pop();
+                    let summary = summarize(
+                        &context.plans,
+                        &context.roster,
+                        &records,
+                        1_000,
+                        96,
+                        context.delivery_class,
+                        &churn,
+                        None,
+                    );
+                    assert!(summary.reasons.contains(&InvalidReason::ChurnNotPerformed {
+                        peer: "r0p1".into()
+                    }));
+                    continue;
+                }
+                _ => unreachable!(),
+            };
+            let expected = InvalidReason::InvalidChurnEvents {
+                count,
+                first: ChurnViolation {
+                    recipient: recipient.into(),
+                    phase,
+                    mismatch,
+                },
+            };
+            let mut expected_summary = None;
+            for reverse in [false, true] {
+                if reverse {
+                    records.churn.reverse();
+                }
+                let output = tempfile::tempdir().unwrap();
+                crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+                let replayed = crate::artifacts::read_records(output.path()).unwrap();
+                for evidence in [&records, &replayed] {
+                    let summary = summarize(
+                        &context.plans,
+                        &context.roster,
+                        evidence,
+                        1_000,
+                        96,
+                        context.delivery_class,
+                        &churn,
+                        None,
+                    );
+                    assert!(!summary.valid, "{mutation}: {:?}", summary.reasons);
+                    assert!(
+                        summary.reasons.contains(&expected),
+                        "{mutation}: {:?}",
+                        summary.reasons
+                    );
+                    let value = serde_json::to_value(summary).unwrap();
+                    assert_eq!(
+                        expected_summary.get_or_insert_with(|| value.clone()),
+                        &value,
+                        "{mutation}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn churn_evidence_accepts_delayed_tied_and_shuffled_repeated_cycles() {
+        let roster = vec![("a".into(), 0), ("b".into(), 0)];
+        let churn = crate::snapshot_churn_plan(&[
+            ("a", 10, 20),
+            ("b", 10, 20),
+            ("a", 30, 40),
+            ("b", 30, 40),
+        ]);
+        let mut records = RunRecords::default();
+        for peer in ["a", "b"] {
+            for (epoch, at_us) in [(2, 25), (3, 45)] {
+                records
+                    .registry
+                    .insert(format!("{peer}-{epoch}"), (peer.into(), epoch));
+                for phase in [ChurnPhase::Disconnect, ChurnPhase::Rejoined] {
+                    records.churn.push(crate::records::ChurnEvent {
+                        recipient: peer.into(),
+                        phase,
+                        at_us,
+                        epoch: (phase == ChurnPhase::Rejoined).then_some(epoch),
+                        tails: BTreeMap::new(),
+                    });
+                }
+            }
+        }
+        for same_timestamp in [false, true] {
+            if same_timestamp {
+                for event in &mut records.churn {
+                    event.at_us = 45;
+                }
+            }
+            for reverse in [false, true] {
+                if reverse {
+                    records.churn.reverse();
+                }
+                let summary = summarize(
+                    &[],
+                    &roster,
+                    &records,
+                    1_000,
+                    96,
+                    DeliveryClass::Reliable,
+                    &churn,
+                    None,
+                );
+                assert!(summary.valid, "{:?}", summary.reasons);
+            }
+        }
+        for mutation in [
+            "missing_disconnect",
+            "missing_rejoin",
+            "extra_disconnect",
+            "extra_rejoin",
+        ] {
+            let mut changed = records.clone();
+            let phase = if mutation.ends_with("disconnect") {
+                ChurnPhase::Disconnect
+            } else {
+                ChurnPhase::Rejoined
+            };
+            let index = changed
+                .churn
+                .iter()
+                .position(|event| {
+                    event.recipient == "a"
+                        && event.phase == phase
+                        && (phase == ChurnPhase::Disconnect || event.epoch == Some(2))
+                })
+                .unwrap();
+            if mutation.starts_with("missing") {
+                changed.churn.remove(index);
+            } else {
+                changed.churn.push(changed.churn[index].clone());
+            }
+            let (count, phase, mismatch) = match mutation {
+                "missing_disconnect" => (1, ChurnPhase::Rejoined, ChurnMismatch::UnexpectedPhase),
+                "missing_rejoin" => (2, ChurnPhase::Disconnect, ChurnMismatch::UnexpectedPhase),
+                "extra_disconnect" => (1, ChurnPhase::Disconnect, ChurnMismatch::UnplannedAction),
+                _ => (1, ChurnPhase::Rejoined, ChurnMismatch::UnexpectedPhase),
+            };
+            let summary = summarize(
+                &[],
+                &roster,
+                &changed,
+                1_000,
+                96,
+                DeliveryClass::Reliable,
+                &churn,
+                None,
+            );
+            assert!(
+                summary
+                    .reasons
+                    .contains(&InvalidReason::InvalidChurnEvents {
+                        count,
+                        first: ChurnViolation {
+                            recipient: "a".into(),
+                            phase,
+                            mismatch
+                        }
+                    }),
+                "{mutation}: {:?}",
+                summary.reasons
+            );
+        }
+    }
+
+    #[test]
     fn snapshot_evidence_rejects_wrong_members_identities_and_impossible_tails() {
         let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
         let baseline = crate::churned_records(&context, &churn);
@@ -2221,6 +2671,17 @@ mod coverage_tests {
                 }
                 _ => unreachable!(),
             };
+            let mut churn = churn.clone();
+            churn
+                .cycles
+                .extend(crate::snapshot_churn_plan(&[("r0p0", snapshot_us, snapshot_us)]).cycles);
+            records.churn.push(crate::records::ChurnEvent {
+                recipient: "r0p0".into(),
+                phase: ChurnPhase::Disconnect,
+                at_us: snapshot_us,
+                epoch: None,
+                tails: BTreeMap::new(),
+            });
             records.churn.push(crate::records::ChurnEvent {
                 recipient: "r0p0".into(),
                 phase: ChurnPhase::Rejoined,

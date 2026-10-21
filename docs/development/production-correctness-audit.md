@@ -6614,3 +6614,38 @@ This finding affects the standalone capacity oracle. It establishes no server
 delivery defect and changes no server wire message or client API. Rust, .NET,
 and Godot clients do not consume this test-target oracle and need no migration.
 Arbitrary churn-event validation and broader A01–A22 coverage remain open.
+
+### F121 — Capacity churn counts can replace actual disconnect evidence
+
+Session 500 confirms [#1106](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1106)
+at `870c9c28`, under open audit #826. The oracle counts recorded rejoins against
+the planned storm. It does not check the lifecycle actions themselves. Removing
+every recorded disconnect while retaining rejoins, sends, and receipts still
+produces a valid verdict. Red Nextest `2dbc0ef0-cfeb-4746-9f7b-2dc1b23a4240`
+reproduces this missing evidence. No server delivery defect is established.
+
+The repair validates each action against its peer's declared reconnect cycles.
+It checks alternating disconnect/rejoin phases, scheduled lower time bounds,
+empty disconnect metadata, contiguous rejoin epochs, and registered incarnation
+identity. Unknown peers and unplanned actions are invalid. Existing missing-work
+checks remain. The raw action records and all delivery evidence remain intact.
+Delayed actions and cross-peer logging inversions stay legal. Same-microsecond
+transitions use disconnect ordinals and rejoin epochs to reconstruct legal
+cycle order without treating another task's log order as causality.
+
+The new negative controls exercise missing and duplicate actions, unknown and
+unplanned peers, early transitions, malformed disconnect fields, invalid epochs,
+and missing registry identity. Controls check typed invalidation reasons.
+Malformed recorded-action cases also check artifact round-trip verdicts and
+reordered histories. Positive controls retain delayed,
+tied, repeated cycles and the earlier snapshot timing inversions. Independent
+review found the equal-timestamp edge before publication and requested its
+explicit positive control. All 11 final focused all-feature controls pass in
+Nextest `ade5eb58-96ff-4e90-8be7-9bdcdb08f7e2`, including real reconnect public
+replay of removed disconnects and missing rejoin epochs, and two-wave room
+replacement. Full strict all-target, all-feature lint passes.
+
+This changes only the private capacity runner verdict. Rust, .NET, and Godot
+clients consume no oracle output and need no migration. Server wire messages,
+client APIs, dependencies, offered workload, and timing limits stay the same.
+The broader audit and full long-workload proof remain open.
