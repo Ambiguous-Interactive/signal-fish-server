@@ -17,6 +17,7 @@ use signal_fish_server::coordination::allocation_benchmark::{
 use signal_fish_server::coordination::{
     ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator,
 };
+use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::metrics::{ResponseTimeTracker, ServerMetrics};
 use signal_fish_server::protocol::{
     DeliveryClass, GameDataEncoding, LobbyState, PlayerId, RoomId, ServerMessage,
@@ -639,7 +640,50 @@ fn assert_steady_state_timing_records_do_not_allocate() {
     eprintln!("response_time_tracker steady-state: {stats:?}");
 }
 
+fn assert_database_metrics_reuse_game_names() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let mut bounded = true;
+        for room_count in [16, 1_024] {
+            let database = InMemoryDatabase::new();
+            for index in 0..room_count {
+                database
+                    .create_room(
+                        format!("game-{}-水", index % 4),
+                        Some(format!("R{index:05}")),
+                        16,
+                        true,
+                        PlayerId::new_v4(),
+                        "relay".into(),
+                        "test".into(),
+                        None,
+                    )
+                    .await
+                    .expect("room");
+            }
+            let region = Region::new(GLOBAL);
+            std::hint::black_box(database.get_rooms_by_game().await.expect("game counts"));
+            let counts = region.change();
+            let region = Region::new(GLOBAL);
+            std::hint::black_box(database.get_game_player_percentiles().await.expect("percentiles"));
+            let percentiles = region.change();
+            eprintln!(
+                "rooms={room_count} games=4 counts_allocations={} counts_reallocations={} counts_bytes={} percentiles_allocations={} percentiles_reallocations={} percentiles_bytes={}",
+                counts.allocations, counts.reallocations, counts.bytes_allocated,
+                percentiles.allocations, percentiles.reallocations, percentiles.bytes_allocated,
+            );
+            bounded &= counts.allocations + counts.reallocations <= 16
+                && percentiles.allocations + percentiles.reallocations <= 96;
+        }
+        assert!(bounded, "game metrics repeated-name allocation regression");
+    });
+}
+
 fn main() {
+    assert_database_metrics_reuse_game_names();
     assert_steady_state_timing_records_do_not_allocate();
     println!(
         "scope,room_size,recipients,relays,deliveries,delivery_handle_clones,allocations,reallocations,\

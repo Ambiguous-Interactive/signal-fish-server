@@ -2557,19 +2557,24 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn get_rooms_by_game(&self) -> Result<HashMap<String, usize>> {
         let rooms = self.rooms.read().await;
-        let mut game_counts = HashMap::new();
+        let mut game_counts: HashMap<String, usize> = HashMap::new();
 
         for room in rooms.values() {
-            let count = game_counts.entry(room.game_name.clone()).or_insert(0usize);
-            *count = count.saturating_add(1);
+            if let Some(count) = game_counts.get_mut(room.game_name.as_str()) {
+                *count = count.saturating_add(1);
+            } else {
+                game_counts.insert(room.game_name.clone(), 1);
+            }
         }
 
         Ok(game_counts)
     }
 
     async fn get_player_count_percentiles(&self) -> Result<HashMap<String, f64>> {
-        let rooms = self.rooms.read().await;
-        let mut player_counts: Vec<usize> = rooms.values().map(|room| room.players.len()).collect();
+        let mut player_counts: Vec<usize> = {
+            let rooms = self.rooms.read().await;
+            rooms.values().map(|room| room.players.len()).collect()
+        };
 
         if player_counts.is_empty() {
             return Ok(HashMap::new());
@@ -2593,17 +2598,20 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn get_game_player_percentiles(&self) -> Result<HashMap<String, HashMap<String, f64>>> {
-        let rooms = self.rooms.read().await;
-        let mut game_player_counts: HashMap<String, Vec<usize>> = HashMap::new();
+        let game_player_counts = {
+            let rooms = self.rooms.read().await;
+            let mut counts: HashMap<String, Vec<usize>> = HashMap::new();
+            for room in rooms.values() {
+                if let Some(player_counts) = counts.get_mut(room.game_name.as_str()) {
+                    player_counts.push(room.players.len());
+                } else {
+                    counts.insert(room.game_name.clone(), vec![room.players.len()]);
+                }
+            }
+            counts
+        };
 
-        for room in rooms.values() {
-            game_player_counts
-                .entry(room.game_name.clone())
-                .or_default()
-                .push(room.players.len());
-        }
-
-        let mut result = HashMap::new();
+        let mut result = HashMap::with_capacity(game_player_counts.len());
 
         for (game_name, mut player_counts) in game_player_counts {
             if !player_counts.is_empty() {
@@ -2997,6 +3005,58 @@ mod tests {
         assert_eq!(percentile(&values, 900), 80.0);
         assert_eq!(percentile(&values, 999), 90.0);
         assert_eq!(percentile(&[], 999), 0.0);
+    }
+
+    #[tokio::test]
+    async fn game_metrics_preserve_exact_counts_and_percentiles() {
+        let database = InMemoryDatabase::new();
+        assert!(database.get_rooms_by_game().await.unwrap().is_empty());
+        assert!(database
+            .get_player_count_percentiles()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(database
+            .get_game_player_percentiles()
+            .await
+            .unwrap()
+            .is_empty());
+        for (index, (game, count)) in [("水", 0), ("水", 2), ("水", 4), ("水", 1), ("other", 3)]
+            .into_iter()
+            .enumerate()
+        {
+            let room = create_test_room(&database, game, &format!("MET{index:03}"))
+                .await
+                .unwrap();
+            let mut rooms = database.rooms.write().await;
+            let room = rooms.get_mut(&room.id).unwrap();
+            room.players.clear();
+            for _ in 0..count {
+                let player = member("metrics");
+                room.players.insert(player.id, player);
+            }
+        }
+        assert_eq!(
+            database.get_rooms_by_game().await.unwrap(),
+            HashMap::from([("水".to_string(), 4), ("other".to_string(), 1),])
+        );
+        let overall = database.get_player_count_percentiles().await.unwrap();
+        let per_game = database.get_game_player_percentiles().await.unwrap();
+        for (key, global, water) in [
+            ("p50", 2.0, 2.0),
+            ("p90", 4.0, 4.0),
+            ("p99", 4.0, 4.0),
+            ("p99_5", 4.0, 4.0),
+            ("p99_9", 4.0, 4.0),
+            ("p100", 4.0, 4.0),
+        ] {
+            assert_eq!(overall.get(key), Some(&global), "overall {key}");
+            assert_eq!(per_game["水"].get(key), Some(&water), "water {key}");
+            assert_eq!(per_game["other"].get(key), Some(&3.0), "other {key}");
+        }
+        assert_eq!(overall.len(), 6);
+        assert_eq!(per_game.len(), 2);
+        assert!(per_game.values().all(|values| values.len() == 6));
     }
 
     // NOTE: These tests run under Miri. `InMemoryDatabase::create_room` calls

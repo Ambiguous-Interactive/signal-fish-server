@@ -4548,3 +4548,67 @@ Run each saved binary with filter `response_time_tracker_average`, `--bench`,
 The benchmark retains the old full-summary expression as a separate control.
 The differential test compares exact getter results with that expression across
 histogram states, precisions, and distributions. Broader #636 work remains open.
+
+### Dashboard database allocation cost (session 501, #636)
+
+Room-count and per-game percentile queries cloned each room's game name before
+looking up its group. The queries now borrow names during aggregation and copy
+only each distinct name into their owned results. Percentile queries also release
+the room read guard after collecting counts, before sorting or building summaries.
+The output fields, ranks, and empty-database behavior stay the same.
+
+The database control in `relay_allocations` counts allocations around the actual public
+`GameDatabase` methods. Fixture creation stays outside each measured region.
+It uses four distinct names, including Unicode, at two room counts. The baseline
+fails the retained repeated-name allocation ceilings. The candidate passes.
+
+| Rooms | Query | Old allocations | New allocations | Old bytes | New bytes |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 16 | Room counts | 19 | 7 | 684 | 564 |
+| 1,024 | Room counts | 1,027 | 7 | 10,764 | 564 |
+| 16 | Per-game percentiles | 57 | 44 | 3,636 | 3,216 |
+| 1,024 | Per-game percentiles | 1,065 | 44 | 21,780 | 11,280 |
+
+Run `cargo bench --bench relay_allocations --features allocation-tracking`.
+The local measurements use `--profile dev`; the hosted Linux allocation gate
+runs the release benchmark. The candidate count query has zero reallocations.
+The percentile query has four at 16 rooms and 28 at 1,024 rooms because its
+necessary count vectors grow from one element. The baseline has zero and 24,
+respectively. The control bounds allocation and reallocation calls for these
+fixed game cohorts; it does not claim constant bytes or zero reallocation.
+An earlier borrowed-map candidate added a second table and conversion vector.
+Review replaced it with borrowed lookup in one owned table, which removes
+that temporary storage. Both candidate measurements remain in local progress notes.
+No server throughput or contention improvement is measured here. Exact-output
+tests cover empty, mixed-game, Unicode, zero-player, and all six percentile keys.
+
+### Stream oracle gap coverage (session 501, #775)
+
+The oracle retained one pointer per raw gap report in a second stream index.
+It now merges each validated gap into compact coverage as it reads the raw
+records. Per-stream totals and first violations preserve summary order.
+A separate gap-state map avoids adding state to reliable receipt-only streams.
+Raw gap records remain unchanged for artifact export and replay.
+
+The ignored `oracle::coverage_tests::generator_all_gap_oracle_memory_profile`
+probe builds two exact all-gap streams in a fresh process. Set
+`CAPACITY_GAP_ORACLE_PROBE_SENDS` to half the desired report count. Baseline and
+candidate use the same records and exact summary assertions.
+
+| Gap reports | Old peak RSS, KiB | New peak RSS, KiB | Decrease, KiB |
+| ---: | ---: | ---: | ---: |
+| 200,000 | 33,872 | 31,716 | 2,156 |
+| 1,000,000 | 120,080 | 112,864 | 7,216 |
+| 2,000,000 | 229,772 | 214,508 | 15,264 |
+
+The growing saving matches removal of roughly eight bytes per report. At two
+million reports, oracle elapsed time is 2.405 seconds before and 2.762 seconds
+after, under concurrent build load. This does not establish a CPU improvement.
+The diagnostic-order regression covers immediate versus deferred violations,
+roster order, gap-only streams, receipt overlap, and artifact replay. Focused
+checks also retain real lossy delivery and replay controls. Independent review
+found no correctness issues.
+
+Raw event memory still grows with offered work. These synthetic measurements
+do not prove the planned ten-minute C3 workload, a full memory bound, or the
+cause of historical generator stalls. Keep #775, #795, and #1009 open.

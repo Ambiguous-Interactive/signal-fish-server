@@ -82,15 +82,6 @@ impl TransportStatusFanOut {
     /// change or a reconnect identity swap that lands after the snapshot
     /// cannot direct this v3-only frame at a v2 connection.
     async fn deliver(&self, server: &EnhancedGameServer) {
-        #[cfg(test)]
-        #[cfg(signal_fish_repository_tests)]
-        if let Some(pause) = TRANSPORT_STATUS_DELIVERY_PAUSES
-            .get(&self.sender)
-            .map(|entry| Arc::clone(entry.value()))
-        {
-            pause.reached.notify_one();
-            pause.release.notified().await;
-        }
         // Deliver to all peers concurrently: one slow room member costs this
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
         // filtering is v3-only but deliberately transport-agnostic: a
@@ -100,11 +91,21 @@ impl TransportStatusFanOut {
                 if !server.client_supports_v3(recipient) {
                     return false;
                 }
-                let sender_is_current = || {
-                    server
-                        .connection_manager
-                        .membership_generation_in_room(&self.sender, &self.room_id)
-                        == Some(self.membership_generation)
+                #[cfg(test)]
+                #[cfg(signal_fish_repository_tests)]
+                if let Some(pause) = TRANSPORT_STATUS_DELIVERY_PAUSES
+                    .get(&self.sender)
+                    .map(|entry| Arc::clone(entry.value()))
+                {
+                    pause.reached.notify_one();
+                    pause.release.notified().await;
+                }
+                let delivery_is_current = || {
+                    server.client_supports_v3(recipient)
+                        && server
+                            .connection_manager
+                            .membership_generation_in_room(&self.sender, &self.room_id)
+                            == Some(self.membership_generation)
                 };
                 server
                     .message_coordinator
@@ -112,7 +113,7 @@ impl TransportStatusFanOut {
                         recipient,
                         &self.room_id,
                         Arc::clone(&self.message),
-                        &sender_is_current,
+                        &delivery_is_current,
                     )
                     .await
                     .unwrap_or(false)
