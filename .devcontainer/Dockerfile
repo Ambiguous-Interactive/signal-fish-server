@@ -218,7 +218,7 @@ RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/
     cargo-watch \
     cargo-expand \
     cargo-llvm-cov \
-    cargo-nextest@0.9.148 \
+    cargo-nextest@0.9.149 \
     cargo-mutants@27.1.0 \
     cargo-fuzz \
     && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \

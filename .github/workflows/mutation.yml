@@ -130,7 +130,7 @@ jobs:
         # and the baseline green-gate depends on every lib test fitting it.
         uses: taiki-e/install-action@v2.87.29
         with:
-          tool: cargo-nextest@0.9.148
+          tool: cargo-nextest@0.9.149
 
       - name: Verify measured mutation inventory
         # This integration test can only enforce the count when cargo-mutants is
@@ -262,7 +262,7 @@ jobs:
         # Pinned, same reason as the baseline job above.
         uses: taiki-e/install-action@v2.87.29
         with:
-          tool: cargo-nextest@0.9.148
+          tool: cargo-nextest@0.9.149
 
       - name: Run mutation testing (shard ${{ matrix.shard }}/44)
         # All flags/env (mold, --in-place, --sharding slice, --profile mutants,
