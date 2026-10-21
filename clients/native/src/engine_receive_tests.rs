@@ -126,6 +126,15 @@ async fn terminal_pair_does_not_admit_later_sibling_messages() {
                     "loss preserves already admitted input"
                 );
             }
+            let receipts = pair.receiver.diagnostic_snapshot(pair.sender_id);
+            assert_eq!(
+                receipts["channels"][RELIABLE_LABEL]["receipts"],
+                serde_json::json!({
+                    "raw": 2, "admitted": if terminal { 1 } else { 2 },
+                    "rejected": 0, "discarded": usize::from(terminal),
+                }),
+                "both roles distinguish driver receipt from terminal-link discard: {receipts}"
+            );
             drop(early);
             assert_eq!(
                 pair.receiver.message_budget.messages.available_permits(),
@@ -140,6 +149,14 @@ async fn terminal_pair_does_not_admit_later_sibling_messages() {
                 pair.receiver.peers[&pair.sender_id].generation,
                 old_generation
             );
+            let fresh = pair.receiver.diagnostic_snapshot(pair.sender_id);
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                assert_eq!(
+                    fresh["channels"][label]["receipts"],
+                    serde_json::json!({"raw": 0, "admitted": 0, "rejected": 0, "discarded": 0}),
+                    "receipt observations belong to a physical generation: {fresh}"
+                );
+            }
             pair.sender
                 .channel(pair.receiver_id, RELIABLE_LABEL)
                 .unwrap()
@@ -173,6 +190,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
     let engine = Engine::new(EngineSettings::default(), events).unwrap();
     let links = [0, 1].map(|_| ChannelReceiveAdmission {
         message_observed: std::sync::Mutex::new(None),
+        receipts: Default::default(),
         budget: engine.message_budget.clone(),
         channels: Arc::new(Mutex::new(RequiredChannelAdmission::default())),
         closed_labels: AtomicU8::new(0),
@@ -582,6 +600,16 @@ async fn flood_until_rejected(
             "the overloaded link must stop publishing after one rejection"
         );
     }
+    let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+    assert_eq!(
+        snapshot["channels"][RELIABLE_LABEL]["receipts"],
+        serde_json::json!({
+            "raw": permits.len() + 1, "admitted": permits.len(),
+            "rejected": 1, "discarded": 0,
+        }),
+        "receive refusal differs from transport loss: {snapshot}"
+    );
+    assert_eq!(snapshot["channels"][UNRELIABLE_LABEL]["receipts"]["raw"], 0);
     permits
 }
 
@@ -602,29 +630,39 @@ async fn unread_live_receive_queue_bounds_decoded_bytes_and_single_message_size(
 
 #[tokio::test]
 async fn dropped_receive_event_queue_stops_live_channel_producer() {
-    let mut pair = LivePair::connect().await;
-    let (_, replacement) = mpsc::unbounded_channel();
-    drop(std::mem::replace(&mut pair.receiver_events, replacement));
-    pair.sender
-        .channel(pair.receiver_id, RELIABLE_LABEL)
-        .unwrap()
-        .send_text("no-receiver")
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if let EngineEvent::ChannelClosed { label, .. } =
-                pair.sender_events.recv().await.unwrap()
-            {
-                if label == RELIABLE_LABEL {
-                    break;
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        let mut pair = LivePair::connect().await;
+        let (_, replacement) = mpsc::unbounded_channel();
+        drop(std::mem::replace(&mut pair.receiver_events, replacement));
+        pair.sender
+            .channel(pair.receiver_id, label)
+            .unwrap()
+            .send_text("no-receiver")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let EngineEvent::ChannelClosed {
+                    label: closed_label,
+                    ..
+                } = pair.sender_events.recv().await.unwrap()
+                {
+                    if closed_label == label {
+                        break;
+                    }
                 }
             }
-        }
-    })
-    .await
-    .expect("a dropped application receiver closes the channel producer");
-    pair.cleanup().await;
+        })
+        .await
+        .expect("a dropped application receiver closes the channel producer");
+        let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+        assert_eq!(
+            snapshot["channels"][label]["receipts"],
+            serde_json::json!({"raw": 1, "admitted": 0, "rejected": 0, "discarded": 1}),
+            "driver input without a live application receiver is discarded: {snapshot}"
+        );
+        pair.cleanup().await;
+    }
 }
 
 // Regression #1059: live channel loss can precede its queued lifecycle event.

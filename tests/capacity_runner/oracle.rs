@@ -1033,7 +1033,7 @@ pub fn summarize(
         .map(|(name, room)| (name.as_str(), *room))
         .collect();
     let mut unknown_recipients = Category::default();
-    let mut arrivals: BTreeMap<(&str, &str, u32), ArrivalEvidence> = BTreeMap::new();
+    let mut arrivals: BTreeMap<ArrivalKey<'_>, ArrivalEvidence> = BTreeMap::new();
     for receipt in &records.receipts {
         let recipient = receipt.recipient.as_str();
         let sender = receipt.sender.as_str();
@@ -1223,10 +1223,7 @@ pub fn summarize(
         // that epoch, not outlive its stream (the sender rejoined past it),
         // and never repeat what the rejoin snapshot already accounted.
         let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
-        for ((arrival_recipient, sender, epoch), stream) in arrivals.iter() {
-            if *arrival_recipient != recipient.as_str() {
-                continue;
-            }
+        for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
             if opaque_senders.contains(sender) {
                 // The unsupported-conversion contract: the opaque sender's
                 // payload reaches NO recipient as a delivery. An arrival is
@@ -1595,6 +1592,19 @@ struct ArrivalContract {
     floor: Option<(u64, u64, bool)>,
 }
 
+type ArrivalKey<'a> = (&'a str, &'a str, u32);
+
+/// Seek directly to one recipient's streams. The empty sender and epoch zero
+/// include malformed names and epochs, which must remain delivery evidence.
+fn recipient_arrivals<'map, 'records>(
+    arrivals: &'map BTreeMap<ArrivalKey<'records>, ArrivalEvidence>,
+    recipient: &'records str,
+) -> impl Iterator<Item = (&'map ArrivalKey<'records>, &'map ArrivalEvidence)> {
+    arrivals
+        .range((recipient, "", 0)..)
+        .take_while(move |((name, _, _), _)| *name == recipient)
+}
+
 /// Ordered complete streams retain one range, rather than one receipt pointer.
 #[derive(Default)]
 struct ArrivalEvidence {
@@ -1773,6 +1783,57 @@ fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    // #636: recipient lookup must retain exact stream order and all malformed
+    // evidence while avoiding a scan of other recipients' streams.
+    #[test]
+    fn recipient_ranges_match_independent_full_scan() {
+        let recipients = ["", "a", "a\0", "a0", "a1", "z", "未知", "\u{10ffff}"];
+        let senders = ["", "a", "unknown", "未知", "\u{10ffff}"];
+        let epochs = [0, 1, 2, u32::MAX];
+        let mut arrivals = BTreeMap::new();
+        for (index, recipient) in recipients.iter().enumerate().rev() {
+            for sender in senders.into_iter().rev() {
+                for epoch in epochs.into_iter().rev() {
+                    let mut stream = ArrivalEvidence::default();
+                    for seq in [u64::MAX, 0, 1, 1, 0] {
+                        stream.observe(seq);
+                    }
+                    arrivals.insert((*recipient, sender, epoch), stream);
+                }
+            }
+            // Compare after every insertion group, not just a full key space.
+            for recipient in recipients.into_iter().chain(["absent", "a00", "未知x"]) {
+                let expected = arrivals
+                    .iter()
+                    .filter(|((name, _, _), _)| *name == recipient)
+                    .map(|(key, stream)| (*key, std::ptr::from_ref(stream)))
+                    .collect::<Vec<_>>();
+                let actual = recipient_arrivals(&arrivals, recipient)
+                    .map(|(key, stream)| (*key, std::ptr::from_ref(stream)))
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "recipient={recipient:?}, group={index}");
+            }
+        }
+        assert_eq!(recipient_arrivals(&BTreeMap::new(), "").count(), 0);
+        // Summarization removes owed streams as recipients are completed.
+        // Retained stale and foreign streams must not affect the next lookup.
+        arrivals.retain(|(_, sender, epoch), _| *sender == "unknown" || *epoch == 0);
+        for recipient in recipients {
+            let expected = arrivals
+                .keys()
+                .filter(|(name, _, _)| *name == recipient)
+                .copied()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                recipient_arrivals(&arrivals, recipient)
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>(),
+                expected,
+                "remaining recipient={recipient:?}"
+            );
+        }
+    }
 
     // Issue #775: canonical ledgers must not retain a pointer per send.
     #[test]

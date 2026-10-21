@@ -539,6 +539,18 @@ the physical link was already removed. The snapshot does not wait for the
 WebRTC driver. Compare both endpoints and their `pc_state` events when
 investigating a failed connection.
 
+Each required channel also reports physical-generation `receipts` counts:
+`raw` counts complete messages returned by the driver poll; `admitted` counts
+successful publication to the client's event queue; `rejected` counts messages
+refused during decoding or queue-capacity checks; `discarded` counts input
+stopped by observed link loss or a closed client event queue. Admission does
+not prove the orchestrator consumed the message or delivered its stdout event.
+Compare those counts with the sender's events and the receiver's
+`channel_message` events. Counts start at zero for each physical generation.
+Snapshots read counters separately without waiting. A raw message can still
+be waiting for admission, or its poller can be cancelled during admission.
+A difference between raw and classified counts does not prove network loss.
+
 At run timeout, stderr also reports a snapshot for each peer with missing
 exchange sends or receipts, including connected peers and departed peers with
 unpaid exchange debt. Each report names missing sends, missing receipts, and
