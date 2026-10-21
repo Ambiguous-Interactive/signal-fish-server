@@ -123,4 +123,4 @@ jobs:
       - name: Reconcile recorded measurements and source manifest
         run: >-
           python3 benches/encoding/cross_language.py --verify-recorded
-          benches/encoding/results/2026-10-16-cross-language-aarch64
+          benches/encoding/results/2026-10-21-cross-language-aarch64
