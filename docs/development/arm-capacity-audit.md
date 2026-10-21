@@ -4281,3 +4281,96 @@ runs in this session. Both failed histories remain authoritative and
 [#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009)
 stays open. Registration, raw samples, all artifacts, and replay evidence
 remain under local `progress/session-496/reserved/`.
+
+### Session 497: seek directly to each recipient's arrival streams
+
+Session 497 advances [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636).
+The oracle previously scanned all remaining arrival streams for each recipient.
+It now seeks to that recipient's first key in the existing ordered map and stops
+at the next recipient. The lower bound includes empty sender names and epoch
+zero. The oracle retains all malformed, stale, duplicate, and foreign-stream
+evidence in its original order.
+
+A synthetic complete-fanout probe runs the full oracle in 36 fresh processes.
+Each workload has six baseline and six candidate trials. Trial order alternates
+baseline/candidate, then candidate/baseline. All full summary JSON values match
+exactly within each workload. The oracle removes owed streams during each run,
+so this comparison includes the shrinking-map behavior.
+
+| Peers | Sends per peer | Receipts | Baseline median (range), us | Candidate median (range), us |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 100 | 24,000 | 60,308 (59,006–61,269) | 61,184 (57,985–66,969) |
+| 64 | 5 | 20,160 | 107,813 (104,999–120,765) | 100,694.5 (95,571–104,057) |
+| 128 | 2 | 32,512 | 416,915 (363,683–451,578) | 302,403.5 (264,111–336,645) |
+
+The median oracle time is 27.5% lower for 128 peers. The 16-peer result overlaps
+and shows no improvement. These are unoptimized test binaries on the shared
+ARM64 host. Other session checks can run on this host. This measures oracle
+work only. It establishes no server throughput, long-run memory bound, or repair
+of historical generator saturation.
+
+Build with `cargo test --test capacity_runner --no-run`. For each row, set
+`CAPACITY_MEMORY_PROBE_PLAYERS` and `CAPACITY_MEMORY_PROBE_SENDS` to the table
+values, then run the copied binary with:
+
+```bash
+/tmp/capacity497-candidate --exact generator_memory_profile_on_complete_fanout \
+  --ignored --nocapture
+```
+
+The baseline is commit `2e1a01e73b311bc86c4629f7e0b8121415ccfa79` with only
+the probe's peer-count selector added. The candidate uses recipient range lookup.
+Both probes collect events in memory; neither runs the artifact-reader path.
+Binary paths and SHA-256 values are:
+
+- `/tmp/capacity497-baseline`:
+  `52fccd5307c919ba0ddf85205c43ae8f17eee45ba2f825210cfc188a202cb469`.
+- `/tmp/capacity497-candidate`:
+  `23ecf2f8e90ffbf3a2c809ecf1fd9da23134665d2bef0d118ec6250e485eded5`.
+
+All 36 raw outputs and `cohort.json` remain in local
+`progress/session-497/capacity/`. The independent lookup control compares exact
+keys, order, and stream identity against a full scan. It covers empty names,
+prefix names, Unicode, epoch limits, absent recipients, and retained stale or
+foreign streams after removals. Scoped strict clippy passes.
+
+### Session 497: reject a replay reservation experiment
+
+Session 497 also tests a new idea for [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775).
+A temporary reader counts actual send and receipt rows in a first pass, then
+reserves exact vector capacity before decoding them. It uses a small typed
+record to skip other JSON fields. It does not reserve from the configured plan.
+The shipped reader keeps its existing single pass because the experiment
+reduces spare capacity without reducing measured process memory.
+
+Six fresh processes replay the same 16-peer fixture with 5,000 sends per peer
+and 1,200,000 receipts. Trial order is baseline, candidate, candidate, baseline,
+baseline, candidate. Both binaries use the same recipient-range oracle and
+profile code. Every full summary JSON value matches exactly.
+
+| Metric, median of three trials | Single pass | Count then decode |
+| --- | ---: | ---: |
+| Retained event vector capacity, bytes | 142,606,336 | 81,920,000 |
+| Collection time, us | 18,270,425 | 43,501,955 |
+| Whole process wall time, seconds | 21.436 | 46.774 |
+| Collected RSS, bytes | 93,478,912 | 93,339,648 |
+| Wait4 peak RSS, KiB | 92,716 | 92,808 |
+
+Reserved capacity falls 42.6%, but peak RSS does not improve. Median collection
+time rises 138.1%. These are unoptimized test binaries on the shared ARM64 host.
+Some builds overlap early trials, so the timings are descriptive. All three
+candidate collection times exceed all three baseline times. This result does
+not establish a physical memory benefit or a long-run memory bound. No two-pass
+reader or specialized JSON prefix counter ships. The probe retains collection
+time as a separate metric for future experiments.
+
+The baseline binary SHA-256 is
+`cb38138293fdc324cc312f7641d1b2c1033a9297c187d855410a7b4db9925d26`.
+The rejected candidate binary SHA-256 is
+`499e11c9154ad0f9ac037c32f604c55f3c8c5b0280775022b22a25f5b7fcf3b2`.
+The fixture SHA-256 is
+`7a44fdbb0dab88e2e32c075c941cebc9a98de91b535d308210ebb2f92dee1991`.
+The binaries, six raw outputs, medians, measured reader function, and rejected
+follow-up patch remain under local `progress/session-497/`. The follow-up adds
+first-error ordering controls and a prefix shortcut; it is not the measured
+candidate and is also discarded. The baseline reader remains unchanged.

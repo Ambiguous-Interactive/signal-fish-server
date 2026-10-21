@@ -1979,6 +1979,7 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
 /// CAPACITY_MEMORY_PROBE_REPLAY_DIR loads those fixtures before oracle evaluation.
 /// Capture child peak RSS with the host profiler; set
 /// CAPACITY_MEMORY_PROBE_SENDS to 100, 1000, or 5000 for increasing fan-out.
+/// CAPACITY_MEMORY_PROBE_PLAYERS selects 2..=128 peers (default 16).
 #[test]
 #[ignore = "generator memory profile; run in a fresh process"]
 fn generator_memory_profile_on_complete_fanout() {
@@ -1991,7 +1992,12 @@ fn generator_memory_profile_on_complete_fanout() {
         "probe is capped at 5000 sends per peer"
     );
     let mut config = scenario_config(Encoding::V3Json);
-    config.players_per_room = 16;
+    config.players_per_room = std::env::var("CAPACITY_MEMORY_PROBE_PLAYERS")
+        .unwrap_or_else(|_| "16".to_string())
+        .parse()
+        .expect("probe player count is an integer");
+    assert!((2..=128).contains(&config.players_per_room));
+    let players = u64::from(config.players_per_room);
     config.warmup = Duration::ZERO;
     config.duration = Duration::from_micros(sends);
     config.send_rate_per_sender = 1_000_000.0;
@@ -2000,6 +2006,7 @@ fn generator_memory_profile_on_complete_fanout() {
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
         .collect::<Vec<_>>();
+    let collection_started = std::time::Instant::now();
     let records = match std::env::var_os("CAPACITY_MEMORY_PROBE_REPLAY_DIR") {
         Some(path) => artifacts::read_records(std::path::Path::new(&path))
             .expect("read memory probe artifact"),
@@ -2012,12 +2019,16 @@ fn generator_memory_profile_on_complete_fanout() {
             complete_records_into(&plans, log)
         }
     };
+    let collection_elapsed = collection_started.elapsed();
     if let Some(path) = std::env::var_os("CAPACITY_MEMORY_PROBE_WRITE_DIR") {
         artifacts::write_deliveries(std::path::Path::new(&path), &records)
             .expect("write memory probe artifact");
     }
-    assert_eq!(config::count_u64(records.sent.len()), 16 * sends);
-    assert_eq!(config::count_u64(records.receipts.len()), 240 * sends);
+    assert_eq!(config::count_u64(records.sent.len()), players * sends);
+    assert_eq!(
+        config::count_u64(records.receipts.len()),
+        players * (players - 1) * sends
+    );
     let collected_rss = diagnostics::resident_memory_bytes(std::process::id());
     let started = std::time::Instant::now();
     let summary = oracle::summarize(
@@ -2037,17 +2048,19 @@ fn generator_memory_profile_on_complete_fanout() {
         summary.reasons
     );
     assert_eq!(summary.totals.outstanding, 0);
-    assert_eq!(summary.latency_us.samples, 240 * sends);
+    assert_eq!(summary.latency_us.samples, players * (players - 1) * sends);
     println!(
         "{}",
         serde_json::json!({
             "sends_per_peer": sends,
+            "players": players,
             "receipts": records.receipts.len(),
             "sent_capacity": records.sent.capacity(),
             "receipt_capacity": records.receipts.capacity(),
             "retained_event_capacity_bytes": records.sent.capacity() * std::mem::size_of::<SentEvent>()
                 + records.receipts.capacity() * std::mem::size_of::<ReceiptEvent>(),
             "collected_rss_bytes": collected_rss,
+            "collection_elapsed_us": collection_elapsed.as_micros(),
             "after_oracle_rss_bytes": diagnostics::resident_memory_bytes(std::process::id()),
             "oracle_elapsed_us": elapsed.as_micros(),
             "summary": summary,

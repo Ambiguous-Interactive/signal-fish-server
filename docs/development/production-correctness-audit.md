@@ -6489,3 +6489,45 @@ and independent adversarial review pass. Rebuilt real Chromium/native restore,
 pair retry, and three-player browser mesh controls pass in Nextest runs
 `0b4a40b2` and `3726e41e`. These bounded controls do not reproduce either
 historical incident. Hosted interop remains a separate qualification gate.
+
+### A20 — Native receipt admission diagnostics
+
+Session 497 advances the open establishment and mesh-receipt investigations
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853)
+and [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+The native physical-link snapshot previously exposed only channel registration
+and handled-open state. It could not distinguish a complete driver receipt from
+queue publication, input refusal, or terminal-link discard. Each required label
+now records those four observations. Existing timeout and pre-removal reports
+include the counts. This is a diagnostic addition, not a confirmed gameplay
+repair or an explanation of either historical incident.
+
+Raw counts start when `poll()` returns a complete message, before admission
+waits and decoding. Admitted counts require successful engine-event queue
+publication. Rejected counts mark decoding or capacity refusal. Discarded counts
+mark observed link loss or a dropped client event receiver. Counters belong to
+a physical generation and retain no payload history. Their separate atomic
+reads are not a transactional ledger: raw input can still await admission or
+lose its poller during cancellation. Queue publication does not prove
+orchestrator consumption, stdout delivery, or remote gameplay receipt.
+
+At baseline `2e1a01e7`, assertions for the new diagnostic contract fail in
+Nextest run `89f170a2-cd90-45f3-8599-79e06133069b` because receipt fields are absent.
+The controlled histories use real paired channels, both local roles, terminal
+and transient observations, receive-count and decoded-byte refusal, dropped
+client receivers, and fresh physical generations. Assertions use completed
+rejection or close barriers rather than a sleep or a possibly unfinished
+message publication. Final Nextest run
+`9c8b6ccc-bc1f-409d-8d01-68cdda47b5fa` passes all four focused tests.
+Strict native all-target, all-feature clippy and formatting also pass.
+Rebuilt browser/native restore and three-player browser mesh histories pass
+in Nextest run `1e4c01eb-1e89-4b79-9cb3-6ddebe37c896`. These histories do not
+reproduce or explain either historical incident.
+Independent adversarial review reports no open finding.
+
+This change affects only the private native reference engine. The Rust SDK
+uses an application-supplied WebRTC driver; .NET supplies signaling and relay;
+Godot uses its own engine WebRTC objects. Their sources do not import this
+engine. The external clients need no migration. Broader A20 coverage and
+[#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826)
+remain open.

@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -106,9 +106,38 @@ impl MessageQueuePermit {
     }
 }
 
+/// Per-label physical-link observations. Snapshots do not wait for the driver.
+#[derive(Default)]
+struct ChannelReceipts {
+    raw: AtomicU64,
+    admitted: AtomicU64,
+    rejected: AtomicU64,
+    discarded: AtomicU64,
+}
+
+impl ChannelReceipts {
+    fn count(counter: &AtomicU64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        // Pollers can be between receipt and classification. These observations
+        // are diagnostics, not an atomic delivery ledger or remote-send proof.
+        serde_json::json!({
+            "raw": self.raw.load(Ordering::Relaxed),
+            "admitted": self.admitted.load(Ordering::Relaxed),
+            "rejected": self.rejected.load(Ordering::Relaxed),
+            "discarded": self.discarded.load(Ordering::Relaxed),
+        })
+    }
+}
+
 struct ChannelReceiveAdmission {
     #[cfg(test)]
     message_observed: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    receipts: [ChannelReceipts; 2],
     budget: Arc<MessageQueueBudget>,
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
@@ -117,6 +146,14 @@ struct ChannelReceiveAdmission {
 }
 
 impl ChannelReceiveAdmission {
+    fn receipts(&self, label: &str) -> Option<&ChannelReceipts> {
+        match label {
+            RELIABLE_LABEL => Some(&self.receipts[0]),
+            UNRELIABLE_LABEL => Some(&self.receipts[1]),
+            _ => None,
+        }
+    }
+
     async fn allows_work(
         &self,
         events: &mpsc::UnboundedSender<EngineEvent>,
@@ -607,6 +644,7 @@ impl Engine {
         let receive_admission = Arc::new(ChannelReceiveAdmission {
             #[cfg(test)]
             message_observed: std::sync::Mutex::new(None),
+            receipts: Default::default(),
             budget: self.message_budget.clone(),
             channels: channel_admission.clone(),
             closed_labels: AtomicU8::new(0),
@@ -983,6 +1021,7 @@ impl Engine {
                         serde_json::json!({
                             "registered": link.channels.contains_key(label),
                             "open_observed": link.open_labels.contains(label),
+                            "receipts": link.receive_admission.receipts(label).map(ChannelReceipts::snapshot),
                         }),
                     )
                 })
@@ -1564,6 +1603,12 @@ fn spawn_channel_event_loop(
         while let Some(event) = channel.poll().await {
             // Admission can suspend; publication time must not replace arrival.
             let received_at = tokio::time::Instant::now();
+            let receipts = admission.receipts(&label);
+            if matches!(event, DataChannelEvent::OnMessage(_)) {
+                if let Some(receipts) = receipts {
+                    ChannelReceipts::count(&receipts.raw);
+                }
+            }
             #[cfg(test)]
             if matches!(event, DataChannelEvent::OnMessage(_)) {
                 if let Ok(observed) = admission.message_observed.lock() {
@@ -1574,6 +1619,11 @@ fn spawn_channel_event_loop(
             }
             let mut rejected = admission.rejected.lock().await;
             if *rejected {
+                if matches!(event, DataChannelEvent::OnMessage(_)) {
+                    if let Some(receipts) = receipts {
+                        ChannelReceipts::count(&receipts.discarded);
+                    }
+                }
                 return;
             }
             match event {
@@ -1593,10 +1643,16 @@ fn spawn_channel_event_loop(
                         .allows_work(&events, peer, generation, Some(&label))
                         .await
                     {
+                        if let Some(receipts) = receipts {
+                            ChannelReceipts::count(&receipts.discarded);
+                        }
                         continue;
                     }
                     let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
                     else {
+                        if let Some(receipts) = receipts {
+                            ChannelReceipts::count(&receipts.rejected);
+                        }
                         *rejected = true;
                         admission.terminal.store(true, Ordering::Relaxed);
                         let _ = events.send(EngineEvent::ChannelReceiveRejected {
@@ -1619,9 +1675,15 @@ fn spawn_channel_event_loop(
                         })
                         .is_err()
                     {
+                        if let Some(receipts) = receipts {
+                            ChannelReceipts::count(&receipts.discarded);
+                        }
                         drop(rejected);
                         let _ = channel.close().await;
                         return;
+                    }
+                    if let Some(receipts) = receipts {
+                        ChannelReceipts::count(&receipts.admitted);
                     }
                 }
                 DataChannelEvent::OnError => {

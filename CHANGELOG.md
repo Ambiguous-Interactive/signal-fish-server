@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
 - Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
   and before failed links are removed, including bounded browser state history and SDP, ICE, and DTLS progress
-  plus browser receipt admission counts and SCTP error details (#853, #889, #1019).
+  plus native and browser receipt admission counts and browser SCTP error details (#853, #889, #1019).
 
 ### Changed
 
