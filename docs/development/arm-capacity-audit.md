@@ -4471,3 +4471,80 @@ open finding.
 The full ten-minute cell, historical generator stalls, and the complete
 workload memory bound remain unproved. This result does not close #775 or
 establish a server capacity point.
+
+### Count JSON bytes without a temporary payload (session 500, #775)
+
+The runner serialized each received JSON application value into a new byte
+vector only to count its bytes. It also allocated temporary JSON for sender
+metadata and envelope sizing. These paths now use the same canonical serializer
+with a checked byte-counting writer. Actual outgoing frame serialization stays
+in place. Exact application and frame lengths, escaped strings, nested values,
+Unicode, noncanonical wire whitespace, and serializer errors remain covered.
+
+A standalone allocation probe compares the previous `serde_json::to_vec` length
+with the current counting helper. Fixture construction occurs before each
+`stats_alloc` region. Both results must match, and the counting path must have
+zero allocations or reallocations. The probe uses Rust 1.94.0 on ARM64 Linux,
+`rustc -O`, and the same debug dependency artifacts for both paths. These are
+allocation counts, not optimized runtime timings.
+
+| Canonical application bytes | Previous allocations | Previous reallocations | Previous allocated bytes | Counting allocated bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 145 | 1 | 1 | 256 | 0 |
+| 1,073 | 1 | 2 | 2,118 | 0 |
+| 16,433 | 1 | 2 | 32,838 | 0 |
+| 65,585 | 1 | 2 | 131,142 | 0 |
+| 524,337 | 1 | 2 | 1,048,646 | 0 |
+
+The counting path records zero allocation and reallocation operations in every
+cohort. To repeat the comparison, construct one ledger-shaped JSON value outside
+the measured region, count `serde_json::to_vec(&value).len()` in one region, and
+call `runner::json_byte_count` in another. Local probe source, compiler command,
+and raw output remain under `progress/session-500/capacity-json-count-probe*`.
+Independent review confirms the probe isolates this helper and preserves byte
+semantics. This removes the transient sizing buffer; the parsed value, actual
+wire frames, retained records, and other oracle state still consume memory.
+The full long-workload memory bound and historical stalls remain unproved.
+
+### Average timing query cost (session 500, #636)
+
+`ResponseTimeTracker::get_average` previously built a full latency summary and
+then discarded its percentiles and range. It now computes only the same nonempty
+histogram mean. The public Rust library method preserves missing, empty, and
+unavailable histogram results, zero samples, clamping, and exact average values.
+There are no in-tree production callers of this getter. This change does not
+accelerate `ServerMetrics::snapshot`, dashboard refresh, or relay delivery.
+
+The release comparison uses identical benchmark fixtures and actual exported
+old/new getter methods. Only the getter implementation differs between the
+binaries. Each cohort records 5,000 samples before measurement. Five alternating
+A/B pairs run on CPU 0 with Criterion, 0.5 seconds of warm-up, one second of
+measurement, and 40 samples. Medians of times and paired decreases are computed
+separately. All five pairs show a lower getter cost in all three cohorts.
+
+| Recorded range | Old median, us | New median, us | Median paired decrease |
+| --- | ---: | ---: | ---: |
+| 0–4,999 us | 13.755 | 10.477 | 18.85% |
+| 0–499,900 us | 25.606 | 15.167 | 38.61% |
+| 0–299,940,000 us | 41.296 | 21.519 | 47.70% |
+
+The host remains shared. Unchanged full-summary controls vary: the combined
+wide control has a median 10.94% increase, while an isolated five-pair repeat
+has a median 5.30% decrease and two large increases. An isolated narrow full
+summary has a median 5.03% increase. These observations do not establish strict
+performance equivalence or a consistent cause for secondary timing changes.
+They limit these results to observed getter savings; no server capacity or
+throughput conclusion follows. Full-summary production code stays unchanged.
+
+A prior candidate used the histogram's bulk percentile iterator. Longer pinned
+comparisons did not establish a qualifying benefit, so that change was removed.
+All initial, pinned, longer, exact-source, and partial attempts remain in local
+`progress/session-500/performance/`, alongside the accepted getter comparison,
+control results, source snapshots, commands, and binary hashes.
+
+Rebuild with `cargo bench --locked --bench response_time_tracker --no-run`.
+Run each saved binary with filter `response_time_tracker_average`, `--bench`,
+`--noplot`, `--warm-up-time 0.5`, `--measurement-time 1`, and `--sample-size 40`.
+The benchmark retains the old full-summary expression as a separate control.
+The differential test compares exact getter results with that expression across
+histogram states, precisions, and distributions. Broader #636 work remains open.

@@ -1871,8 +1871,11 @@ impl ResponseTimeTracker {
     }
 
     pub fn get_average(&self, operation: &str) -> Option<f64> {
-        self.get_latency_metrics(operation)
-            .and_then(|metrics| metrics.average_ms)
+        let histogram = self.operations.get(operation)?.histogram.as_ref()?;
+        if histogram.is_empty() {
+            return None;
+        }
+        Some(histogram.mean() / MICROS_PER_MS)
     }
 
     pub fn get_latency_metrics(&self, operation: &str) -> Option<OperationLatencyMetrics> {
@@ -1986,6 +1989,54 @@ pub struct DashboardCacheMetrics {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn test_average_matches_full_metrics_for_all_histogram_states() {
+        for significant_figures in [1, 2, 3] {
+            for samples in [
+                vec![0],
+                vec![777; 100],
+                vec![
+                    0,
+                    1,
+                    999,
+                    1_000,
+                    50_000,
+                    299_999_999,
+                    300_000_000,
+                    600_000_000,
+                ],
+                (0..5000).collect(),
+                (0..5000).map(|sample| sample * 100).collect(),
+                (0..101)
+                    .map(|sample| if sample < 99 { 1 } else { 300_000_000 })
+                    .collect(),
+            ] {
+                let mut tracker =
+                    ResponseTimeTracker::with_bounds(1, 300_000_000, significant_figures);
+                assert_eq!(tracker.get_average("missing"), None);
+                tracker.operations.insert(
+                    "empty".to_string(),
+                    OperationLatencyHistogram::new(1, 300_000_000, significant_figures),
+                );
+                assert_eq!(tracker.get_average("empty"), None);
+                tracker.operations.insert(
+                    "unavailable".to_string(),
+                    OperationLatencyHistogram { histogram: None },
+                );
+                assert_eq!(tracker.get_average("unavailable"), None);
+                for sample in samples {
+                    tracker.add_sample("room_join", Duration::from_micros(sample));
+                }
+                assert_eq!(
+                    tracker.get_average("room_join"),
+                    tracker
+                        .get_latency_metrics("room_join")
+                        .and_then(|metrics| metrics.average_ms)
+                );
+            }
+        }
+    }
 
     #[test]
     fn response_time_tracker_reuses_operations_and_preserves_sample_bounds() {

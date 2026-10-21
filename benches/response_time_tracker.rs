@@ -26,6 +26,31 @@ fn bench_response_time_tracker(c: &mut Criterion) {
         });
     });
 
+    for (cohort, scale) in [("low", 1u64), ("rtt", 100), ("wide", 60_000)] {
+        let mut tracker = ResponseTimeTracker::new();
+        for sample in 0..5000u64 {
+            tracker.add_sample(
+                "room_join",
+                Duration::from_micros(sample.saturating_mul(scale)),
+            );
+        }
+        c.bench_function(&format!("response_time_tracker_average_{cohort}"), |b| {
+            b.iter(|| black_box(tracker.get_average("room_join")));
+        });
+        c.bench_function(
+            &format!("response_time_tracker_average_full_stats_control_{cohort}"),
+            |b| {
+                b.iter(|| {
+                    black_box(
+                        tracker
+                            .get_latency_metrics("room_join")
+                            .and_then(|metrics| metrics.average_ms),
+                    )
+                });
+            },
+        );
+    }
+
     c.bench_function("response_time_tracker_get_stats", |b| {
         let mut tracker = ResponseTimeTracker::new();
         for sample in 0..5000u64 {
