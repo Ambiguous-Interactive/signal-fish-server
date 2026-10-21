@@ -721,6 +721,258 @@ async fn immediate_send_then_close_with_remote_reactor_paused() {
     }
 }
 
+// Investigations #853/#889/#826: qualify native SCTP fragmentation through reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fragmented_gameplay_preserves_receipts_through_same_stream_reset() {
+    for initiator_sends in [true, false] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            for binary in [false, true] {
+                for acknowledged in [false, true] {
+                    let context = format!(
+                        "initiator={initiator_sends}, label={label}, binary={binary}, acked={acknowledged}"
+                    );
+                    let (mut pair, remote_runtime) = backpressure_pair(None, initiator_sends).await;
+                    let generation = pair.receiver.peers[&pair.sender_id].generation;
+                    let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
+                    // Distinct, valid UTF-8 bodies at the exact engine byte limit.
+                    // The multibyte sequence crosses SCTP fragment boundaries.
+                    let bodies: Vec<_> = (0..3)
+                        .map(|index| format!("{index}:{}ab", "界".repeat(21_844)))
+                        .collect();
+                    assert!(bodies.iter().all(|body| body.len() == 65_536));
+                    if !acknowledged {
+                        remote_runtime.pause().await;
+                    }
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        for body in &bodies {
+                            if binary {
+                                channel.send(body.as_bytes().into()).await.unwrap();
+                            } else {
+                                channel.send_text(body).await.unwrap();
+                            }
+                        }
+                    })
+                    .await
+                    .expect("the full fragmented burst is accepted before reset");
+                    let mut received = Vec::new();
+                    if acknowledged {
+                        // Application receipt, rather than SCTP acknowledgement,
+                        // makes this control mandatory even for no-retransmit DATA.
+                        tokio::time::timeout(Duration::from_secs(5), async {
+                            while received.len() < bodies.len() {
+                                match pair.receiver_events.recv().await.unwrap() {
+                                    EngineEvent::ChannelMessage {
+                                        peer,
+                                        generation: event_generation,
+                                        label: received_label,
+                                        text,
+                                        ..
+                                    } => {
+                                        assert_eq!(peer, pair.sender_id, "{context}");
+                                        assert_eq!(event_generation, generation, "{context}");
+                                        assert_eq!(received_label, label, "{context}");
+                                        received.push(text);
+                                    }
+                                    EngineEvent::ChannelReceiveRejected { .. }
+                                    | EngineEvent::ChannelClosed { .. } => {
+                                        panic!(
+                                            "{context}: live fragmented input must remain usable"
+                                        )
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            while channel.outstanding_bytes().await.unwrap() != 0 {
+                                tokio::task::yield_now().await;
+                            }
+                        })
+                        .await
+                        .expect("all application receipts precede control reset");
+                        remote_runtime.pause().await;
+                    }
+                    assert_eq!(
+                        channel.outstanding_bytes().await.unwrap(),
+                        if acknowledged { 0 } else { 3 * 65_536 },
+                        "{context}"
+                    );
+                    channel.close().await.unwrap();
+                    remote_runtime.resume();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            match pair.receiver_events.recv().await.unwrap() {
+                                EngineEvent::ChannelMessage {
+                                    peer,
+                                    generation: event_generation,
+                                    label: received_label,
+                                    text,
+                                    ..
+                                } => {
+                                    assert_eq!(peer, pair.sender_id, "{context}");
+                                    assert_eq!(event_generation, generation, "{context}");
+                                    assert_eq!(received_label, label, "{context}");
+                                    received.push(text);
+                                }
+                                EngineEvent::ChannelClosed {
+                                    peer,
+                                    generation: event_generation,
+                                    label: closed,
+                                } => {
+                                    assert_eq!(peer, pair.sender_id, "{context}");
+                                    assert_eq!(event_generation, generation, "{context}");
+                                    assert_eq!(closed, label, "{context}");
+                                    break;
+                                }
+                                EngineEvent::ChannelReceiveRejected { .. } => {
+                                    panic!(
+                                        "{context}: fragmentation must not cause input rejection"
+                                    )
+                                }
+                                _ => {}
+                            }
+                        }
+                        while !matches!(
+                            channel.outstanding_bytes().await,
+                            Ok(0) | Err(webrtc::error::Error::ErrDataChannelClosed)
+                        ) {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("fragmented input and reciprocal reset finish");
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while !pair.receiver.peers[&pair.sender_id]
+                            .channel_tasks
+                            .iter()
+                            .any(|task| task.is_finished())
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the closed channel producer stops");
+                    loop {
+                        let event = match pair.receiver_events.try_recv() {
+                            Ok(event) => event,
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                panic!("{context}: the engine still owns its event sender")
+                            }
+                        };
+                        assert!(
+                            !matches!(
+                                event,
+                                EngineEvent::ChannelMessage { .. }
+                                    | EngineEvent::ChannelClosed { .. }
+                                    | EngineEvent::ChannelReceiveRejected { .. }
+                            ),
+                            "{context}: no late input or duplicate close after the producer stops"
+                        );
+                    }
+                    let mut indices = BTreeSet::new();
+                    for text in &received {
+                        let index = bodies
+                            .iter()
+                            .position(|body| body == text)
+                            .unwrap_or_else(|| panic!("{context}: corrupt or unexpected body"));
+                        assert!(
+                            indices.insert(index),
+                            "{context}: duplicate complete receipt"
+                        );
+                    }
+                    if label == RELIABLE_LABEL || acknowledged {
+                        assert_eq!(received.len(), bodies.len(), "{context}: required receipts");
+                    }
+                    if label == RELIABLE_LABEL {
+                        assert!(received == bodies, "{context}: reliable send order");
+                    }
+                    let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+                    assert_eq!(
+                        snapshot["channels"][label]["receipts"],
+                        serde_json::json!({
+                            "raw": received.len(), "admitted": received.len(),
+                            "rejected": 0, "discarded": 0,
+                        }),
+                        "{context}: complete driver input must admit once: {snapshot}"
+                    );
+                    assert_eq!(
+                        pair.receiver.message_budget.messages.available_permits(),
+                        256
+                    );
+                    assert_eq!(
+                        pair.receiver.message_budget.bytes.available_permits(),
+                        1024 * 1024
+                    );
+                    let reports = pair.receiver.peers[&pair.sender_id]
+                        .pc
+                        .get_stats(std::time::Instant::now(), StatsSelector::None)
+                        .await;
+                    let summary = reports
+                        .iter()
+                        .find_map(|entry| match entry {
+                            RTCStatsReportEntry::DataChannel(channel) if channel.label == label => {
+                                Some(channel)
+                            }
+                            _ => None,
+                        })
+                        .expect("closed fragmented channel retains statistics");
+                    assert_eq!(
+                        summary.messages_received,
+                        received.len() as u32,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        summary.bytes_received,
+                        (received.len() * 65_536) as u64,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        summary.state,
+                        rtc::data_channel::RTCDataChannelState::Closed
+                    );
+                    eprintln!(
+                        "fragmented-reset {context}: receipts={}, bytes={}",
+                        received.len(),
+                        summary.bytes_received
+                    );
+                    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                    pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+                    pair.negotiate().await;
+                    assert_ne!(pair.receiver.peers[&pair.sender_id].generation, generation);
+                    pair.sender
+                        .channel(pair.receiver_id, label)
+                        .unwrap()
+                        .send_text("fresh-after-fragmented-reset")
+                        .await
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            match pair.receiver_events.recv().await.unwrap() {
+                                EngineEvent::ChannelMessage {
+                                    label: received_label,
+                                    text,
+                                    ..
+                                } => {
+                                    assert_eq!(received_label, label, "{context}");
+                                    assert_eq!(text, "fresh-after-fragmented-reset", "{context}");
+                                    break;
+                                }
+                                EngineEvent::ChannelClosed { .. }
+                                | EngineEvent::ChannelReceiveRejected { .. } => {
+                                    panic!("{context}: a fresh link must recover")
+                                }
+                                _ => {}
+                            }
+                        }
+                    })
+                    .await
+                    .expect("fresh link delivers after fragmented reset");
+                    pair.cleanup().await;
+                }
+            }
+        }
+    }
+}
+
 async fn backpressure_pair(
     limit: Option<usize>,
     initiator_sends: bool,

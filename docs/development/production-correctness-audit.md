@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97 |
 
@@ -6709,3 +6709,40 @@ The external clients need no migration. Rust `da8f2d16` in `docs/protocol.md`,
 `.llm/research/protocol-fixtures.md` already classify this event as v3-only.
 The schema, v3 behavior, defaults, and client APIs stay the same. This repairs
 one recipient-version race; it does not complete the broader correctness audit.
+
+### A20 — Native fragmented gameplay through same-stream reset
+
+The [baseline](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/f206b635caa11f09926557ae1aa56515ca2442a6)
+leaves native fragmentation unqualified by the earlier Chromium-only comparison.
+This investigation advances [#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853),
+[#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889),
+and native replacement qualification [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+The new `fragmented_gameplay_preserves_receipts_through_same_stream_reset`
+control uses real native ICE, DTLS, and SCTP peers over local UDP.
+
+Sixteen histories cover both sender roles, required channel labels, text and
+binary send entrypoints, and immediate versus application-receipt-confirmed
+reset. Each sends three distinct 65,536-byte UTF-8 bodies. The immediate
+histories pause the receiver reactor before sending and retain all 196,608
+outstanding bytes until close starts. The control histories consume every
+application receipt and wait for zero outstanding bytes before reset.
+
+Assertions check the full bodies, peer, physical generation, label, duplicates,
+reliable order, same-stream close order, complete driver receipts, engine
+admission, closed transport statistics, released queue permits, and fresh-link
+recovery. Immediate-reset unreliable loss remains allowed. Receipt-confirmed
+controls require all messages on either label. The stopped producer must leave
+no late message, rejection, or duplicate close in the event queue.
+
+All 16 histories pass with 48 exact large receipts and 3,145,728 received
+bytes. The existing eight small-message paused-reset histories also pass.
+Three temporary faults corrupt large text, omit large binary admission, and
+misroute unreliable input. Each fails the intended body, required-receipt, or
+label assertion. Restoring the source restores the passing controls.
+
+These bounded histories do not identify either historical failure cause.
+They do not cover packet loss injection, browser/native fragmented exchange,
+first-open sends, or a published dependency replacement. The broader A20 audit
+and all linked campaigns remain open. This internal qualification changes no
+server behavior, protocol schema, or external Rust, .NET, and Godot client
+contract. Those clients need no migration.
