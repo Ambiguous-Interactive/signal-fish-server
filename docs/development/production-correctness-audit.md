@@ -6535,7 +6535,7 @@ remain open.
 ### F119 — Capacity send ledgers can bypass the declared workload
 
 Session 498 confirms [#1102](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1102)
-at `62e8ded6`, under open audit #826. The capacity oracle validates deliveries
+at `62e8ded631ab2d69dabb0a06e351e1721bd48ef6`, under open audit #826. The capacity oracle validates deliveries
 against recorded sends, but it does not validate those sends against the declared
 schedule. It subtracts raw send-row count from planned count to find unsent work.
 A changed room, phase, intended time, sequence, or duplicate replacing another
