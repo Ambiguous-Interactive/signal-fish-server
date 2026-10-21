@@ -749,6 +749,118 @@ async fn transport_status_delivery_does_not_block_concurrent_leave() {
     );
 }
 
+// Issue #826: a reconnect may replace a recipient after its capability check.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_rechecks_recipient_protocol_after_reconnect() {
+    for replacement_version in [2, 3] {
+        let server = create_test_server().await;
+        let mut members = Vec::new();
+        let mut room_code = None;
+        for name in ["observer", "reporter"] {
+            let (player, mut receiver) = register_router_test_client(&server).await;
+            server.set_client_protocol(
+                &player,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::WebRtc],
+                    topologies: vec![Topology::Relay, Topology::Mesh],
+                },
+            );
+            server
+                .handle_client_message(
+                    &player,
+                    ClientMessage::JoinRoom {
+                        game_name: "recipient-protocol".into(),
+                        room_code: room_code.clone(),
+                        player_name: name.into(),
+                        max_players: Some(2),
+                        supports_authority: Some(false),
+                        relay_transport: None,
+                        password: None,
+                        join_only: None,
+                    },
+                )
+                .await;
+            let joined = next_routed_test_message(&mut receiver, "RoomJoined").await;
+            let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+                panic!("expected RoomJoined: {joined:?}");
+            };
+            room_code = Some(payload.room_code.clone());
+            members.push((
+                player,
+                receiver,
+                payload.reconnection_token.clone().unwrap(),
+            ));
+        }
+        let (reporter, _reporter_rx, _) = members.pop().unwrap();
+        let (observer, mut observer_rx, token) = members.pop().unwrap();
+        drain_until_routed_player_joined(&mut observer_rx, reporter, "reporter join").await;
+        let room_id = server.get_client_room(&observer).await.unwrap();
+        let pause = super::message_router::arm_transport_status_delivery_pause(reporter);
+        let status_server = Arc::clone(&server);
+        let status_task = tokio::spawn(async move {
+            status_server
+                .handle_client_message(
+                    &reporter,
+                    ClientMessage::TransportStatus {
+                        transport: Transport::WebRtc,
+                        connected: true,
+                    },
+                )
+                .await;
+        });
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .unwrap();
+        // Exercise the real disconnect and reconnect transactions while status
+        // delivery is between the capability check and recipient lookup.
+        server.unregister_client(&observer).await;
+        let (replacement, mut replacement_rx) = register_router_test_client(&server).await;
+        server.set_client_protocol(
+            &replacement,
+            NegotiatedProtocol {
+                version: replacement_version,
+                transports: vec![Transport::Relay],
+                topologies: vec![Topology::Relay],
+            },
+        );
+        assert!(
+            server
+                .handle_reconnect(&replacement, &observer, &room_id, &token)
+                .await
+        );
+        assert!(matches!(
+            next_routed_test_message(&mut replacement_rx, "Reconnected")
+                .await
+                .as_ref(),
+            ServerMessage::Reconnected(_)
+        ));
+        pause.release.notify_one();
+        status_task.await.unwrap();
+        super::message_router::disarm_transport_status_delivery_pause(&reporter);
+        if replacement_version == 3 {
+            assert!(
+                matches!(next_routed_test_message(&mut replacement_rx, "PeerTransportStatus").await.as_ref(),
+                ServerMessage::PeerTransportStatus { peer_id, .. } if *peer_id == reporter)
+            );
+        } else {
+            let outcome = replacement_rx.try_recv();
+            assert!(
+                matches!(outcome, Err(mpsc::error::TryRecvError::Empty)),
+                "v2 replacement must not receive a v3-only transport status: {outcome:?}"
+            );
+        }
+        assert_eq!(
+            server
+                .metrics
+                .transport_status_fanout
+                .load(Ordering::Relaxed),
+            u64::from(replacement_version == 3)
+        );
+    }
+}
+
 // Issue #826: concurrent public-library calls must preserve transport transitions.
 #[tokio::test]
 #[cfg_attr(miri, ignore)]

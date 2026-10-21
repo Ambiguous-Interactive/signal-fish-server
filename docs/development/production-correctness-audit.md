@@ -6649,3 +6649,28 @@ This changes only the private capacity runner verdict. Rust, .NET, and Godot
 clients consume no oracle output and need no migration. Server wire messages,
 client APIs, dependencies, offered workload, and timing limits stay the same.
 The broader audit and full long-workload proof remain open.
+
+### F122 — Delayed transport status can reach a v2 replacement
+
+Session 501 confirms [#1108](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1108)
+at `52a58471`, under open audit #826. `TransportStatusFanOut::deliver` checks
+recipient protocol before conditional routing. A recipient can disconnect and
+reconnect as v2 between that check and delivery-handle lookup. The condition
+checks only the source membership, so the v3-only `PeerTransportStatus` frame
+can reach the v2 replacement. The real disconnect/reconnect history in
+`transport_status_rechecks_recipient_protocol_after_reconnect` fails before
+repair in Nextest `b87d8fb7`.
+
+The repair also checks the current recipient protocol in the conditional send
+predicate at queue admission. It keeps the existing source membership check
+and does not hold the room mutation gate during slow delivery. The same real
+history rejects the frame for a v2 replacement and delivers it for a v3
+replacement. Both existing paused-delivery and concurrent-order controls pass
+with the regression in Nextest `5f28291f-bf46-4924-85ab-d75e2ecd9ff9`.
+Independent review found no correctness issues.
+
+The external clients need no migration. Rust `da8f2d16` in `docs/protocol.md`,
+.NET `e467c871` in `docs/polling-client.md`, and Godot `2a74de36` in
+`.llm/research/protocol-fixtures.md` already classify this event as v3-only.
+The schema, v3 behavior, defaults, and client APIs stay the same. This repairs
+one recipient-version race; it does not complete the broader correctness audit.

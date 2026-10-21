@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce dashboard room-query allocations and release room locks before percentile sorting (#636).
 - Reduce the cost of average timing queries in the Rust library (#636).
 - Reduce memory allocation when recording server response and WebSocket round-trip timings (#636).
 - **Breaking:** Require Rust 1.94.0 or newer to build from source with the current dependencies.
@@ -30,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep v3 peer transport updates off v2 connections after a concurrent reconnect (#1108).
 - Preserve admitted browser gameplay payloads when a peer-link timeout occurs while output waits (#1099).
 - Hold queued native gameplay probes when a returning peer re-arms the exchange release gates (#1097).
 - Keep native send-buffer counts correct when setup or empty messages are acknowledged (#1095).

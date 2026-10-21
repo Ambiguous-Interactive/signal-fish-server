@@ -1488,7 +1488,7 @@ pub fn summarize(
         }
     };
     let mut invalid_gaps = GapViolations::default();
-    let mut gaps_by_stream: BTreeMap<(&str, &str, u32), Vec<&GapEvent>> = BTreeMap::new();
+    let mut gap_streams: BTreeMap<ArrivalKey<'_>, GapStreamEvidence> = BTreeMap::new();
     for gap in &records.gaps {
         let mut detail: Option<String> = None;
         // The experiment's cross-format pair (opaque sender -> any co-room
@@ -1543,10 +1543,60 @@ pub fn summarize(
             invalid_gaps.record_violation(gap, detail);
             continue;
         }
-        gaps_by_stream
-            .entry((gap.recipient.as_str(), gap.sender.as_str(), gap.epoch))
-            .or_default()
-            .push(gap);
+        let recipient = gap.recipient.as_str();
+        let sender = gap.sender.as_str();
+        let gap_stream = gap_streams
+            .entry((recipient, sender, gap.epoch))
+            .or_insert_with(|| {
+                let view = views.get(recipient).expect("validated roster recipient");
+                // Closed or unadopted streams owe no completeness check. Keep
+                // their raw gaps as evidence, matching the arrival contract.
+                let adopted = view
+                    .adopted
+                    .get(sender)
+                    .is_some_and(|epochs| epochs.contains(&gap.epoch));
+                let closed = view
+                    .closed_at
+                    .contains_key(&(sender.to_string(), gap.epoch));
+                let total_owed = if adopted && !closed {
+                    blocks
+                        .get(&(sender, gap.epoch))
+                        .map_or(0, |block| count_u64(block.len()))
+                } else {
+                    0
+                };
+                GapStreamEvidence {
+                    total_owed,
+                    ..GapStreamEvidence::default()
+                }
+            });
+        let total_owed = gap_stream.total_owed;
+        if total_owed == 0 {
+            continue;
+        }
+        let stream = arrivals.entry((recipient, sender, gap.epoch)).or_default();
+        // Receipts are complete before this pass. Insert gaps directly into
+        // their compact coverage, without retaining one pointer per report.
+        if gap.to_seq > total_owed {
+            gap_stream.invalid.record_violation(
+                gap,
+                format!(
+                    "gap range reaches beyond what the sender sent ({} > \
+                     {total_owed} relayed in epoch {})",
+                    gap.to_seq, gap.epoch
+                ),
+            );
+        } else if !stream.observed.covered.insert(gap.from_seq, gap.to_seq) {
+            gap_stream.invalid.record_violation(
+                gap,
+                format!(
+                    "gap range {}:{} overlaps an already-covered sequence",
+                    gap.from_seq, gap.to_seq
+                ),
+            );
+        } else {
+            gap_stream.covered += gap.to_seq - gap.from_seq + 1;
+        }
     }
 
     let mut duplicates = Category::default();
@@ -1593,6 +1643,9 @@ pub fn summarize(
         // and never repeat what the rejoin snapshot already accounted.
         let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
         for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
+            if stream.total == 0 {
+                continue;
+            }
             if opaque_senders.contains(sender) {
                 // The unsupported-conversion contract: the opaque sender's
                 // payload reaches NO recipient as a delivery. An arrival is
@@ -1679,39 +1732,13 @@ pub fn summarize(
                 // omission only with its exact gap report, while reliable
                 // permits no gap report at all (validated globally above) —
                 // so its coverage is receipts alone.
-                let stream_gaps = match delivery_class {
-                    DeliveryClass::Reliable if !opaque_senders.contains(sender) => &[][..],
-                    _ => gaps_by_stream
-                        .get(&(recipient.as_str(), sender, *epoch))
-                        .map_or(&[][..], Vec::as_slice),
-                };
-                let mut covered = arrival.observed.covered;
-                for gap in stream_gaps {
-                    if gap.to_seq > total_owed {
-                        invalid_gaps.record_violation(
-                            gap,
-                            format!(
-                                "gap range reaches beyond what the sender sent ({} > \
-                                 {total_owed} relayed in epoch {epoch})",
-                                gap.to_seq
-                            ),
-                        );
-                        continue;
+                let covered = arrival.observed.covered;
+                if let Some(gaps) = gap_streams.remove(&(recipient.as_str(), sender, *epoch)) {
+                    outcome.gap_covered += gaps.covered;
+                    invalid_gaps.count += gaps.invalid.count;
+                    if invalid_gaps.first.is_none() {
+                        invalid_gaps.first = gaps.invalid.first;
                     }
-                    // Reject BEFORE inserting: a rejected range contributes
-                    // no coverage, so its non-overlapping remainder stays an
-                    // honest uncovered omission in the totals.
-                    if !covered.insert(gap.from_seq, gap.to_seq) {
-                        invalid_gaps.record_violation(
-                            gap,
-                            format!(
-                                "gap range {}:{} overlaps an already-covered sequence",
-                                gap.from_seq, gap.to_seq
-                            ),
-                        );
-                        continue;
-                    }
-                    outcome.gap_covered += gap.to_seq - gap.from_seq + 1;
                 }
                 // Count covered positions and holes above the seat's floor.
                 let accounting = covered.above(owed_floor);
@@ -1972,6 +1999,15 @@ fn recipient_arrivals<'map, 'records>(
     arrivals
         .range((recipient, "", 0)..)
         .take_while(move |((name, _, _), _)| *name == recipient)
+}
+
+/// One gap-report accumulator per stream, independent of report count.
+/// Reliable streams without reports allocate no gap state.
+#[derive(Default)]
+struct GapStreamEvidence {
+    total_owed: u64,
+    covered: u64,
+    invalid: GapViolations,
 }
 
 /// Ordered complete streams retain one range, rather than one receipt pointer.
@@ -3416,5 +3452,151 @@ mod coverage_tests {
             "covered": accounting.covered, "holes": accounting.holes,
             "first_hole": accounting.first_hole, "highest": accounting.highest})
         );
+    }
+
+    #[test]
+    fn streamed_gaps_preserve_first_violation_order_and_exact_replay() {
+        let context = crate::unit_context_with_class(DeliveryClass::Latest);
+        for global_invalid in [false, true] {
+            for reverse in [false, true] {
+                let mut records = crate::complete_records(&context.plans);
+                for (recipient, sender) in [("r0p1", "r0p0"), ("r0p0", "r0p1")] {
+                    // Record order differs from roster order. The first
+                    // stream violation must still follow roster order.
+                    records.gaps.push(crate::gap_for(
+                        recipient,
+                        sender,
+                        0,
+                        signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                    ));
+                }
+                if reverse {
+                    records.gaps.reverse();
+                }
+                if global_invalid {
+                    let mut gap = records.gaps[0].clone();
+                    gap.recipient = "outside-roster".into();
+                    records.gaps.push(gap);
+                }
+                let summarize = |records: &RunRecords| {
+                    super::summarize(
+                        &context.plans,
+                        &context.roster,
+                        records,
+                        1000,
+                        96,
+                        DeliveryClass::Latest,
+                        &ChurnPlan::default(),
+                        None,
+                    )
+                };
+                let summary = summarize(&records);
+                let invalid = summary
+                    .reasons
+                    .iter()
+                    .find_map(|reason| match reason {
+                        InvalidReason::InvalidGapReports { count, first } => Some((*count, first)),
+                        _ => None,
+                    })
+                    .expect("invalid gaps");
+                assert_eq!(invalid.0, if global_invalid { 3 } else { 2 });
+                assert_eq!(
+                    invalid.1.recipient,
+                    if global_invalid {
+                        "outside-roster"
+                    } else {
+                        "r0p0"
+                    }
+                );
+                assert_eq!(summary.totals.gap_covered, 0);
+                assert_eq!(summary.totals.outstanding, 0);
+                let output = tempfile::tempdir().expect("gap artifacts");
+                crate::artifacts::write_deliveries(output.path(), &records).expect("write gaps");
+                let replayed = crate::artifacts::read_records(output.path()).expect("read gaps");
+                assert_eq!(
+                    serde_json::to_value(summarize(&replayed)).unwrap(),
+                    serde_json::to_value(summary).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(replayed).unwrap(),
+                    serde_json::to_value(records).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "all-gap oracle memory profile; run in a fresh process"]
+    fn generator_all_gap_oracle_memory_profile() {
+        let sends = std::env::var("CAPACITY_GAP_ORACLE_PROBE_SENDS")
+            .unwrap_or_else(|_| "100000".into())
+            .parse::<u64>()
+            .expect("send count");
+        assert!((1..=1_000_000).contains(&sends));
+        let mut config = crate::scenario_config(crate::Encoding::V3Json);
+        config.players_per_room = 2;
+        config.warmup = std::time::Duration::ZERO;
+        config.duration = std::time::Duration::from_micros(sends);
+        config.send_rate_per_sender = 1_000_000.0;
+        let (plans, churn) = crate::build_run_shape(&config).expect("probe shape");
+        let roster: Vec<_> = plans
+            .iter()
+            .map(|plan| (plan.name.clone(), plan.room))
+            .collect();
+        let mut records = RunRecords::default();
+        for plan in &plans {
+            let sender: crate::ReceiptName = plan.name.as_str().into();
+            let recipient: crate::ReceiptName = plans
+                .iter()
+                .find(|peer| peer.name != plan.name)
+                .expect("other peer")
+                .name
+                .as_str()
+                .into();
+            for send in &plan.sends {
+                records.sent.push(SentEvent {
+                    sender: sender.clone(),
+                    room: plan.room,
+                    seq: send.seq,
+                    epoch: 1,
+                    intended_us: send.intended_us,
+                    sent_us: send.intended_us + 5,
+                    application_bytes: 96,
+                    encoded_frame_body_bytes: 150,
+                    phase: send.phase,
+                });
+                records.gaps.push(GapEvent {
+                    sender: sender.clone(),
+                    recipient: recipient.clone(),
+                    epoch: 1,
+                    from_seq: send.seq + 1,
+                    to_seq: send.seq + 1,
+                    reason: signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                });
+            }
+        }
+        let collected_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        let summary = summarize(
+            &plans,
+            &roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Latest,
+            &churn,
+            None,
+        );
+        assert!(summary.valid, "{:?}", summary.reasons);
+        assert_eq!(summary.totals.gap_covered, sends * 2);
+        println!(
+            "GAP_ORACLE_PROFILE {}",
+            serde_json::json!({
+                "gaps": records.gaps.len(), "collected_rss_bytes": collected_rss,
+                "after_oracle_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                "oracle_elapsed_us": started.elapsed().as_micros(),
+            })
+        );
+        std::hint::black_box(records);
     }
 }
