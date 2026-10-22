@@ -51,6 +51,11 @@ as raw bytes and decoded UTF-8 text. Across all peers and link generations,
 pending messages retain at most 256 entries and 1 MiB of decoded text.
 Exceeding either limit reports an error and closes the failed P2P link through
 relay fallback. The limits bound the application backlog, not WebRTC stack memory.
+The 64 KiB limit is a message size limit. It does not guarantee delivery on
+`unreliable`. This channel does not retry lost fragments. A burst of large
+messages can overflow the remote UDP receive buffer, including on localhost.
+Use `reliable` for data that must arrive. Use small, replaceable updates on
+`unreliable`. An open channel and zero `bufferedAmount` do not prove receipt.
 **Migration:** Split larger payloads into smaller messages and keep consuming
 output. Native library consumers must retain `EngineEvent::ChannelMessage`'s
 `queue_permit` until the message is handled or discarded, including output waits.

@@ -292,6 +292,8 @@ impl EnhancedGameServer {
         key: Option<u32>,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
+        let source_lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
         if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
             return;
         }
@@ -468,6 +470,8 @@ impl EnhancedGameServer {
         payload: Bytes,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
+        let source_lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
         if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
             return;
         }

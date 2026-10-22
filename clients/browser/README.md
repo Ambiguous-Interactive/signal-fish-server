@@ -184,6 +184,11 @@ is exceeded. Other peers and
 signaling remain available. These limits cover the application queue, not the
 browser's internal WebRTC buffers. Binary messages use array buffers and decode
 as UTF-8 with replacement characters for invalid bytes.
+The 64 KiB limit is a message size limit. It does not guarantee delivery on
+`unreliable`. This channel does not retry lost fragments. A burst of large
+messages can overflow the remote UDP receive buffer, including on localhost.
+Use `reliable` for data that must arrive. Use small, replaceable updates on
+`unreliable`. An open channel and zero `bufferedAmount` do not prove receipt.
 **Migration:** Split payloads larger than 64 KiB and keep consuming output.
 
 ### WebSocket and output limits

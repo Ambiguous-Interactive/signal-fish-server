@@ -56,7 +56,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
-| A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
+| A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123 |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36 |
@@ -6797,3 +6797,103 @@ guarantee. The campaigns remain open for their full scope. The native
 reference library now exposes its existing local diagnostic snapshot for
 library callers. The server protocol and configuration stay the same.
 External Rust, .NET, and Godot clients need no migration.
+
+### A20 — First-open burst loss mechanism
+
+The two-message burst above now has transport evidence. Each endpoint sends
+one 65,536-byte text message and one 65,536-byte binary message per label
+at the first open callback. Both offerer roles use the real engines.
+The original single-message first-open qualification stays unchanged.
+
+A failed native-offerer run reproduces the missing second browser receipt.
+Chromium reports two reliable messages and one unreliable message received.
+Each sender reports two sends per label. Both channels remain open.
+A separate traced browser-offerer failure shows the native stack sending all
+binary fragments. Chromium acknowledges later TSNs while its cumulative ACK
+stops at TSN 2143070677. The native stack sends FORWARD-TSN through 2143070710.
+The stack retries reliable fragments. It abandons the missing unreliable
+message under the channel's zero-retry policy.
+
+A per-socket Linux monitor confirms remote receive loss in another burst run.
+The Chromium UDP socket drop count rises from 0 to 39 in one role, and from
+0 to 31 in the other role. The monitored native sockets retain zero drops.
+This proves local UDP receive overflow in that reproduction. It does not
+prove the cause of the historical #853 or #889 failures, or every burst loss.
+Local raw traces, socket owners, commands, and source copies remain in
+`progress/session-506/`.
+
+The ignored `fragmented_first_open_burst_transport_diagnostic` retains the
+burst as a manual probe. Run it with:
+
+```sh
+RUST_LOG=rtc_sctp=trace cargo test --manifest-path clients/native/Cargo.toml \
+  --features browser-interop --test browser_interop_e2e \
+  fragmented_first_open_burst_transport_diagnostic -- --ignored --nocapture
+```
+
+The probe requires both reliable receipts in both directions. It checks exact
+content and rejects duplicate or corrupt receipts on either label. It prints
+browser transport statistics and both engine receipt counters at the reliable
+completion point. Unreliable receipts can still be in flight at that point;
+absence in that snapshot alone does not prove loss. The 30-second deadline
+bounds each history. Neither the probe nor an open channel guarantees delivery
+on the unreliable label. Use reliable messages for data that must arrive.
+The campaigns remain open. Server protocol and external-client contracts stay
+the same; Rust, .NET, and Godot clients need no migration.
+
+### F123 — Embedded gameplay crosses reconnect into a fresh epoch
+
+Issue [#1117](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1117),
+found at `849321ff` under open #826 (A13/A04). Concurrent library use exposes a
+gameplay identity defect. `handle_game_data`, `handle_game_data_binary`, and
+`handle_client_message(GameData)` supply no socket lifecycle to relay admission.
+The shared handlers interpret that absence as an ungated call. An old frame
+can pause at a sender or room budget wait while unregister and reconnect finish.
+When the frame resumes, stamp lookup uses the restored connection. Peers receive
+old gameplay labeled with the replacement's epoch and sequence.
+
+The existing admission history now exercises all three public entrypoints and
+both socket entrypoints at both budget waits. It records the original relay
+epoch before admission, waits at the existing admission seam, and runs a real
+unregister and token-based reconnect. It releases the old frame, inspects its
+actual peer payload and epoch, then requires a fresh frame from the replacement
+to use its new epoch with sequence one. It also checks charged bytes and that
+neither call produces a refusal. No new production pause hook is added.
+Baseline Nextest `b251cacd-1b80-4a12-bcbd-79f1299f910c` fails because the old
+public JSON frame has epoch two instead of epoch one. Earlier gate-only control
+`b6257619-1f96-4aff-b2c0-169afff8eb59` independently shows reconnect completing
+while that frame remains paused.
+
+Both shared handlers now capture the current lifecycle when the caller did not
+supply one. The existing lifecycle gate then covers budget admission through
+stamp and enqueue, as it does for socket calls. It releases before delivery
+backpressure. Explicit socket sources retain their existing identity check.
+Calls with no registered lifecycle keep their existing compatibility behavior.
+The same gate serializes voluntary leave with admission; the reproduced history
+covers reconnect, not every overlapping leave/rejoin schedule or socket write.
+The wire format and client API are unchanged. The release note describes the
+observable embedded-server repair. Rust, .NET, and Godot clients consume the
+network protocol and do not call these server library entrypoints. They require
+no migration or tracking issue. The session PR records the source assessment.
+This finding does not complete the broader #826 audit.
+
+Reproduce with `cargo nextest run --lib
+-E 'test(old_relay_budget_admission_serializes_restored_player_reconnect)'`.
+
+Repaired Nextest `1e7900c8-c619-43ca-8c53-aaf297f151cd` passes the ten-history
+matrix and all 15 neighboring gameplay handler and budget tests. Review adds
+an exact one-receipt check and requires the old frame's sequence to be one.
+
+Independent review finds an earlier ownership gap in public
+`handle_client_message`: room liveness can suspend before relay dispatch.
+The existing pre-dispatch pause now exercises public and explicit socket calls.
+It restores the connection before releasing the old call. Baseline Nextest
+`df2e9189-380f-4fe6-90c3-d4c182a4bec1` delivers the old public-router payload
+with epoch two and sequence one. The router now resolves a missing source at
+entry, before liveness waits. The existing stale-source check in the shared
+relay handler then drops the old frame after reconnect. The regression also
+requires fresh JSON and binary frames to begin at sequences one and two.
+Final Nextest `a874b100-9a20-4bd9-bf8f-a972a6081dca` passes both gameplay
+histories and all 15 neighboring handler tests. Independent review confirms
+the router capture occurs before its first await and adds no recursive gate
+acquisition. The original socket checks remain active.
