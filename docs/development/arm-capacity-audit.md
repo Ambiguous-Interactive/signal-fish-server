@@ -4938,3 +4938,48 @@ Reproduce with the capacity-runner test executable and
 `CAPACITY_SUMMARY_NAMES_STRINGS=1` for the owned-string path; omit it for shared
 names. Fixed executable identity and all six raw trials are saved locally in
 `progress/session-508/summary-names/`.
+
+### Generator thread scheduling samples (session 509, #1009)
+
+Linux intervals now retain `generator_scheduling` within the existing resource
+timing boundary. Each thread record names its TID, start-time ticks, kernel
+state, name, wait channel, and raw `schedstat` counters. The counters record
+CPU runtime, runqueue wait in nanoseconds, and timeslices, per the
+[kernel contract](https://docs.kernel.org/scheduler/sched-stats.html#proc-pid-schedstat).
+Compare TID and start-time ticks together across samples. Threads can exit
+between reads; unreadable fields remain null. Compare counters only when both
+start-time values are known. The snapshot is not atomic.
+
+The kernel's `sched_schedstats` switch is true, false, or unknown when absent.
+Zero wait counters cannot exclude starvation when collection is off or unknown.
+Kernel thread states and wait channels describe the read instant. They do not
+identify the state of each Tokio task or prove the cause of an earlier stall.
+HTTP scrape failures retain these records in intervals and bounded failure
+evidence. Old artifacts and non-Linux hosts retain null.
+
+Fixture controls cover disabled and missing switches, zero and malformed
+counters, missing thread files, and start-time parsing. A live nonleader-thread
+control took 1.952111 ms for 20 snapshots on this host. This small-process cost
+does not bound full-workload overhead. Offered work and lag bounds stay unchanged.
+
+### Smaller recipient counters (session 509, #775 and #636)
+
+Recipient histograms now select u8, u16, u32, or u64 counters from the same
+complete raw-arrival bound. The inclusive limits are 255, 65,535, and
+4,294,967,295 arrivals per recipient. The aggregate retains u64 counters.
+Duplicate, self-echo, and opaque arrivals remain in the bound before delivery
+validation. Hot-bucket controls compare exact wide-counter summaries on both
+sides of the u8 and u16 limits. The existing replay checks remain unchanged.
+
+A fresh-process probe with 1,000 recipients and 4,096 samples per recipient
+uses 45,056,000 bucket bytes with u32 and 22,528,000 with u16, a 50% reduction.
+The two runs retain the same percentile checksum, 2,512,893,000. RSS falls from
+60,321,792 to 35,991,552 bytes in these samples. This isolated histogram probe
+does not measure whole-run memory or capacity. The full ten-minute cell has
+more than 65,535 receipts per recipient and retains u32 counters.
+
+Use the existing ignored `generator_recipient_latency_memory_profile` probe
+with `CAPACITY_LATENCY_PROBE_PEERS=1000` and
+`CAPACITY_LATENCY_PROBE_COUNTER_BYTES=4` or `2`. The earlier COMPACT setting
+still selects u32 or u64. Raw process logs remain in local
+`progress/session-509/latency-{4,2}-byte-counters.log`.

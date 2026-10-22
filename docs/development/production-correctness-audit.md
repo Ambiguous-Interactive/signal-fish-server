@@ -7052,3 +7052,29 @@ checks sibling transport delivery afterward. A separate held-poller history
 requires the established sibling-first fence, exact discard counters for both
 labels, and one target close event. Production engine behavior stays unchanged.
 This explains the local oracle failure, not the separate historical #1120 reset.
+
+### F129 — Native pending channels outlive SCTP handshake failure
+
+Issue [#1128](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1128),
+under open #826 (A11 and A22). The SCTP association reports handshake retry
+exhaustion, but the RTC handler only logs that event. Channels created before
+SCTP connects have no DCEP deadline. Their handles stay Connecting without a
+terminal close, so the reference engine cannot use channel loss for recovery.
+
+A deterministic public-core control withholds INIT replies or COOKIE ACK and
+exhausts the configured retry budget. Before repair it observes no close events
+for the two pending channels. The handler now closes the association and sends
+one failure event through the channel pipeline. Pending channels close once.
+Channel creation on the failed physical transport returns a typed error.
+The failure stays terminal when late handshake packets arrive; a fresh peer
+connection can establish channels and deliver gameplay.
+
+The public peer connection negotiates one SCTP association. Its channel registry
+keys streams by stream ID. This change does not add support for multiple SCTP
+associations within one peer connection. The generic SCTP handler retains its
+existing attribution controls. No server wire or external SDK change is needed.
+The external Rust, .NET, and Godot clients do not use this RTC path patch.
+
+This confirmed recovery defect does not establish the cause of the historical
+initial-exchange failures in #853 or #889, or the reciprocal-reset timeout in
+issue #1120. Those investigations remain open with their original acceptance criteria.

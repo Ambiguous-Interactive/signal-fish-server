@@ -415,6 +415,10 @@ pub struct IntervalSample {
     pub server_cgroup_cpu: Option<diagnostics::CgroupCpuStats>,
     #[serde(default)]
     pub generator_cgroup_cpu: Option<diagnostics::CgroupCpuStats>,
+    /// OS-thread counters and wait states. Old artifacts and unsupported
+    /// hosts retain null. Reads occur within the resource timing boundary.
+    #[serde(default)]
+    pub generator_scheduling: Option<diagnostics::ProcessScheduling>,
     /// Kernel TCP socket-buffer memory of the server process, in pages
     /// (TCP + TCP6 `mem` from `/proc/<pid>/net/sockstat`).
     pub server_socket_tcp_mem_pages: Option<u64>,
@@ -1074,6 +1078,28 @@ mod tests {
         let actual = serde_json::to_value(&restored[0]).unwrap();
         assert_eq!(actual["server_cgroup_cpu"], stats);
         assert_eq!(actual["generator_cgroup_cpu"], stats);
+    }
+
+    #[test]
+    fn interval_thread_scheduling_preserves_raw_counters_and_unknown_kernel_switch() {
+        let mut input = serde_json::json!({"t_us":9,"counters":{}});
+        let old: IntervalSample = serde_json::from_value(input.clone()).unwrap();
+        assert!(old.generator_scheduling.is_none());
+        let scheduling = serde_json::json!({"schedstats_enabled":null,"threads":[
+            {"tid":17,"name":"tokio-runtime-w","start_time_ticks":123,"state":"S",
+             "wait_channel":"futex_wait_queue","counters":{"runtime_ns":10,
+             "runqueue_wait_ns":20,"timeslices":30}},
+            {"tid":18,"name":null,"start_time_ticks":null,"state":null,
+             "wait_channel":null,"counters":null}]});
+        input["generator_scheduling"] = scheduling.clone();
+        let parsed: IntervalSample = serde_json::from_value(input).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        write_intervals(output.path(), &[parsed]).unwrap();
+        let restored = read_intervals(output.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored[0]).unwrap()["generator_scheduling"],
+            scheduling
+        );
     }
 
     #[test]

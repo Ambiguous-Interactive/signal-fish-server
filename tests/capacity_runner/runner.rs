@@ -769,6 +769,7 @@ fn interval_evidence(sample: &IntervalSample) -> serde_json::Value {
         "generator_cpu_seconds": sample.generator_cpu_seconds,
         "server_cgroup_cpu": sample.server_cgroup_cpu,
         "generator_cgroup_cpu": sample.generator_cgroup_cpu,
+        "generator_scheduling": sample.generator_scheduling,
         "server_rss_bytes": sample.server_rss_bytes,
         "generator_rss_bytes": sample.generator_rss_bytes})
 }
@@ -2064,6 +2065,7 @@ async fn collect_interval_sample(
         generator_cpu_seconds: diagnostics::process_cpu_seconds(std::process::id()),
         server_cgroup_cpu: pid.and_then(diagnostics::cgroup_cpu_stats),
         generator_cgroup_cpu: diagnostics::cgroup_cpu_stats(std::process::id()),
+        generator_scheduling: diagnostics::process_scheduling(std::process::id()),
         // One procfs read serves the whole pair, so both fields always
         // come from the same scrape instant (the parser's contract is
         // all-or-nothing per family).
@@ -2338,6 +2340,13 @@ mod session_poll_tests {
         assert!(sample.scrape_error.is_none(), "{:?}", sample.scrape_error);
         assert_eq!(sample.counters["signal_fish_websocket_queue_depth"], 7);
         #[cfg(target_os = "linux")]
+        assert!(!sample
+            .generator_scheduling
+            .as_ref()
+            .unwrap()
+            .threads
+            .is_empty());
+        #[cfg(target_os = "linux")]
         if let Some(current) = diagnostics::cgroup_cpu_stats(std::process::id()) {
             for observed in [&sample.server_cgroup_cpu, &sample.generator_cgroup_cpu] {
                 let observed = observed.as_ref().expect("readable CPU group is sampled");
@@ -2371,6 +2380,10 @@ mod session_poll_tests {
         assert_eq!(
             evidence["generator_cgroup_cpu"],
             serde_json::to_value(&sample.generator_cgroup_cpu).unwrap()
+        );
+        assert_eq!(
+            evidence["generator_scheduling"],
+            serde_json::to_value(&sample.generator_scheduling).unwrap()
         );
         let output = tempfile::tempdir().unwrap();
         artifacts::write_intervals(output.path(), &[sample]).unwrap();
@@ -2421,6 +2434,11 @@ mod session_poll_tests {
             server.await.unwrap();
             assert!(sample.scrape_error.is_some(), "{response}");
             assert!(sample.counters.is_null());
+            #[cfg(target_os = "linux")]
+            assert!(
+                sample.generator_scheduling.is_some(),
+                "HTTP failures retain thread evidence"
+            );
             let timing = sample.timing.as_ref().unwrap();
             assert_eq!(
                 timing.headers_received_us.is_some(),

@@ -179,3 +179,11 @@ The [#1125](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1
 repair keeps a payload's read slot charged until its handler sweep ends.
 A paired-wire control holds 320 messages in SCTP, limits each event-first pump
 to 256 queued messages, and drains every retained message in later pumps.
+
+SCTP handshake retry exhaustion closes the failed association and all pending
+channels. Undialed channels have no DCEP deadline, so they must receive their
+terminal close from the SCTP failure. The terminal transport rejects late SCTP input and new channel creation. Deterministic controls lose INIT and COOKIE ACK separately, check
+one close per pending channel, reject late INIT input, and deliver gameplay
+on a fresh peer.
+See [#1128](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1128).
+Published replacement qualification in #912 must retain these controls.

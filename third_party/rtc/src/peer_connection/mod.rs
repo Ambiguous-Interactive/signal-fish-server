@@ -1915,6 +1915,7 @@ impl RTCPeerConnection {
     ///
     /// Returns an error if:
     /// - The peer connection is closed (`ErrConnectionClosed`)
+    /// - The SCTP association is closed (`ErrSCTPNotEstablished`)
     /// - The label or sub-protocol exceeds the length the DCEP OPEN message can carry
     /// - The stream ID is reserved or outside the negotiated range, or no free ID remains
     ///   (`ErrMaxDataChannelID`)
@@ -1934,6 +1935,16 @@ impl RTCPeerConnection {
         // https://www.w3.org/TR/webrtc/#peer-to-peer-data-api (Step #2)
         if self.peer_connection_state == RTCPeerConnectionState::Closed {
             return Err(Error::ErrConnectionClosed);
+        }
+
+        if self.sctp_transport().handshake_failed
+            || self
+                .sctp_transport()
+                .sctp_associations
+                .values()
+                .any(|association| association.is_closed() && !association.is_handshaking())
+        {
+            return Err(Error::ErrSCTPNotEstablished);
         }
 
         let mut params = DataChannelParameters {

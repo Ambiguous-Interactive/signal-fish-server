@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close pending native gameplay channels when the SCTP handshake fails (#1128).
 - Release native channel send capacity when unreliable gameplay is abandoned (#1124).
 - Preserve native gameplay backpressure across repeated reads (#1125).
 - Reject queued gameplay after room leave without charging relay bytes (#1119).

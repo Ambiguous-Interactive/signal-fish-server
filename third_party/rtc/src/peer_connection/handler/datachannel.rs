@@ -647,8 +647,16 @@ impl<'a>
                 }
             }
 
-            // The peer closed the DTLS transport, and with it the SCTP transport every channel
-            // runs over: every channel is closed now (rtc#255).
+            RTCEventInternal::SCTPHandshakeFailed => {
+                // One peer connection owns one SCTP association. Undialed
+                // channels have no stream and no DCEP timeout to retire them.
+                self.ctx.rejected_streams.clear();
+                for dc in self.data_channels.drain() {
+                    self.announce_closed(now, dc, None);
+                }
+            }
+
+            // Closing DTLS closes its SCTP transport and every channel (rtc#255).
             RTCEventInternal::DTLSClosed => {
                 self.ctx.rejected_streams.clear();
                 for dc in self.data_channels.drain() {
