@@ -648,6 +648,70 @@ mod tests {
     use futures::executor::block_on;
     use std::sync::atomic::AtomicUsize;
 
+    // A once-polled writer can consume a mutex wake before it reaches capacity.
+    // Keep those writers scheduled while another operation needs the same core.
+    #[test]
+    fn concurrent_close_drives_writers_queued_on_the_core_lock() {
+        struct WakeCount(AtomicUsize);
+        impl futures::task::ArcWake for WakeCount {
+            fn wake_by_ref(this: &Arc<Self>) {
+                this.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            let (mut inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            Arc::get_mut(&mut inner)
+                .unwrap()
+                .data_channel_send_buffer_limit = 0;
+            let id = inner
+                .core
+                .lock()
+                .await
+                .create_data_channel("pending", None)
+                .unwrap()
+                .id();
+            let (_sender, receiver) = crate::runtime::channel(1);
+            let dc = DataChannelImpl::new(id, inner.clone(), receiver);
+            let core = inner.core.lock().await;
+            let binary = dc.send(BytesMut::from(&b"x"[..]));
+            let text = dc.send_text("x");
+            let writable = dc.writable();
+            let close = dc.close();
+            futures::pin_mut!(binary, text, writable, close);
+            for pending in [
+                binary.as_mut().now_or_never(),
+                text.as_mut().now_or_never(),
+                writable.as_mut().now_or_never(),
+            ] {
+                assert!(pending.is_none(), "each writer waits on the held core");
+            }
+            let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+            let waker = futures::task::waker(wakes.clone());
+            assert!(
+                close
+                    .as_mut()
+                    .poll(&mut std::task::Context::from_waker(&waker))
+                    .is_pending()
+            );
+            drop(core);
+            assert_eq!(
+                wakes.0.load(Ordering::SeqCst),
+                0,
+                "the mutex wakes the dormant first writer, not the later close"
+            );
+            assert!(
+                inner.core.try_lock().is_some(),
+                "the core itself is unlocked"
+            );
+            let (binary, text, writable, closed) = futures::join!(binary, text, writable, close);
+            assert!(closed.is_ok());
+            for result in [binary, text, writable] {
+                assert!(matches!(result, Err(Error::ErrDataChannelClosed)));
+            }
+        }));
+    }
+
     // Issue #1135: a writer can wait on the core lock when the driver stops.
     #[test]
     fn writable_observes_stop_before_capacity_wait_registration() {

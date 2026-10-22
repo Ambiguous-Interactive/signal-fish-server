@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep closed native gameplay transports retired when delayed packets arrive (#1138).
+- Prevent delayed packets from reopening closed native gameplay transports (#1138).
 - Refuse capacity workloads that exceed the configured sender payload byte budget (#775).
 - Close native gameplay channels when stream reset retries expire (#1133).
 - Report native peer closure after a fatal socket error, including before channel admission (#1134).
