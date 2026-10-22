@@ -849,8 +849,18 @@ impl<T: Counter> LatencyAccumulator<T> {
     }
 }
 
-fn compact_latency_count(receipts: u64) -> bool {
-    u32::try_from(receipts).is_ok()
+// HDR counters saturate silently. Bound each bucket by every raw arrival at
+// the busiest recipient, before allocating any recipient histogram.
+fn recipient_latency_counter_bytes(receipts: u64) -> usize {
+    if u8::try_from(receipts).is_ok() {
+        1
+    } else if u16::try_from(receipts).is_ok() {
+        2
+    } else if u32::try_from(receipts).is_ok() {
+        4
+    } else {
+        8
+    }
 }
 
 /// Preserve each recipient's tail while bounding each histogram counter by
@@ -1867,24 +1877,33 @@ pub fn summarize(
         per_recipient.push(outcome);
     }
 
-    // Every recipient bucket is bounded by all raw arrivals at that peer,
-    // including duplicates and misroutes. Unknown peers have no histogram.
-    // This bound remains small even when room fan-out makes total receipts
-    // exceed u32::MAX. Larger per-peer evidence retains u64 counters.
-    let latency_us = if compact_latency_count(maximum_recipient_receipts) {
-        recipient_latency_statistics::<u32>(
+    // Duplicate, opaque, and misrouted arrivals also count toward this bound.
+    // The aggregate always retains u64 counters, even when each peer fits u8.
+    let latency_us = match recipient_latency_counter_bytes(maximum_recipient_receipts) {
+        1 => recipient_latency_statistics::<u8>(
             records,
             &member_names,
             &mut per_recipient,
             maximum_recipient_receipts,
-        )
-    } else {
-        recipient_latency_statistics::<u64>(
+        ),
+        2 => recipient_latency_statistics::<u16>(
             records,
             &member_names,
             &mut per_recipient,
             maximum_recipient_receipts,
-        )
+        ),
+        4 => recipient_latency_statistics::<u32>(
+            records,
+            &member_names,
+            &mut per_recipient,
+            maximum_recipient_receipts,
+        ),
+        _ => recipient_latency_statistics::<u64>(
+            records,
+            &member_names,
+            &mut per_recipient,
+            maximum_recipient_receipts,
+        ),
     };
 
     if let Some(reason) =
@@ -2672,17 +2691,101 @@ mod coverage_tests {
             );
         }
 
-        // A full narrow bucket remains exact at the inclusive safety bound.
-        // More raw rows at one peer select u64 before any histogram exists.
-        assert!(compact_latency_count(0));
-        assert!(compact_latency_count(u64::from(u32::MAX)));
-        assert!(!compact_latency_count(u64::from(u32::MAX) + 1));
-        let mut narrow = Histogram::<u32>::new(3).unwrap();
-        let mut wide = Histogram::<u64>::new(3).unwrap();
-        narrow.record_n(8, u32::MAX).unwrap();
-        wide.record_n(8, u64::from(u32::MAX)).unwrap();
-        assert_eq!(narrow.len(), wide.len());
-        assert_eq!(narrow.value_at_quantile(0.99), wide.value_at_quantile(0.99));
+        // Every inclusive counter limit is safe. The next raw arrival must
+        // widen counters before a saturated HDR bucket can lose evidence.
+        for (receipts, expected_bytes) in [
+            (0, 1),
+            (u64::from(u8::MAX), 1),
+            (u64::from(u8::MAX) + 1, 2),
+            (u64::from(u16::MAX), 2),
+            (u64::from(u16::MAX) + 1, 4),
+            (u64::from(u32::MAX), 4),
+            (u64::from(u32::MAX) + 1, 8),
+            (u64::MAX, 8),
+        ] {
+            assert_eq!(
+                recipient_latency_counter_bytes(receipts),
+                expected_bytes,
+                "raw receipt bound {receipts}"
+            );
+        }
+        fn full_bucket_matches_wide<T: Counter>(maximum: u64) {
+            let mut narrow = Histogram::<T>::new(3).unwrap();
+            let mut wide = Histogram::<u64>::new(3).unwrap();
+            narrow.record_n(8, T::from_u64(maximum).unwrap()).unwrap();
+            wide.record_n(8, maximum).unwrap();
+            assert_eq!(narrow.len(), wide.len());
+            for quantile in [0.5, 0.95, 0.99] {
+                assert_eq!(
+                    narrow.value_at_quantile(quantile),
+                    wide.value_at_quantile(quantile)
+                );
+            }
+        }
+        full_bucket_matches_wide::<u8>(u64::from(u8::MAX));
+        full_bucket_matches_wide::<u16>(u64::from(u16::MAX));
+        full_bucket_matches_wide::<u32>(u64::from(u32::MAX));
+        full_bucket_matches_wide::<u64>(u64::MAX);
+    }
+
+    // #775/#636: all arrivals can hit one HDR bucket. Duplicates, self-echoes,
+    // and opaque leaks must widen its counter even though they fail delivery checks.
+    #[test]
+    fn recipient_latency_width_changes_preserve_full_hot_buckets() {
+        for count in [255, 256, 65_535, 65_536] {
+            for opaque in [false, true] {
+                let context = if opaque {
+                    crate::unit_context_with_experiment()
+                } else {
+                    crate::unit_context()
+                };
+                let mut records = crate::complete_records(&context.plans);
+                let mut receipt = records
+                    .receipts
+                    .iter()
+                    .find(|receipt| !opaque || receipt.sender.as_str() == context.plans[0].name)
+                    .expect("opaque sender has receipts")
+                    .clone();
+                // A self-echo still contributes to this peer's latency population.
+                receipt.recipient = receipt.sender.clone();
+                receipt.received_us = u64::MAX;
+                records.receipts = vec![receipt; count];
+                let summary = summarize(
+                    &context.plans,
+                    &context.roster,
+                    &records,
+                    1000,
+                    96,
+                    DeliveryClass::Reliable,
+                    &ChurnPlan::default(),
+                    context.experiment,
+                );
+                let members = context
+                    .roster
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                let mut wide_peers = summary.per_recipient.clone();
+                let wide = recipient_latency_statistics::<u64>(
+                    &records,
+                    &members,
+                    &mut wide_peers,
+                    count_u64(count),
+                );
+                assert_eq!(summary.latency_us.samples, count_u64(count));
+                assert_eq!(
+                    serde_json::to_value(summary.latency_us).unwrap(),
+                    serde_json::to_value(wide).unwrap(),
+                    "count={count}, opaque={opaque}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&summary.per_recipient).unwrap(),
+                    serde_json::to_value(wide_peers).unwrap(),
+                    "count={count}, opaque={opaque}"
+                );
+                assert_eq!(records.receipts.len(), count);
+            }
+        }
     }
 
     #[test]
@@ -2694,6 +2797,9 @@ mod coverage_tests {
             .expect("peer count");
         assert!((1..=16000).contains(&peers));
         let compact = std::env::var("CAPACITY_LATENCY_PROBE_COMPACT").as_deref() == Ok("1");
+        let counter_bytes = std::env::var("CAPACITY_LATENCY_PROBE_COUNTER_BYTES")
+            .map(|value| value.parse::<usize>().expect("counter bytes"))
+            .unwrap_or(if compact { 4 } else { 8 });
         fn measure<T: Counter>(peers: usize) {
             let started = std::time::Instant::now();
             let mut histograms: Vec<LatencyAccumulator<T>> =
@@ -2724,10 +2830,11 @@ mod coverage_tests {
             );
             std::hint::black_box(histograms);
         }
-        if compact {
-            measure::<u32>(peers);
-        } else {
-            measure::<u64>(peers);
+        match counter_bytes {
+            2 => measure::<u16>(peers),
+            4 => measure::<u32>(peers),
+            8 => measure::<u64>(peers),
+            _ => panic!("counter bytes must be 2, 4, or 8 for 4096 samples"),
         }
     }
 

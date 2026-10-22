@@ -213,8 +213,9 @@ impl<'a> SctpHandler<'a> {
         now: Instant,
         limits: (usize, &mut usize),
         messages: &mut Vec<SctpMessage>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let (max_len, budget) = limits;
+        let mut failed = false;
         while let Some(event) = conn.poll() {
             match event {
                 Event::HandshakeFailed { reason } => {
@@ -222,7 +223,15 @@ impl<'a> SctpHandler<'a> {
                         "association_handle {} handshake failed due to {}",
                         ch.0, reason
                     );
-                    //TODO: put it into event_outs?
+                    // No DCEP deadline exists before SCTP connects. Make this
+                    // terminal failure visible to every waiting channel now.
+                    conn.close(reason)?;
+                    failed = true;
+                    ctx_pending.retain(|(association, _)| *association != ch);
+                    event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeFailed,
+                    });
                 }
                 Event::Connected => {
                     debug!("association_handle {} is connected", ch.0);
@@ -279,7 +288,7 @@ impl<'a> SctpHandler<'a> {
             }
         }
 
-        Ok(())
+        Ok(failed)
     }
 
     /// Retry streams parked by a full pipeline. The level-triggered half of the drain.
@@ -330,7 +339,7 @@ impl<'a> SctpHandler<'a> {
                 &mut messages,
             )?;
 
-            Self::drain_association_events(
+            let failed = Self::drain_association_events(
                 &mut self.ctx.pending_readable,
                 &mut self.ctx.event_outs,
                 conn,
@@ -339,6 +348,7 @@ impl<'a> SctpHandler<'a> {
                 (max_len, &mut budget),
                 &mut messages,
             )?;
+            self.ctx.sctp_transport.handshake_failed |= failed;
             for message in messages {
                 if let SctpMessage::StreamEvent(event) = &message {
                     self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
@@ -414,7 +424,7 @@ impl<'a> SctpHandler<'a> {
                         ..Default::default()
                     });
             let mut messages = vec![];
-            Self::drain_association_events(
+            let failed = Self::drain_association_events(
                 &mut self.ctx.pending_readable,
                 &mut self.ctx.event_outs,
                 conn,
@@ -423,6 +433,7 @@ impl<'a> SctpHandler<'a> {
                 (max_len, &mut budget),
                 &mut messages,
             )?;
+            self.ctx.sctp_transport.handshake_failed |= failed;
             for message in messages {
                 let message = match message {
                     SctpMessage::StreamEvent(event) => DTLSMessage::SctpStreamEvent(event),
@@ -499,6 +510,9 @@ impl<'a>
     fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
         let now = msg.now;
         if let RTCMessageInternal::Dtls(DTLSMessage::Raw(dtls_message)) = msg.message {
+            if self.ctx.sctp_transport.handshake_failed {
+                return Ok(());
+            }
             debug!("recv sctp RAW {:?}", msg.transport.peer_addr);
 
             if self.ctx.sctp_transport.sctp_endpoint.is_none() {
@@ -563,7 +577,7 @@ impl<'a>
                         }
                     }
 
-                    Self::drain_association_events(
+                    let failed = Self::drain_association_events(
                         &mut self.ctx.pending_readable,
                         &mut self.ctx.event_outs,
                         conn,
@@ -572,6 +586,7 @@ impl<'a>
                         (max_len, &mut budget),
                         &mut messages,
                     )?;
+                    self.ctx.sctp_transport.handshake_failed |= failed;
 
                     while let Some(event) = conn.poll_endpoint_event() {
                         endpoint_events.push((*ch, event));
@@ -871,7 +886,7 @@ impl<'a>
 
         // DTLSHandshakeComplete is not terminated here since SRTP handler needs it
         let dtls_complete = matches!(&evt.event, RTCEventInternal::DTLSHandshakeComplete(_, _));
-        if dtls_complete {
+        if dtls_complete && !self.ctx.sctp_transport.handshake_failed {
             debug!("sctp recv dtls handshake complete");
 
             if let Some(sctp_transport_config) =
@@ -1221,6 +1236,181 @@ mod tests {
             assert!(!pc.data_channels.stream_id_in_use(&u16::MAX));
         }
         assert!(pc.create_data_channel("ordinary", None).is_ok());
+    }
+
+    // Issue #1128: SCTP handshake failure must release pending gameplay channels.
+    #[test]
+    fn sctp_handshake_failure_closes_pending_channels_and_allows_fresh_peer() {
+        use crate::data_channel::{RTCDataChannelInit, RTCDataChannelState};
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        use crate::peer_connection::message::RTCMessage;
+        use crate::peer_connection::transport::RTCSctpTransportState;
+
+        for awaiting_cookie_ack in [false, true] {
+            let now = Instant::now();
+            let config = TransportConfig::default().with_timer_config(sctp::TimerConfig {
+                max_t1_init_retrans: 0,
+                max_t1_cookie_retrans: 0,
+                ..Default::default()
+            });
+            let mut endpoint = Endpoint::new(
+                client_addr(),
+                TransportProtocol::UDP,
+                EndpointConfig::default().into(),
+                None,
+            );
+            let (handle, mut conn) = endpoint
+                .connect(now, ClientConfig::new(config.clone()), server_addr())
+                .unwrap();
+            let initial = drain_transmits(&mut conn, now);
+            let stale_init = initial[0].clone();
+            if awaiting_cookie_ack {
+                let mut remote = Endpoint::new(
+                    server_addr(),
+                    TransportProtocol::UDP,
+                    EndpointConfig::default().into(),
+                    Some(ServerConfig::new(config).into()),
+                );
+                for packet in initial {
+                    let (_, DatagramEvent::NewAssociation(mut server)) =
+                        remote.handle(now, client_addr(), None, packet).unwrap()
+                    else {
+                        panic!("INIT creates the remote association");
+                    };
+                    for datagram in drain_transmits(&mut server, now) {
+                        if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                            endpoint.handle(now, server_addr(), None, datagram)
+                        {
+                            conn.handle_event(event);
+                        }
+                    }
+                }
+                assert!(
+                    !drain_transmits(&mut conn, now).is_empty(),
+                    "COOKIE ECHO is sent"
+                );
+            }
+            let expiry = conn.poll_timeout().unwrap();
+            let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+            let ids = [
+                pc.create_data_channel("reliable", None).unwrap().id(),
+                pc.create_data_channel(
+                    "fixed",
+                    Some(RTCDataChannelInit {
+                        negotiated: Some(0),
+                        ..Default::default()
+                    }),
+                )
+                .unwrap()
+                .id(),
+            ];
+            for id in ids {
+                assert_eq!(
+                    pc.data_channel(id).unwrap().ready_state(),
+                    RTCDataChannelState::Connecting
+                );
+            }
+            pc.dtls_transport_mut().dtls_role = RTCDtlsRole::Client;
+            pc.pipeline_context.sctp_handler_context = client_ctx(now, endpoint, handle, conn);
+            pc.get_sctp_handler().handle_timeout(expiry).unwrap();
+            while pc.poll_event().is_some() {}
+            let mut closed = Vec::new();
+            while let Some(message) = pc.poll_read() {
+                if let RTCMessage::DataChannelClosed(id) = message.message {
+                    closed.push(id);
+                }
+            }
+            closed.sort_unstable();
+            let mut expected = ids.to_vec();
+            expected.sort_unstable();
+            assert_eq!(
+                closed, expected,
+                "cookie_ack={awaiting_cookie_ack}: each pending channel closes"
+            );
+            assert_eq!(pc.sctp_transport().state(), RTCSctpTransportState::Closed);
+            assert!(pc.data_channels.is_empty());
+            assert!(pc.create_data_channel("failed-link", None).is_err());
+            // Failed physical links reject late handshake input before routing it.
+            // Reuse the original initiate tag so the endpoint routes this late
+            // INIT to the retained failed association rather than a fresh one.
+            pc.get_sctp_handler()
+                .handle_read(TaggedRTCMessageInternal {
+                    now: expiry,
+                    transport: TransportContext {
+                        peer_addr: server_addr(),
+                        ..Default::default()
+                    },
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Raw(BytesMut::from(
+                        &stale_init[..],
+                    ))),
+                })
+                .unwrap();
+            assert!(
+                pc.get_sctp_handler().poll_write().is_none(),
+                "failed transport emits no new handshake"
+            );
+            assert_eq!(pc.sctp_transport().state(), RTCSctpTransportState::Closed);
+            assert!(pc.create_data_channel("late-retry", None).is_err());
+            pc.get_sctp_handler()
+                .handle_timeout(expiry + Duration::from_secs(60))
+                .unwrap();
+            while pc.poll_event().is_some() {}
+            assert!(pc.poll_read().is_none(), "failure emits no duplicate close");
+
+            let mut pair = establish();
+            let mut fresh = RTCPeerConnectionBuilder::new().build(expiry).unwrap();
+            fresh.dtls_transport_mut().dtls_role = RTCDtlsRole::Client;
+            fresh.pipeline_context.sctp_handler_context =
+                client_ctx(expiry, pair.client_ep, pair.client_ch, pair.client_conn);
+            let id = fresh
+                .create_data_channel(
+                    "fresh",
+                    Some(RTCDataChannelInit {
+                        negotiated: Some(0),
+                        ..Default::default()
+                    }),
+                )
+                .unwrap()
+                .id();
+            assert!(
+                matches!(fresh.poll_read().unwrap().message, RTCMessage::DataChannelOpened(open) if open == id)
+            );
+            fresh
+                .data_channel(id)
+                .unwrap()
+                .send_text(expiry, "fresh-gameplay")
+                .unwrap();
+            while let Some(message) = fresh.get_endpoint_handler().poll_write() {
+                fresh
+                    .get_datachannel_handler()
+                    .handle_write(message)
+                    .unwrap();
+            }
+            while let Some(message) = fresh.get_datachannel_handler().poll_write() {
+                fresh.get_sctp_handler().handle_write(message).unwrap();
+            }
+            while let Some(message) = fresh.get_sctp_handler().poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message
+                    && let Some((_, DatagramEvent::AssociationEvent(event))) = pair
+                        .server_ep
+                        .handle(expiry, client_addr(), None, raw.freeze())
+                {
+                    pair.server_conn.handle_event(event);
+                }
+            }
+            assert_eq!(
+                pair.server_conn
+                    .stream(0)
+                    .unwrap()
+                    .read_sctp()
+                    .unwrap()
+                    .unwrap()
+                    .to_payload(100)
+                    .unwrap()
+                    .freeze(),
+                Bytes::from_static(b"fresh-gameplay")
+            );
+        }
     }
 
     fn connected_creation_fixed_id_history(role: RTCDtlsRole) {

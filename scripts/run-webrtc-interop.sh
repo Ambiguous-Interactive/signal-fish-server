@@ -77,6 +77,10 @@ echo "==> Verifying WebRTC event retention and driver cancellation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib peer_connection::
 
+echo "==> Verifying public channel recovery after SCTP handshake loss"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib sctp_handshake_loss_ --features runtime-mock
+
 echo "==> Verifying RTC channel statistics retention"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib statistics
@@ -96,6 +100,10 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
 echo "==> Verifying RTC timer-only send credit release"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib timer_abandonment_
+
+echo "==> Verifying RTC handshake failure recovery"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib sctp_handshake_failure_
 
 echo "==> Verifying RTC negotiated stream allocation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \

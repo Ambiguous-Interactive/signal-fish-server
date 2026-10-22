@@ -564,6 +564,9 @@ pub(crate) enum RTCEventInternal {
     /// Parameter: Association handle
     SCTPHandshakeComplete(usize /*AssociationHandle*/),
 
+    /// SCTP exhausted its handshake retries. Pending channels cannot open.
+    SCTPHandshakeFailed,
+
     /// SCTP stream has been closed
     ///
     /// Parameters:

@@ -218,6 +218,118 @@ pub fn process_cpu_seconds(_pid: u32) -> Option<f64> {
     None
 }
 
+/// A non-atomic snapshot of the generator's OS threads. Match a thread by
+/// `(tid, start_time_ticks)` between snapshots; exited threads disappear.
+/// Compare counters only when both snapshots have known start-time ticks.
+/// Counters are raw kernel values, not proof that a Tokio task was runnable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessScheduling {
+    /// Kernel switch when exposed; `None` means unknown, not enabled.
+    pub schedstats_enabled: Option<bool>,
+    pub threads: Vec<ThreadScheduling>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadScheduling {
+    pub tid: u32,
+    pub name: Option<String>,
+    pub start_time_ticks: Option<u64>,
+    /// Instantaneous kernel state, such as R (runnable) or S (sleeping).
+    pub state: Option<String>,
+    /// Kernel wait channel, absent when unreadable or hidden (`0`).
+    pub wait_channel: Option<String>,
+    /// Raw schedstat counters; an unreadable or malformed file stays null.
+    pub counters: Option<ThreadSchedulingCounters>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadSchedulingCounters {
+    pub runtime_ns: u64,
+    pub runqueue_wait_ns: u64,
+    pub timeslices: u64,
+}
+
+/// Read every current thread, rather than only the process leader. A thread
+/// can exit between enumeration and file reads; retain its TID and nulls.
+#[cfg(target_os = "linux")]
+pub fn process_scheduling(pid: u32) -> Option<ProcessScheduling> {
+    process_scheduling_from(pid, Path::new("/proc"))
+}
+
+#[cfg(target_os = "linux")]
+fn process_scheduling_from(pid: u32, proc_root: &Path) -> Option<ProcessScheduling> {
+    let task_root = proc_root.join(pid.to_string()).join("task");
+    let mut tids = std::fs::read_dir(&task_root)
+        .ok()?
+        .map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    tids.sort_unstable();
+    let threads = tids
+        .into_iter()
+        .map(|tid| {
+            let task = task_root.join(tid.to_string());
+            let identity = std::fs::read_to_string(task.join("stat"))
+                .ok()
+                .and_then(|text| thread_identity_from_stat(&text));
+            ThreadScheduling {
+                tid,
+                name: std::fs::read_to_string(task.join("comm"))
+                    .ok()
+                    .map(|name| name.trim_end_matches('\n').to_string()),
+                start_time_ticks: identity.as_ref().map(|(_, start)| *start),
+                state: identity.map(|(state, _)| state),
+                wait_channel: std::fs::read_to_string(task.join("wchan"))
+                    .ok()
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty() && text != "0"),
+                counters: std::fs::read_to_string(task.join("schedstat"))
+                    .ok()
+                    .and_then(|text| thread_scheduling_counters(&text)),
+            }
+        })
+        .collect();
+    let schedstats_enabled = std::fs::read_to_string(proc_root.join("sys/kernel/sched_schedstats"))
+        .ok()
+        .and_then(|text| match text.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        });
+    Some(ProcessScheduling {
+        schedstats_enabled,
+        threads,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn thread_identity_from_stat(stat: &str) -> Option<(String, u64)> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?;
+    if state.len() != 1 {
+        return None;
+    }
+    // starttime is field 22; state is field 3.
+    let start_time_ticks = fields.nth(18)?.parse().ok()?;
+    Some((state.to_string(), start_time_ticks))
+}
+
+#[cfg(target_os = "linux")]
+fn thread_scheduling_counters(text: &str) -> Option<ThreadSchedulingCounters> {
+    let mut fields = text.split_whitespace();
+    let counters = ThreadSchedulingCounters {
+        runtime_ns: fields.next()?.parse().ok()?,
+        runqueue_wait_ns: fields.next()?.parse().ok()?,
+        timeslices: fields.next()?.parse().ok()?,
+    };
+    fields.next().is_none().then_some(counters)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn process_scheduling(_pid: u32) -> Option<ProcessScheduling> {
+    None
+}
+
 /// Kernel socket-memory accounting for a process's network namespace
 /// ([`SocketMemoryPages`], from `/proc/<pid>/net/sockstat`), summed across
 /// IPv4 and IPv6. Units are kernel memory pages — the kernel's own
@@ -349,6 +461,122 @@ pub fn parse_labeled_counter(text: &str, name: &str, labels: &[(&str, &str)]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn thread_scheduling_preserves_threads_waits_and_disabled_or_missing_counters() {
+        let proc_root = tempfile::tempdir().unwrap();
+        let tasks = proc_root.path().join("42/task");
+        std::fs::create_dir_all(&tasks).unwrap();
+        for tid in [30, 10, 20] {
+            std::fs::create_dir(tasks.join(tid.to_string())).unwrap();
+        }
+        // Include parentheses and spaces in comm; starttime is field 22.
+        let stat = "10 (tokio ) worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 12345 23";
+        std::fs::write(tasks.join("10/stat"), stat).unwrap();
+        std::fs::write(tasks.join("10/comm"), "tokio ) worker\n").unwrap();
+        std::fs::write(tasks.join("10/schedstat"), "0 0 0\n").unwrap();
+        std::fs::write(tasks.join("10/wchan"), "futex_wait_queue\n").unwrap();
+        std::fs::write(tasks.join("20/schedstat"), "12 34 56\n").unwrap();
+        std::fs::write(tasks.join("20/wchan"), "0\n").unwrap();
+        std::fs::write(tasks.join("30/schedstat"), "12 malformed 56\n").unwrap();
+        let switch = proc_root.path().join("sys/kernel");
+        std::fs::create_dir_all(&switch).unwrap();
+        for (setting, expected) in [("0\n", Some(false)), ("1\n", Some(true)), ("x", None)] {
+            std::fs::write(switch.join("sched_schedstats"), setting).unwrap();
+            let snapshot = process_scheduling_from(42, proc_root.path()).unwrap();
+            assert_eq!(snapshot.schedstats_enabled, expected);
+            assert_eq!(
+                snapshot
+                    .threads
+                    .iter()
+                    .map(|thread| thread.tid)
+                    .collect::<Vec<_>>(),
+                [10, 20, 30]
+            );
+            let sleeping = &snapshot.threads[0];
+            assert_eq!(sleeping.name.as_deref(), Some("tokio ) worker"));
+            assert_eq!(sleeping.state.as_deref(), Some("S"));
+            assert_eq!(sleeping.start_time_ticks, Some(12345));
+            assert_eq!(sleeping.wait_channel.as_deref(), Some("futex_wait_queue"));
+            assert_eq!(sleeping.counters.as_ref().unwrap().runqueue_wait_ns, 0);
+            let measured = &snapshot.threads[1];
+            assert_eq!(measured.counters.as_ref().unwrap().runtime_ns, 12);
+            assert_eq!(measured.counters.as_ref().unwrap().runqueue_wait_ns, 34);
+            assert_eq!(measured.counters.as_ref().unwrap().timeslices, 56);
+            assert_eq!(measured.state, None);
+            assert_eq!(measured.start_time_ticks, None);
+            assert_eq!(measured.wait_channel, None);
+            assert_eq!(snapshot.threads[2].counters, None);
+        }
+        std::fs::remove_file(switch.join("sched_schedstats")).unwrap();
+        assert_eq!(
+            process_scheduling_from(42, proc_root.path())
+                .unwrap()
+                .schedstats_enabled,
+            None
+        );
+        assert_eq!(process_scheduling_from(43, proc_root.path()), None);
+        std::fs::remove_dir_all(tasks).unwrap();
+        assert_eq!(process_scheduling_from(42, proc_root.path()), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn thread_scheduling_rejects_malformed_and_overflowed_kernel_fields() {
+        for text in [
+            "",
+            "1 2",
+            "1 2 3 4",
+            "1 x 3",
+            "-1 2 3",
+            "1 18446744073709551616 3",
+        ] {
+            assert_eq!(thread_scheduling_counters(text), None, "{text:?}");
+        }
+        for text in ["", "1 (worker) S 1", "1 (worker) RUNNING 1 2 3"] {
+            assert_eq!(thread_identity_from_stat(text), None, "{text:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn thread_scheduling_live_snapshot_includes_a_nonleader_thread_and_measures_read_cost() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("sched-control".into())
+            .spawn(move || {
+                let thread_path = std::fs::read_link("/proc/thread-self").unwrap();
+                let tid: u32 = thread_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                ready_tx.send(tid).unwrap();
+                stop_rx.recv().unwrap();
+            })
+            .unwrap();
+        let tid = ready_rx.recv().unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let snapshot = process_scheduling(std::process::id()).unwrap();
+            let observed = snapshot
+                .threads
+                .iter()
+                .find(|thread| thread.tid == tid)
+                .unwrap();
+            assert_eq!(observed.name.as_deref(), Some("sched-control"));
+            assert!(observed.start_time_ticks.is_some());
+            assert!(observed.counters.is_some());
+        }
+        eprintln!("20 live thread snapshots: {:?}", start.elapsed());
+        stop_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(process_scheduling(u32::MAX), None);
+    }
 
     #[test]
     fn parse_labeled_counter_matches_real_exposition_lines_order_insensitively() {

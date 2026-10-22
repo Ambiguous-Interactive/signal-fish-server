@@ -34,6 +34,9 @@ pub(crate) struct SctpTransport {
     // so we need a dedicated field
     pub(crate) is_started: bool,
 
+    /// Handshake retry exhaustion is terminal for this physical transport.
+    pub(crate) handshake_failed: bool,
+
     // The *configured* ceiling from SettingEngine — an input to the negotiation below, not the
     // value W3C `maxMessageSize` reports. See `negotiated_max_message_size`.
     pub(crate) max_message_size: SctpMaxMessageSize,
@@ -70,6 +73,7 @@ impl SctpTransport {
             sctp_associations: HashMap::new(),
 
             is_started: false,
+            handshake_failed: false,
             max_message_size,
             negotiated_max_message_size: None,
             max_receive_buffer_size,
@@ -104,6 +108,9 @@ impl SctpTransport {
     /// assigned once at construction and never updated or read, so any getter over it would have
     /// reported `Connecting` for the lifetime of the connection.
     pub(crate) fn state(&self) -> RTCSctpTransportState {
+        if self.handshake_failed {
+            return RTCSctpTransportState::Closed;
+        }
         match self.association() {
             None => RTCSctpTransportState::Connecting,
             Some(association) if association.is_closed() => RTCSctpTransportState::Closed,

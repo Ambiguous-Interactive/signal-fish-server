@@ -1743,6 +1743,8 @@ mod tests {
 /// instantly, and until the driver read `Runtime::now()` that was not true.
 #[cfg(all(test, feature = "runtime-mock"))]
 mod virtual_clock_tests {
+    mod handshake_failure_tests;
+
     use super::*;
     use crate::runtime::mock::{MockRuntime, MockUDPNetwork};
     use std::sync::Mutex as StdMutex;
