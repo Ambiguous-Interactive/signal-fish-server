@@ -4838,6 +4838,31 @@ an HTTP rejection, a truncated body, and invalid HTTP. These controls qualify
 the evidence path; they do not identify the historical generator-stall cause
 or establish an instrumentation overhead bound for the full long workload.
 
+### Cgroup CPU evidence (session 508, #1009)
+
+Interval samples and failure diagnostics now retain separate server and
+generator `cgroup_cpu` records. Each record names its unified cgroup path and
+records cumulative `usage_usec`, `nr_periods`, `nr_throttled`, and
+`throttled_usec` from `cpu.stat`. Bandwidth counters remain null when absent.
+Old interval files remain readable. Missing processes, unsupported hosts,
+unreadable files, and malformed known counters produce no CPU record.
+
+The [kernel contract](https://docs.kernel.org/admin-guide/cgroup-v2.html#cpu)
+defines usage for the group and its descendants. Bandwidth counters describe
+that group's own limit. They exclude throttling inherited from ancestors.
+These are group counters, not process counters. A shared group includes other
+work. Compare cumulative samples only within the same group lifetime and
+mount namespace. Zero throttling does not exclude host scheduling pauses,
+ancestor limits, socket waits, or allocator stalls.
+
+The sampler uses the conventional `/sys/fs/cgroup` mount. Its existing resource
+completion boundary includes these reads. Fixture controls cover root and
+nested groups, disabled bandwidth accounting, zero values, unknown counters,
+missing files, invalid numbers, duplicates, and old artifact round trips.
+The live sampler control verifies resource and failure-report wiring.
+This extends the evidence available for a future fixed-workload investigation;
+it does not explain the historical stall or qualify the full long cell.
+
 ### Shared unchanged-room oracle views (session 507, #775, #636)
 
 The oracle previously retained a separate room-membership and initial-epoch
@@ -4879,3 +4904,37 @@ Reproduce the current view probe with the capacity-runner test executable,
 CAPACITY_VIEW_PROBE_PLAYERS=64`. Fixed executable hashes, source/probe copies,
 raw trials, excluded cohorts, process snapshots, and exact summary outputs are
 saved locally in `progress/session-507-capacity-memory/`.
+
+### Shared summary sender names (session 508, #775, #636)
+
+The oracle summary now shares each sender name across recipient count maps.
+Each map owns a shared name handle, so the summary can outlive its raw records.
+Names, counts, map order, and artifact JSON stay unchanged.
+
+An isolated debug-build probe constructs the same count-map types with owned
+strings and shared names. It uses 250 rooms with 64 peers each, or 1,008,000
+map entries. Three fresh processes per path use one fixed executable and
+alternate paths. Process lists before and after each run show no active Rust
+builds. The probe reads its own RSS before writing JSON with a bounded writer.
+
+| Metric | Owned strings median | Shared names median |
+| --- | ---: | ---: |
+| Retained process RSS | 86,724,608 bytes | 35,143,680 bytes |
+| Name handle size | 24 bytes | 8 bytes |
+
+Retained RSS falls by 59.5% in this fixture. All six outputs have 21,702,982
+bytes and the same SHA-256 hash. This measures retained summary count maps.
+It does not bound raw-event memory, whole-oracle peak memory, or server capacity.
+It does not qualify the full ten-minute workload.
+
+The regression checks shared storage, string-key lookup and order, empty and
+Unicode names, common prefixes, empty rosters, record ownership, JSON round
+trips, and exact artifact replay. The focused regression and the 23-test
+oracle suite pass.
+
+Reproduce with the capacity-runner test executable and
+`--ignored --exact oracle::coverage_tests::generator_summary_sender_names_memory_profile
+--nocapture`. Set `CAPACITY_SUMMARY_NAMES_ROOMS=250`. Set
+`CAPACITY_SUMMARY_NAMES_STRINGS=1` for the owned-string path; omit it for shared
+names. Fixed executable identity and all six raw trials are saved locally in
+`progress/session-508/summary-names/`.
