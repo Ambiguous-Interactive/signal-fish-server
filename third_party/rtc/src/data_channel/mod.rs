@@ -422,8 +422,8 @@ impl RTCDataChannel<'_> {
             }
             dc.ready_state = RTCDataChannelState::Closing;
             /*
-                Accepted writes and their reset must share the endpoint FIFO.
-                Public state changes before the driver processes either queue.
+                Accepted writes enter SCTP before this reset is queued.
+                Public state changes before the driver sends the reset.
             */
             let defer_reset = dc.data_channel.is_some();
             if !defer_reset {
@@ -444,8 +444,8 @@ impl RTCDataChannel<'_> {
                     TaggedRTCMessageInternal,
                 };
                 let now = self.peer_connection.pipeline_context.now;
-                self.peer_connection.get_endpoint_handler().handle_write(
-                    TaggedRTCMessageInternal {
+                self.peer_connection
+                    .write_data_channel(TaggedRTCMessageInternal {
                         now,
                         transport: Default::default(),
                         message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
@@ -454,8 +454,7 @@ impl RTCDataChannel<'_> {
                                 data_channel_event: DataChannelEvent::Close,
                             },
                         )),
-                    },
-                )?;
+                    })?;
             }
             self.peer_connection
                 .pipeline_context

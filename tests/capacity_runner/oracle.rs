@@ -16,6 +16,7 @@
 //! replay (`artifacts::replay`) run the same code and must agree exactly.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use hdrhistogram::{Counter, Histogram};
 
@@ -907,7 +908,7 @@ pub fn latency_histogram(samples: impl IntoIterator<Item = u64>) -> Histogram<u6
 /// at or below the tail was accounted to the away window ("a recipient owes
 /// no GameData at or below this sequence in the paired epoch"), and the
 /// stream's owed window starts one past it.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct ChurnView {
     /// Member -> the epoch this recipient's seat adopts (and every epoch it
     /// has adopted, which are the streams it can be owed).
@@ -950,7 +951,7 @@ fn churn_views(
     records: &RunRecords,
     roster: &[(String, u32)],
     blocks: &BTreeMap<(&str, u32), RelayBlock<'_>>,
-) -> (BTreeMap<String, ChurnView>, Vec<String>) {
+) -> (BTreeMap<String, Arc<ChurnView>>, Vec<String>) {
     let room_of: BTreeMap<&str, u32> = roster
         .iter()
         .map(|(name, room)| (name.as_str(), *room))
@@ -966,16 +967,46 @@ fn churn_views(
                     None
                 })
         };
-    let mut views: BTreeMap<String, ChurnView> = BTreeMap::new();
+    let mut members_by_room: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for (member, room) in roster {
+        members_by_room
+            .entry(*room)
+            .or_default()
+            .push(member.as_str());
+    }
+    let changing_rooms: BTreeSet<u32> = records
+        .churn
+        .iter()
+        .filter_map(|event| room_of.get(event.recipient.as_str()).copied())
+        .collect();
+    // Ordinary rooms have the same immutable initial view at every seat.
+    // Keep one per room, rather than one tree of names and epochs per peer.
+    // A room with any recorded churn retains the full viewer-specific path.
+    let mut initial_views: BTreeMap<u32, Arc<ChurnView>> = BTreeMap::new();
+    let mut views: BTreeMap<String, Arc<ChurnView>> = BTreeMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     for (viewer, room) in roster {
-        let view = views.entry(viewer.clone()).or_default();
+        if !changing_rooms.contains(room) {
+            let initial = initial_views.entry(*room).or_insert_with(|| {
+                let mut view = ChurnView::default();
+                for member in &members_by_room[room] {
+                    view.adopted
+                        .entry((*member).to_string())
+                        .or_default()
+                        .insert(1);
+                }
+                Arc::new(view)
+            });
+            views.insert(viewer.clone(), Arc::clone(initial));
+            continue;
+        }
+        let mut view = ChurnView::default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
-        for (member, _) in roster
-            .iter()
-            .filter(|(_, member_room)| *member_room == *room)
-        {
-            view.adopted.entry(member.clone()).or_default().insert(1);
+        for member in &members_by_room[room] {
+            view.adopted
+                .entry((*member).to_string())
+                .or_default()
+                .insert(1);
         }
         let mut events: Vec<&crate::records::ChurnEvent> = records
             .churn
@@ -1067,6 +1098,7 @@ fn churn_views(
                 }
             }
         }
+        views.insert(viewer.clone(), Arc::new(view));
     }
     (views, unresolved)
 }
@@ -2259,6 +2291,107 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    // #775/#636: ordinary rooms share their immutable epoch evidence while
+    // affected rooms retain exact per-seat snapshots and unresolved identities.
+    #[test]
+    fn churn_views_share_only_unchanged_rooms_and_preserve_exact_evidence() {
+        let roster: Vec<_> = [("alice", 0), ("βob", 0), ("other", 1), ("last", 1)]
+            .into_iter()
+            .map(|(name, room)| (name.to_string(), room))
+            .collect();
+        let blocks = BTreeMap::new();
+        let mut records = RunRecords::default();
+        let (initial, unresolved) = churn_views(&records, &roster, &blocks);
+        assert!(unresolved.is_empty());
+        assert!(Arc::ptr_eq(&initial["alice"], &initial["βob"]));
+        assert!(Arc::ptr_eq(&initial["other"], &initial["last"]));
+        assert!(!Arc::ptr_eq(&initial["alice"], &initial["other"]));
+
+        // Disconnects change no epoch or snapshot state. Force each room
+        // through the existing viewer-specific event path as an exact control.
+        for recipient in ["alice", "other"] {
+            records.churn.push(crate::records::ChurnEvent {
+                recipient: recipient.to_string(),
+                phase: ChurnPhase::Disconnect,
+                at_us: 10,
+                epoch: None,
+                tails: BTreeMap::new(),
+            });
+        }
+        let (unshared, unresolved) = churn_views(&records, &roster, &blocks);
+        assert!(unresolved.is_empty());
+        assert_eq!(initial, unshared);
+        assert!(!Arc::ptr_eq(&unshared["alice"], &unshared["βob"]));
+        assert!(!Arc::ptr_eq(&unshared["other"], &unshared["last"]));
+
+        records.churn.truncate(1);
+        records
+            .registry
+            .insert("bob-id".to_string(), ("βob".to_string(), 1));
+        records.churn.push(crate::records::ChurnEvent {
+            recipient: "alice".to_string(),
+            phase: ChurnPhase::Rejoined,
+            at_us: 100,
+            epoch: Some(2),
+            tails: BTreeMap::from([("βob".to_string(), ("bob-id".to_string(), 5))]),
+        });
+        let (mixed, unresolved) = churn_views(&records, &roster, &blocks);
+        assert!(unresolved.is_empty());
+        assert!(Arc::ptr_eq(&mixed["other"], &mixed["last"]));
+        assert!(!Arc::ptr_eq(&mixed["alice"], &mixed["βob"]));
+        assert_eq!(mixed["other"], initial["other"]);
+        assert_eq!(
+            mixed["alice"].floors[&("βob".to_string(), 1)],
+            (5, 100, true)
+        );
+        assert_eq!(mixed["βob"].closed_at[&("alice".to_string(), 1)], 100);
+        assert_eq!(mixed["βob"].adopted["alice"], BTreeSet::from([1, 2]));
+
+        records.registry.clear();
+        let (_, unresolved) = churn_views(&records, &roster, &blocks);
+        assert_eq!(unresolved, ["bob-id"]);
+        let (empty, unresolved) = churn_views(&records, &[], &blocks);
+        assert!(empty.is_empty());
+        assert!(unresolved.is_empty());
+    }
+
+    /// Isolate retained oracle views from event storage and summary serialization.
+    #[test]
+    #[ignore = "churn-view memory profile; run in a fresh process"]
+    fn generator_churn_view_memory_profile() {
+        let rooms = std::env::var("CAPACITY_VIEW_PROBE_ROOMS")
+            .unwrap_or_else(|_| "1000".to_string())
+            .parse::<u32>()
+            .expect("room count");
+        let players = std::env::var("CAPACITY_VIEW_PROBE_PLAYERS")
+            .unwrap_or_else(|_| "16".to_string())
+            .parse::<u32>()
+            .expect("player count");
+        assert!((1..=2000).contains(&rooms));
+        assert!((1..=128).contains(&players));
+        let roster: Vec<_> = (0..rooms)
+            .flat_map(|room| (0..players).map(move |player| (format!("r{room}p{player}"), room)))
+            .collect();
+        let before = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        let (views, unresolved) = churn_views(&RunRecords::default(), &roster, &BTreeMap::new());
+        assert!(unresolved.is_empty());
+        assert_eq!(views.len(), roster.len());
+        assert!(views
+            .values()
+            .all(|view| view.adopted.len() == usize::try_from(players).unwrap()));
+        println!(
+            "{}",
+            serde_json::json!({
+                "rooms": rooms, "players": players, "views": views.len(),
+                "rss_before_bytes": before,
+                "rss_retained_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                "elapsed_us": started.elapsed().as_micros(),
+            })
+        );
+        std::hint::black_box(views);
+    }
 
     #[test]
     fn compact_recipient_latency_matches_wide_counts_and_preserves_raw_evidence() {

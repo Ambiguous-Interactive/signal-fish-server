@@ -177,6 +177,127 @@ mod handler_honesty {
         expect_error(recv(&mut rx).await, ErrorCode::NotInRoom);
     }
 
+    // Regression #1119: leave preserves the connection lifecycle.
+    #[tokio::test(start_paused = true)]
+    #[cfg(signal_fish_repository_tests)]
+    async fn gameplay_queued_behind_leave_rejects_without_charging_relay_bytes() {
+        for binary in [false, true] {
+            let server = create_test_server().await;
+            let (player, mut rx) = register_client(&server).await;
+            server
+                .handle_join_room(
+                    &player,
+                    "queued-leave".to_string(),
+                    Some("QUE001".to_string()),
+                    "player".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            let room_id = server.get_client_room(&player).await.unwrap();
+            match recv(&mut rx).await.as_ref() {
+                ServerMessage::RoomJoined(payload) => {
+                    assert_eq!(payload.room_id, room_id);
+                    assert_eq!(payload.player_id, player);
+                    assert_eq!(payload.room_code, "QUE001");
+                    assert_eq!(payload.current_players.len(), 1);
+                    assert_eq!(payload.current_players[0].id, player);
+                    assert!(!payload.current_players[0].is_ready);
+                    assert!(payload.ready_players.is_empty());
+                }
+                other => panic!("expected the initial room snapshot, got {other:?}"),
+            }
+            match recv(&mut rx).await.as_ref() {
+                ServerMessage::LobbyStateChanged {
+                    lobby_state,
+                    ready_players,
+                    all_ready,
+                } => {
+                    assert_eq!(*lobby_state, crate::protocol::LobbyState::Lobby);
+                    assert!(ready_players.is_empty());
+                    assert!(!all_ready);
+                }
+                other => panic!("expected the initial lobby transition, got {other:?}"),
+            }
+            match rx.try_recv() {
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(error) => panic!("join closed the channel: {error}"),
+                Ok(message) => panic!("unexpected extra join message: {message:?}"),
+            }
+
+            let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+            let guard = lifecycle.lock().await;
+            let previous = lifecycle.lock_attempt_count_for_test();
+            let leave_server = Arc::clone(&server);
+            let leave = tokio::spawn(async move { leave_server.leave_room(&player).await });
+            timeout(
+                Duration::from_secs(1),
+                lifecycle.wait_for_lock_attempt_after_for_test(previous),
+            )
+            .await
+            .expect("leave queues first on the lifecycle gate");
+
+            let gameplay = async {
+                if binary {
+                    server
+                        .handle_game_data_binary(
+                            &player,
+                            GameDataEncoding::MessagePack,
+                            Bytes::from_static(b"payload"),
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_game_data(&player, serde_json::json!("payload"), None, None)
+                        .await;
+                }
+            };
+            tokio::pin!(gameplay);
+            assert!(futures_util::poll!(&mut gameplay).is_pending());
+            drop(guard);
+            timeout(Duration::from_secs(1), leave)
+                .await
+                .expect("leave finishes")
+                .expect("leave task succeeds");
+            timeout(Duration::from_secs(1), gameplay)
+                .await
+                .expect("queued gameplay finishes");
+
+            assert!(matches!(
+                recv(&mut rx).await.as_ref(),
+                ServerMessage::RoomLeft
+            ));
+            assert_eq!(
+                server.metrics().snapshot().await.players.relay_bytes_total,
+                0,
+                "roomless gameplay must not charge relay bytes; binary={binary}"
+            );
+            /* Whole-window reservations catch charges even when accounting
+             * omits the stale frame. */
+            server
+                .rate_limiter
+                .check_relay_bytes(
+                    &player,
+                    server.config.rate_limit_config.max_relay_bytes,
+                    None,
+                )
+                .await
+                .expect("queued roomless frame leaves the sender budget intact");
+            server
+                .rate_limiter
+                .check_room_relay_bytes(
+                    &room_id,
+                    server.config.rate_limit_config.max_room_relay_bytes,
+                )
+                .await
+                .expect("queued roomless frame leaves the old room budget intact");
+            expect_error(recv(&mut rx).await, ErrorCode::NotInRoom);
+        }
+    }
+
     /// A pre-v3 sender supplying delivery metadata trips the legacy-lane
     /// guard (`class.is_none() && key.is_none()`); before this pin nothing
     /// asserted it, so reordering or deleting the arm survived silently.

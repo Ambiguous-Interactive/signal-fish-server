@@ -4813,3 +4813,69 @@ not either process's RSS or an exclusive footprint. The sampler uses the
 conventional v2 mount; it does not add v1 or nonstandard-mount support.
 This repairs missing resource evidence. It does not identify the cause of
 the stalls in #1009 or qualify a capacity limit.
+
+### Sampler phase boundaries (session 507, #1009)
+
+New interval samples include optional `timing` evidence on the workload's
+monotonic clock. The fields record the planned slot, task wake, completed HTTP
+headers, completed body, completed scrape processing, and completed process
+resource reads. Subtract adjacent boundaries to locate observed delay. These
+are elapsed task observations; they include descheduling and do not measure
+pure socket wait, server CPU, or mutex contention. The body boundary includes
+text decoding. The scrape boundary includes status validation, counter parsing,
+and counter serialization. Resource reads remain sequential.
+
+Failed scrapes keep each reached boundary. An incomplete body has a header
+boundary and no completed-body boundary. Request failure has neither. Resource
+sampling still runs after scrape failure. Old interval files omit `timing` and
+remain readable. The delivery records, exact replay, offered traffic, sampler
+schedule, and 250 ms lag bound stay unchanged. Bounded invalid-run diagnostics
+include the same numeric boundaries beside their existing gap context.
+
+A real HTTP fixture delays headers and body separately and checks the recorded
+boundaries, counter content, and interval-file round trip. Error controls cover
+an HTTP rejection, a truncated body, and invalid HTTP. These controls qualify
+the evidence path; they do not identify the historical generator-stall cause
+or establish an instrumentation overhead bound for the full long workload.
+
+### Shared unchanged-room oracle views (session 507, #775, #636)
+
+The oracle previously retained a separate room-membership and initial-epoch
+tree for every recipient. Rooms without recorded churn now share one immutable
+view. A room with any recorded churn keeps its exact per-seat event path.
+Membership grouping also removes the full-roster scan from each seat's setup.
+Raw sends, receipts, gaps, and artifact formats remain unchanged.
+
+An isolated probe builds 1,000 rooms with 64 peers each and no raw events.
+Three fresh processes per path alternate before/after using fixed default-test
+executables. These are debug-build view-construction costs, not release server
+results. The final six processes ran from 03:23:35 to 03:24:51 UTC without local
+compilation. A 100 ms process monitor recorded no active compiler samples;
+paused ASAN compiler processes stayed stopped. Each process records its UTC
+start/end, retained RSS, and its own `wait4` peak RSS.
+
+| Metric | Before median | After median |
+| --- | ---: | ---: |
+| Retained process RSS | 751,276,032 bytes | 34,349,056 bytes |
+| Peak process RSS | 733,612 KiB | 33,320 KiB |
+| View construction | 23,477,341 µs | 257,330 µs |
+
+Retained process RSS fell by 95.4% in this fixture. It includes the process and
+roster baseline. The probe measures this view cost only. It does not bound total
+oracle memory, raw-event retention, or the full ten-minute capacity workload.
+An earlier cohort overlapped local work and was excluded. A separate provenance
+command also triggered the process monitor; that trial was excluded.
+
+The deterministic regression compares shared views with forced per-seat
+construction. It covers mixed changed/unchanged rooms, snapshot floors, closed
+epochs, unresolved identities, Unicode names, and empty rosters. The oracle-only
+suite passes 22 tests. Fifteen selected negative and artifact-replay controls
+also pass. A complete 16-peer fixture with 100 sends per peer retains all 24,000
+receipts and produces identical canonical summary JSON before and after.
+
+Reproduce the current view probe with the capacity-runner test executable,
+`--ignored --exact oracle::coverage_tests::generator_churn_view_memory_profile
+--nocapture`, and `CAPACITY_VIEW_PROBE_ROOMS=1000
+CAPACITY_VIEW_PROBE_PLAYERS=64`. Fixed executable hashes, source/probe copies,
+raw trials, excluded cohorts, process snapshots, and exact summary outputs are
+saved locally in `progress/session-507-capacity-memory/`.

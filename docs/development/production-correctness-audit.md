@@ -6897,3 +6897,67 @@ Final Nextest `a874b100-9a20-4bd9-bf8f-a972a6081dca` passes both gameplay
 histories and all 15 neighboring handler tests. Independent review confirms
 the router capture occurs before its first await and adds no recursive gate
 acquisition. The original socket checks remain active.
+
+### F124 — Gameplay queued behind leave charges the old room
+
+Issue [#1119](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1119),
+found under open #826 (A07/A13). JSON and binary gameplay resolved the sender's
+room before waiting for its lifecycle gate. An ordinary `LeaveRoom` can win that
+gate without replacing the connection. The waiting frame then charges the sender
+and old room budgets, but stamp lookup drops it. The sender receives no
+`NOT_IN_ROOM` refusal.
+
+The regression holds the existing lifecycle gate, queues a real leave first,
+and polls gameplay into the same wait. It releases the gate, awaits both calls,
+and requires `RoomLeft`, zero relay accounting, and `NOT_IN_ROOM`. It also
+reserves each full byte budget to prove that the stale frame spent neither
+budget. Paused time prevents a window reset from masking a charge. The matrix
+covers the public JSON and binary entrypoints. It adds no production pause hook.
+Baseline Nextest `0f3c1d22-dfd5-46c8-816c-87c0a4a552b1` fails the JSON history:
+relay accounting is nine bytes instead of zero. The repair resolves membership
+under the existing source gate in both lanes. Refusal delivery releases the
+gate before calling the helper that takes it again.
+
+Run `cargo nextest run --lib -E 'test(game_data_tests)'`. Initial repaired run
+`b0bcc2ad-cdf7-4d4e-95ba-64cb66bfcad8` passes both queued-leave histories and
+all 15 neighboring handler tests. This is a bounded library concurrency
+history. It does not certify every leave/rejoin schedule or socket-write
+outcome. The wire format and public API stay the same. Rust, .NET, and Godot
+network clients require no migration or tracking issue because the change
+corrects server admission ordering. The broader #826 campaign remains open.
+
+Final Nextest `878cc7a0-1f5b-40f1-ba8c-15d6134a649f` passes all 16 tests,
+including the full sender and room budget reservations. Independent source
+review finds no remaining correctness issue in the changed gate scope.
+
+### F125 — A peer reset overtakes accepted native gameplay writes
+
+Issue [#1121](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1121),
+under open #826 (A20). A native send accepted its payload into the endpoint
+queue and charged outstanding bytes. An incoming stream reset could stop the
+SCTP outgoing stream before the next write flush. The later handoff skipped
+the payload without returning an error. The production-read-pump regression
+fails on the baseline with no DATA for the accepted reliable body. This differs
+from #1076, which repaired local close ordering.
+
+The core now hands application data to SCTP under the same mutable borrow as
+send admission. The driver still batches transport packets. Earlier driver
+control errors stay separate from the current send result. Refused sends leave
+no payload, outstanding byte charge, or sent statistics. Media retains its
+normal write path and FIFO. The four text/binary and reliable/zero-retransmit
+histories require three complete bodies each, exact wire types and order,
+DATA before RECONFIG, the full reset TSN boundary, peer DATA ingestion, and
+both reset completions. Eight refusal histories cover direct-core oversized
+input and association shutdown. They require unchanged counters and no late
+DATA. The existing local-close fixture now uses a real SCTP association and
+checks DATA/reset wire order. All new controls use the existing hosted
+`stream_reset_` filter.
+
+The initial production-read-pump control fails before repair and passes after
+admission handoff. The final session PR records focused checks and independent
+review. These controls establish local admission and transport ordering. They
+do not prove application delivery after the peer closes its reader, or a cause
+for the historical #853/#889 failures or the separate #1120 Closed-state timeout.
+The server wire format and API stay the same. Rust, .NET, and Godot SDKs do not
+use this standalone reference-client dependency patch and need no migration.
+The broader A20 audit remains open.

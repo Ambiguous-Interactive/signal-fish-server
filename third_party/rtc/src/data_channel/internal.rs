@@ -221,7 +221,48 @@ mod tests {
     use crate::peer_connection::RTCPeerConnectionBuilder;
     use datachannel::message::Message;
     use datachannel::message::message_channel_open::{ChannelType, DataChannelOpen};
-    use shared::marshal::{Marshal, Unmarshal};
+    use shared::marshal::Marshal;
+
+    fn install_connected_stream(
+        pc: &mut crate::peer_connection::RTCPeerConnection,
+        id: crate::data_channel::RTCDataChannelId,
+        ordered: bool,
+    ) -> Result<()> {
+        let mut association = crate::peer_connection::handler::sctp::established_test_association(
+            crate::peer_connection::transport::dtls::role::RTCDtlsRole::Client,
+        );
+        association
+            .open_stream(0, PayloadProtocolIdentifier::String)?
+            .set_reliability_params(
+                !ordered,
+                if ordered {
+                    sctp::ReliabilityType::Reliable
+                } else {
+                    sctp::ReliabilityType::Rexmit
+                },
+                0,
+            )?;
+        pc.pipeline_context
+            .sctp_handler_context
+            .sctp_transport
+            .sctp_associations
+            .insert(sctp::AssociationHandle(0), association);
+        pc.pipeline_context
+            .sctp_handler_context
+            .sctp_transport
+            .internal_buffer
+            .resize(65_536, 0);
+        // The injected ACK below represents an OPEN already sent by this fixture.
+        let channel = pc
+            .data_channels
+            .get_mut(&id)
+            .unwrap()
+            .data_channel
+            .as_mut()
+            .unwrap();
+        while channel.poll_write().is_some() {}
+        Ok(())
+    }
 
     fn acknowledge_channel(
         pc: &mut crate::peer_connection::RTCPeerConnection,
@@ -265,6 +306,7 @@ mod tests {
                 assert_eq!(internal.ready_state, RTCDataChannelState::Connecting);
                 assert!(internal.data_channel.is_some());
                 let id = pc.data_channels.insert(internal);
+                install_connected_stream(&mut pc, id, ordered)?;
                 let mut channel = pc.data_channel(id).expect("registered connecting channel");
                 let result = if text {
                     channel.send_text(now, "before-ack")
@@ -294,6 +336,113 @@ mod tests {
                     channel.send_text(now, "closed"),
                     Err(Error::ErrDataChannelClosed)
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    // Regression #1121: late SCTP refusal cannot leave sent credit or a queued body.
+    #[test]
+    fn stream_reset_admission_failures_leave_no_payload_or_sent_credit() -> Result<()> {
+        use crate::data_channel::RTCDataChannelMessage;
+        use crate::peer_connection::message::{
+            RTCMessage, TaggedRTCMessage,
+            internal::{DTLSMessage, RTCMessageInternal},
+        };
+        for ordered in [true, false] {
+            for binary in [false, true] {
+                for oversized in [false, true] {
+                    let now = Instant::now();
+                    let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+                    let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                        ordered,
+                        max_retransmits: (!ordered).then_some(0),
+                        negotiated: Some(0),
+                        ..Default::default()
+                    });
+                    dc.dial(0)?;
+                    let id = pc.data_channels.insert(dc);
+                    install_connected_stream(&mut pc, id, ordered)?;
+                    let result = if oversized {
+                        /*
+                           The low-level Protocol API does not use RTCDataChannel's
+                           public size preflight. SCTP must still refuse it honestly.
+                        */
+                        pc.handle_write(TaggedRTCMessage {
+                            now,
+                            message: RTCMessage::DataChannelMessage(
+                                id,
+                                RTCDataChannelMessage {
+                                    is_string: !binary,
+                                    data: bytes::BytesMut::from(&vec![b'x'; 65_537][..]),
+                                },
+                            ),
+                        })
+                    } else {
+                        pc.pipeline_context
+                            .sctp_handler_context
+                            .sctp_transport
+                            .sctp_associations
+                            .get_mut(&sctp::AssociationHandle(0))
+                            .unwrap()
+                            .shutdown()?;
+                        if binary {
+                            pc.data_channel(id)
+                                .unwrap()
+                                .send(now, bytes::BytesMut::from("rejected"))
+                        } else {
+                            pc.data_channel(id).unwrap().send_text(now, "rejected")
+                        }
+                    };
+                    assert_eq!(
+                        result,
+                        Err(if oversized {
+                            Error::ErrOutboundPacketTooLarge
+                        } else {
+                            Error::ErrDataChannelClosed
+                        })
+                    );
+                    assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 0);
+                    assert!(
+                        pc.pipeline_context
+                            .stats
+                            .data_channels
+                            .get(&id)
+                            .is_none_or(|stats| stats.messages_sent == 0 && stats.bytes_sent == 0)
+                    );
+                    assert!(
+                        pc.pipeline_context
+                            .datachannel_handler_context
+                            .write_outs
+                            .is_empty()
+                    );
+                    assert!(
+                        pc.data_channels
+                            .get_mut(&id)
+                            .unwrap()
+                            .data_channel
+                            .as_mut()
+                            .unwrap()
+                            .poll_write()
+                            .is_none()
+                    );
+                    while let Some(message) = pc.get_sctp_handler().poll_write() {
+                        if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                            let mut offset = 12;
+                            while offset + 4 <= raw.len() {
+                                assert_ne!(
+                                    raw[offset], 0,
+                                    "rejected payload must never reach the wire"
+                                );
+                                let length = usize::from(u16::from_be_bytes([
+                                    raw[offset + 2],
+                                    raw[offset + 3],
+                                ]));
+                                offset += length.next_multiple_of(4);
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -370,7 +519,7 @@ mod tests {
         Ok(())
     }
 
-    // Regression #1076: the endpoint queue owns accepted writes until the driver runs.
+    // Regressions #1076/#1121: accepted writes enter SCTP before local reset.
     #[test]
     fn stream_reset_accepted_send_precedes_local_close_in_sctp_write_order() -> Result<()> {
         use crate::peer_connection::message::internal::{DTLSMessage, RTCMessageInternal};
@@ -389,6 +538,7 @@ mod tests {
                 while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
             }
             let id = pc.data_channels.insert(dc);
+            install_connected_stream(&mut pc, id, ordered)?;
             if !negotiated {
                 acknowledge_channel(&mut pc, now)?;
             }
@@ -408,42 +558,37 @@ mod tests {
                     .send_text(now, "too-late")
                     .is_err()
             );
-            while let Some(msg) = pc.get_endpoint_handler().poll_write() {
-                pc.get_datachannel_handler().handle_write(msg)?;
+            /*
+               Both application writes and local close now enter SCTP before
+               the transport flush. Inspect the real wire, not a deferred queue.
+            */
+            while let Some(message) = pc.get_datachannel_handler().poll_write() {
+                pc.get_sctp_handler().handle_write(message)?;
             }
-            let mut output = Vec::new();
-            while let Some(msg) = pc.get_datachannel_handler().poll_write() {
-                if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)) = msg.message {
-                    output.push(message);
+            let mut kinds = Vec::new();
+            let mut bodies = Vec::new();
+            while let Some(message) = pc.get_sctp_handler().poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    let mut offset = 12;
+                    while offset + 4 <= raw.len() {
+                        let length =
+                            usize::from(u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]));
+                        kinds.push(raw[offset]);
+                        if raw[offset] == 0 {
+                            bodies.push(bytes::Bytes::copy_from_slice(
+                                &raw[offset + 16..offset + length],
+                            ));
+                        }
+                        offset += length.next_multiple_of(4);
+                    }
                 }
             }
-            output.retain(|message| {
-                message.ppi != PayloadProtocolIdentifier::Dcep
-                    || !matches!(
-                        Message::unmarshal(&mut &message.payload[..]),
-                        Ok(Message::DataChannelThreshold(_))
-                    )
-            });
-            if !negotiated {
-                assert_eq!(output[0].ppi, PayloadProtocolIdentifier::Dcep);
-                assert!(matches!(
-                    Message::unmarshal(&mut &output[0].payload[..])?,
-                    Message::DataChannelOpen(_)
-                ));
-                output.remove(0);
-            }
-            assert_eq!(output.len(), 2, "one accepted message and one reset");
             assert_eq!(
-                output[0].ppi,
-                PayloadProtocolIdentifier::String,
-                "ordered={ordered}: accepted payload must reach SCTP before reset; output={output:?}"
+                kinds,
+                [0, 130],
+                "ordered={ordered}, negotiated={negotiated}: one DATA before one reset"
             );
-            assert_eq!(&output[0].payload[..], b"final-before-reset");
-            assert_eq!(output[1].ppi, PayloadProtocolIdentifier::Dcep);
-            assert!(matches!(
-                Message::unmarshal(&mut &output[1].payload[..])?,
-                Message::DataChannelClose(_)
-            ));
+            assert_eq!(bodies, [bytes::Bytes::from_static(b"final-before-reset")]);
         }
         Ok(())
     }

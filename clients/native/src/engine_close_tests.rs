@@ -1209,6 +1209,9 @@ async fn full_channel_remote_reset_releases_senders() {
     for initiator_sends in [true, false] {
         for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
             for limit in [1, 8] {
+                let context =
+                    format!("initiator_sends={initiator_sends}, label={label}, limit={limit}");
+                eprintln!("remote-reset start: {context}");
                 let (pair, remote_runtime) = backpressure_pair(Some(limit), initiator_sends).await;
                 let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
                 let remote = pair.receiver.channel(pair.sender_id, label).unwrap();
@@ -1233,7 +1236,7 @@ async fn full_channel_remote_reset_releases_senders() {
                  * caller suspended until the public state proves terminal reset,
                  * then re-poll its already pending operations.
                  */
-                tokio::time::timeout(Duration::from_secs(5), async {
+                let reset = tokio::time::timeout(Duration::from_secs(5), async {
                     while !matches!(
                         channel.ready_state().await,
                         Ok(rtc::data_channel::RTCDataChannelState::Closed)
@@ -1242,8 +1245,25 @@ async fn full_channel_remote_reset_releases_senders() {
                         tokio::task::yield_now().await;
                     }
                 })
-                .await
-                .expect("remote reset reaches the local public channel state");
+                .await;
+                if reset.is_err() {
+                    // Driver/core lock failure must not hang post-deadline evidence.
+                    let states = tokio::time::timeout(Duration::from_secs(1), async {
+                        format!(
+                            "local_state={:?}; local_outstanding={:?}; remote_state={:?}; remote_outstanding={:?}",
+                            channel.ready_state().await,
+                            channel.outstanding_bytes().await,
+                            remote.ready_state().await,
+                            remote.outstanding_bytes().await,
+                        )
+                    }).await;
+                    panic!(
+                        "remote reset reaches the local public channel state: {context}; states={states:?}; sender={}; receiver={}",
+                        pair.sender.diagnostic_snapshot(pair.receiver_id),
+                        pair.receiver.diagnostic_snapshot(pair.sender_id),
+                    );
+                }
+                eprintln!("remote-reset complete: {context}");
 
                 tokio::time::timeout(Duration::from_secs(5), async {
                     let (ready, binary, text) = tokio::join!(&mut writable, &mut binary, &mut text);

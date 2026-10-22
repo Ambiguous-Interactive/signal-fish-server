@@ -106,16 +106,19 @@ required channel modes and input/close/open/input on a reused stream.
 See [#1075](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1075).
 Published replacement qualification in #912 must retain these controls.
 
-Local close puts its reset command in the endpoint write queue after accepted
-sends. The channel enters `Closing` at once and rejects new sends. The handler
-passes prior payload to SCTP before requesting reset. This prevents accepted
-outbound input from reaching a stream after that stream stops accepting writes.
-The delta changes `src/data_channel/mod.rs` and
-`src/peer_connection/handler/datachannel.rs`. Controls retain the original
-paused-receiver workload, both roles and required modes, pending and acknowledged
-sends, closed statistics, reset/reuse, and fresh links. Boundary controls inspect
-DATA before RECONFIG and the reset's sender TSN. See
-[#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076).
+Public text and binary sends enter SCTP during admission, before a peer reset
+can stop the outgoing stream. Local close queues its reset after those writes.
+The driver still generates and batches transport packets. Earlier driver control
+errors do not reject the new payload. Refused payloads add no outstanding byte
+charge or sent statistics and leave no body for a later flush.
+The delta changes `src/data_channel/mod.rs` and the peer-connection write and
+SCTP handlers. Controls inspect accepted text/binary DATA before reciprocal
+RECONFIG, the reset's sender TSN, complete peer ingestion, reset completion,
+media FIFO, stale controls, and size/shutdown refusal. Both required delivery
+modes retain their original reliability settings. These controls do not require
+application delivery after the peer has closed its reader.
+See [#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076)
+and [#1121](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1121).
 Published replacement qualification in #912 must retain these controls.
 
 Public creation rejects an occupied fixed stream ID before registry insertion.

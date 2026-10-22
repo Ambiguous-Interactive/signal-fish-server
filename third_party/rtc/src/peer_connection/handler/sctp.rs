@@ -743,7 +743,10 @@ impl<'a>
                 }
 
                 let mut stream = conn.stream(message.stream_id)?;
-                if !is_dcep_internal_control_message && stream.is_writable() {
+                if !is_dcep_internal_control_message {
+                    if !stream.is_writable() {
+                        return Err(Error::ErrStreamClosed);
+                    }
                     // The payload is owned end-to-end (the DataChannel `send` API
                     // takes the buffer by value), so hand it to SCTP zero-copy:
                     // `freeze()` is O(1) and the enqueued chunks are refcounted
@@ -2062,13 +2065,12 @@ mod tests {
                 pc.get_sctp_handler().handle_write(message).unwrap();
             }
             while let Some(message) = pc.get_sctp_handler().poll_write() {
-                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
-                    if let Some((_, DatagramEvent::AssociationEvent(event))) = pair
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message
+                    && let Some((_, DatagramEvent::AssociationEvent(event))) = pair
                         .server_ep
                         .handle(later, client_addr(), None, raw.freeze())
-                    {
-                        pair.server_conn.handle_event(event);
-                    }
+                {
+                    pair.server_conn.handle_event(event);
                 }
             }
             let acknowledged = later + Duration::from_millis(500);
@@ -2182,6 +2184,250 @@ mod tests {
                 }
             }
             assert_eq!(received, vec![Bytes::from_static(b"final-before-reset")]);
+        }
+    }
+
+    // Regression #1121: a remote reset cannot overtake accepted application writes.
+    #[test]
+    fn incoming_stream_reset_preserves_accepted_outgoing_data() {
+        use crate::data_channel::{
+            internal::RTCDataChannelInternal, parameters::DataChannelParameters,
+        };
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        use crate::peer_connection::message::internal::RTPMessage;
+        for ordered in [true, false] {
+            for binary in [false, true] {
+                let context = format!("ordered={ordered}, binary={binary}");
+                let now = Instant::now();
+                let mut established = establish();
+                let ch = established.client_ch;
+                let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+                pc.pipeline_context.sctp_handler_context =
+                    client_ctx(now, established.client_ep, ch, established.client_conn);
+                pc.pipeline_context
+                    .sctp_handler_context
+                    .sctp_transport
+                    .sctp_associations
+                    .get_mut(&ch)
+                    .unwrap()
+                    .open_stream(0, PayloadProtocolIdentifier::String)
+                    .unwrap()
+                    .set_reliability_params(
+                        !ordered,
+                        if ordered {
+                            sctp::ReliabilityType::Reliable
+                        } else {
+                            sctp::ReliabilityType::Rexmit
+                        },
+                        0,
+                    )
+                    .unwrap();
+                established
+                    .server_conn
+                    .open_stream(0, PayloadProtocolIdentifier::String)
+                    .unwrap();
+                let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                    ordered,
+                    max_retransmits: (!ordered).then_some(0),
+                    negotiated: Some(0),
+                    ..Default::default()
+                });
+                dc.dial(ch.0).unwrap();
+                while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+                let id = pc.data_channels.insert(dc);
+                /*
+                   Media can await an inbound DTLS handshake. Early data-channel handoff
+                   must keep both media entries and their relative order unchanged.
+                */
+                let media = |bytes: &'static [u8]| TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Rtp(RTPMessage::Raw(BytesMut::from(bytes))),
+                };
+                pc.get_endpoint_handler()
+                    .handle_write(media(b"media-before"))
+                    .unwrap();
+                /*
+                   A stale unrelated driver control cannot reject a new payload
+                   or leave that payload queued after a reported send failure.
+                */
+                pc.pipeline_context
+                    .datachannel_handler_context
+                    .write_outs
+                    .push_back(TaggedRTCMessageInternal {
+                        now,
+                        transport: TransportContext::default(),
+                        message: RTCMessageInternal::Dtls(DTLSMessage::SctpStreamReject {
+                            association_handle: ch.0,
+                            stream_id: 999,
+                        }),
+                    });
+                let bodies = ["accepted-first", "accepted-second", "accepted-last"];
+                for body in bodies {
+                    if binary {
+                        pc.data_channel(id)
+                            .unwrap()
+                            .send(now, BytesMut::from(body))
+                            .unwrap();
+                    } else {
+                        pc.data_channel(id).unwrap().send_text(now, body).unwrap();
+                    }
+                }
+                pc.get_endpoint_handler()
+                    .handle_write(media(b"media-after"))
+                    .unwrap();
+                let accepted_bytes = bodies.iter().map(|body| body.len()).sum::<usize>();
+                assert_eq!(
+                    pc.data_channel(id).unwrap().outstanding_bytes(),
+                    accepted_bytes
+                );
+                established
+                    .server_conn
+                    .stream(0)
+                    .unwrap()
+                    .close(now)
+                    .unwrap();
+                for raw in drain_transmits(&mut established.server_conn, now) {
+                    // Decoded SCTP at the DTLS output seam uses the production read pump.
+                    pc.pipeline_context
+                        .dtls_handler_context
+                        .read_outs
+                        .push_back(raw_read(now, raw));
+                    pc.pump_reads(None);
+                }
+                let stats = &pc.pipeline_context.stats.data_channels[&id];
+                let sent_stats = (stats.messages_sent, stats.bytes_sent);
+                assert_eq!(
+                    sent_stats,
+                    (3, u64::try_from(accepted_bytes).unwrap()),
+                    "{context}: successful admission owns exact sent credit"
+                );
+                let rejected = if binary {
+                    pc.data_channel(id)
+                        .unwrap()
+                        .send(now, BytesMut::from("rejected-after-reset"))
+                } else {
+                    pc.data_channel(id)
+                        .unwrap()
+                        .send_text(now, "rejected-after-reset")
+                };
+                assert_eq!(
+                    rejected,
+                    Err(Error::ErrDataChannelClosed),
+                    "{context}: reject before enqueue"
+                );
+                assert_eq!(
+                    pc.data_channel(id).unwrap().outstanding_bytes(),
+                    accepted_bytes,
+                    "{context}: rejection adds no byte charge"
+                );
+                let stats = &pc.pipeline_context.stats.data_channels[&id];
+                assert_eq!(
+                    (stats.messages_sent, stats.bytes_sent),
+                    sent_stats,
+                    "{context}: rejected writes add no sent statistics"
+                );
+                assert!(
+                    pc.pipeline_context
+                        .datachannel_handler_context
+                        .write_outs
+                        .is_empty(),
+                    "{context}: no rejected payload remains for a later flush"
+                );
+                let media = &pc.pipeline_context.endpoint_handler_context.write_outs;
+                assert_eq!(media.len(), 2, "{context}: retain media awaiting keys");
+                for (message, expected) in media
+                    .iter()
+                    .zip([b"media-before".as_slice(), b"media-after"])
+                {
+                    assert!(
+                        matches!(&message.message, RTCMessageInternal::Rtp(RTPMessage::Raw(raw)) if raw.as_ref() == expected),
+                        "{context}: media FIFO"
+                    );
+                }
+                let mut sent = Vec::new();
+                let mut last_data_tsn = None;
+                let mut reset_boundary = None;
+                let before_datas = established.server_conn.stats().get_num_datas();
+                /*
+                   No packet loss is injected. Drive both real SCTP directions through
+                   reciprocal completion, without a wall-clock or application ACK shortcut.
+                */
+                for _ in 0..8 {
+                    while let Some(message) = pc.get_sctp_handler().poll_write() {
+                        if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                            let mut offset = 12;
+                            while offset + 4 <= raw.len() {
+                                let length = usize::from(u16::from_be_bytes([
+                                    raw[offset + 2],
+                                    raw[offset + 3],
+                                ]));
+                                if raw[offset] == 0 {
+                                    assert!(
+                                        reset_boundary.is_none(),
+                                        "{context}: DATA precedes reset"
+                                    );
+                                    last_data_tsn = Some(u32::from_be_bytes(
+                                        raw[offset + 4..offset + 8].try_into().unwrap(),
+                                    ));
+                                    assert_eq!(
+                                        u32::from_be_bytes(
+                                            raw[offset + 12..offset + 16].try_into().unwrap()
+                                        ),
+                                        if binary { 53 } else { 51 },
+                                        "{context}: preserve wire type"
+                                    );
+                                    sent.push(Bytes::copy_from_slice(
+                                        &raw[offset + 16..offset + length],
+                                    ));
+                                } else if raw[offset] == 130
+                                    && raw[offset + 4..offset + 6] == 13u16.to_be_bytes()
+                                {
+                                    reset_boundary = Some(u32::from_be_bytes(
+                                        raw[offset + 16..offset + 20].try_into().unwrap(),
+                                    ));
+                                }
+                                offset += length.next_multiple_of(4);
+                            }
+                            if let Some((_, DatagramEvent::AssociationEvent(event))) = established
+                                .server_ep
+                                .handle(now, client_addr(), None, raw.freeze())
+                            {
+                                established.server_conn.handle_event(event);
+                            }
+                        }
+                    }
+                    for raw in drain_transmits(&mut established.server_conn, now) {
+                        pc.pipeline_context
+                            .dtls_handler_context
+                            .read_outs
+                            .push_back(raw_read(now, raw));
+                        pc.pump_reads(None);
+                    }
+                }
+                assert_eq!(
+                    sent,
+                    bodies.map(|body| Bytes::copy_from_slice(body.as_bytes())),
+                    "{context}: full bodies exactly once in accepted order"
+                );
+                assert_eq!(
+                    reset_boundary, last_data_tsn,
+                    "{context}: reset accounts for all accepted TSNs"
+                );
+                assert_eq!(
+                    established.server_conn.stats().get_num_datas() - before_datas,
+                    3,
+                    "{context}: peer ingests all DATA before reset completes"
+                );
+                assert!(
+                    pc.data_channel(id).is_none(),
+                    "{context}: local reset completes"
+                );
+                assert!(
+                    established.server_conn.stream(0).is_err(),
+                    "{context}: peer reset completes"
+                );
+            }
         }
     }
 
