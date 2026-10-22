@@ -1857,7 +1857,7 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
     use tokio_tungstenite::tungstenite::Message;
     let player = PlayerId::new_v4();
     let registry: runner::SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
-        player.to_string(),
+        player,
         ("r0p0".into(), 1),
     )])));
     let epoch = tokio::time::Instant::now();

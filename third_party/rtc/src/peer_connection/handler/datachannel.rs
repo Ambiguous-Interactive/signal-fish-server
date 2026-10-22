@@ -647,7 +647,7 @@ impl<'a>
                 }
             }
 
-            RTCEventInternal::SCTPHandshakeFailed => {
+            RTCEventInternal::SCTPTransportFailed => {
                 // One peer connection owns one SCTP association. Undialed
                 // channels have no stream and no DCEP timeout to retire them.
                 self.ctx.rejected_streams.clear();

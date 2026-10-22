@@ -1,4 +1,5 @@
 use super::*;
+use crate::TimerConfig;
 
 fn reset_pair() -> (Association, Association) {
     let mut a = timed_test_association();
@@ -1429,6 +1430,71 @@ fn reciprocal_reset_recovers_lost_request_data_and_final_response() -> Result<()
             );
             assert!(remote.stream(1)?.read_sctp()?.is_none(), "{context}");
         }
+    }
+    Ok(())
+}
+
+// Issue #1133: lost reset traffic must not leave a timerless SID.
+#[test]
+fn stream_reset_retry_exhaustion_closes_all_streams_once() -> Result<()> {
+    for retries in [0, 1, 5] {
+        let (mut a, _) = reset_pair();
+        a.timers = TimerTable::new(TimerConfig {
+            max_reconfig_retrans: retries,
+            ..TimerConfig::default()
+        });
+        let now = Instant::now();
+        a.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+        a.events.clear();
+        a.send_reset_request(now, 1)?;
+        let original = reset_requests(&mut a, now).remove(0);
+        for _ in 0..retries {
+            let at = a.poll_timeout().expect("reset retry remains armed");
+            a.handle_timeout(at);
+            let retransmitted = reset_requests(&mut a, at);
+            assert_eq!(retransmitted.len(), 1, "budget={retries}");
+            assert_eq!(request(&retransmitted[0]), request(&original));
+            assert_eq!(a.state(), AssociationState::Established);
+        }
+        let at = a
+            .poll_timeout()
+            .expect("final reset expiration remains armed");
+        a.handle_timeout(at);
+        assert_eq!(a.state(), AssociationState::Closed, "budget={retries}");
+        assert!(a.streams.is_empty());
+        assert!(a.poll_timeout().is_none());
+        let terminal = a
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::AssociationFailed {
+                        reason: AssociationError::TimedOut
+                    }
+                )
+            })
+            .count();
+        assert_eq!(terminal, 1);
+        let closed: Vec<_> = a
+            .events
+            .drain(..)
+            .filter_map(|event| {
+                if let Event::AssociationLost { reason, id } = event {
+                    assert_eq!(reason, AssociationError::TimedOut);
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(closed.len(), 2);
+        assert!(closed.contains(&1) && closed.contains(&2));
+        a.handle_timeout(at + Duration::from_secs(1000));
+        assert!(
+            a.poll().is_none(),
+            "terminal timeout must notify each stream once"
+        );
     }
     Ok(())
 }

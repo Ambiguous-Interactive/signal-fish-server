@@ -7166,3 +7166,101 @@ contract stays the same. Refreshed source assessments show that the external
 Rust SDK has no dependency on this patch, the .NET SDK has no native package
 dependency, and Godot uses its engine's WebRTC implementation. All three are
 unaffected and need no migration issue. The broader investigations remain open.
+
+### F132 — Reset retry exhaustion leaves a timerless native stream
+
+Issue [#1133](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1133)
+advances open #1120, #912, and #826 (A20). A new deterministic history at
+`9660fae3` exhausts the existing RECONFIG retry limit. The timeout path clears
+its timer but ignores retry failure. The association stays Established and
+retains the reset stream without another deadline.
+
+The source control fails before repair at configured retry limits 0, 1, and 5.
+It now requires one closure per stream, one terminal association event, and no
+remaining timers. The repair closes the failed association and sends a typed
+terminal event through RTC's existing transport cleanup. Undialed and established
+channels retire; late input and new channel creation cannot reopen the transport.
+The internal failure event and latch now name transport failure rather than
+handshake failure, since both phases use this path.
+
+The public asynchronous control opens two negotiated gameplay channels on each
+endpoint before losing encrypted SCTP packets. ICE traffic remains live. One
+channel requests reset; its sibling holds an admitted byte and blocked binary,
+text, and writable calls. The real retry timer reaches the existing threshold.
+The local channels close once, blocked operations return typed Closed errors,
+and new creation fails. The untouched remote stays Open until explicit cleanup;
+the test does not invent a remote receipt. Fresh peers deliver gameplay on the
+same mock network. Existing reset and handshake-loss controls remain required.
+
+This is a new confirmed teardown defect. It does not establish the cause of
+issue #1120's historical five-second native timeout. That issue and published-package
+replacement #912 retain their original acceptance criteria.
+
+### F133 — Fatal native driver exit omits peer closure
+
+Issue [#1134](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1134)
+advances open #853, #889, #912, and #826 (A20). A fatal socket receive error
+stops the async driver. The baseline marks the wrapper closing, but leaves the
+RTC core live and sends no terminal peer callback. A responder with no admitted
+remote channels has no channel event stream that can report its loss.
+
+The new public control injects a typed BrokenPipe receive failure before remote
+channel admission. It fails on the missing terminal callback before repair.
+The driver now closes its core and publishes the ordinary terminal connection
+event before ending. Pending handles close, new creation fails, and a fresh peer
+can deliver gameplay on the same network. Established reliable and zero-retry
+unordered channels also release blocked binary, text, and writable operations.
+Both controls fail when the retirement call is removed and pass after restoration.
+The driver-task callback marker stays in place so a close from the terminal
+callback uses the existing reentrant path.
+Creation checks the closing flag under its core and registration locks, so
+a creator waiting on registration cannot add a handle after the driver stops.
+Recoverable socket errors and ICE restart keep their existing behavior.
+
+This repair does not establish the cause of the historical browser/native
+exchange failures. Delivery across an independently failed physical peer remains
+outside the earlier ordered-channel-closure claim in F115. The server wire is
+unchanged. Current external-client source assessments show that Rust and .NET
+do not use these patched packages, and Godot uses its engine WebRTC stack.
+All three external SDKs are unaffected and need no migration issue.
+
+### A22 — Typed generator sender identity
+
+The session 511 generator change advances open #775, #1009, and #636 by removing
+UUID string allocation from each receipt and gap lookup under the shared sender
+registry lock. A fixed lookup probe removes 1,200,000 allocations totaling
+43,200,000 bytes with the same checksum. The artifact registry retains canonical
+string UUID keys. Focused controls retain exact old/new incarnation mapping,
+unknown-player handling, byte accounting, and live reliable/reconnect replay.
+See the bounded measurement in [ARM capacity audit](arm-capacity-audit.md).
+This allocation result does not identify a historical stall cause or establish
+full-workload memory, latency, or capacity. The original full-cell requirements
+and all invalid attempts remain required evidence.
+
+### F134 — Native shutdown overtakes capacity listener registration
+
+Issue [#1135](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1135)
+advances A20 under open #826 and the native investigations #1120, #853, and #889.
+A final rerun of F133's public established-channel control hung after its Closed
+callback. Diagnostics place the wait in parked sender completion, not cleanup.
+The capacity waiter checks connection closure before awaiting the core lock.
+If shutdown notifies while that lock is held, the waiter has no listener yet.
+Its later lazy listener misses the non-sticky terminal wake. A real runtime
+waits for the 50 ms polling timer; a static mock clock cannot make progress.
+
+The deterministic control holds the core lock, polls writable until pending,
+marks the connection closing, sends the actual terminal wake, then releases the
+lock. The old path stays pending. The repaired shortage path registers an eager
+listener and rechecks the full condition before waiting. Healthy sends allocate
+no listener. Public established controls require parked binary, text, and
+writable futures to return typed Closed errors immediately after the terminal
+callback. They do not advance a fallback timer to obtain success.
+The same lock ordering can admit a send after shutdown when capacity is free.
+Writable and binary/text send variants recheck closure under the core lock.
+Deterministic controls cover full and unlimited capacity, all four blocking
+and nonblocking send variants, and typed Closed errors before the live core path.
+The send-variant fixture uses pending channels; it proves terminal error
+classification, not successful admission on an already-open channel.
+
+This is a new confirmed wake-order defect. It does not establish the cause of
+any older hosted failure. The server protocol and external SDKs are unchanged.

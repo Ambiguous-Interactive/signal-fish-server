@@ -129,6 +129,12 @@ pub enum Event {
         reason: AssociationError,
     },
 
+    /// An established association reached a terminal transport failure.
+    AssociationFailed {
+        /// Reason that the association was closed.
+        reason: AssociationError,
+    },
+
     /// The association was successfully established
     Connected,
     /// The association was lost
@@ -3883,6 +3889,20 @@ impl Association {
 
             Timer::T2Shutdown => {
                 error!("[{}] retransmission failure: T2-shutdown", self.side);
+            }
+
+            Timer::Reconfig => {
+                // RFC 6525 5.1.1: enforce the configured retransmission
+                // threshold. A timerless request would reserve its SID forever.
+                error!("[{}] retransmission failure: RECONFIG", self.side);
+                if let Err(err) = self.close(AssociationError::TimedOut) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
+                self.control_queue.clear();
+                self.events.push_back(Event::AssociationFailed {
+                    reason: AssociationError::TimedOut,
+                });
+                self.endpoint_events.push_back(EndpointEventInner::Drained);
             }
 
             Timer::T3RTX => {

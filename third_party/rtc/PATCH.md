@@ -198,3 +198,11 @@ The delta changes `src/peer_connection/handler/dtls.rs` and
 losing handshake records and drive the actual retry timers.
 See [#1131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1131).
 Published replacement qualification in #912 must retain these controls.
+
+Established SCTP reset retry exhaustion follows the same terminal transport
+cleanup as handshake failure. It closes pending and established channels and
+rejects new channels or late input on that physical transport.
+The wrapper control loses encrypted SCTP packets only after channels open,
+fills a sibling channel, and checks blocked binary, text, and writable calls.
+See [#1133](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1133).
+Replacement qualification in #912 must retain reset exhaustion and fresh-peer recovery.

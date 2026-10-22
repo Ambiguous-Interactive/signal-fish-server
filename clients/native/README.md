@@ -45,6 +45,8 @@ Completed stream IDs can be reused; late duplicate resets do not close a new cha
 Accepted text and binary writes enter SCTP before a peer reset can stop the stream.
 A successful send means local admission. It does not prove remote receipt.
 DTLS handshake retry exhaustion reports a failed link even before remote channel admission.
+Stream reset retry exhaustion closes the failed SCTP transport and its gameplay channels.
+A fatal driver socket error reports peer closure even before any remote channel opens.
 The patch scope and removal criteria are in
 [RTC patch notes](../../third_party/rtc/PATCH.md) and
 [SCTP patch notes](../../third_party/rtc-sctp/PATCH.md).

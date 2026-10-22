@@ -1940,7 +1940,7 @@ impl RTCPeerConnection {
         if matches!(
             self.dtls_transport().state(),
             RTCDtlsTransportState::Failed | RTCDtlsTransportState::Closed
-        ) || self.sctp_transport().handshake_failed
+        ) || self.sctp_transport().transport_failed
             || self
                 .sctp_transport()
                 .sctp_associations

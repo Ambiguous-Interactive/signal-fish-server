@@ -4983,3 +4983,26 @@ with `CAPACITY_LATENCY_PROBE_PEERS=1000` and
 `CAPACITY_LATENCY_PROBE_COUNTER_BYTES=4` or `2`. The earlier COMPACT setting
 still selects u32 or u64. Raw process logs remain in local
 `progress/session-509/latency-{4,2}-byte-counters.log`.
+
+### Typed sender registry keys (session 511, #775 and #636)
+
+The live generator now retains typed player UUIDs in its sender registry.
+Receipt and gap lookups no longer format a UUID into a new string while
+holding the shared registry lock. The completed registry still writes the
+same string keys to artifacts. Old and new connection IDs retain their
+separate incarnation values, even when both IDs name the same sender.
+
+An isolated allocation probe compares 1,200,000 lookups across 1,000 player
+IDs with the same mutex, ordered map, and shared name values. Three fresh
+processes per path alternate in old/new/new/old/old/new order. Each old path
+allocates 1,200,000 strings, or 43,200,000 bytes. Each typed path allocates
+zero lookup bytes. All six checksums equal 7,454,400. Setup and map storage
+are outside the measured boundary. This measures lookup allocations only;
+it does not establish server capacity, full-run memory, or the cause of an
+earlier generator stall. The workload schedule and lag bound stay unchanged.
+
+The focused controls preserve receipt and gap incarnation mapping, canonical
+byte accounting, unknown-player rejection, and shared sender names. Real
+reliable and reconnect cells still replay their complete summaries exactly.
+Raw probe source and six results are retained locally in
+`progress/session-511/registry-lookups/`.
