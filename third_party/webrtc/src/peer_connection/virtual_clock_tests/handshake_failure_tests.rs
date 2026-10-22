@@ -553,6 +553,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             advance_both(&a.rt, &b.rt, Duration::from_millis(25));
         }
         assert_eq!(opened, [[true; 2]; 2]);
+        eprintln!("reset-loss: channels opened");
         enabled.store(true, Ordering::SeqCst);
         channels[1][1].send_text("x").await.unwrap();
         assert_eq!(channels[1][1].outstanding_bytes().await.unwrap(), 1);
@@ -563,29 +564,41 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
         assert!(binary.as_mut().now_or_never().is_none());
         assert!(text.as_mut().now_or_never().is_none());
         assert!(writable.as_mut().now_or_never().is_none());
-        channels[1][0].close().await.unwrap();
-        for _ in 0..300 {
-            if b.pc.sctp().await.unwrap().state().await.unwrap()
-                == rtc::peer_connection::transport::RTCSctpTransportState::Closed
-            {
-                break;
+        let retire_transport = async {
+            eprintln!("reset-loss: senders blocked, closing selected channel");
+            channels[1][0].close().await.unwrap();
+            eprintln!("reset-loss: selected channel closing");
+            for _ in 0..300 {
+                if b.pc.sctp().await.unwrap().state().await.unwrap()
+                    == rtc::peer_connection::transport::RTCSctpTransportState::Closed
+                {
+                    break;
+                }
+                advance_both(&a.rt, &b.rt, Duration::from_secs(1));
+                a.rt.yield_now().await;
             }
-            advance_both(&a.rt, &b.rt, Duration::from_secs(1));
-        }
-        assert_eq!(
-            b.pc.sctp().await.unwrap().state().await.unwrap(),
-            rtc::peer_connection::transport::RTCSctpTransportState::Closed,
-            "lost RECONFIG must not leave an established transport after its retry limit"
+            assert_eq!(
+                b.pc.sctp().await.unwrap().state().await.unwrap(),
+                rtc::peer_connection::transport::RTCSctpTransportState::Closed,
+                "lost RECONFIG must not leave an established transport after its retry limit"
+            );
+            assert!(
+                !b.rec.saw_ice(RTCIceConnectionState::Failed),
+                "SCTP-only loss preserves consent"
+            );
+            assert!(
+                dropped.load(Ordering::SeqCst) >= 6,
+                "reset retries crossed the actual UDP fault"
+            );
+        };
+        // A once-polled writer can be waiting for the core mutex, not capacity.
+        // Poll all writers while close and the driver need that same mutex.
+        let ((binary_result, text_result, writable_result), ()) = futures::join!(
+            async { futures::join!(binary, text, writable) },
+            retire_transport,
         );
-        assert!(
-            !b.rec.saw_ice(RTCIceConnectionState::Failed),
-            "SCTP-only loss preserves consent"
-        );
-        assert!(
-            dropped.load(Ordering::SeqCst) >= 6,
-            "reset retries crossed the actual UDP fault"
-        );
-        for result in [binary.await, text.await, writable.await] {
+        eprintln!("reset-loss: terminal writers completed");
+        for result in [binary_result, text_result, writable_result] {
             assert!(matches!(result, Err(Error::ErrDataChannelClosed)));
         }
         for (index, channel) in channels[1].iter().enumerate() {
@@ -621,9 +634,13 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             rtc::data_channel::RTCDataChannelState::Open,
             "one endpoint's timeout must not invent remote receipt"
         );
+        eprintln!("reset-loss: assertions complete, closing first peer");
         a.pc.close().await.unwrap();
+        eprintln!("reset-loss: first peer closed");
         b.pc.close().await.unwrap();
+        eprintln!("reset-loss: second peer closed, checking fresh gameplay");
         assert_fresh_gameplay(&network).await;
+        eprintln!("reset-loss: fresh gameplay complete");
     }));
 }
 
@@ -696,25 +713,26 @@ fn fatal_socket_loss_releases_established_gameplay_senders() {
             assert!(binary.as_mut().now_or_never().is_none());
             assert!(text.as_mut().now_or_never().is_none());
             assert!(writable.as_mut().now_or_never().is_none());
-            fatal_recv.trigger();
-            for _ in 0..100 {
-                if a.rec.saw_conn(RTCPeerConnectionState::Closed) {
-                    break;
+            let stop_driver = async {
+                fatal_recv.trigger();
+                for _ in 0..100 {
+                    if a.rec.saw_conn(RTCPeerConnectionState::Closed) {
+                        break;
+                    }
+                    advance_both(&a.rt, &b.rt, Duration::from_millis(1));
+                    a.rt.yield_now().await;
                 }
-                advance_both(&a.rt, &b.rt, Duration::from_millis(1));
-            }
-            assert!(
-                !fatal_recv.enabled.load(Ordering::SeqCst),
-                "the actual UDP receive path failed"
+                assert!(
+                    !fatal_recv.enabled.load(Ordering::SeqCst),
+                    "the actual UDP receive path failed"
+                );
+                assert!(a.rec.saw_conn(RTCPeerConnectionState::Closed));
+            };
+            let ((binary_result, text_result, writable_result), ()) = futures::join!(
+                async { futures::join!(binary, text, writable) },
+                stop_driver,
             );
-            assert!(a.rec.saw_conn(RTCPeerConnectionState::Closed));
-            for result in [
-                binary.as_mut().now_or_never(),
-                text.as_mut().now_or_never(),
-                writable.as_mut().now_or_never(),
-            ] {
-                let result =
-                    result.expect("terminal senders must finish without another timer tick");
+            for result in [binary_result, text_result, writable_result] {
                 assert!(
                     matches!(result, Err(Error::ErrDataChannelClosed)),
                     "parked sends must finish when their driver stops"

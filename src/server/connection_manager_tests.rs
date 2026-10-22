@@ -217,6 +217,7 @@ impl MessageCoordinator for TestCoordinator {
         _room_id: &RoomId,
         _expected_members: &[PlayerId],
         _recipient_messages: Vec<crate::coordination::RoomRecipientMessages>,
+        _spectator_messages: Vec<Arc<ServerMessage>>,
         before_send: Box<
             dyn FnOnce() -> std::pin::Pin<
                     Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,

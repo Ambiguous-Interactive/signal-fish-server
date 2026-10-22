@@ -182,6 +182,9 @@ struct MessageToAbandon {
 pub struct Association {
     side: Side,
     state: AssociationState,
+    /// A server also starts in Closed while awaiting INIT. Retired transports
+    /// must instead ignore input, including the rest of a packet after ABORT.
+    retired: bool,
     handshake_completed: bool,
     max_message_size: u32,
     inflight_queue_length: usize,
@@ -303,6 +306,7 @@ impl Default for Association {
         Association {
             side: Side::default(),
             state: AssociationState::default(),
+            retired: false,
             handshake_completed: false,
             max_message_size: 0,
             inflight_queue_length: 0,
@@ -802,6 +806,7 @@ impl Association {
 
     /// Close ends the SCTP Association and cleans up any state
     pub fn close(&mut self, reason: AssociationError) -> Result<()> {
+        self.retired = true;
         if self.state() != AssociationState::Closed {
             self.set_state(AssociationState::Closed);
 
@@ -1055,6 +1060,9 @@ impl Association {
 
     /// handle_inbound parses incoming raw packets
     fn handle_inbound(&mut self, p: Packet, now: Instant) -> Result<()> {
+        if self.retired {
+            return Ok(());
+        }
         if let Err(err) = p.check_packet() {
             warn!("[{}] failed validating packet {}", self.side, err);
             return Ok(());
@@ -1064,6 +1072,9 @@ impl Association {
 
         for c in &p.chunks {
             self.handle_chunk(&p, c, now)?;
+            if self.retired {
+                return Ok(());
+            }
         }
 
         self.handle_chunk_end(now);

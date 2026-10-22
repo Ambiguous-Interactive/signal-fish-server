@@ -292,6 +292,162 @@ struct FinalizedJoinPublicationFixture {
     reconnect_token: String,
 }
 
+async fn register_publication_spectator(
+    server: &Arc<EnhancedGameServer>,
+    room_id: crate::protocol::RoomId,
+) -> mpsc::Receiver<Arc<ServerMessage>> {
+    let spectator = PlayerId::new_v4();
+    let (tx, mut rx) = mpsc::channel(16);
+    server
+        .message_coordinator
+        .register_local_spectator_with_initial_message_async(
+            spectator,
+            room_id,
+            crate::coordination::ClientDeliveryHandle::new(
+                tx,
+                crate::coordination::ConnectionCloseSignal::detached(),
+            ),
+            &|| true,
+            None,
+            None,
+            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+        )
+        .await
+        .expect("publish observer snapshot and route");
+    assert!(matches!(recv(&mut rx).await.as_ref(), ServerMessage::Pong));
+    assert!(!server
+        .message_coordinator
+        .routed_player_ids(&room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .contains(&spectator));
+    rx
+}
+
+// Issue #1137: personalized plan transactions also publish the public boundary.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn game_start_spectator_gets_public_lifecycle_without_session_plan() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc());
+    let room_id = create_db_room_with_max(&server, host, 1).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&host, room_id)
+        .await;
+    server
+        .database
+        .transition_room_to_lobby(&room_id)
+        .await
+        .unwrap();
+    server.handle_player_ready(&host).await;
+    assert!(matches!(
+        recv(&mut host_rx).await.as_ref(),
+        ServerMessage::LobbyStateChanged { .. }
+    ));
+    let mut spectator_rx = register_publication_spectator(&server, room_id).await;
+    server.handle_start_game(&host).await;
+    assert!(matches!(
+        recv(&mut spectator_rx).await.as_ref(),
+        ServerMessage::GameStarting { .. }
+    ));
+    assert!(matches!(
+        recv(&mut host_rx).await.as_ref(),
+        ServerMessage::GameStarting { .. }
+    ));
+    assert!(matches!(
+        recv(&mut host_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .lobby_state,
+        LobbyState::Finalized
+    );
+    assert_silent(&mut spectator_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn finalized_join_spectator_gets_public_lifecycle_without_session_plan() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let mut fixture = setup_finalized_join_publication(&server).await;
+    let mut spectator_rx = register_publication_spectator(&server, fixture.room.id).await;
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(
+                &fixture.room,
+                fixture.joiner,
+                fixture.joined_player.clone(),
+                guard,
+            )
+            .await
+    );
+    assert!(matches!(recv(&mut spectator_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { player } if player.id == fixture.joiner));
+    assert!(matches!(
+        recv(&mut fixture.joiner_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { .. }
+    ));
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert_silent(&mut spectator_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn finalized_reconnect_spectator_gets_public_lifecycle_without_session_plan() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let mut fixture = setup_mesh_reconnect(&server, 16, 16, true).await;
+    let mut spectator_rx = register_publication_spectator(&server, fixture.room_id).await;
+    assert!(
+        server
+            .handle_reconnect(
+                &fixture.current,
+                &fixture.reconnecting,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await
+    );
+    assert!(matches!(recv(&mut spectator_rx).await.as_ref(),
+        ServerMessage::PlayerReconnected { player_id, .. } if *player_id == fixture.reconnecting));
+    assert!(matches!(
+        recv(&mut fixture.current_rx).await.as_ref(),
+        ServerMessage::Reconnected(_)
+    ));
+    assert!(matches!(
+        recv(&mut fixture.current_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert!(matches!(
+        recv(&mut fixture.existing_rx).await.as_ref(),
+        ServerMessage::PlayerReconnected { .. }
+    ));
+    assert!(matches!(
+        recv(&mut fixture.existing_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert_silent(&mut spectator_rx).await;
+}
+
 async fn setup_finalized_join_publication(
     server: &Arc<EnhancedGameServer>,
 ) -> FinalizedJoinPublicationFixture {

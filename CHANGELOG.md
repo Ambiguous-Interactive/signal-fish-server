@@ -7,13 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Relay live room events and gameplay to read-only spectators (#1137).
+
 ### Changed
 
+- **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
 
+- Prevent delayed packets from reopening closed native gameplay transports (#1138).
+- Refuse capacity workloads that exceed the configured sender payload byte budget (#775).
 - Close native gameplay channels when stream reset retries expire (#1133).
 - Report native peer closure after a fatal socket error, including before channel admission (#1134).
 - Reject native sends after shutdown and return blocked-send closure errors without a polling delay (#1135).

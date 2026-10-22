@@ -3192,6 +3192,7 @@ async fn two_frame_transaction_progresses_at_minimum_control_capacity() {
                     &room_id,
                     &[player],
                     vec![two_frame_batch(player)],
+                    vec![],
                     Box::new(|| Box::pin(async { Ok(true) })),
                     Box::new(|_| true),
                 )
@@ -3258,6 +3259,7 @@ async fn paused_room_transaction_does_not_block_other_room_registration() {
                         player_a,
                         vec![Arc::new(ServerMessage::Pong)],
                     )],
+                    vec![],
                     Box::new(move || {
                         Box::pin(async move {
                             hook_entered.notify_one();
@@ -3347,6 +3349,7 @@ async fn classified_two_frame_transaction_progresses_at_minimum_control_capacity
                     &room_id,
                     &[player],
                     vec![two_frame_batch(player)],
+                    vec![],
                     Box::new(|| Box::pin(async { Ok(true) })),
                     Box::new(|failed_phase_zero| {
                         assert_eq!(failed_phase_zero, 0);
@@ -3471,6 +3474,7 @@ async fn synthetic_classified_scope_change_during_hook_reports_exact_phase_failu
                         vec![Arc::new(ServerMessage::Pong)],
                     ),
                 ],
+                vec![],
                 Box::new(move || {
                     Box::pin(async move {
                         actor_transition
@@ -3577,6 +3581,7 @@ async fn classified_generation_replacement_before_hook_aborts_without_partial_fr
                     &room_id,
                     &[player],
                     vec![two_frame_batch(player)],
+                    vec![],
                     Box::new(move || {
                         Box::pin(async move {
                             hook_called.store(true, Ordering::Release);
@@ -3683,6 +3688,7 @@ async fn classified_stale_reservation_retries_whole_transaction_before_hook() {
                             vec![Arc::new(ServerMessage::Pong)],
                         ),
                     ],
+                    vec![],
                     Box::new(move || {
                         Box::pin(async move {
                             hook_calls.fetch_add(1, Ordering::AcqRel);
@@ -3862,6 +3868,7 @@ async fn classified_hook_rejection_and_error_release_every_reservation() {
                 &room_id,
                 &[alice, bob],
                 vec![two_frame_batch(alice), two_frame_batch(bob)],
+                vec![],
                 Box::new(move || {
                     Box::pin(async move {
                         if hook_errors {
@@ -3953,6 +3960,7 @@ async fn panicking_commit_hook_releases_and_accounts_every_reservation() {
                     &room_id,
                     &[alice, bob],
                     vec![two_frame_batch(alice), two_frame_batch(bob)],
+                    vec![],
                     Box::new(|| {
                         Box::pin(async {
                             panic!("sentinel commit hook panic");
@@ -4036,6 +4044,7 @@ async fn panicking_phase_callback_accounts_remaining_frames_and_never_delivers_p
                     &room_id,
                     &[player],
                     vec![two_frame_batch(player)],
+                    vec![],
                     Box::new(|| Box::pin(async { Ok(true) })),
                     Box::new(|_| panic!("sentinel phase callback panic")),
                 )
@@ -4213,6 +4222,7 @@ async fn room_transaction_commits_every_phase_zero_frame_before_phase_one() {
                     })],
                 ),
             ],
+            vec![],
             Box::new(|| Box::pin(async { Ok(true) })),
             Box::new(|failed_phase_zero| {
                 assert_eq!(failed_phase_zero, 0);
@@ -4311,6 +4321,7 @@ async fn empty_member_batch_retains_identity_validation_before_phase_one() {
                                 vec![Arc::new(ServerMessage::Pong)],
                             ),
                         ],
+                        vec![],
                         Box::new(move || {
                             Box::pin(async move {
                                 hook_calls.fetch_add(1, Ordering::AcqRel);
@@ -4467,6 +4478,7 @@ async fn failed_phase_zero_can_cancel_every_dependent_phase_one_frame() {
                     vec![Arc::new(ServerMessage::Pong)],
                 ),
             ],
+            vec![],
             Box::new(move || {
                 Box::pin(async move {
                     joiner_rx.close();
@@ -4540,6 +4552,7 @@ async fn room_transaction_reserves_slow_recipients_in_one_timeout_window() {
                         RoomRecipientMessages::in_order(alice, vec![Arc::new(ServerMessage::Pong)]),
                         RoomRecipientMessages::in_order(bob, vec![Arc::new(ServerMessage::Pong)]),
                     ],
+                    vec![],
                     Box::new(|| Box::pin(async { Ok(true) })),
                     Box::new(|_| true),
                 )
@@ -4607,6 +4620,7 @@ async fn room_transaction_hook_error_delivers_no_partial_frames() {
             &room_id,
             &[alice, bob],
             vec![two_frame_batch(alice), two_frame_batch(bob)],
+            vec![],
             Box::new(|| Box::pin(async { anyhow::bail!("injected finalize failure") })),
             Box::new(|_| true),
         )
@@ -4677,6 +4691,7 @@ async fn receiver_close_during_commit_hook_degrades_without_suppressing_healthy_
             &room_id,
             &[healthy, closing],
             vec![two_frame_batch(healthy), two_frame_batch(closing)],
+            vec![],
             Box::new(move || {
                 Box::pin(async move {
                     closing_rx.close();
@@ -4749,6 +4764,7 @@ async fn member_leave_while_second_frame_waits_aborts_whole_room_transaction() {
                     &room_id,
                     &[stable, leaving],
                     vec![two_frame_batch(stable), two_frame_batch(leaving)],
+                    vec![],
                     Box::new(move || {
                         Box::pin(async move {
                             hook_called.store(true, Ordering::Release);
@@ -4825,6 +4841,7 @@ async fn full_recipient_queue_aborts_room_transaction_before_commit_hook() {
             &room_id,
             &[stable, blocked],
             vec![two_frame_batch(stable), two_frame_batch(blocked)],
+            vec![],
             Box::new(move || {
                 Box::pin(async move {
                     hook_marker.store(true, Ordering::Release);
@@ -4992,5 +5009,398 @@ async fn bus_room_broadcast_honors_the_sequenced_exclusion_list() {
     assert!(
         matches!(excluded_delivery, Err(mpsc::error::TryRecvError::Empty)),
         "the excluded player must not receive the bus broadcast"
+    );
+}
+
+fn observer_test_baseline(room_id: RoomId, spectator_id: PlayerId) -> Arc<ServerMessage> {
+    Arc::new(ServerMessage::SpectatorJoined(Box::new(
+        SpectatorJoinedPayload {
+            room_id,
+            room_code: "OBS001".to_string(),
+            spectator_id,
+            game_name: "observer-routing".to_string(),
+            current_players: Vec::new(),
+            current_spectators: Vec::new(),
+            lobby_state: LobbyState::Lobby,
+            reason: None,
+        },
+    )))
+}
+
+#[tokio::test]
+async fn observer_initial_snapshot_fences_data_and_failed_baselines_never_publish() {
+    for failure in [None, Some(false), Some(true)] {
+        let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+        let room = RoomId::new_v4();
+        let seated = PlayerId::new_v4();
+        let observer = PlayerId::new_v4();
+        let (sender, mut seated_receiver) = mpsc::channel(8);
+        coordinator
+            .register_local_client(
+                seated,
+                Some(room),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("seated route");
+        let (sender, receiver) = crate::coordination::outbound_queue::channel(8, 8);
+        sender.set_protocol_version(3);
+        let mut observer_receiver = ControlReceiver::Classified(receiver);
+        let mut delivery =
+            ClientDeliveryHandle::classified(sender, ConnectionCloseSignal::detached());
+        delivery.sender = delivery.sender.next_generation();
+        let retained_delivery = delivery.clone();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let registration = {
+            let coordinator = Arc::clone(&coordinator);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            tokio::spawn(async move {
+                coordinator
+                    .register_local_spectator_with_initial_message_async(
+                        observer,
+                        room,
+                        delivery,
+                        &move || failure != Some(false),
+                        None,
+                        None,
+                        Box::new(move |members| {
+                            Box::pin(async move {
+                                assert_eq!(
+                                    members,
+                                    vec![seated],
+                                    "observer is not a seated baseline member"
+                                );
+                                entered.notify_one();
+                                release.notified().await;
+                                if failure == Some(true) {
+                                    anyhow::bail!("injected observer baseline failure");
+                                }
+                                Ok(observer_test_baseline(room, observer))
+                            })
+                        }),
+                    )
+                    .await
+            })
+        };
+        entered.notified().await;
+        let mut broadcast =
+            Box::pin(coordinator.broadcast_to_room(&room, Arc::new(contended_game_data(seated))));
+        assert!(
+            futures_util::poll!(broadcast.as_mut()).is_pending(),
+            "data must wait for the observer's fenced baseline"
+        );
+        release.notify_one();
+        let outcome = registration.await.expect("registration task");
+        match failure {
+            None => assert_eq!(outcome.expect("baseline"), DeliveryOutcome::Delivered),
+            Some(false) => assert_eq!(
+                outcome.expect("canceled baseline"),
+                DeliveryOutcome::Canceled
+            ),
+            Some(true) => assert!(outcome
+                .expect_err("builder failure")
+                .to_string()
+                .contains("injected")),
+        }
+        broadcast.await.expect("post-baseline data");
+        let healthy_seated_data = seated_receiver.try_recv().expect("healthy seated data");
+        assert!(matches!(
+            healthy_seated_data.as_ref(),
+            ServerMessage::GameData { .. }
+        ));
+        assert_eq!(
+            coordinator
+                .routed_player_ids(&room)
+                .await
+                .expect("seated roster"),
+            Some(vec![seated])
+        );
+        if failure.is_some() {
+            observer_receiver.assert_empty("failed observer baseline must never publish a route");
+            continue;
+        }
+        assert!(matches!(
+            observer_receiver
+                .pop_message("observer baseline precedes data")
+                .as_ref(),
+            ServerMessage::SpectatorJoined(_)
+        ));
+        assert!(matches!(
+            observer_receiver
+                .pop_message("observer receives subsequent data")
+                .as_ref(),
+            ServerMessage::GameData { .. }
+        ));
+        assert!(coordinator
+            .send_to_player_in_room_if_members(
+                &seated,
+                &room,
+                &[seated],
+                Arc::new(ServerMessage::Pong)
+            )
+            .await
+            .expect("exact seated membership survives observer"));
+        let received_message = seated_receiver
+            .try_recv()
+            .expect("seated exact-members frame");
+        assert!(matches!(received_message.as_ref(), ServerMessage::Pong));
+
+        // Leave reliable old-room data unread. The generation barrier must
+        // drain this accepted frame before the terminal roomless transition.
+        coordinator
+            .broadcast_to_room(&room, Arc::new(contended_game_data(seated)))
+            .await
+            .expect("queue stale observer data before detach");
+        let received_message = seated_receiver.try_recv().expect("seated pre-detach data");
+        assert!(matches!(
+            received_message.as_ref(),
+            ServerMessage::GameData { .. }
+        ));
+        // A roomless generation transition must retire the observer route and
+        // allow the same physical connection to become a seated member later.
+        let mut lobby_delivery = retained_delivery;
+        lobby_delivery.sender = lobby_delivery.sender.next_generation();
+        lobby_delivery
+            .sender
+            .try_send(Arc::new(ServerMessage::RoomLeft), None)
+            .expect("retire the observer queue generation");
+        coordinator
+            .register_local_client(observer, None, lobby_delivery.clone())
+            .await
+            .expect("observer detach");
+        assert!(matches!(
+            observer_receiver
+                .pop_message("accepted reliable data precedes detach barrier")
+                .as_ref(),
+            ServerMessage::GameData { .. }
+        ));
+        assert!(matches!(
+            observer_receiver
+                .pop_message("roomless transition follows accepted data")
+                .as_ref(),
+            ServerMessage::RoomLeft
+        ));
+        coordinator
+            .broadcast_to_room(&room, Arc::new(ServerMessage::Pong))
+            .await
+            .expect("old room after observer detach");
+        observer_receiver.assert_empty("detached observer must not receive old-room traffic");
+        coordinator
+            .register_local_client(observer, Some(room), lobby_delivery)
+            .await
+            .expect("same identity now seated");
+        let mut expected = vec![seated, observer];
+        expected.sort_unstable();
+        assert_eq!(
+            coordinator
+                .routed_player_ids(&room)
+                .await
+                .expect("new seated roster"),
+            Some(expected)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_observer_does_not_drop_healthy_observer_or_seated_broadcasts() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(5),
+        Arc::clone(&metrics),
+    ));
+    let room = RoomId::new_v4();
+    let seated = PlayerId::new_v4();
+    let (sender, mut seated_receiver) = mpsc::channel(8);
+    coordinator
+        .register_local_client(
+            seated,
+            Some(room),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("seated route");
+    let mut observers = Vec::new();
+    for capacity in [1, 8] {
+        let observer = PlayerId::new_v4();
+        let (sender, receiver) = mpsc::channel(capacity);
+        let (close, listener) = ConnectionCloseSignal::channel();
+        assert_eq!(
+            coordinator
+                .register_local_spectator_with_initial_message_async(
+                    observer,
+                    room,
+                    ClientDeliveryHandle::new(sender, close),
+                    &|| true,
+                    None,
+                    None,
+                    Box::new(move |_| Box::pin(async move {
+                        Ok(observer_test_baseline(room, observer))
+                    })),
+                )
+                .await
+                .expect("observer route"),
+            DeliveryOutcome::Delivered
+        );
+        observers.push((receiver, listener));
+    }
+    let (mut healthy_receiver, healthy_close) = observers.pop().expect("healthy observer");
+    let (mut slow_receiver, slow_close) = observers.pop().expect("slow observer");
+    let received_message = healthy_receiver.try_recv().expect("healthy baseline");
+    assert!(matches!(
+        received_message.as_ref(),
+        ServerMessage::SpectatorJoined(_)
+    ));
+    // The slow observer keeps its one-slot baseline queued while others drain.
+    let broadcast = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .broadcast_to_room(&room, Arc::new(contended_game_data(seated)))
+                .await
+        })
+    };
+    wait_for_counter("slow observer reached backpressure", 10_000, || {
+        metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 1
+    })
+    .await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    broadcast
+        .await
+        .expect("broadcast task")
+        .expect("isolated slow observer");
+    assert_eq!(
+        slow_close.requested_reason(),
+        Some(CloseReason::SlowConsumer)
+    );
+    assert_eq!(healthy_close.requested_reason(), None);
+    let seated_data = seated_receiver.try_recv().expect("seated data survives");
+    assert!(matches!(
+        seated_data.as_ref(),
+        ServerMessage::GameData { .. }
+    ));
+    let healthy_observer_data = healthy_receiver
+        .try_recv()
+        .expect("healthy observer data survives");
+    assert!(matches!(
+        healthy_observer_data.as_ref(),
+        ServerMessage::GameData { .. }
+    ));
+    let slow_baseline = slow_receiver
+        .try_recv()
+        .expect("only the slow baseline remains");
+    assert!(matches!(
+        slow_baseline.as_ref(),
+        ServerMessage::SpectatorJoined(_)
+    ));
+    let unexpected_slow_message = slow_receiver.try_recv();
+    assert!(unexpected_slow_message.is_err());
+    coordinator
+        .broadcast_to_room(&room, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("healthy routes remain usable");
+    let received_message = seated_receiver.try_recv().expect("next seated broadcast");
+    assert!(matches!(received_message.as_ref(), ServerMessage::Pong));
+    let received_message = healthy_receiver
+        .try_recv()
+        .expect("next healthy observer broadcast");
+    assert!(matches!(received_message.as_ref(), ServerMessage::Pong));
+    assert_eq!(
+        coordinator
+            .routed_player_ids(&room)
+            .await
+            .expect("seated roster"),
+        Some(vec![seated])
+    );
+}
+
+#[tokio::test]
+async fn observer_close_after_reservation_does_not_abort_seated_transaction_phases() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    );
+    let room = RoomId::new_v4();
+    let seated = PlayerId::new_v4();
+    let observer = PlayerId::new_v4();
+    let (sender, mut seated_receiver) = mpsc::channel(4);
+    coordinator
+        .register_local_client(
+            seated,
+            Some(room),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("seated route");
+    let (sender, mut observer_receiver) = mpsc::channel(4);
+    assert_eq!(
+        coordinator
+            .register_local_spectator_with_initial_message_async(
+                observer,
+                room,
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                &|| true,
+                None,
+                None,
+                Box::new(move |_| Box::pin(
+                    async move { Ok(observer_test_baseline(room, observer)) }
+                )),
+            )
+            .await
+            .expect("observer route"),
+        DeliveryOutcome::Delivered
+    );
+    let received_message = observer_receiver.try_recv().expect("observer baseline");
+    assert!(matches!(
+        received_message.as_ref(),
+        ServerMessage::SpectatorJoined(_)
+    ));
+    let phase_callback_calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&phase_callback_calls);
+    let outcome = coordinator
+        .commit_room_messages_if_members_with_hook(
+            &room,
+            &[seated],
+            vec![two_frame_batch(seated)],
+            vec![Arc::new(ServerMessage::Pong)],
+            Box::new(move || {
+                Box::pin(async move {
+                    // Every recipient already has its permits. Only the observer
+                    // disappears between membership validation and phase commit.
+                    drop(observer_receiver);
+                    Ok(true)
+                })
+            }),
+            Box::new(move |seated_failures| {
+                assert_eq!(
+                    seated_failures, 0,
+                    "observer failure must not cancel seated plans"
+                );
+                callback_calls.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+        )
+        .await
+        .expect("observer closure is isolated");
+    assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);
+    assert_eq!(phase_callback_calls.load(Ordering::Relaxed), 1);
+    let phase_zero_message = seated_receiver.try_recv().expect("seated phase zero");
+    assert!(matches!(phase_zero_message.as_ref(), ServerMessage::Pong));
+    let phase_one_message = seated_receiver.try_recv().expect("seated phase one");
+    assert!(
+        matches!(phase_one_message.as_ref(), ServerMessage::Error { message, .. }
+        if message == "tailored plan marker")
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_channel_closed
+            .load(Ordering::Relaxed),
+        1,
+        "the failed observer still has its delivery outcome accounted"
     );
 }

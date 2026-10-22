@@ -1498,3 +1498,133 @@ fn stream_reset_retry_exhaustion_closes_all_streams_once() -> Result<()> {
     }
     Ok(())
 }
+
+// Regression #1138: delayed gameplay cannot revive a retired association.
+#[test]
+fn terminal_association_ignores_delayed_and_bundled_gameplay() -> Result<()> {
+    for history in [
+        "reset exhaustion",
+        "local abort",
+        "abort before data",
+        "data before abort",
+    ] {
+        let (mut a, mut b) = reset_pair();
+        let now = Instant::now();
+        b.stream(1)?.write_sctp(
+            now,
+            &Bytes::from_static(b"delayed gameplay"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        let data = transmitted_data(&b.gather_outbound(now).0).remove(0);
+        let mut chunks: Vec<Box<dyn Chunk>> = vec![];
+        match history {
+            "reset exhaustion" => {
+                a.timers = TimerTable::new(TimerConfig {
+                    max_reconfig_retrans: 0,
+                    ..TimerConfig::default()
+                });
+                a.send_reset_request(now, 1)?;
+                assert_eq!(reset_requests(&mut a, now).len(), 1);
+                a.handle_timeout(a.poll_timeout().expect("reset deadline"));
+            }
+            "local abort" => {
+                a.abort()?;
+                a.gather_outbound(now); // Deliver the local ABORT before delayed input.
+            }
+            _ => chunks.push(Box::new(ChunkAbort {
+                error_causes: vec![ErrorCause {
+                    code: USER_INITIATED_ABORT,
+                    ..Default::default()
+                }],
+            })),
+        }
+        a.events.clear();
+        if history == "data before abort" {
+            chunks.insert(0, Box::new(data));
+        } else {
+            chunks.push(Box::new(data));
+        }
+        let wire = b.create_packet(chunks).marshal()?;
+        a.handle_inbound(Packet::unmarshal(&wire)?, now)?;
+        assert_eq!(a.state(), AssociationState::Closed, "{history}");
+        assert!(
+            a.streams.is_empty(),
+            "{history}: late DATA recreated a stream"
+        );
+        assert!(
+            a.accept_stream().is_none(),
+            "{history}: late stream accepted"
+        );
+        assert!(
+            a.poll_timeout().is_none(),
+            "{history}: late input armed a timer"
+        );
+        assert!(
+            a.gather_outbound(now).0.is_empty(),
+            "{history}: late input emitted output"
+        );
+        assert!(
+            !a.events.iter().any(|event| {
+                matches!(event, Event::Connected | Event::Stream(_))
+                    || (history != "data before abort" && matches!(event, Event::DatagramReceived))
+            }),
+            "{history}: late input emitted a live event"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_association_ignores_old_handshake_but_fresh_server_connects() -> Result<()> {
+    for delayed in ["INIT", "COOKIE-ECHO"] {
+        let mut server = Association::default();
+        let now = Instant::now();
+        let init = ChunkInit {
+            initiate_tag: 123,
+            advertised_receiver_window_credit: 65536,
+            num_outbound_streams: 1,
+            num_inbound_streams: 1,
+            initial_tsn: 42,
+            ..Default::default()
+        };
+        let packet = |chunk: Box<dyn Chunk>| Packet {
+            common_header: CommonHeader {
+                source_port: 5000,
+                destination_port: 5000,
+                verification_tag: 0,
+            },
+            chunks: vec![chunk],
+        };
+        // A fresh server starts Closed and must still accept its first handshake.
+        server.handle_inbound(packet(Box::new(init.clone())), now)?;
+        assert!(!server.gather_outbound(now).0.is_empty());
+        let echo = ChunkCookieEcho {
+            cookie: server
+                .my_cookie
+                .as_ref()
+                .expect("INIT creates cookie")
+                .cookie
+                .clone(),
+        };
+        server.handle_inbound(packet(Box::new(echo.clone())), now)?;
+        assert_eq!(server.state(), AssociationState::Established);
+        assert!(matches!(server.poll(), Some(Event::Connected)));
+        server.gather_outbound(now);
+        server.close(AssociationError::LocallyClosed)?;
+        let late: Box<dyn Chunk> = if delayed == "INIT" {
+            Box::new(init)
+        } else {
+            Box::new(echo)
+        };
+        let wire = packet(late).marshal()?;
+        server.handle_inbound(Packet::unmarshal(&wire)?, now)?;
+        assert_eq!(server.state(), AssociationState::Closed, "{delayed}");
+        assert!(server.poll().is_none(), "{delayed}: no second connection");
+        assert!(server.poll_timeout().is_none(), "{delayed}: no timer");
+        assert!(
+            server.gather_outbound(now).0.is_empty(),
+            "{delayed}: no reply"
+        );
+    }
+    Ok(())
+}

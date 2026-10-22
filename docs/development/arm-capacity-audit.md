@@ -5006,3 +5006,29 @@ byte accounting, unknown-player rejection, and shared sender names. Real
 reliable and reconnect cells still replay their complete summaries exactly.
 Raw probe source and six results are retained locally in
 `progress/session-511/registry-lookups/`.
+
+### Sender payload byte admission — session 512
+
+Issue [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+now has a separate byte admission limit. Record counts alone admitted four
+scheduled sends with 17,179,869,180 application bytes across four senders.
+The runner reached networking instead of refusing this workload in the red
+control. It now checks `rooms * players_per_room * payload_bytes` with checked
+arithmetic before plans, output files, or connections.
+
+`sender_payload_budget_bytes` defaults to 67,108,864 bytes (64 MiB). Set
+`CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES` to a positive integer to select a
+budget for a provisioned host. The runner refuses excess work and prints the
+required bytes and selected budget. It never trims a payload or sender count.
+The sum covers one configured application payload per sender. It excludes
+serialization copies, socket queues, server buffers, records, and validation
+state. It is not an RSS limit. Retained and unexpected event bounds remain
+open in #775.
+
+The 999-room, 16-player, 96-byte shape requires 1,534,464 payload bytes and fits
+this byte limit. Its record cost still exceeds the independent default record
+limit. Exact boundaries, zero, arithmetic overflow, environment parsing, old
+manifest bytes, and pre-network refusal are covered. Eight encoding, class,
+and size cells retain exact live/replay results and explicit custom budget
+values in their manifests. This does not establish a new server capacity or
+explain a historical generator stall.

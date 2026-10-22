@@ -1135,3 +1135,153 @@ fn assert_no_pending_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, 
         }
     }
 }
+
+// Issue #1137: observing live traffic must never create a seated membership.
+#[tokio::test]
+async fn spectator_live_lifecycle_relay_and_room_switch_stay_read_only() {
+    let server = create_test_server().await;
+    let host = Uuid::new_v4();
+    let peer = Uuid::new_v4();
+    let viewer = Uuid::new_v4();
+    let other_host = Uuid::new_v4();
+    let (host_tx, _host_rx) = mpsc::channel(64);
+    let (peer_tx, _peer_rx) = mpsc::channel(64);
+    let (viewer_tx, mut viewer_rx) = mpsc::channel(64);
+    let (other_tx, _other_rx) = mpsc::channel(64);
+    for (id, tx) in [
+        (host, host_tx),
+        (peer, peer_tx),
+        (viewer, viewer_tx),
+        (other_host, other_tx),
+    ] {
+        server.connect_client(id, tx).await;
+    }
+    for (id, code, name) in [(host, "LIVE01", "Host"), (other_host, "LIVE02", "Other")] {
+        server
+            .handle_join_room(
+                &id,
+                "live_view".into(),
+                Some(code.into()),
+                name.into(),
+                Some(4),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+    }
+    let room_id = server.get_client_room(&host).await.unwrap();
+    server
+        .handle_join_as_spectator(
+            &viewer,
+            "live_view".into(),
+            "LIVE01".into(),
+            "Viewer".into(),
+            None,
+        )
+        .await;
+    assert!(matches!(
+        recv_now(&mut viewer_rx, "live spectator event").as_ref(),
+        ServerMessage::SpectatorJoined(_)
+    ));
+    assert_no_pending_message(&mut viewer_rx, "own admission is already in the baseline");
+    assert_eq!(server.get_client_room(&viewer).await, None);
+    server
+        .handle_join_room(
+            &peer,
+            "live_view".into(),
+            Some("LIVE01".into()),
+            "Peer".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(recv_now(&mut viewer_rx, "live spectator event").as_ref(), ServerMessage::PlayerJoined {player} if player.id == peer)
+    );
+    let room = server
+        .database()
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.players.len(), 2);
+    assert!(!room.players.contains_key(&viewer));
+    for id in [host, peer] {
+        server.handle_player_ready(&id).await;
+    }
+    expect_lobby_state_changed_with_ready(&mut viewer_rx, "host ready", 1, false);
+    expect_lobby_state_changed_with_ready(&mut viewer_rx, "all seated players ready", 2, true);
+    server.handle_start_game(&host).await;
+    let start = recv_now(&mut viewer_rx, "spectator sees game start");
+    assert!(
+        matches!(start.as_ref(), ServerMessage::GameStarting {peer_connections} if peer_connections.len() == 2)
+    );
+    server
+        .handle_game_data(&host, serde_json::json!({"tick":1}), None, None)
+        .await;
+    assert!(
+        matches!(recv_now(&mut viewer_rx, "live spectator event").as_ref(), ServerMessage::GameData {from_player, ..} if *from_player == host)
+    );
+    server
+        .handle_game_data_binary(&host, GameDataEncoding::Protobuf, vec![0, 255, 2].into())
+        .await;
+    assert!(
+        matches!(recv_now(&mut viewer_rx, "live spectator event").as_ref(), ServerMessage::GameDataBinary {from_player, payload, ..} if *from_player == host && payload.as_ref() == [0, 255, 2])
+    );
+    server
+        .handle_game_data(&viewer, serde_json::json!({"invalid":true}), None, None)
+        .await;
+    server
+        .handle_game_data_binary(&viewer, GameDataEncoding::Protobuf, vec![1].into())
+        .await;
+    server.handle_start_game(&viewer).await;
+    for _ in 0..3 {
+        assert!(matches!(
+            recv_now(&mut viewer_rx, "live spectator event").as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::NotInRoom),
+                ..
+            }
+        ));
+    }
+    server.handle_leave_spectator(&viewer).await;
+    assert!(matches!(
+        recv_now(&mut viewer_rx, "live spectator event").as_ref(),
+        ServerMessage::SpectatorLeft { .. }
+    ));
+    server
+        .handle_game_data(&host, serde_json::json!({"old_room":1}), None, None)
+        .await;
+    assert_no_pending_message(&mut viewer_rx, "leave removes the observer route");
+    server
+        .handle_join_as_spectator(
+            &viewer,
+            "live_view".into(),
+            "LIVE02".into(),
+            "Viewer".into(),
+            None,
+        )
+        .await;
+    assert!(matches!(
+        recv_now(&mut viewer_rx, "live spectator event").as_ref(),
+        ServerMessage::SpectatorJoined(_)
+    ));
+    server
+        .handle_game_data(&host, serde_json::json!({"old_room":2}), None, None)
+        .await;
+    server
+        .handle_game_data(&other_host, serde_json::json!({"new_room":1}), None, None)
+        .await;
+    assert!(
+        matches!(recv_now(&mut viewer_rx, "live spectator event").as_ref(), ServerMessage::GameData {from_player, ..} if *from_player == other_host)
+    );
+    assert_no_pending_message(
+        &mut viewer_rx,
+        "old room cannot leak into the new observer session",
+    );
+}

@@ -208,6 +208,13 @@ impl MessageCoordinator for RecordingCoordinator {
         except_player: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> Result<()> {
+        if matches!(message.as_ref(), ServerMessage::NewSpectatorJoined { .. })
+            && self.delay_first_spectator_broadcast.load(Ordering::Acquire)
+            && self.spectator_broadcasts.fetch_add(1, Ordering::AcqRel) == 0
+        {
+            self.first_spectator_broadcast_started.notify_one();
+            self.release_first_spectator_broadcast.notified().await;
+        }
         if let Ok(Some(room)) = self.database.get_room_by_id(room_id).await {
             let mut sent = self.sent.lock().await;
             for player_id in room.players.keys() {
@@ -283,6 +290,7 @@ impl MessageCoordinator for RecordingCoordinator {
         _room_id: &RoomId,
         _expected_members: &[PlayerId],
         recipient_messages: Vec<crate::coordination::RoomRecipientMessages>,
+        _spectator_messages: Vec<Arc<ServerMessage>>,
         before_send: Box<
             dyn FnOnce() -> std::pin::Pin<
                     Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,
@@ -316,6 +324,36 @@ impl MessageCoordinator for RecordingCoordinator {
             }
         }
         Ok(crate::coordination::RoomMessageTransactionOutcome::Committed)
+    }
+
+    async fn register_local_spectator_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        _delivery: crate::coordination::ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        _commit_gate: Option<&'a std::sync::Mutex<()>>,
+        drain: Option<watch::Receiver<bool>>,
+        build_message: crate::coordination::RoomSnapshotBuilder<'a>,
+    ) -> Result<crate::coordination::DeliveryOutcome> {
+        // This recorder models seated routes only. Production concurrency is
+        // covered by the in-memory coordinator and real socket tests.
+        let routed = self.routed_player_ids(&room_id).await?.unwrap_or_default();
+        let message = build_message(routed).await?;
+        let (_tx, fallback) = watch::channel(false);
+        let delivered = self
+            .send_to_player_if(
+                &player_id,
+                message,
+                should_commit,
+                drain.unwrap_or(fallback),
+            )
+            .await?;
+        Ok(if delivered {
+            crate::coordination::DeliveryOutcome::Delivered
+        } else {
+            crate::coordination::DeliveryOutcome::Canceled
+        })
     }
 
     async fn register_local_client(

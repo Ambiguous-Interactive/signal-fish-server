@@ -1576,7 +1576,7 @@ The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 field
 {
   "type": "ProtocolInfo",
   "data": {
-    "capabilities": ["reconnection", "spectators", "authority", "room_operation_ids"],
+    "capabilities": ["reconnection", "spectators", "authority", "room_operation_ids", "spectator_relay"],
     "game_data_formats": ["json", "message_pack"],
     "protocol_version": 3,
     "min_protocol_version": 2,
@@ -1604,6 +1604,9 @@ at admission with `MESSAGE_TOO_LARGE` and is never relayed or budget-charged.
 server implementation. It is disclosed only to authenticated connections.
 The reserved `room_operation_ids` token is absent unless explicitly requested and successfully negotiated;
 SDK-compatibility capability tokens may appear alongside it.
+The server-owned `spectator_relay` token advertises live read-only spectator
+broadcasts after a fenced join snapshot. It appears only on v3 and later.
+See [Spectator Mode](concepts/spectator-mode.md) for delivery and admission limits.
 
 **Endpoints.** `/v2/ws` and `/v3/ws` share the same handler, and their version-neutral
 `/v2/client-config` and `/v3/client-config` companions return the current receive-limit metadata. `/v3/ws` only

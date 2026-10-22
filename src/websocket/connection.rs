@@ -8,7 +8,7 @@ use crate::coordination::{
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, GameDataLimitPayload, PlayerId,
     PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
-    PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
+    PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY, SPECTATOR_RELAY_CAPABILITY,
 };
 use crate::server::{ClientLifecycle, EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
@@ -1304,8 +1304,14 @@ fn dedup_preserving_order<T: PartialEq>(items: &mut Vec<T>) {
 fn protocol_info_capabilities(
     mut compatibility_capabilities: Vec<String>,
     room_operation_ids: bool,
+    protocol_version: u16,
 ) -> Vec<String> {
-    compatibility_capabilities.retain(|capability| capability != ROOM_OPERATION_IDS_CAPABILITY);
+    compatibility_capabilities.retain(|capability| {
+        capability != ROOM_OPERATION_IDS_CAPABILITY && capability != SPECTATOR_RELAY_CAPABILITY
+    });
+    if protocol_version >= 3 {
+        compatibility_capabilities.push(SPECTATOR_RELAY_CAPABILITY.to_string());
+    }
     if room_operation_ids {
         compatibility_capabilities.push(ROOM_OPERATION_IDS_CAPABILITY.to_string());
     }
@@ -2867,6 +2873,7 @@ async fn handle_socket_supervised(
                                             capabilities: protocol_info_capabilities(
                                                 compatibility.capabilities.clone(),
                                                 room_operation_ids,
+                                                negotiated_version,
                                             ),
                                             notes: compatibility.notes.clone(),
                                             game_data_formats: supported_formats,
@@ -4321,18 +4328,41 @@ mod tests {
             ROOM_OPERATION_IDS_CAPABILITY.to_string(),
         ];
         assert_eq!(
-            protocol_info_capabilities(compatibility.clone(), false),
+            protocol_info_capabilities(compatibility.clone(), false, 2),
             vec!["sdk_feature"],
             "a compatibility manifest cannot pre-enable a reserved wire extension"
         );
         assert_eq!(
-            protocol_info_capabilities(compatibility, true),
+            protocol_info_capabilities(compatibility, true, 2),
             vec![
                 "sdk_feature".to_string(),
                 ROOM_OPERATION_IDS_CAPABILITY.to_string()
             ],
             "explicit negotiation advertises the reserved token exactly once"
         );
+    }
+
+    #[test]
+    fn spectator_relay_capability_is_server_owned_and_v3_only() {
+        for version in [2, 3, 4] {
+            let result = protocol_info_capabilities(
+                vec![
+                    "sdk_feature".into(),
+                    SPECTATOR_RELAY_CAPABILITY.into(),
+                    SPECTATOR_RELAY_CAPABILITY.into(),
+                ],
+                false,
+                version,
+            );
+            assert_eq!(
+                result
+                    .iter()
+                    .filter(|s| s.as_str() == SPECTATOR_RELAY_CAPABILITY)
+                    .count(),
+                usize::from(version >= 3)
+            );
+            assert_eq!(result.first().map(String::as_str), Some("sdk_feature"));
+        }
     }
 
     #[test]

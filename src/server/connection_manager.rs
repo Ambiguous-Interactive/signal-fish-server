@@ -1079,6 +1079,15 @@ impl ConnectionManager {
         })
     }
 
+    pub(super) fn client_delivery_handle(
+        &self,
+        player_id: &PlayerId,
+    ) -> Option<ClientDeliveryHandle> {
+        self.clients
+            .get(player_id)
+            .map(|client| client.delivery_handle())
+    }
+
     pub async fn advance_delivery_generation(&self, player_id: &PlayerId) {
         if let Some(delivery) = self.advance_delivery_generation_local(player_id) {
             if let Err(err) = self

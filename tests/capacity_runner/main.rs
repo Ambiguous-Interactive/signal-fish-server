@@ -98,6 +98,45 @@ async fn planned_record_budget_refuses_large_work_before_artifacts_or_connection
     );
 }
 
+#[tokio::test]
+async fn payload_budget_refuses_large_frames_before_artifacts_or_connections() {
+    let parent = tempfile::tempdir().expect("output parent");
+    let output = parent.path().join("refused");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("test listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let mut config = scenario_config(Encoding::V3Json);
+    config.endpoint = Some(format!(
+        "ws://{}",
+        listener.local_addr().expect("test address")
+    ));
+    config.payload_bytes = u32::MAX;
+    config.duration = Duration::from_millis(1);
+    config.warmup = Duration::ZERO;
+    config.output_dir = output.clone();
+    let error = tokio::time::timeout(Duration::from_millis(100), runner::run(config))
+        .await
+        .expect("payload refusal must precede network waits")
+        .expect_err("large payload workload refused");
+    assert!(
+        error.contains("17179869180"),
+        "full payload byte count: {error}"
+    );
+    assert!(
+        error.contains("sender_payload_budget_bytes is 67108864"),
+        "{error}"
+    );
+    assert!(!output.exists(), "refusal must not create a run directory");
+    assert_eq!(
+        listener
+            .accept()
+            .expect_err("refusal must not connect")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 /// Exercise config -> live receipt collection -> bounded sidecar, while
 /// keeping replay dependent only on the ordinary delivery artifacts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1654,9 +1693,21 @@ async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay()
             let output = tempfile::tempdir().expect("exact cell output");
             let mut config = wire_correctness_config(encoding);
             config.payload_bytes = bytes;
+            // Explicitly admit the exact sender payload total. Replay must
+            // retain this host override for every wire/delivery-class cell.
+            config.sender_payload_budget_bytes =
+                u64::from(config.rooms) * u64::from(config.players_per_room) * u64::from(bytes);
+            let expected_payload_budget = config.sender_payload_budget_bytes;
             config.delivery_class = delivery_class;
             config.output_dir = output.path().to_path_buf();
             let outcome = runner::run(config).await.expect("exact cell");
+            assert_eq!(
+                artifacts::read_manifest(output.path())
+                    .expect("cell manifest")
+                    .config
+                    .sender_payload_budget_bytes,
+                expected_payload_budget
+            );
             assert!(
                 outcome.summary.valid,
                 "{encoding:?}/{delivery_class:?}/{bytes}: {:?}",
@@ -3786,6 +3837,28 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
         }
     }
     std::env::remove_var("CAPACITY_RUNNER_PLANNED_RECORD_BUDGET");
+
+    for (raw, expected) in [
+        ("1234", Some(1234)),
+        ("0", Some(0)),
+        ("-1", None),
+        ("abc", None),
+    ] {
+        std::env::set_var("CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES", raw);
+        let result = RunConfig::from_env();
+        match expected {
+            Some(expected) => assert_eq!(
+                result
+                    .expect("payload budget parses")
+                    .sender_payload_budget_bytes,
+                expected
+            ),
+            None => assert!(result
+                .expect_err("invalid payload budget")
+                .contains("SENDER_PAYLOAD_BUDGET_BYTES")),
+        }
+    }
+    std::env::remove_var("CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES");
 
     // Unknown enum values fail loudly, naming the accepted values.
     std::env::set_var("CAPACITY_RUNNER_ENCODING", "cbor");
@@ -5918,6 +5991,7 @@ fn scenario_config(encoding: Encoding) -> RunConfig {
         sample_interval: Duration::from_millis(250),
         receipt_timings: false,
         planned_record_budget: config::default_planned_record_budget(),
+        sender_payload_budget_bytes: config::default_sender_payload_budget_bytes(),
         server_overlay: RunConfig::default_server_overlay(),
         pause_sends: None,
         pause_reads: None,

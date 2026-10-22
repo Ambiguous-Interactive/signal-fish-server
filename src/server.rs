@@ -2138,6 +2138,9 @@ impl EnhancedGameServer {
 pub struct InMemoryMessageCoordinator {
     local_clients: Arc<RwLock<HashMap<PlayerId, ClientDeliveryHandle>>>,
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
+    // Broadcast recipients with no seated role. Access follows the routing
+    // gate and room_players lock so publication and role are one transition.
+    spectator_routes: Arc<StdMutex<HashSet<PlayerId>>>,
     room_routing_gates: RoutingGateRegistry,
     player_routing_gates: RoutingGateRegistry,
     metrics: Arc<crate::metrics::ServerMetrics>,
@@ -2652,6 +2655,7 @@ impl InMemoryMessageCoordinator {
         Self {
             local_clients: Arc::new(RwLock::new(HashMap::new())),
             room_players: Arc::new(RwLock::new(HashMap::new())),
+            spectator_routes: Arc::new(StdMutex::new(HashSet::new())),
             room_routing_gates: RoutingGateRegistry::default(),
             player_routing_gates: RoutingGateRegistry::default(),
             metrics,
@@ -3756,19 +3760,18 @@ impl InMemoryMessageCoordinator {
         reservations: &[RoomBatchReservation],
         recipients: &[(PlayerId, ClientDeliveryHandle)],
     ) -> bool {
-        reservations.len() == recipients.len()
-            && recipients.iter().all(|(player_id, handle)| {
-                reservations.iter().any(|reservation| match reservation {
-                    RoomBatchReservation::Reserved {
-                        player_id: reserved_player,
-                        sender,
-                        ..
-                    } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
-                    RoomBatchReservation::ChannelClosed { .. }
-                    | RoomBatchReservation::SlowConsumer { .. }
-                    | RoomBatchReservation::Canceled => false,
-                })
+        recipients.iter().all(|(player_id, handle)| {
+            reservations.iter().any(|reservation| match reservation {
+                RoomBatchReservation::Reserved {
+                    player_id: reserved_player,
+                    sender,
+                    ..
+                } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
+                RoomBatchReservation::ChannelClosed { .. }
+                | RoomBatchReservation::SlowConsumer { .. }
+                | RoomBatchReservation::Canceled => false,
             })
+        })
     }
 
     async fn broadcast_to_room_if_with_hook<'a>(
@@ -3870,6 +3873,7 @@ impl InMemoryMessageCoordinator {
             if let Some(expected_members) = expected_members {
                 let mut current: Vec<PlayerId> = current_recipients
                     .iter()
+                    .filter(|(id, _)| !self.is_spectator_route(id))
                     .map(|(player_id, _)| *player_id)
                     .collect();
                 let mut expected = expected_members.to_vec();
@@ -3980,6 +3984,117 @@ impl InMemoryMessageCoordinator {
                     | ConditionalDeliveryReservation::Canceled => false,
                 })
             })
+    }
+}
+
+impl InMemoryMessageCoordinator {
+    fn is_spectator_route(&self, player_id: &PlayerId) -> bool {
+        self.spectator_routes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(player_id)
+    }
+
+    fn set_spectator_route(&self, player_id: PlayerId, spectator: bool) {
+        let mut routes = self
+            .spectator_routes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if spectator {
+            routes.insert(player_id);
+        } else {
+            routes.remove(&player_id);
+        }
+    }
+
+    async fn register_initial_room_recipient<'a>(
+        &'a self,
+        spectator: bool,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        commit_gate: Option<&'a StdMutex<()>>,
+        drain: Option<tokio::sync::watch::Receiver<bool>>,
+        build_message: crate::coordination::RoomSnapshotBuilder<'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        let mut reservation_guard = InitialTransitionReservationGuard {
+            metrics: &self.metrics,
+            player_id,
+            armed: false,
+        };
+        let permit = match self
+            .reserve_initial_transition(player_id, &delivery, drain)
+            .await
+        {
+            Ok(permit) => {
+                reservation_guard.armed = true;
+                permit
+            }
+            Err(outcome) => return Ok(outcome),
+        };
+        let routing = self
+            .lock_player_routing_write(player_id, Some(room_id))
+            .await;
+        // Same lock ordering and routing transition as the sync builder, but
+        // the async builder itself is fenced by only this room's gate. Global
+        // map guards are held only for the snapshots/updates around it.
+        // Reconnect uses this to fetch replay after every older same-room
+        // broadcast has either recorded or skipped its event, and before any
+        // newer same-room broadcast can snapshot this restored socket as live.
+        let mut routed_players: Vec<PlayerId> = {
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            room_players
+                .get(&room_id)
+                .into_iter()
+                .flat_map(|players| players.iter().copied())
+                .filter(|routed_player| {
+                    clients.contains_key(routed_player) && !self.is_spectator_route(routed_player)
+                })
+                .collect()
+        };
+        if !spectator && !routed_players.contains(&player_id) {
+            routed_players.push(player_id);
+        }
+        routed_players.sort_unstable();
+        let message = match build_message(routed_players).await {
+            Ok(message) => message,
+            // Dropping the guard here accounts the reserved attempt: the
+            // baseline build failed after the capacity was reserved.
+            Err(error) => return Err(error),
+        };
+        let outcome = {
+            // Drain takes the same gate before flipping its atomic state. No
+            // reconnect baseline can pass the check and queue after that flip.
+            let _commit_guard = commit_gate
+                .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            if !should_commit() {
+                // The armed guard accounts the released reservation.
+                return Ok(DeliveryOutcome::Canceled);
+            }
+            let outcome =
+                self.commit_initial_transition(player_id, permit, message, &delivery.close);
+            reservation_guard.defuse();
+            outcome
+        };
+        if outcome == DeliveryOutcome::Delivered {
+            let mut room_players = self.room_players.write().await;
+            let mut clients = self.local_clients.write().await;
+            room_players.retain(|_, players| {
+                players.remove(&player_id);
+                !players.is_empty()
+            });
+            room_players
+                .entry(room_id)
+                .or_insert_with(HashSet::new)
+                .insert(player_id);
+            self.set_spectator_route(player_id, spectator);
+            clients.insert(player_id, delivery.clone());
+            self.sync_active_room_gates(&room_players, &routing);
+        }
+
+        Ok(outcome)
     }
 }
 
@@ -4202,7 +4317,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .get(room_id)
             .into_iter()
             .flat_map(|players| players.iter().copied())
-            .filter(|player_id| clients.contains_key(player_id))
+            .filter(|player_id| {
+                clients.contains_key(player_id) && !self.is_spectator_route(player_id)
+            })
             .collect();
         players.sort_unstable();
         Ok(Some(players))
@@ -4257,7 +4374,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .get(room_id)
             .into_iter()
             .flat_map(|players| players.iter().copied())
-            .filter(|routed_player| clients.contains_key(routed_player))
+            .filter(|routed_player| {
+                clients.contains_key(routed_player) && !self.is_spectator_route(routed_player)
+            })
             .collect();
         current_members.sort_unstable();
         let mut expected_members = expected_members.to_vec();
@@ -4464,6 +4583,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         room_id: &RoomId,
         expected_members: &[PlayerId],
         recipient_messages: Vec<RoomRecipientMessages>,
+        spectator_messages: Vec<Arc<ServerMessage>>,
         before_send: Box<
             dyn FnOnce() -> std::pin::Pin<
                     Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + 'a>,
@@ -4514,40 +4634,58 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         if batch_members != expected {
             anyhow::bail!("room message batches must cover every expected member exactly once");
         }
-        if recipient_messages
-            .iter()
-            .all(|batch| batch.messages.is_empty())
+        if spectator_messages.is_empty()
+            && recipient_messages
+                .iter()
+                .all(|batch| batch.messages.is_empty())
         {
             anyhow::bail!("room message transaction requires at least one frame");
         }
-        if recipient_messages
-            .iter()
-            .any(|batch| batch.first_phase > 1 || batch.phase_count() > 2)
+        if spectator_messages.len() > 2
+            || recipient_messages
+                .iter()
+                .any(|batch| batch.first_phase > 1 || batch.phase_count() > 2)
         {
             anyhow::bail!("room message transactions support exactly two ordered phases");
         }
 
-        let messages_by_player: HashMap<PlayerId, RoomRecipientMessages> = recipient_messages
+        let seated_messages: HashMap<PlayerId, RoomRecipientMessages> = recipient_messages
             .into_iter()
             .map(|batch| (batch.player_id, batch))
             .collect();
-        let max_phases = messages_by_player
+        let max_phases = seated_messages
             .values()
             .map(RoomRecipientMessages::phase_count)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(spectator_messages.len());
         let mut before_send = Some(before_send);
         let mut after_first_phase = Some(after_first_phase);
         let (_drain_tx, drain) = watch::channel(false);
         let should_send = || true;
 
         loop {
-            let recipients = self.collect_room_recipients(room_id, None).await;
-            let mut routed: Vec<PlayerId> =
-                recipients.iter().map(|(player_id, _)| *player_id).collect();
+            let mut recipients = self.collect_room_recipients(room_id, None).await;
+            recipients
+                .retain(|(id, _)| !self.is_spectator_route(id) || !spectator_messages.is_empty());
+            let mut routed: Vec<PlayerId> = recipients
+                .iter()
+                .filter(|(id, _)| !self.is_spectator_route(id))
+                .map(|(player_id, _)| *player_id)
+                .collect();
             routed.sort_unstable();
             if routed != expected {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
+            }
+
+            let mut messages_by_player = seated_messages.clone();
+            for (id, _) in &recipients {
+                if self.is_spectator_route(id) {
+                    messages_by_player.insert(
+                        *id,
+                        RoomRecipientMessages::in_order(*id, spectator_messages.clone()),
+                    );
+                }
             }
 
             let reservation_inputs: Option<Vec<_>> = recipients
@@ -4614,6 +4752,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .map(|players| {
                     players
                         .iter()
+                        .filter(|id| !self.is_spectator_route(id) || !spectator_messages.is_empty())
                         .filter_map(|player_id| {
                             clients
                                 .get(player_id)
@@ -4624,13 +4763,30 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .unwrap_or_default();
             let mut current_members: Vec<PlayerId> = current_recipients
                 .iter()
+                .filter(|(id, _)| !self.is_spectator_route(id))
                 .map(|(player_id, _)| *player_id)
                 .collect();
             current_members.sort_unstable();
+            let seated_recipients: Vec<_> = current_recipients
+                .iter()
+                .filter(|(id, _)| !self.is_spectator_route(id))
+                .cloned()
+                .collect();
             if current_members != expected
-                || !Self::batch_reservations_cover_recipients(guard.get(), &current_recipients)
+                || !Self::batch_reservations_cover_recipients(guard.get(), &seated_recipients)
             {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
+            }
+            if guard.get().len() != current_recipients.len()
+                || !Self::batch_reservations_cover_recipients(guard.get(), &current_recipients)
+            {
+                // Observer churn cannot invalidate a seated start or replan.
+                // Release its stale reservations and resolve observers again.
+                drop(clients);
+                drop(room_players);
+                drop(_routing);
+                tokio::task::yield_now().await;
+                continue;
             }
 
             drop(clients);
@@ -4667,9 +4823,14 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         );
                         continue;
                     };
+                    // Observer delivery is independent of seated confirmation.
+                    // Its queue still accounts failures, but it cannot cancel
+                    // player plan phases or degrade a seated publication.
+                    let seated = !self.is_spectator_route(player_id);
                     let Some(batch) = messages_by_player.get(player_id) else {
                         let skipped = permits.iter_mut().filter_map(Option::take).count();
-                        failed_frames = failed_frames.saturating_add(skipped);
+                        failed_frames =
+                            failed_frames.saturating_add(if seated { skipped } else { 0 });
                         for _ in 0..skipped {
                             self.record_canceled_delivery(*player_id);
                         }
@@ -4689,7 +4850,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     // must not record a cancellation: the still-armed guard
                     // owns the metric for any permit it leaves behind.
                     let Some(permit_index) = phase.checked_sub(batch.first_phase) else {
-                        failed_frames = failed_frames.saturating_add(1);
+                        failed_frames = failed_frames.saturating_add(usize::from(seated));
                         tracing::error!(
                             %room_id,
                             %player_id,
@@ -4699,7 +4860,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         continue;
                     };
                     let Some(permit) = permits.get_mut(permit_index).and_then(Option::take) else {
-                        failed_frames = failed_frames.saturating_add(1);
+                        failed_frames = failed_frames.saturating_add(usize::from(seated));
                         self.record_canceled_delivery(*player_id);
                         tracing::error!(
                             %room_id,
@@ -4719,7 +4880,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                             }
                         }
                         Ok(_) => {
-                            failed_frames = failed_frames.saturating_add(1);
+                            failed_frames = failed_frames.saturating_add(usize::from(seated));
                             self.record_canceled_delivery(*player_id);
                             tracing::warn!(
                                 %room_id,
@@ -4729,7 +4890,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                             );
                         }
                         Err(_) => {
-                            failed_frames = failed_frames.saturating_add(1);
+                            failed_frames = failed_frames.saturating_add(usize::from(seated));
                             self.metrics.increment_websocket_deliveries_channel_closed();
                             tracing::warn!(
                                 %room_id,
@@ -4758,11 +4919,16 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         // the still-armed guard counts their cancellation
                         // metric exactly once at drop.
                         for reservation in guard.get() {
-                            let RoomBatchReservation::Reserved { permits, .. } = reservation else {
+                            let RoomBatchReservation::Reserved {
+                                player_id, permits, ..
+                            } = reservation
+                            else {
                                 continue;
                             };
                             let skipped = permits.iter().filter(|permit| permit.is_some()).count();
-                            failed_frames = failed_frames.saturating_add(skipped);
+                            if !self.is_spectator_route(player_id) {
+                                failed_frames = failed_frames.saturating_add(skipped);
+                            }
                         }
                         break;
                     }
@@ -4960,6 +5126,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .insert(player_id);
         }
         let mut clients = self.local_clients.write().await;
+        self.set_spectator_route(player_id, false);
         clients.insert(player_id, delivery);
         self.sync_active_room_gates(&room_players, &routing);
         Ok(())
@@ -4991,6 +5158,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 players.remove(&player_id);
                 !players.is_empty()
             });
+            self.set_spectator_route(player_id, false);
             clients.insert(player_id, delivery);
             Some((epoch, final_seq))
         } else {
@@ -5052,6 +5220,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .entry(room_id)
                 .or_insert_with(HashSet::new)
                 .insert(player_id);
+            self.set_spectator_route(player_id, false);
             clients.insert(player_id, delivery.clone());
             self.sync_active_room_gates(&room_players, &routing);
         }
@@ -5067,93 +5236,42 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         should_commit: &'a (dyn Fn() -> bool + Send + Sync),
         commit_gate: Option<&'a StdMutex<()>>,
         drain: Option<tokio::sync::watch::Receiver<bool>>,
-        build_message: Box<
-            dyn FnOnce(
-                    Vec<PlayerId>,
-                ) -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<Output = anyhow::Result<Arc<ServerMessage>>>
-                            + Send
-                            + 'a,
-                    >,
-                > + Send
-                + 'a,
-        >,
+        build_message: crate::coordination::RoomSnapshotBuilder<'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let mut reservation_guard = InitialTransitionReservationGuard {
-            metrics: &self.metrics,
+        self.register_initial_room_recipient(
+            false,
             player_id,
-            armed: false,
-        };
-        let permit = match self
-            .reserve_initial_transition(player_id, &delivery, drain)
-            .await
-        {
-            Ok(permit) => {
-                reservation_guard.armed = true;
-                permit
-            }
-            Err(outcome) => return Ok(outcome),
-        };
-        let routing = self
-            .lock_player_routing_write(player_id, Some(room_id))
-            .await;
-        // Same lock ordering and routing transition as the sync builder, but
-        // the async builder itself is fenced by only this room's gate. Global
-        // map guards are held only for the snapshots/updates around it.
-        // Reconnect uses this to fetch replay after every older same-room
-        // broadcast has either recorded or skipped its event, and before any
-        // newer same-room broadcast can snapshot this restored socket as live.
-        let mut routed_players: Vec<PlayerId> = {
-            let room_players = self.room_players.read().await;
-            let clients = self.local_clients.read().await;
-            room_players
-                .get(&room_id)
-                .into_iter()
-                .flat_map(|players| players.iter().copied())
-                .filter(|routed_player| clients.contains_key(routed_player))
-                .collect()
-        };
-        if !routed_players.contains(&player_id) {
-            routed_players.push(player_id);
-        }
-        routed_players.sort_unstable();
-        let message = match build_message(routed_players).await {
-            Ok(message) => message,
-            // Dropping the guard here accounts the reserved attempt: the
-            // baseline build failed after the capacity was reserved.
-            Err(error) => return Err(error),
-        };
-        let outcome = {
-            // Drain takes the same gate before flipping its atomic state. No
-            // reconnect baseline can pass the check and queue after that flip.
-            let _commit_guard = commit_gate
-                .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-            if !should_commit() {
-                // The armed guard accounts the released reservation.
-                return Ok(DeliveryOutcome::Canceled);
-            }
-            let outcome =
-                self.commit_initial_transition(player_id, permit, message, &delivery.close);
-            reservation_guard.defuse();
-            outcome
-        };
-        if outcome == DeliveryOutcome::Delivered {
-            let mut room_players = self.room_players.write().await;
-            let mut clients = self.local_clients.write().await;
-            room_players.retain(|_, players| {
-                players.remove(&player_id);
-                !players.is_empty()
-            });
-            room_players
-                .entry(room_id)
-                .or_insert_with(HashSet::new)
-                .insert(player_id);
-            clients.insert(player_id, delivery.clone());
-            self.sync_active_room_gates(&room_players, &routing);
-        }
+            room_id,
+            delivery,
+            should_commit,
+            commit_gate,
+            drain,
+            build_message,
+        )
+        .await
+    }
 
-        Ok(outcome)
+    async fn register_local_spectator_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        commit_gate: Option<&'a StdMutex<()>>,
+        drain: Option<tokio::sync::watch::Receiver<bool>>,
+        build_message: crate::coordination::RoomSnapshotBuilder<'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        self.register_initial_room_recipient(
+            true,
+            player_id,
+            room_id,
+            delivery,
+            should_commit,
+            commit_gate,
+            drain,
+            build_message,
+        )
+        .await
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
@@ -5168,6 +5286,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         });
 
         let mut clients = self.local_clients.write().await;
+        self.set_spectator_route(*player_id, false);
         clients.remove(player_id);
         self.sync_active_room_gates(&room_players, &routing);
 

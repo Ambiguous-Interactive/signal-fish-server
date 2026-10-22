@@ -305,6 +305,14 @@ pub struct RunConfig {
         skip_serializing_if = "planned_record_budget_is_default"
     )]
     pub planned_record_budget: u64,
+    /// Sum of configured application payload bytes for one in-flight send
+    /// per sender. This admission budget excludes serialization copies,
+    /// socket queues, server buffers, and retained validation records.
+    #[serde(
+        default = "default_sender_payload_budget_bytes",
+        skip_serializing_if = "sender_payload_budget_is_default"
+    )]
+    pub sender_payload_budget_bytes: u64,
     /// Deep-merged over the shared harness base config for spawned servers.
     pub server_overlay: Value,
     /// Negative-control hook: pause senders once (scheduled-send latency).
@@ -345,6 +353,14 @@ pub struct RunConfig {
 
 pub(crate) fn default_planned_record_budget() -> u64 {
     32_000_000
+}
+
+pub(crate) fn default_sender_payload_budget_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn sender_payload_budget_is_default(value: &u64) -> bool {
+    *value == default_sender_payload_budget_bytes()
 }
 
 fn planned_record_budget_is_default(value: &u64) -> bool {
@@ -521,6 +537,20 @@ impl RunConfig {
         micros(self.duration).div_ceil(self.period_micros())
     }
 
+    pub fn validate_sender_payload_budget(&self) -> Result<u64, String> {
+        let bytes = u64::from(self.rooms)
+            .checked_mul(u64::from(self.players_per_room))
+            .and_then(|senders| senders.checked_mul(u64::from(self.payload_bytes)))
+            .ok_or_else(|| "sender payload byte count overflows".to_string())?;
+        if self.sender_payload_budget_bytes == 0 || bytes > self.sender_payload_budget_bytes {
+            return Err(format!(
+                "one payload per sender needs {bytes} application bytes; sender_payload_budget_bytes is {}. Reduce the workload or explicitly set CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES for a provisioned host",
+                self.sender_payload_budget_bytes
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub fn validate_planned_record_budget(&self) -> Result<u64, String> {
         if !self.send_rate_per_sender.is_finite() || self.send_rate_per_sender <= 0.0 {
             return Err("send rate must be finite and positive".to_string());
@@ -559,7 +589,8 @@ impl RunConfig {
     /// `DURATION_SECS`, `CHURN` (`none` | `reconnect-burst` |
     /// `room-replacement`) with `CHURN_FRACTION_PERCENT`,
     /// `CHURN_START_MS`, `CHURN_WINDOW_MS`, `CHURN_INTERVAL_MS`,
-    /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`, `PLANNED_RECORD_BUDGET`. Absent optional
+    /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`, `PLANNED_RECORD_BUDGET`,
+    /// `SENDER_PAYLOAD_BUDGET_BYTES`. Absent optional
     /// variables fall back to the small default scenario; required scalars
     /// fall back to the same defaults so a bare invocation just works. Each
     /// run needs a FRESH `OUTPUT_DIR` (a directory that already holds a run
@@ -707,6 +738,11 @@ impl RunConfig {
             .transpose()
             .map_err(|error| format!("CAPACITY_RUNNER_PLANNED_RECORD_BUDGET: {error}"))?
             .unwrap_or_else(default_planned_record_budget);
+        let sender_payload_budget_bytes = var("SENDER_PAYLOAD_BUDGET_BYTES")?
+            .map(|raw| raw.parse::<u64>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES: {error}"))?
+            .unwrap_or_else(default_sender_payload_budget_bytes);
         Ok(RunConfig {
             endpoint,
             external_host_evidence,
@@ -729,6 +765,7 @@ impl RunConfig {
             sample_interval: Duration::from_millis(sample_ms.unwrap_or(250)),
             receipt_timings,
             planned_record_budget,
+            sender_payload_budget_bytes,
             server_overlay: if experiment.is_some() {
                 Self::unsupported_format_overlay()
             } else {
@@ -748,6 +785,67 @@ impl RunConfig {
 #[cfg(test)]
 mod receipt_timing_tests {
     use super::*;
+
+    #[test]
+    fn sender_payload_budget_counts_all_senders_and_checks_exact_boundaries() {
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        for (rooms, players, payload) in [(1, 4, 96), (999, 16, 96), (2, 8, u32::MAX)] {
+            config.rooms = rooms;
+            config.players_per_room = players;
+            config.payload_bytes = payload;
+            let expected = u64::from(rooms) * u64::from(players) * u64::from(payload);
+            for budget in [0, expected - 1, expected, expected + 1] {
+                config.sender_payload_budget_bytes = budget;
+                let result = config.validate_sender_payload_budget();
+                if budget >= expected {
+                    assert_eq!(result.expect("explicitly admitted payload"), expected);
+                } else {
+                    assert!(result
+                        .expect_err("payload refused")
+                        .contains(&expected.to_string()));
+                }
+            }
+        }
+        config.rooms = u32::MAX;
+        config.players_per_room = u32::MAX;
+        config.payload_bytes = u32::MAX;
+        config.sender_payload_budget_bytes = u64::MAX;
+        assert_eq!(
+            config.validate_sender_payload_budget().unwrap_err(),
+            "sender payload byte count overflows"
+        );
+    }
+
+    #[test]
+    fn default_sender_payload_budget_preserves_campaign_and_refuses_large_frames() {
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        config.rooms = 999;
+        config.players_per_room = 16;
+        assert_eq!(
+            config
+                .validate_sender_payload_budget()
+                .expect("campaign payload fits"),
+            1_534_464
+        );
+        config.rooms = 1;
+        config.players_per_room = 4;
+        config.payload_bytes = 16 * 1024 * 1024;
+        assert_eq!(
+            config
+                .validate_sender_payload_budget()
+                .expect("exact default bound"),
+            67_108_864
+        );
+        config.payload_bytes += 1;
+        assert!(config.validate_sender_payload_budget().is_err());
+        config.sender_payload_budget_bytes += 4;
+        assert_eq!(
+            config
+                .validate_sender_payload_budget()
+                .expect("explicit host override"),
+            67_108_868
+        );
+    }
 
     #[test]
     fn planned_record_budget_matches_the_full_offered_work_and_boundaries() {
@@ -820,6 +918,7 @@ mod receipt_timing_tests {
         let value: serde_json::Value = serde_json::from_slice(&old_bytes).expect("config JSON");
         assert!(value.get("receipt_timings").is_none());
         assert!(value.get("planned_record_budget").is_none());
+        assert!(value.get("sender_payload_budget_bytes").is_none());
         let restored: RunConfig = serde_json::from_slice(&old_bytes).expect("old config shape");
         assert!(!restored.receipt_timings);
         assert_eq!(
@@ -827,9 +926,11 @@ mod receipt_timing_tests {
             old_bytes
         );
         config.planned_record_budget = 1234;
+        config.sender_payload_budget_bytes = 5678;
         let custom = serde_json::to_vec(&config).expect("custom budget");
         let restored: RunConfig = serde_json::from_slice(&custom).expect("custom config");
         assert_eq!(restored.planned_record_budget, 1234);
+        assert_eq!(restored.sender_payload_budget_bytes, 5678);
         config.receipt_timings = true;
         assert_eq!(
             serde_json::to_value(config).expect("enabled config")["receipt_timings"],

@@ -125,6 +125,10 @@ async fn authenticate_with_version(
     )
     .await;
     assert_eq!(
+        info.capabilities.iter().any(|c| c == "spectator_relay"),
+        protocol_version >= 3
+    );
+    assert_eq!(
         info.protocol_version, expect_reported,
         "negotiated protocol version mismatch"
     );
@@ -1649,5 +1653,116 @@ async fn reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data() {
     );
 
     assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
+}
+
+// Issue #1137: a spectator gets live relay data without a seated membership.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn spectator_receives_live_relay_after_snapshot_and_cannot_send() {
+    let (running_server, _server) = start_test_server(test_server_config()).await;
+    let addr = running_server.addr();
+    let mut host = connect(addr).await;
+    authenticate_v3(&mut host).await;
+    let (host_id, _) = join_room(&mut host, "VIEW01", "Host").await;
+    let mut sent = 0_u64;
+    for version in [2, 3] {
+        let mut viewer = connect(addr).await;
+        authenticate_with_version(&mut viewer, version, (version >= 3).then_some(version)).await;
+        send(
+            &mut viewer,
+            &ClientMessage::JoinAsSpectator {
+                game_name: "v3_seq_game".into(),
+                room_code: "VIEW01".into(),
+                spectator_name: "Viewer".into(),
+                password: None,
+            },
+        )
+        .await;
+        let baseline = next_matching_server_message_within(
+            &mut viewer,
+            SERVER_MESSAGE_TIMEOUT,
+            "spectator baseline",
+            |m| match m {
+                ServerMessage::SpectatorJoined(p) => Some(p),
+                _ => None,
+            },
+        )
+        .await;
+        let host_baseline = baseline
+            .current_players
+            .iter()
+            .find(|p| p.id == host_id)
+            .unwrap();
+        assert_eq!(host_baseline.seq, (version >= 3).then_some(sent));
+        for (class, key) in [
+            (DeliveryClass::Reliable, None),
+            (DeliveryClass::Volatile, None),
+            (DeliveryClass::Latest, Some(7)),
+        ] {
+            sent += 1;
+            let data = serde_json::json!({"tick":sent});
+            send(
+                &mut host,
+                &ClientMessage::GameData {
+                    data: data.clone(),
+                    class: Some(class),
+                    key,
+                },
+            )
+            .await;
+            let live = next_matching_server_message_within(
+                &mut viewer,
+                SERVER_MESSAGE_TIMEOUT,
+                "spectator live gameplay",
+                |m| match m {
+                    ServerMessage::GameData {
+                        from_player,
+                        data,
+                        seq,
+                        epoch,
+                        class,
+                        key,
+                    } => Some((from_player, data, seq, epoch, class, key)),
+                    _ => None,
+                },
+            )
+            .await;
+            assert_eq!(
+                live,
+                (
+                    host_id,
+                    data,
+                    (version >= 3).then_some(sent),
+                    host_baseline.epoch,
+                    (version >= 3).then_some(class),
+                    if version >= 3 { key } else { None }
+                )
+            );
+        }
+        send(
+            &mut viewer,
+            &ClientMessage::GameData {
+                data: serde_json::json!({"invalid":true}),
+                class: None,
+                key: None,
+            },
+        )
+        .await;
+        next_matching_server_message_within(
+            &mut viewer,
+            SERVER_MESSAGE_TIMEOUT,
+            "spectator cannot send",
+            |m| match m {
+                ServerMessage::Error {
+                    error_code: Some(ErrorCode::NotInRoom),
+                    ..
+                } => Some(()),
+                _ => None,
+            },
+        )
+        .await;
+        viewer.close(None).await.expect("viewer closes");
+    }
+    host.close(None).await.expect("host closes");
     running_server.shutdown().await;
 }
