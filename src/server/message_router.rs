@@ -154,6 +154,8 @@ impl EnhancedGameServer {
         message: ClientMessage,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
+        let source_lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
         if source_lifecycle.as_ref().is_some_and(|lifecycle| {
             !self
                 .connection_manager

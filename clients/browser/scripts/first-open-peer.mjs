@@ -23,12 +23,20 @@ try {
   await page.exposeFunction('publish', emit);
   await page.addScriptTag({ content: bundle.outputFiles[0].text });
   await page.evaluate(
-    async ({ initiate, binaryMode }) => {
+    async ({ initiate, binaryMode, burst }) => {
       const publish = (event) => void globalThis.publish(event);
       const payload = (sender, label, binary) => {
         const prefix = `${sender}:${label}:${binary ? 'binary' : 'text'}:`;
         const remaining = 65536 - new TextEncoder().encode(prefix).byteLength;
         return prefix + '界'.repeat(Math.floor(remaining / 3)) + 'x'.repeat(remaining % 3);
+      };
+      const NativePeerConnection = globalThis.RTCPeerConnection;
+      let connection;
+      globalThis.RTCPeerConnection = class extends NativePeerConnection {
+        constructor(...args) {
+          super(...args);
+          connection = this;
+        }
       };
       let pairs = 0;
       const opens = new Set();
@@ -46,8 +54,10 @@ try {
           opens.add(label);
           // Send within this label's first open callback, before pair bookkeeping.
           const channel = engine.channel(peer, label);
-          const body = payload('browser', label, binaryMode);
-          channel.send(binaryMode ? new TextEncoder().encode(body) : body);
+          for (const binary of burst ? [false, true] : [binaryMode]) {
+            const body = payload('browser', label, binary);
+            channel.send(binary ? new TextEncoder().encode(body) : body);
+          }
           publish({ type: 'open', label });
           if (engine.noteChannelOpen(peer, label)) pairs += 1;
         },
@@ -55,7 +65,7 @@ try {
           const binary = text.startsWith(`native:${label}:binary:`);
           const key = `${label}:${binary}`;
           if (
-            binary !== binaryMode ||
+            (!burst && binary !== binaryMode) ||
             bytes !== 65536 ||
             text !== payload('native', label, binary) ||
             receipts.has(key)
@@ -74,6 +84,10 @@ try {
       });
       globalThis.firstOpen = {
         engine,
+        transportStats: async () =>
+          [...(await connection.getStats()).values()].filter((entry) =>
+            ['data-channel', 'candidate-pair', 'transport'].includes(entry.type),
+          ),
         snapshot: () => ({
           pairs,
           opens: [...opens],
@@ -84,13 +98,17 @@ try {
       const offer = await engine.pairWith('native', initiate, []);
       publish(offer === null ? { type: 'ready' } : { type: 'offer', sdp: offer });
     },
-    { initiate: process.argv[2] === 'true', binaryMode: process.argv[3] === 'true' },
+    {
+      initiate: process.argv[2] === 'true',
+      binaryMode: process.argv[3] === 'true',
+      burst: process.argv[4] === 'burst',
+    },
   );
   const input = createInterface({ input: process.stdin });
   for await (const line of input) {
     const command = JSON.parse(line);
     await page.evaluate(async (command) => {
-      const { engine, snapshot } = globalThis.firstOpen;
+      const { engine, snapshot, transportStats } = globalThis.firstOpen;
       if (command.type === 'offer') {
         const sdp = await engine.handleOffer('native', command.sdp);
         await globalThis.publish({ type: 'answer', sdp });
@@ -99,7 +117,11 @@ try {
       } else if (command.type === 'candidate') {
         await engine.handleRemoteCandidate('native', command.candidate);
       } else if (command.type === 'snapshot') {
-        await globalThis.publish({ type: 'snapshot', ...snapshot() });
+        await globalThis.publish({
+          type: 'snapshot',
+          ...snapshot(),
+          transportStats: await transportStats(),
+        });
       }
     }, command);
   }

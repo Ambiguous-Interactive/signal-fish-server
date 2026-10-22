@@ -2750,7 +2750,13 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
     use super::game_data::{arm_relay_admission_pause, RelayAdmissionStage};
     use crate::protocol::ClientMessage;
 
-    for lane in ["text", "binary"] {
+    for lane in [
+        "text",
+        "binary",
+        "library-text",
+        "library-binary",
+        "library-router-text",
+    ] {
         for stage in [
             RelayAdmissionStage::BeforeSenderBudget,
             RelayAdmissionStage::BeforeRoomBudget,
@@ -2760,13 +2766,47 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
             })
             .await;
             let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+            let incumbent_epoch = fixture
+                .server
+                .connection_manager
+                .current_relay_stamp_in_room(&fixture.leaver, &fixture.room_id)
+                .expect("incumbent relay stamp")
+                .epoch;
             let pause = arm_relay_admission_pause(fixture.leaver, stage);
             let old_frame = {
                 let server = Arc::clone(&fixture.server);
                 let player_id = fixture.leaver;
                 let lifecycle = Arc::clone(&old_lifecycle);
                 tokio::spawn(async move {
-                    if lane == "text" {
+                    if lane == "library-text" {
+                        server
+                            .handle_game_data(
+                                &player_id,
+                                serde_json::Value::String("x".repeat(900)),
+                                None,
+                                None,
+                            )
+                            .await;
+                    } else if lane == "library-binary" {
+                        server
+                            .handle_game_data_binary(
+                                &player_id,
+                                GameDataEncoding::MessagePack,
+                                bytes::Bytes::from(vec![0u8; 900]),
+                            )
+                            .await;
+                    } else if lane == "library-router-text" {
+                        server
+                            .handle_client_message(
+                                &player_id,
+                                ClientMessage::GameData {
+                                    data: serde_json::Value::String("x".repeat(900)),
+                                    class: None,
+                                    key: None,
+                                },
+                            )
+                            .await;
+                    } else if lane.ends_with("text") {
                         server
                             .handle_client_message_from_lifecycle(
                                 &player_id,
@@ -2829,22 +2869,21 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
                 })
             };
             tokio::time::advance(Duration::from_millis(1)).await;
-            assert!(
-                timeout(Duration::from_millis(1), &mut restore)
-                    .await
-                    .is_err(),
-                "reconnect must wait for the paused old relay admission ({lane}, {stage:?})"
-            );
+            let early_restore = timeout(Duration::from_millis(1), &mut restore).await;
+            let restore_waited = early_restore.is_err();
 
             pause.release.notify_one();
             timeout(Duration::from_secs(1), old_frame)
                 .await
                 .expect("old relay finishes")
                 .expect("old relay task lives");
-            let mut replacement_rx = timeout(Duration::from_secs(1), restore)
-                .await
-                .expect("reconnect completes after the gate releases")
-                .expect("restore task lives");
+            let mut replacement_rx = match early_restore {
+                Ok(outcome) => outcome.expect("early restore task lives"),
+                Err(_) => timeout(Duration::from_secs(1), restore)
+                    .await
+                    .expect("reconnect completes after the gate releases")
+                    .expect("restore task lives"),
+            };
             assert!(
                 drain_queued_messages(&mut replacement_rx).is_empty(),
                 "the replacement receives no refusal for the old frame ({lane}, {stage:?})"
@@ -2854,7 +2893,7 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
             // charged bytes and room delivery agree.
             let delivered = drain_queued_messages(&mut fixture.survivor_rx);
             assert!(
-                delivered.iter().any(|message| if lane == "text" {
+                delivered.iter().any(|message| if lane.ends_with("text") {
                     matches!(
                         message.as_ref(),
                         ServerMessage::GameData { data, .. }
@@ -2869,7 +2908,38 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
                 }),
                 "the old frame must relay while its bytes are charged ({lane}, {stage:?}); got {delivered:?}"
             );
-            let expected_bytes = if lane == "text" { 902 } else { 900 };
+            assert_eq!(
+                delivered
+                    .iter()
+                    .filter(|message| matches!(
+                        message.as_ref(),
+                        ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+                    ))
+                    .count(),
+                1,
+                "old gameplay relays exactly once ({lane}, {stage:?})"
+            );
+            for message in &delivered {
+                if let ServerMessage::GameData { epoch, seq, .. }
+                | ServerMessage::GameDataBinary { epoch, seq, .. } = message.as_ref()
+                {
+                    assert_eq!(
+                        *epoch,
+                        Some(incumbent_epoch),
+                        "old gameplay must retain the incumbent epoch ({lane}, {stage:?})"
+                    );
+                    assert_eq!(
+                        *seq,
+                        Some(1),
+                        "old gameplay consumes one incumbent sequence ({lane}, {stage:?})"
+                    );
+                }
+            }
+            assert!(
+                restore_waited,
+                "reconnect must wait for the paused old relay admission ({lane}, {stage:?})"
+            );
+            let expected_bytes = if lane.ends_with("text") { 902 } else { 900 };
             let snapshot = fixture.server.metrics().snapshot().await;
             assert_eq!(
                 snapshot.players.relay_bytes_total, expected_bytes,
@@ -2878,7 +2948,7 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
 
             // The replacement keeps an intact budget: a follow-up frame fits
             // the window's remainder and must reach the survivor.
-            if lane == "text" {
+            if lane.ends_with("text") {
                 fixture
                     .server
                     .handle_client_message(
@@ -2920,8 +2990,22 @@ async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
                 drain_queued_messages(&mut replacement_rx).is_empty(),
                 "the replacement's follow-up relay must not be refused ({lane}, {stage:?})"
             );
+            let (epoch, seq) = match follow_up.as_ref() {
+                ServerMessage::GameData { epoch, seq, .. }
+                | ServerMessage::GameDataBinary { epoch, seq, .. } => (*epoch, *seq),
+                _ => unreachable!("only gameplay leaves the receive loop"),
+            };
             assert!(
-                if lane == "text" {
+                epoch.is_some_and(|epoch| epoch > incumbent_epoch),
+                "replacement gameplay uses its fresh epoch ({lane}, {stage:?})"
+            );
+            assert_eq!(
+                seq,
+                Some(1),
+                "old gameplay must not consume the replacement sequence ({lane}, {stage:?})"
+            );
+            assert!(
+                if lane.ends_with("text") {
                     matches!(
                         follow_up.as_ref(),
                         ServerMessage::GameData { data, .. }
@@ -4211,7 +4295,13 @@ async fn old_socket_cannot_change_room_authority_or_access_after_reconnect() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
-async fn old_socket_game_data_cannot_relay_after_reconnect() {
+async fn old_socket_and_library_game_data_cannot_relay_after_reconnect() {
+    for library_router in [false, true] {
+        assert_old_game_data_cannot_relay_after_reconnect(library_router).await;
+    }
+}
+
+async fn assert_old_game_data_cannot_relay_after_reconnect(library_router: bool) {
     use crate::protocol::{ClientMessage, GameDataEncoding};
 
     let mut fixture = setup_joined_pair_with_reconnection().await;
@@ -4225,17 +4315,18 @@ async fn old_socket_game_data_cannot_relay_after_reconnect() {
         let sender = fixture.leaver;
         let lifecycle = Arc::clone(&old_lifecycle);
         tokio::spawn(async move {
-            server
-                .handle_client_message_from_lifecycle(
-                    &sender,
-                    ClientMessage::GameData {
-                        data: serde_json::json!({"old": true}),
-                        class: None,
-                        key: None,
-                    },
-                    lifecycle,
-                )
-                .await;
+            let message = ClientMessage::GameData {
+                data: serde_json::json!({"old": true}),
+                class: None,
+                key: None,
+            };
+            if library_router {
+                server.handle_client_message(&sender, message).await;
+            } else {
+                server
+                    .handle_client_message_from_lifecycle(&sender, message, lifecycle)
+                    .await;
+            }
         })
     };
     timeout(Duration::from_secs(1), pause.reached.notified())

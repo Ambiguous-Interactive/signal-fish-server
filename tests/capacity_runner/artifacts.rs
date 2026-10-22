@@ -449,12 +449,17 @@ pub fn write_manifest(
     write_json(output_dir.join(MANIFEST_FILE), &manifest)
 }
 
-/// Append-write helper: serialize `value` as pretty JSON.
+/// Write pretty JSON through a bounded buffer instead of retaining encoded output.
 pub fn write_json(path: impl AsRef<Path>, value: &impl serde::Serialize) -> Result<(), String> {
     let path = path.as_ref();
-    let bytes = serde_json::to_vec_pretty(value)
+    let file =
+        fs::File::create(path).map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)
         .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    fs::write(path, bytes).map_err(|error| format!("write {}: {error}", path.display()))
+    writer
+        .flush()
+        .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 /// Write the event log as JSON lines.
@@ -725,6 +730,18 @@ mod tests {
             };
             results.push((file, result));
         }
+        let output = tempfile::tempdir().expect("output");
+        std::os::unix::fs::symlink("/dev/full", output.path().join(SUMMARY_FILE))
+            .expect("full device fixture");
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"large": "x".repeat(32_768)}),
+        ] {
+            results.push((
+                SUMMARY_FILE,
+                write_json(output.path().join(SUMMARY_FILE), &value),
+            ));
+        }
         assert!(
             results.iter().all(|(_, result)| result.is_err()),
             "every writer must report its buffered failure: {results:?}"
@@ -732,6 +749,110 @@ mod tests {
         for (file, result) in results {
             assert!(result.expect_err("write failure").contains(file));
         }
+    }
+
+    #[test]
+    fn pretty_json_stream_preserves_exact_bytes_and_reports_failures() {
+        let output = tempfile::tempdir().expect("output");
+        let path = output.path().join(SUMMARY_FILE);
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!({"large": "x".repeat(32_768)}),
+            serde_json::json!({"escaped": "quote\"\\\n", "unicode": "未知", "empty": [],
+                "nested": [{"max": u64::MAX, "min": i64::MIN, "float": 1.5}]}),
+        ] {
+            write_json(&path, &value).expect("stream pretty JSON");
+            assert_eq!(
+                fs::read(&path).expect("read JSON"),
+                serde_json::to_vec_pretty(&value).unwrap()
+            );
+        }
+        assert!(write_json(output.path().join("missing/summary.json"), &())
+            .unwrap_err()
+            .contains("create"));
+        struct RefusesSerialization;
+        impl serde::Serialize for RefusesSerialization {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("injected serialization failure"))
+            }
+        }
+        let error = write_json(&path, &RefusesSerialization).unwrap_err();
+        assert!(error.contains("serialize") && error.contains("injected serialization failure"));
+    }
+
+    #[test]
+    #[ignore = "isolated summary serialization memory profile; run in a fresh process"]
+    fn generator_summary_write_memory_profile() {
+        let rooms = std::env::var("CAPACITY_SUMMARY_PROBE_ROOMS")
+            .unwrap_or_else(|_| "999".into())
+            .parse::<u32>()
+            .expect("room count");
+        assert!((1..=999).contains(&rooms));
+        let streaming = std::env::var("CAPACITY_SUMMARY_PROBE_STREAMING").as_deref() == Ok("1");
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        let mut summary = summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            500_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        let base = summary.per_recipient[0].clone();
+        summary.per_recipient = (0..rooms)
+            .flat_map(|room| {
+                let base = &base;
+                (0..16).map(move |player| {
+                    let mut outcome = base.clone();
+                    outcome.recipient = RunConfig::peer_name(room, player);
+                    outcome.room = room;
+                    outcome.received = (0..16)
+                        .filter(|&sender| sender != player)
+                        .map(|sender| (RunConfig::peer_name(room, sender), 43_200))
+                        .collect();
+                    outcome
+                })
+            })
+            .collect();
+        let retained_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let output = tempfile::tempdir().expect("output");
+        let path = output.path().join(SUMMARY_FILE);
+        let started = std::time::Instant::now();
+        if streaming {
+            write_json(&path, &summary).expect("stream summary");
+        } else {
+            let bytes = serde_json::to_vec_pretty(&summary).expect("encode summary");
+            fs::write(&path, &bytes).expect("write summary");
+            std::hint::black_box(bytes);
+        }
+        let elapsed_us = started.elapsed().as_micros();
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let mut artifact = fs::File::open(&path).unwrap();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = artifact.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        let sha256 = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        println!(
+            "SUMMARY_WRITE_PROFILE {}",
+            serde_json::json!({"rooms":rooms,
+            "recipients":summary.per_recipient.len(), "streaming":streaming,
+            "retained_rss_bytes":retained_rss, "elapsed_us":elapsed_us,
+            "artifact_bytes":fs::metadata(&path).unwrap().len(), "sha256":sha256})
+        );
+        std::hint::black_box(summary);
     }
 
     // #775/#636: repeated names must borrow the replay line before pooling,

@@ -4744,3 +4744,72 @@ sort across 4,096 duplicate and Unicode histories. They also cover sorted
 input, zero and small inputs, high sender counts, duplicate evidence through
 the real collector, unchanged receipt order, JSONL round-trip, and a second
 empty drain. The runner changes no server behavior or external client API.
+
+### Summary-write memory after collection (session 506, #775, #636)
+
+The capacity runner now writes pretty JSON through a buffered file writer.
+It no longer retains the complete encoded summary beside the raw records
+and per-recipient outcomes. The same helper writes the manifest and optional
+receipt-timing sidecar. It reports serialization, write, and final-flush errors.
+Successful artifact bytes and replay inputs stay the same. Writes are
+non-atomic. A serialization, write, or flush failure can leave a partial file
+and fails the run; that file is not successful evidence.
+
+The ignored `artifacts::tests::generator_summary_write_memory_profile`
+control compares the former output vector with the streaming writer in one
+executable. Its synthetic summary has 16 peers per room and 15 sender counters
+per peer. Each sender counter holds 43,200 deliveries. This matches the
+recipient-counter shape of the 720-second, 60-send/s capacity plan.
+The fixture expands a small oracle summary; it does not execute or validate
+that long workload. Raw records, sockets, and oracle peak memory are outside
+this probe.
+
+Three fresh trials per path alternate old/new/new/old/old/new for each size.
+The release executable is the same for both paths. Final trials run without
+local build, browser, or gameplay-test overlap on the shared ARM64 host.
+A small native launcher reads each child's `wait4` resource usage. This avoids
+inheriting a Python launcher's larger peak-RSS floor.
+
+| Recipients | Summary bytes | Old peak RSS (KiB) | New peak RSS (KiB) | Old write (µs) | New write (µs) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,024 | 791,937 | 8,452 | 8,064 | 2,344 | 3,054 |
+| 4,096 | 3,212,097 | 16,124 | 13,696 | 8,413 | 7,675 |
+| 15,984 | 12,615,505 | 47,620 | 35,460 | 29,978 | 28,905 |
+
+These are medians. At 15,984 peers, peak RSS falls by 12,160 KiB, about 26%.
+Small-cohort RSS differences and write times remain sensitive to process and
+host noise. This is a post-run artifact-memory improvement, not a relay-latency
+or server-throughput result. Retained event memory still grows with workload.
+The full ten-minute memory proof and historical stalls remain open.
+
+Reproduce with the release capacity-runner executable and `--ignored --exact
+artifacts::tests::generator_summary_write_memory_profile --nocapture`, setting
+`CAPACITY_SUMMARY_PROBE_ROOMS` and `CAPACITY_SUMMARY_PROBE_STREAMING=0` or `1`.
+All six processes per size produce the same artifact length and SHA-256.
+Raw rows, native launcher, script, executable hash, and the invalidated
+overlapping cohort remain in local `progress/session-506/summary-memory/`.
+
+Regression controls preserve exact pretty-JSON bytes, including escaped and
+Unicode strings, nested values, scalar bounds, and output larger than the
+writer buffer. They cover file creation, serialization, buffered-write, and
+final-flush failures. The live small reliable cell still replays to the exact
+summary. The runner changes no server message or external client API.
+
+### Root-cgroup memory samples (session 506, #1009)
+
+The sampler previously reported unavailable memory for a unified cgroup at
+`0::/`, even when `/sys/fs/cgroup/memory.current` was readable. It rejected
+the empty relative path after removing the leading slash. The sampler now
+reads the mount-root file for this path and keeps nested cgroup reads.
+Only unified-hierarchy entries select this path. Missing, malformed, and
+unreadable values remain unavailable. Legacy hierarchy behavior stays the same.
+
+Fixture controls cover root, nested, hybrid, malformed, zero, and unavailable
+values. The unchanged helper failed the root fixture with `None` instead of
+`Some(123456)` before the repair. A live Linux control checks the calling
+process when its unified cgroup file is readable. The repaired sampler
+recorded 23,571,091,456 bytes on this host. This is shared cgroup usage,
+not either process's RSS or an exclusive footprint. The sampler uses the
+conventional v2 mount; it does not add v1 or nonstandard-mount support.
+This repairs missing resource evidence. It does not identify the cause of
+the stalls in #1009 or qualify a capacity limit.

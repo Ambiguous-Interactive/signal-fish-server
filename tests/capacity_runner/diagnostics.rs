@@ -102,38 +102,19 @@ pub fn resident_memory_bytes(_pid: u32) -> Option<u64> {
     None
 }
 
-/// Cgroup memory usage of a process in bytes (cgroup v2 then v1, best
-/// effort; `None` when the process's cgroup cannot be read).
+/// Cgroup v2 memory usage in bytes at the conventional Linux mount.
+/// Returns `None` for v1, unreadable counters, or an unavailable mount.
 #[cfg(target_os = "linux")]
 pub fn cgroup_memory_bytes(pid: u32) -> Option<u64> {
     let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
-    let relative = cgroup
-        .lines()
-        .find_map(|line| {
-            // v2 lines are `0::<path>`; v1 memory lines are `N:memory:<path>`.
-            let mut fields = line.split(':');
-            let hierarchy = fields.next()?;
-            let controller = fields.next()?;
-            let path = fields.next()?.trim_start_matches('/').to_string();
-            if hierarchy == "0" || controller == "memory" {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .filter(|path| !path.is_empty())?;
+    cgroup_memory_bytes_from(&cgroup, Path::new("/sys/fs/cgroup"))
+}
 
-    let root = Path::new("/sys/fs/cgroup");
-    let v2 = root.join(&relative).join("memory.current");
-    if let Ok(text) = std::fs::read_to_string(&v2) {
-        if let Ok(bytes) = text.trim().parse::<u64>() {
-            return Some(bytes);
-        }
-    }
-    // v1 exposes usage through the memory controller mount, which this
-    // best-effort probe does not resolve; absence is recorded as None.
-    let _ = root;
-    None
+#[cfg(target_os = "linux")]
+fn cgroup_memory_bytes_from(cgroup: &str, root: &Path) -> Option<u64> {
+    let relative = cgroup.lines().find_map(|line| line.strip_prefix("0::/"))?;
+    let text = std::fs::read_to_string(root.join(relative).join("memory.current")).ok()?;
+    text.trim().parse().ok()
 }
 
 /// Cgroup memory usage of a process in bytes (`None` off-Linux).
@@ -393,6 +374,53 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_memory_reads_v2_root_and_nested_groups_without_inventing_absent_values() {
+        let root = tempfile::tempdir().expect("cgroup fixture");
+        std::fs::write(root.path().join("memory.current"), "123456\n").unwrap();
+        std::fs::create_dir(root.path().join("game")).unwrap();
+        std::fs::write(root.path().join("game/memory.current"), "654321\n").unwrap();
+        for (body, expected) in [
+            ("0::/\n", Some(123456)),
+            ("0::/game\n", Some(654321)),
+            ("0::/missing\n", None),
+            ("5:memory:/legacy\n0::/game\n", Some(654321)),
+            ("5:memory:/\n", None),
+            ("0:memory:/\n", None),
+            ("0::\n", None),
+            ("invalid\n", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                cgroup_memory_bytes_from(body, root.path()),
+                expected,
+                "{body:?}"
+            );
+        }
+        std::fs::write(root.path().join("memory.current"), "0\n").unwrap();
+        assert_eq!(cgroup_memory_bytes_from("0::/\n", root.path()), Some(0));
+        std::fs::write(root.path().join("memory.current"), "unavailable\n").unwrap();
+        assert_eq!(cgroup_memory_bytes_from("0::/\n", root.path()), None);
+        assert_eq!(cgroup_memory_bytes(u32::MAX), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_memory_reads_the_live_root_counter_when_available() {
+        let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+        if cgroup.lines().any(|line| line == "0::/")
+            && std::fs::read_to_string("/sys/fs/cgroup/memory.current")
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .is_some()
+        {
+            let measured = cgroup_memory_bytes(std::process::id());
+            assert!(measured.is_some(), "readable root cgroup must be sampled");
+            eprintln!("live root cgroup memory sample: {measured:?} bytes");
+        }
     }
 
     // The live sampler reads the calling process and only ever moves
