@@ -358,23 +358,16 @@ impl EnhancedGameServer {
             }
         }
 
+        /* A queued leave changes membership without replacing the lifecycle.
+         * Hold this gate from room lookup through stamp/enqueue (issue #686). */
+        let source_gate = match source_lifecycle.as_ref() {
+            Some(lifecycle) => Some(lifecycle.lock().await),
+            None => None,
+        };
+        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+            return;
+        }
         if let Some(room_id) = self.get_client_room(player_id).await {
-            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
-                return;
-            }
-            // Hold the source gate across admission and stamp/enqueue (issue
-            // #686): the reconnect rekey waits for this gate, so the budget
-            // charge and the stamp land while the source is provably the
-            // incumbent — or the re-check dismisses the stale frame with no
-            // charge at all. The gate is released before the backpressured
-            // fan-out completion so a reconnect never waits on queue drains.
-            let source_gate = match source_lifecycle.as_ref() {
-                Some(lifecycle) => Some(lifecycle.lock().await),
-                None => None,
-            };
-            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
-                return;
-            }
             // The sender-controlled JSON payload is the budget measure
             // (memoized above, shared with the per-encoding cap).
             if let Err(e) = self
@@ -420,6 +413,8 @@ impl EnhancedGameServer {
             self.broadcast_game_data_with(player_id, &room_id, source_gate, &mut build_message)
                 .await;
         } else {
+            // Refusal delivery acquires the same source gate.
+            drop(source_gate);
             // Every sibling surface (ProvideConnectionInfo, Signal,
             // Authority) rejects unseated senders with NOT_IN_ROOM; leaving
             // these lanes silent made "relayed" indistinguishable from
@@ -529,19 +524,14 @@ impl EnhancedGameServer {
         // first, and rejected frames — oversized or over-budget — record no
         // liveness: a stream of rejected frames must not keep an otherwise
         // idle client or room alive indefinitely.
+        let source_gate = match source_lifecycle.as_ref() {
+            Some(lifecycle) => Some(lifecycle.lock().await),
+            None => None,
+        };
+        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+            return;
+        }
         if let Some(room_id) = self.get_client_room(player_id).await {
-            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
-                return;
-            }
-            // Source gate across admission and stamp/enqueue; see the text
-            // lane for the issue #686 rationale.
-            let source_gate = match source_lifecycle.as_ref() {
-                Some(lifecycle) => Some(lifecycle.lock().await),
-                None => None,
-            };
-            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
-                return;
-            }
             // Sender-side relay byte budget (issue #519) plus the room's
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
@@ -593,6 +583,7 @@ impl EnhancedGameServer {
             // frame was validly sized and is answered with NOT_IN_ROOM.
             self.record_client_activity(player_id);
             self.maybe_update_last_seen(player_id).await;
+            drop(source_gate);
             // See the text-lane rationale above: an unseated sender must be
             // able to observe the rejection, not infer it from silence.
             let _ = self

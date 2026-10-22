@@ -375,12 +375,27 @@ impl Features {
     }
 }
 
+/// Monotonic sampler boundaries, in microseconds from the workload epoch.
+/// Elapsed phases include task descheduling. Missing response boundaries mean
+/// that the request failed before that phase completed. Old artifacts omit this.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SamplerTiming {
+    pub scheduled_us: u64,
+    pub wake_us: u64,
+    pub headers_received_us: Option<u64>,
+    pub body_received_us: Option<u64>,
+    pub scrape_finished_us: u64,
+    pub resources_finished_us: u64,
+}
+
 /// One periodic resource sample. Every counter is `Option`: a value the
 /// host cannot provide is recorded as `null` (unavailable), never dropped.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntervalSample {
     /// Sample time in microseconds relative to the run epoch.
     pub t_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<SamplerTiming>,
     pub counters: Value,
     /// Resident set size of the server process.
     pub server_rss_bytes: Option<u64>,

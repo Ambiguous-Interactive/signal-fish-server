@@ -358,6 +358,72 @@ impl RTCPeerConnection {
         }
     }
 
+    /*
+       Keep application admission and SCTP enqueue under one peer-core borrow.
+       The normal write flush still generates and batches transport packets.
+    */
+    pub(crate) fn write_data_channel(
+        &mut self,
+        message: TaggedRTCMessageInternal,
+    ) -> Result<(), Error> {
+        use sansio::Protocol;
+        /*
+           Old inbound-generated control belongs to the driver, not this send.
+           Its failure must neither reject this payload nor leave it queued.
+        */
+        while let Some(control) = self
+            .pipeline_context
+            .datachannel_handler_context
+            .write_outs
+            .pop_front()
+        {
+            if let Err(error) = self.get_sctp_handler().handle_write(control) {
+                warn!("SctpHandler.handle_write got error: {}", error);
+            }
+        }
+        let sent = match &message.message {
+            RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                data_channel_id,
+                data_channel_event: DataChannelEvent::Message(payload),
+            })) => Some((*data_channel_id, payload.data.len())),
+            _ => None,
+        };
+        self.get_datachannel_handler().handle_write(message)?;
+        while let Some(message) = self
+            .pipeline_context
+            .datachannel_handler_context
+            .write_outs
+            .pop_front()
+        {
+            if let Err(error) = self
+                .get_sctp_handler()
+                .handle_write(message)
+                .map_err(|error| {
+                    if error == Error::ErrStreamClosed {
+                        Error::ErrDataChannelClosed
+                    } else {
+                        error
+                    }
+                })
+            {
+                self.pipeline_context
+                    .datachannel_handler_context
+                    .write_outs
+                    .clear();
+                return Err(error);
+            }
+        }
+        if let Some((id, bytes)) = sent
+            && let Some(channel) = self.data_channels.get(&id)
+        {
+            self.pipeline_context
+                .stats
+                .get_or_create_data_channel(id, &channel.label, &channel.protocol)
+                .on_message_sent(bytes);
+        }
+        Ok(())
+    }
+
     /// Returns whether any handler raised an event during the sweep.
     fn pump_events(&mut self) -> bool {
         let mut intermediate_eouts = VecDeque::new();
@@ -461,13 +527,19 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
             }
         };
 
-        // Only endpoint can handle user write message
-        let mut endpoint_handler = self.get_endpoint_handler();
-        endpoint_handler.handle_write(TaggedRTCMessageInternal {
+        let message = TaggedRTCMessageInternal {
             now,
             transport: Default::default(),
             message: rtc_message_internal,
-        })
+        };
+        if matches!(
+            &message.message,
+            RTCMessageInternal::Dtls(DTLSMessage::DataChannel(_))
+        ) {
+            self.write_data_channel(message)
+        } else {
+            self.get_endpoint_handler().handle_write(message)
+        }
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
@@ -721,13 +793,7 @@ mod handler_test {
 
         pc.handle_write(TaggedRTCMessage {
             now: t(5),
-            message: RTCMessage::DataChannelMessage(
-                1,
-                RTCDataChannelMessage {
-                    is_string: true,
-                    data: BytesMut::from(&b"hello"[..]),
-                },
-            ),
+            message: RTCMessage::RtcpPacket(String::new(), Vec::new()),
         })
         .expect("handle_write queues the message");
 

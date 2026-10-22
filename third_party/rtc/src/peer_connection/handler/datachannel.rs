@@ -493,16 +493,7 @@ impl<'a>
             if let DataChannelEvent::Message(RTCDataChannelMessage { is_string, data }) =
                 message.data_channel_event
             {
-                let data_len = data.len();
                 let channel_id = message.data_channel_id;
-
-                // Get label/protocol before taking mutable borrow
-                let dc_internal = self
-                    .data_channels
-                    .get(&channel_id)
-                    .ok_or(Error::ErrDataChannelNotExisted)?;
-                let label = dc_internal.label.clone();
-                let protocol = dc_internal.protocol.clone();
 
                 let data_channel = self
                     .data_channels
@@ -517,11 +508,6 @@ impl<'a>
                         is_string, data,
                     );
                 data_channel.handle_write(data_channel_message)?;
-
-                // Track sent message stats
-                self.stats
-                    .get_or_create_data_channel(channel_id, &label, &protocol)
-                    .on_message_sent(data_len);
 
                 while let Some(data_channel_message) = data_channel.poll_write() {
                     debug!("send data channel message from handle_write");

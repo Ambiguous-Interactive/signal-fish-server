@@ -34,7 +34,8 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::artifacts::{
-    self, BuildIdentity, ConfigProvenance, IntervalSample, ServerIdentity, WorkloadShape,
+    self, BuildIdentity, ConfigProvenance, IntervalSample, SamplerTiming, ServerIdentity,
+    WorkloadShape,
 };
 use crate::config::{
     count_u64, count_usize, default_latest_keys, micros, ChurnSchedule, DeliveryClass, Encoding,
@@ -763,7 +764,7 @@ fn completed_send_evidence(send: &SentEvent) -> serde_json::Value {
 }
 
 fn interval_evidence(sample: &IntervalSample) -> serde_json::Value {
-    json!({"t_us": sample.t_us, "scrape_failed": sample.scrape_error.is_some(),
+    json!({"t_us": sample.t_us, "timing": sample.timing, "scrape_failed": sample.scrape_error.is_some(),
         "server_cpu_seconds": sample.server_cpu_seconds,
         "generator_cpu_seconds": sample.generator_cpu_seconds,
         "server_rss_bytes": sample.server_rss_bytes,
@@ -1960,92 +1961,123 @@ async fn sample_loop(
         if Instant::now() >= until {
             return;
         }
+        let sample =
+            collect_interval_sample(&client, epoch, slot, &metrics_url, pid, delivery_class).await;
         slot += interval;
-
-        let scrape: Result<BTreeMap<String, serde_json::Value>, String> = async {
-            let response = client
-                .get(&metrics_url)
-                .send()
-                .await
-                .map_err(|error| format!("{metrics_url}: {error}"))?;
-            let status = response.status();
-            let text = response
-                .text()
-                .await
-                .map_err(|error| format!("{metrics_url}: {error}"))?;
-            if !status.is_success() {
-                return Err(format!("{metrics_url}: {status}"));
-            }
-            // Every tracked counter is recorded — its value, or null when
-            // the exposition no longer carries it.
-            let mut counters: BTreeMap<String, serde_json::Value> = diagnostics::TRACKED_COUNTERS
-                .iter()
-                .map(|name| {
-                    let value = match diagnostics::parse_counter(&text, name) {
-                        Some(value) => serde_json::Value::from(value),
-                        None => serde_json::Value::Null,
-                    };
-                    ((*name).to_string(), value)
-                })
-                .collect();
-            // A lossy-class run also records its class's seven accountable
-            // outcomes, so server-side accounting can be checked against the
-            // gap reports the oracle validated.
-            if let Some(class) = delivery_class {
-                let class_token = match class {
-                    DeliveryClass::Latest => "latest",
-                    DeliveryClass::Volatile => "volatile",
-                    DeliveryClass::Reliable => "reliable",
-                };
-                for outcome in [
-                    "attempted",
-                    "delivered",
-                    "superseded",
-                    "dropped_full",
-                    "dropped",
-                    "abandoned",
-                    "unsupported_format",
-                ] {
-                    let value = diagnostics::parse_labeled_counter(
-                        &text,
-                        "signal_fish_websocket_delivery_class_outcomes_total",
-                        &[("class", class_token), ("outcome", outcome)],
-                    );
-                    counters.insert(
-                        format!("class_outcome_{outcome}"),
-                        value
-                            .map(serde_json::Value::from)
-                            .unwrap_or(serde_json::Value::Null),
-                    );
-                }
-            }
-            Ok(counters)
-        }
-        .await;
-        let (counters, scrape_error) = match scrape {
-            Ok(counters) => (
-                serde_json::to_value(counters).unwrap_or(serde_json::Value::Null),
-                None,
-            ),
-            Err(error) => (serde_json::Value::Null, Some(error)),
-        };
-        let sockets = pid.and_then(diagnostics::socket_memory_pages);
-        let sample = IntervalSample {
-            t_us: micros(epoch.elapsed()),
-            counters,
-            server_rss_bytes: pid.and_then(diagnostics::resident_memory_bytes),
-            server_cpu_seconds: pid.and_then(diagnostics::process_cpu_seconds),
-            cgroup_memory_bytes: pid.and_then(diagnostics::cgroup_memory_bytes),
-            generator_rss_bytes: diagnostics::resident_memory_bytes(std::process::id()),
-            generator_cpu_seconds: diagnostics::process_cpu_seconds(std::process::id()),
-            // One procfs read serves the whole pair, so both fields always
-            // come from the same scrape instant (the parser's contract is
-            // all-or-nothing per family).
-            server_socket_tcp_mem_pages: sockets.as_ref().map(|pages| pages.tcp),
-            server_socket_udp_mem_pages: sockets.as_ref().map(|pages| pages.udp),
-            scrape_error,
-        };
         out.lock().expect("interval samples poisoned").push(sample);
+    }
+}
+
+async fn collect_interval_sample(
+    client: &reqwest::Client,
+    epoch: Instant,
+    slot: Instant,
+    metrics_url: &str,
+    pid: Option<u32>,
+    delivery_class: Option<DeliveryClass>,
+) -> IntervalSample {
+    let wake_us = micros(epoch.elapsed());
+    let mut headers_received_us = None;
+    let mut body_received_us = None;
+
+    let scrape: Result<BTreeMap<String, serde_json::Value>, String> = async {
+        let response = client
+            .get(metrics_url)
+            .send()
+            .await
+            .map_err(|error| format!("{metrics_url}: {error}"))?;
+        headers_received_us = Some(micros(epoch.elapsed()));
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| format!("{metrics_url}: {error}"))?;
+        body_received_us = Some(micros(epoch.elapsed()));
+        if !status.is_success() {
+            return Err(format!("{metrics_url}: {status}"));
+        }
+        // Every tracked counter is recorded — its value, or null when
+        // the exposition no longer carries it.
+        let mut counters: BTreeMap<String, serde_json::Value> = diagnostics::TRACKED_COUNTERS
+            .iter()
+            .map(|name| {
+                let value = match diagnostics::parse_counter(&text, name) {
+                    Some(value) => serde_json::Value::from(value),
+                    None => serde_json::Value::Null,
+                };
+                ((*name).to_string(), value)
+            })
+            .collect();
+        // A lossy-class run also records its class's seven accountable
+        // outcomes, so server-side accounting can be checked against the
+        // gap reports the oracle validated.
+        if let Some(class) = delivery_class {
+            let class_token = match class {
+                DeliveryClass::Latest => "latest",
+                DeliveryClass::Volatile => "volatile",
+                DeliveryClass::Reliable => "reliable",
+            };
+            for outcome in [
+                "attempted",
+                "delivered",
+                "superseded",
+                "dropped_full",
+                "dropped",
+                "abandoned",
+                "unsupported_format",
+            ] {
+                let value = diagnostics::parse_labeled_counter(
+                    &text,
+                    "signal_fish_websocket_delivery_class_outcomes_total",
+                    &[("class", class_token), ("outcome", outcome)],
+                );
+                counters.insert(
+                    format!("class_outcome_{outcome}"),
+                    value
+                        .map(serde_json::Value::from)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        Ok(counters)
+    }
+    .await;
+    let (counters, scrape_error) = match scrape {
+        Ok(counters) => (
+            serde_json::to_value(counters).unwrap_or(serde_json::Value::Null),
+            None,
+        ),
+        Err(error) => (serde_json::Value::Null, Some(error)),
+    };
+    let scrape_finished_us = micros(epoch.elapsed());
+    let sockets = pid.and_then(diagnostics::socket_memory_pages);
+    let sample = IntervalSample {
+        t_us: micros(epoch.elapsed()),
+        timing: None,
+        counters,
+        server_rss_bytes: pid.and_then(diagnostics::resident_memory_bytes),
+        server_cpu_seconds: pid.and_then(diagnostics::process_cpu_seconds),
+        cgroup_memory_bytes: pid.and_then(diagnostics::cgroup_memory_bytes),
+        generator_rss_bytes: diagnostics::resident_memory_bytes(std::process::id()),
+        generator_cpu_seconds: diagnostics::process_cpu_seconds(std::process::id()),
+        // One procfs read serves the whole pair, so both fields always
+        // come from the same scrape instant (the parser's contract is
+        // all-or-nothing per family).
+        server_socket_tcp_mem_pages: sockets.as_ref().map(|pages| pages.tcp),
+        server_socket_udp_mem_pages: sockets.as_ref().map(|pages| pages.udp),
+        scrape_error,
+    };
+    let resources_finished_us = micros(epoch.elapsed());
+    IntervalSample {
+        timing: Some(SamplerTiming {
+            scheduled_us: micros(slot.saturating_duration_since(epoch)),
+            wake_us,
+            headers_received_us,
+            body_received_us,
+            scrape_finished_us,
+            resources_finished_us,
+        }),
+        ..sample
     }
 }
 
@@ -2259,6 +2291,139 @@ async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(),
 #[cfg(test)]
 mod session_poll_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sampler_timing_separates_late_wake_headers_body_and_resource_reads() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/metrics/prom", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 44\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            stream
+                .write_all(b"signal_fish_websocket_queue_depth 7         ")
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let epoch = Instant::now();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let sample = collect_interval_sample(
+            &client,
+            epoch,
+            epoch,
+            &endpoint,
+            Some(std::process::id()),
+            None,
+        )
+        .await;
+        server.await.unwrap();
+        assert!(sample.scrape_error.is_none(), "{:?}", sample.scrape_error);
+        assert_eq!(sample.counters["signal_fish_websocket_queue_depth"], 7);
+        let timing = sample
+            .timing
+            .as_ref()
+            .expect("new samples carry boundaries");
+        let headers = timing.headers_received_us.expect("headers reached");
+        let body = timing.body_received_us.expect("body reached");
+        assert_eq!(timing.scheduled_us, 0);
+        assert!(timing.wake_us >= 10_000, "late wake stays distinct");
+        assert!(headers >= timing.wake_us + 20_000, "header wait captured");
+        assert!(
+            body >= timing.wake_us + 50_000,
+            "both server waits captured"
+        );
+        assert!(body >= headers, "observation boundaries are monotonic");
+        assert!(timing.scrape_finished_us >= body);
+        assert!(sample.t_us >= timing.scrape_finished_us);
+        assert!(timing.resources_finished_us >= sample.t_us);
+        let evidence = interval_evidence(&sample);
+        assert_eq!(evidence["timing"], serde_json::to_value(timing).unwrap());
+        let output = tempfile::tempdir().unwrap();
+        artifacts::write_intervals(output.path(), &[sample]).unwrap();
+        let reloaded = artifacts::read_intervals(output.path()).unwrap();
+        assert_eq!(interval_evidence(&reloaded[0]), evidence);
+    }
+
+    #[tokio::test]
+    async fn sampler_timing_retains_reached_phases_on_http_and_body_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (response, expected_headers, expected_body) in [
+            (
+                "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                true,
+                true,
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort",
+                true,
+                false,
+            ),
+            ("invalid HTTP response\r\n\r\n", false, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/metrics/prom", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+            let epoch = Instant::now();
+            let sample = collect_interval_sample(
+                &reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+                epoch,
+                epoch,
+                &endpoint,
+                None,
+                None,
+            )
+            .await;
+            server.await.unwrap();
+            assert!(sample.scrape_error.is_some(), "{response}");
+            assert!(sample.counters.is_null());
+            let timing = sample.timing.as_ref().unwrap();
+            assert_eq!(
+                timing.headers_received_us.is_some(),
+                expected_headers,
+                "{response}"
+            );
+            assert_eq!(
+                timing.body_received_us.is_some(),
+                expected_body,
+                "{response}"
+            );
+            assert!(timing.scrape_finished_us >= timing.wake_us);
+            assert!(timing.resources_finished_us >= timing.scrape_finished_us);
+        }
+        let historical: IntervalSample =
+            serde_json::from_value(json!({"t_us": 7, "counters": {}})).unwrap();
+        assert!(historical.timing.is_none(), "old artifacts stay readable");
+        assert!(serde_json::to_value(historical)
+            .unwrap()
+            .get("timing")
+            .is_none());
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // #775: byte accounting must not allocate another application-sized buffer.

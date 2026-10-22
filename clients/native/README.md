@@ -42,6 +42,8 @@ continues to relay opaque signaling payloads.
 The native build uses qualified local RTC and SCTP source patches.
 A closed channel retains its stream ID until both reset directions finish.
 Completed stream IDs can be reused; late duplicate resets do not close a new channel.
+Accepted text and binary writes enter SCTP before a peer reset can stop the stream.
+A successful send means local admission. It does not prove remote receipt.
 The patch scope and removal criteria are in
 [RTC patch notes](../../third_party/rtc/PATCH.md) and
 [SCTP patch notes](../../third_party/rtc-sctp/PATCH.md).

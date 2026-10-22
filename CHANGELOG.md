@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject queued gameplay after room leave without charging relay bytes (#1119).
+- Preserve native gameplay during peer resets and first sends on negotiated channels (#1121).
 - Keep embedded-server gameplay in its original connection when a player reconnects (#1117).
 
 ## [0.12.0] - 2026-10-21

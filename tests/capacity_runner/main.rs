@@ -314,6 +314,15 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
             "every scrape of this run must succeed, got {:?}",
             sample.scrape_error
         );
+        let timing = sample.timing.as_ref().expect("sampler phase evidence");
+        let headers = timing.headers_received_us.expect("successful HTTP headers");
+        let body = timing.body_received_us.expect("successful HTTP body");
+        assert!(timing.wake_us >= timing.scheduled_us);
+        assert!(headers >= timing.wake_us);
+        assert!(body >= headers);
+        assert!(timing.scrape_finished_us >= body);
+        assert!(sample.t_us >= timing.scrape_finished_us);
+        assert!(timing.resources_finished_us >= sample.t_us);
         for name in [
             "signal_fish_relay_bytes_total",
             "signal_fish_websocket_egress_bytes_total",
