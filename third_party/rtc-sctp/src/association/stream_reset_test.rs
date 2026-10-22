@@ -1233,3 +1233,202 @@ fn stream_reset_fence_resumes_forward_recovery_after_long_wait() -> Result<()> {
     }
     Ok(())
 }
+
+// Issue #1120: distinguish lost reset traffic from lost accepted DATA. These
+// losses are independent even when encrypted native traffic cannot name them.
+#[test]
+fn reciprocal_reset_recovers_lost_request_data_and_final_response() -> Result<()> {
+    for reliable in [false, true] {
+        for wrap in [false, true] {
+            let context = format!("reliable={reliable}, wrap={wrap}");
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            let ppi = PayloadProtocolIdentifier::Binary;
+            if wrap {
+                local.my_next_tsn = u32::MAX;
+                local.cumulative_tsn_ack_point = u32::MAX - 1;
+                local.advanced_peer_tsn_ack_point = u32::MAX - 1;
+                remote.peer_last_tsn = u32::MAX - 1;
+            }
+            local.stream(1)?.set_reliability_params(
+                !reliable,
+                if reliable {
+                    ReliabilityType::Reliable
+                } else {
+                    ReliabilityType::Rexmit
+                },
+                0,
+            )?;
+            local
+                .stream(1)?
+                .write_sctp(now, &Bytes::from_static(b"x"), ppi)?;
+            let lost_data = transmitted_data(&local.gather_outbound(now).0);
+            assert_eq!(lost_data.len(), 1, "{context}");
+            remote.send_reset_request(now, 1)?;
+            let lost_reset = reset_requests(&mut remote, now).remove(0);
+            assert_eq!(local.buffered_amount(), 1, "{context}");
+            assert!(!local.streams[&1].incoming_reset_complete, "{context}");
+            assert!(remote.streams[&1].reset_requested, "{context}");
+            assert_eq!(remote.buffered_amount(), 0, "{context}");
+
+            let reset_at = remote.timers.get(Timer::Reconfig).unwrap();
+            remote.handle_timeout(reset_at);
+            let mut retries = reset_requests(&mut remote, reset_at);
+            assert_eq!(
+                retries.len(),
+                1,
+                "{context}: lost remote reset must retransmit at its deadline"
+            );
+            let retry = retries.remove(0);
+            assert_eq!(request(&retry), request(&lost_reset), "{context}");
+            // The first success response is delivered. The reciprocal reset
+            // still waits for the missing local DATA's transport boundary.
+            for packet in local.handle_reconfig(&retry, reset_at)? {
+                for c in packet.chunks {
+                    if let Some(c) = c.as_any().downcast_ref::<ChunkReconfig>() {
+                        remote.handle_reconfig(c, reset_at)?;
+                    }
+                }
+            }
+            let reciprocal = reset_requests(&mut local, reset_at).remove(0);
+            let reciprocal_rsn = request(&reciprocal).reconfig_request_sequence_number;
+            for packet in remote.handle_reconfig(&reciprocal, reset_at)? {
+                for c in packet.chunks {
+                    if let Some(c) = c.as_any().downcast_ref::<ChunkReconfig>() {
+                        local.handle_reconfig(c, reset_at)?;
+                    }
+                }
+            }
+            assert!(local.reconfig_in_progress, "{context}");
+            assert!(remote.streams[&1].outgoing_reset_complete, "{context}");
+            assert!(!remote.streams[&1].incoming_reset_complete, "{context}");
+
+            let data_at = local.timers.get(Timer::T3RTX).unwrap();
+            assert!(
+                data_at >= reset_at,
+                "{context}: clock must not move backward"
+            );
+            local.handle_timeout(data_at);
+            let recovery = local.gather_outbound(data_at).0;
+            let mut terminal = vec![];
+            let mut recovery_counts = (0, 0);
+            for raw in &recovery {
+                for c in Packet::unmarshal(raw)?.chunks {
+                    if let Some(c) = c.as_any().downcast_ref::<ChunkPayloadData>() {
+                        recovery_counts.0 += 1;
+                        assert_eq!(c.tsn, lost_data[0].tsn, "{context}");
+                        assert!(
+                            reliable,
+                            "{context}: zero-retransmit DATA must not be sent twice"
+                        );
+                        remote.handle_data(c)?;
+                    } else if let Some(c) = c.as_any().downcast_ref::<ChunkForwardTsn>() {
+                        recovery_counts.1 += 1;
+                        assert_eq!(c.new_cumulative_tsn, lost_data[0].tsn, "{context}");
+                        assert!(!reliable, "{context}: reliable DATA must not be abandoned");
+                        terminal.extend(remote.handle_forward_tsn(c)?);
+                    }
+                }
+            }
+            assert_eq!(
+                recovery_counts,
+                if reliable { (1, 0) } else { (0, 1) },
+                "{context}"
+            );
+            if reliable {
+                assert_eq!(
+                    remote
+                        .stream(1)?
+                        .read_sctp()?
+                        .unwrap()
+                        .to_payload(10)?
+                        .freeze(),
+                    Bytes::from_static(b"x"),
+                    "{context}"
+                );
+            }
+            terminal.extend(remote.control_queue.drain(..));
+            // Lose only the terminal reply to the reciprocal request. No
+            // further DATA or application read may be needed for recovery.
+            assert_eq!(
+                terminal.len(),
+                1,
+                "{context}: lose exactly one terminal packet"
+            );
+            assert_eq!(terminal[0].chunks.len(), 1, "{context}");
+            let lost_terminal = terminal[0].chunks[0]
+                .as_any()
+                .downcast_ref::<ChunkReconfig>()
+                .unwrap()
+                .param_a
+                .as_ref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ParamReconfigResponse>()
+                .unwrap();
+            assert_eq!(
+                lost_terminal.reconfig_response_sequence_number, reciprocal_rsn,
+                "{context}"
+            );
+            assert_eq!(
+                lost_terminal.result,
+                ReconfigResult::SuccessPerformed,
+                "{context}"
+            );
+            assert!(!remote.streams.contains_key(&1), "{context}");
+            assert!(local.streams.contains_key(&1), "{context}");
+            let retry_at = local.timers.get(Timer::Reconfig).unwrap();
+            assert!(
+                retry_at >= data_at,
+                "{context}: clock must not move backward"
+            );
+            local.handle_timeout(retry_at);
+            let mut retries = reset_requests(&mut local, retry_at);
+            assert_eq!(
+                retries.len(),
+                1,
+                "{context}: lost terminal reply must cause a retry"
+            );
+            let retry = retries.remove(0);
+            assert_eq!(request(&retry), request(&reciprocal), "{context}");
+            for packet in remote.handle_reconfig(&retry, retry_at)? {
+                for c in packet.chunks {
+                    if let Some(c) = c.as_any().downcast_ref::<ChunkReconfig>() {
+                        local.handle_reconfig(c, retry_at)?;
+                    }
+                }
+            }
+            assert!(!local.streams.contains_key(&1), "{context}");
+            for endpoint in [&local, &remote] {
+                assert!(endpoint.reconfigs.is_empty(), "{context}");
+                assert!(endpoint.timers.get(Timer::Reconfig).is_none(), "{context}");
+                assert_eq!(endpoint.state(), AssociationState::Established, "{context}");
+            }
+            assert!(
+                remote.pending_queue.is_empty(),
+                "{context}: duplicate reset must not queue another reciprocal"
+            );
+            local.handle_sack(&remote.create_selective_ack_chunk(), retry_at)?;
+            assert_eq!(local.buffered_amount(), 0, "{context}");
+            local
+                .open_stream(1, ppi)?
+                .write_sctp(retry_at, &Bytes::from_static(b"fresh"), ppi)?;
+            remote.open_stream(1, ppi)?;
+            for c in transmitted_data(&local.gather_outbound(retry_at).0) {
+                remote.handle_data(&c)?;
+            }
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(10)?
+                    .freeze(),
+                Bytes::from_static(b"fresh"),
+                "{context}"
+            );
+            assert!(remote.stream(1)?.read_sctp()?.is_none(), "{context}");
+        }
+    }
+    Ok(())
+}

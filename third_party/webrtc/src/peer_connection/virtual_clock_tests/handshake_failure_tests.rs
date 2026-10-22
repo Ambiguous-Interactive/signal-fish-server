@@ -9,24 +9,26 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
-// Test-only network fault: preserve STUN consent and DTLS handshake records,
-// but lose encrypted application records, which carry the SCTP handshake.
+// Test-only network fault: preserve STUN consent while dropping one DTLS
+// record type (handshake records, or application records carrying SCTP).
 #[derive(Debug)]
-struct LostSctpRuntime {
+struct LostRecordRuntime {
     runtime: Arc<MockRuntime>,
     dropped: Arc<AtomicUsize>,
+    record_type: u8,
 }
 #[derive(Debug)]
-struct LostSctpSocket {
+struct LostRecordSocket {
     socket: Arc<dyn AsyncUdpSocket>,
     dropped: Arc<AtomicUsize>,
+    record_type: u8,
 }
-impl AsyncUdpSocket for LostSctpSocket {
+impl AsyncUdpSocket for LostRecordSocket {
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
     fn poll_send(&self, cx: &mut Context<'_>, packet: &Transmit<'_>) -> Poll<io::Result<usize>> {
-        if packet.contents.first() == Some(&23) {
+        if packet.contents.first() == Some(&self.record_type) {
             self.dropped.fetch_add(1, Ordering::SeqCst);
             Poll::Ready(Ok(packet.contents.len()))
         } else {
@@ -42,7 +44,7 @@ impl AsyncUdpSocket for LostSctpSocket {
         self.socket.poll_recv(cx, bufs, meta)
     }
 }
-impl Runtime for LostSctpRuntime {
+impl Runtime for LostRecordRuntime {
     fn now(&self) -> Instant {
         self.runtime.now()
     }
@@ -50,9 +52,10 @@ impl Runtime for LostSctpRuntime {
         self.runtime.spawn(future)
     }
     fn wrap_udp_socket(&self, socket: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
-        Ok(Arc::new(LostSctpSocket {
+        Ok(Arc::new(LostRecordSocket {
             socket: self.runtime.wrap_udp_socket(socket)?,
             dropped: self.dropped.clone(),
+            record_type: self.record_type,
         }))
     }
     fn wrap_tcp_listener(
@@ -85,6 +88,14 @@ impl Runtime for LostSctpRuntime {
 }
 
 async fn loss_peer(network: &Arc<MockUDPNetwork>, dropped: &Arc<AtomicUsize>) -> Peer {
+    loss_record_peer(network, dropped, 23).await
+}
+
+async fn loss_record_peer(
+    network: &Arc<MockUDPNetwork>,
+    dropped: &Arc<AtomicUsize>,
+    record_type: u8,
+) -> Peer {
     let rt = Arc::new(MockRuntime::with_network(network.clone()));
     rt.clock().advance(CLOCK_OFFSET);
     let rec = Arc::new(StateRecorder::default());
@@ -94,9 +105,10 @@ async fn loss_peer(network: &Arc<MockUDPNetwork>, dropped: &Arc<AtomicUsize>) ->
                 .with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::Disabled)
                 .build(),
         )
-        .with_runtime(Arc::new(LostSctpRuntime {
+        .with_runtime(Arc::new(LostRecordRuntime {
             runtime: rt.clone(),
             dropped: dropped.clone(),
+            record_type,
         }))
         .with_handler(rec.clone())
         .with_udp_addrs(vec!["127.0.0.1:0"])
@@ -226,52 +238,112 @@ fn sctp_handshake_loss_closes_public_pending_handles_and_fresh_peer_recovers() {
         ));
         a.pc.close().await.unwrap();
         b.pc.close().await.unwrap();
-        // New public peers use the same native driver and an intact network.
-        let (fresh_a, fresh_b) = connect_pair(&Arc::new(MockUDPNetwork::new())).await;
-        let mut fresh_channels = Vec::new();
-        for peer in [&fresh_a, &fresh_b] {
-            fresh_channels.push(
-                peer.pc
-                    .create_data_channel(
-                        "fresh-gameplay",
-                        Some(rtc::data_channel::RTCDataChannelInit {
-                            negotiated: Some(42),
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .unwrap(),
-            );
-        }
-        let mut opened = [false; 2];
-        for _ in 0..400 {
-            for (index, channel) in fresh_channels.iter().enumerate() {
-                if let Some(Some(crate::data_channel::DataChannelEvent::OnOpen)) =
-                    channel.poll().now_or_never()
-                {
-                    opened[index] = true;
-                }
-            }
-            if opened == [true, true] {
-                break;
-            }
-            advance_both(&fresh_a.rt, &fresh_b.rt, Duration::from_millis(25));
-        }
-        assert_eq!(opened, [true, true], "fresh public channels open");
-        fresh_channels[0].send_text("fresh-gameplay").await.unwrap();
-        let mut delivered = false;
-        for _ in 0..200 {
-            if let Some(Some(crate::data_channel::DataChannelEvent::OnMessage(message))) =
-                fresh_channels[1].poll().now_or_never()
-            {
-                assert_eq!(&message.data[..], b"fresh-gameplay");
-                delivered = true;
-                break;
-            }
-            advance_both(&fresh_a.rt, &fresh_b.rt, Duration::from_millis(25));
-        }
-        assert!(delivered, "fresh native gameplay reaches its peer");
-        fresh_a.pc.close().await.unwrap();
-        fresh_b.pc.close().await.unwrap();
+        assert_fresh_gameplay(&Arc::new(MockUDPNetwork::new())).await;
     }));
+}
+
+// #1131: DTLS failure must reach the app before any remote channel exists.
+#[test]
+fn dtls_handshake_loss_notifies_responder_without_remote_channels() {
+    let runtime = MockRuntime::new();
+    runtime.block_on(Box::pin(async {
+        for local_channels in [false, true] {
+            let network = Arc::new(MockUDPNetwork::new());
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let a = loss_record_peer(&network, &dropped, 22).await;
+            let b = loss_record_peer(&network, &dropped, 22).await;
+            let _pending = a.pc.create_data_channel("pending-gameplay", None).await.unwrap();
+            let mut pending = Vec::new();
+            if local_channels {
+                pending.push(b.pc.create_data_channel("pending", None).await.unwrap());
+                pending.push(b.pc.create_data_channel("negotiated", Some(rtc::data_channel::RTCDataChannelInit { negotiated: Some(42), ..Default::default() })).await.unwrap());
+            }
+            let offer = a.pc.create_offer(None).await.unwrap();
+            a.pc.set_local_description(offer.clone()).await.unwrap();
+            b.pc.set_remote_description(offer).await.unwrap();
+            let answer = b.pc.create_answer(None).await.unwrap();
+            b.pc.set_local_description(answer.clone()).await.unwrap();
+            a.pc.set_remote_description(answer).await.unwrap();
+            for tick in 0..600 {
+                for candidate in a.rec.take_candidates() { b.pc.add_ice_candidate(candidate).await.unwrap(); }
+                for candidate in b.rec.take_candidates() { a.pc.add_ice_candidate(candidate).await.unwrap(); }
+                if b.rec.saw_conn(RTCPeerConnectionState::Failed) { break; }
+                advance_both(&a.rt, &b.rt, if tick < 100 { Duration::from_millis(25) } else { Duration::from_secs(1) });
+            }
+            assert!(dropped.load(Ordering::SeqCst) >= 8, "real handshake retries reach the loss boundary");
+            assert!(!b.rec.saw_ice(RTCIceConnectionState::Failed), "handshake loss preserves ICE consent");
+            assert!(b.rec.saw_conn(RTCPeerConnectionState::Failed), "a responder with no remote channels must receive a terminal handshake failure callback: {:?}", b.rec.conn_states());
+            assert_eq!(b.pc.sctp().await.unwrap().transport().state().await.unwrap(), rtc::peer_connection::transport::RTCDtlsTransportState::Failed);
+            for channel in pending {
+                let mut closed = false;
+                for _ in 0..200 {
+                    match channel.poll().now_or_never() {
+                        Some(Some(crate::data_channel::DataChannelEvent::OnClose)) => { closed = true; break; }
+                        Some(Some(event)) => panic!("pending channel received {event:?}"),
+                        Some(None) => panic!("pending channel ended without OnClose"),
+                        None => settle(),
+                    }
+                }
+                assert!(closed, "DTLS failure closes pending public handles");
+                assert!(matches!(channel.send_text("late-gameplay").await, Err(Error::ErrDataChannelClosed)));
+                assert!(matches!(channel.writable().await, Err(Error::ErrDataChannelClosed)));
+                assert!(!matches!(channel.poll().now_or_never(), Some(Some(_))), "close fires once");
+            }
+            assert!(matches!(b.pc.create_data_channel("late", None).await, Err(Error::ErrSCTPNotEstablished)));
+            assert!(!a.rec.saw_conn(RTCPeerConnectionState::Failed), "a peer with no received DTLS flight has no failed retry timer");
+            assert_fresh_gameplay(&network).await;
+            assert_eq!(b.rec.conn_states().iter().filter(|state| **state == RTCPeerConnectionState::Failed).count(), 1);
+            a.pc.close().await.unwrap();
+            b.pc.close().await.unwrap();
+        }
+    }));
+}
+
+async fn assert_fresh_gameplay(network: &Arc<MockUDPNetwork>) {
+    let (fresh_a, fresh_b) = connect_pair(network).await;
+    let mut fresh_channels = Vec::new();
+    for peer in [&fresh_a, &fresh_b] {
+        fresh_channels.push(
+            peer.pc
+                .create_data_channel(
+                    "fresh-gameplay",
+                    Some(rtc::data_channel::RTCDataChannelInit {
+                        negotiated: Some(42),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let mut opened = [false; 2];
+    for _ in 0..400 {
+        for (index, channel) in fresh_channels.iter().enumerate() {
+            if let Some(Some(crate::data_channel::DataChannelEvent::OnOpen)) =
+                channel.poll().now_or_never()
+            {
+                opened[index] = true;
+            }
+        }
+        if opened == [true, true] {
+            break;
+        }
+        advance_both(&fresh_a.rt, &fresh_b.rt, Duration::from_millis(25));
+    }
+    assert_eq!(opened, [true, true], "fresh public channels open");
+    fresh_channels[0].send_text("fresh-gameplay").await.unwrap();
+    let mut delivered = false;
+    for _ in 0..200 {
+        if let Some(Some(crate::data_channel::DataChannelEvent::OnMessage(message))) =
+            fresh_channels[1].poll().now_or_never()
+        {
+            assert_eq!(&message.data[..], b"fresh-gameplay");
+            delivered = true;
+            break;
+        }
+        advance_both(&fresh_a.rt, &fresh_b.rt, Duration::from_millis(25));
+    }
+    assert!(delivered, "fresh native gameplay reaches its peer");
+    fresh_a.pc.close().await.unwrap();
+    fresh_b.pc.close().await.unwrap();
 }

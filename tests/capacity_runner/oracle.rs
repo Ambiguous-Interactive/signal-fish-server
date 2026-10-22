@@ -1629,32 +1629,17 @@ pub fn summarize(
         let gap_stream = gap_streams
             .entry((recipient, sender, gap.epoch))
             .or_insert_with(|| {
-                let view = views.get(recipient).expect("validated roster recipient");
-                // Closed or unadopted streams owe no completeness check. Keep
-                // their raw gaps as evidence, matching the arrival contract.
-                let adopted = view
-                    .adopted
-                    .get(sender)
-                    .is_some_and(|epochs| epochs.contains(&gap.epoch));
-                let closed = view
-                    .closed_at
-                    .contains_key(&(sender.to_string(), gap.epoch));
-                let total_owed = if adopted && !closed {
-                    blocks
-                        .get(&(sender, gap.epoch))
-                        .map_or(0, |block| count_u64(block.len()))
-                } else {
-                    0
-                };
+                // Every observed report must fit the sender's recorded epoch,
+                // including streams whose completeness obligation has ended.
+                let total_owed = blocks
+                    .get(&(sender, gap.epoch))
+                    .map_or(0, |block| count_u64(block.len()));
                 GapStreamEvidence {
                     total_owed,
                     ..GapStreamEvidence::default()
                 }
             });
         let total_owed = gap_stream.total_owed;
-        if total_owed == 0 {
-            continue;
-        }
         let stream = arrivals.entry((recipient, sender, gap.epoch)).or_default();
         // Receipts are complete before this pass. Insert gaps directly into
         // their compact coverage, without retaining one pointer per report.
@@ -1771,19 +1756,42 @@ pub fn summarize(
 
         maximum_recipient_receipts = maximum_recipient_receipts.max(recipient_receipts);
 
-        // (b) Per-owed-stream completeness: duplicates, arrival order, and
-        // the class's omission contract, over every `(sender, epoch)` stream
-        // this recipient's seat ever adopted.
+        // (b) Validate all observed gaps, then check completeness only for
+        // streams this seat still owes. Closed epochs keep their evidence.
         for sender in expected_senders {
-            let Some(adopted) = view.adopted.get(sender) else {
+            // Keep roster sender order for the first offending key, including
+            // epochs that no longer owe completeness or were never adopted.
+            for ((_, _, epoch), stream) in arrivals
+                .range((recipient.as_str(), sender, 0)..=(recipient.as_str(), sender, u32::MAX))
+            {
+                outcome.duplicates += stream.duplicates.count;
+                stream
+                    .duplicates
+                    .append_to(&mut duplicates, recipient, sender, *epoch);
+                outcome.out_of_order += stream.out_of_order.count;
+                stream
+                    .out_of_order
+                    .append_to(&mut out_of_order, recipient, sender, *epoch);
+            }
+            let adopted = view.adopted.get(sender);
+            let Some(epochs) = sender_epochs.get(sender) else {
                 continue;
             };
-            for epoch in adopted {
+            for epoch in epochs {
+                let gaps = gap_streams.remove(&(recipient.as_str(), sender, *epoch));
+                if let Some(gaps) = &gaps {
+                    invalid_gaps.count += gaps.invalid.count;
+                    if invalid_gaps.first.is_none() {
+                        invalid_gaps.first = gaps.invalid.first.clone();
+                    }
+                }
                 // A closed stream is finished: its sender rejoined past it
                 // (or the viewer's snapshot superseded it), so nothing
                 // further is owed. Arrivals there are stale-epoch
                 // misroutes, caught by the arrival scan above.
-                if view.closed_at.contains_key(&(sender.to_string(), *epoch)) {
+                if !adopted.is_some_and(|epochs| epochs.contains(epoch))
+                    || view.closed_at.contains_key(&(sender.to_string(), *epoch))
+                {
                     continue;
                 }
                 let Some(block) = blocks.get(&(sender, *epoch)) else {
@@ -1796,15 +1804,6 @@ pub fn summarize(
                 let arrival = arrivals
                     .remove(&(recipient.as_str(), sender, *epoch))
                     .unwrap_or_default();
-                outcome.duplicates += arrival.duplicates.count;
-                arrival
-                    .duplicates
-                    .append_to(&mut duplicates, recipient, sender, *epoch);
-                outcome.out_of_order += arrival.out_of_order.count;
-                arrival
-                    .out_of_order
-                    .append_to(&mut out_of_order, recipient, sender, *epoch);
-
                 // The stream's rejoin floor: from this instant on, every
                 // sequence at or below the snapshot tail is not owed (the
                 // loud away window), and deliveries must resume exactly one
@@ -1823,12 +1822,8 @@ pub fn summarize(
                 // permits no gap report at all (validated globally above) —
                 // so its coverage is receipts alone.
                 let covered = arrival.observed.covered;
-                if let Some(gaps) = gap_streams.remove(&(recipient.as_str(), sender, *epoch)) {
+                if let Some(gaps) = gaps {
                     outcome.gap_covered += gaps.covered;
-                    invalid_gaps.count += gaps.invalid.count;
-                    if invalid_gaps.first.is_none() {
-                        invalid_gaps.first = gaps.invalid.first;
-                    }
                 }
                 // Count covered positions and holes above the seat's floor.
                 let accounting = covered.above(owed_floor);
@@ -2318,6 +2313,307 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn unadopted_epoch_reports_still_require_exact_gap_evidence() {
+        let context = crate::unit_context_with_class(DeliveryClass::Latest);
+        let mut baseline = crate::complete_records(&context.plans);
+        for event in &mut baseline.sent {
+            event.epoch = 99;
+        }
+        for event in &mut baseline.receipts {
+            event.epoch = 99;
+        }
+        for mutation in ["bounds", "receipt", "overlap", "legal"] {
+            let mut records = baseline.clone();
+            let mut gap = crate::gap_for(
+                "r0p0",
+                "r0p1",
+                0,
+                signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+            );
+            gap.epoch = 99;
+            if mutation == "bounds" {
+                gap.from_seq = u64::MAX;
+                gap.to_seq = u64::MAX;
+            }
+            if mutation == "overlap" || mutation == "legal" {
+                crate::drop_receipt(&mut records, "r0p0", "r0p1", 0);
+            }
+            records.gaps.push(gap.clone());
+            if mutation == "overlap" {
+                records.gaps.push(gap);
+            }
+            let summary = summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                1_000,
+                96,
+                DeliveryClass::Latest,
+                &ChurnPlan::default(),
+                None,
+            );
+            // Unannounced epochs already invalidate the send schedule. They
+            // still must not hide a separate impossible observed gap report.
+            assert!(!summary.valid);
+            assert_eq!(
+                summary
+                    .reasons
+                    .iter()
+                    .find_map(|reason| match reason {
+                        InvalidReason::InvalidGapReports { count, .. } => Some(*count),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+                u64::from(mutation != "legal"),
+                "{mutation}: {:?}",
+                summary.reasons
+            );
+        }
+    }
+
+    // #1130: a rejoin must not erase earlier observed contract violations.
+    #[test]
+    fn observed_arrival_violations_keep_roster_sender_order() {
+        let mut config = crate::scenario_config(crate::Encoding::V3Json);
+        config.players_per_room = 11;
+        let (plans, churn) = crate::build_run_shape(&config).unwrap();
+        let roster: Vec<_> = plans
+            .iter()
+            .map(|plan| (plan.name.clone(), plan.room))
+            .collect();
+        for duplicate in [true, false] {
+            let mut records = crate::complete_records(&plans);
+            for sender in ["r0p2", "r0p10"] {
+                let positions: Vec<_> = records
+                    .receipts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, receipt)| {
+                        (receipt.recipient == "r0p0" && receipt.sender == sender)
+                            .then_some(position)
+                    })
+                    .take(2)
+                    .collect();
+                assert_eq!(positions.len(), 2);
+                if duplicate {
+                    let mut receipt = records.receipts[positions[0]].clone();
+                    receipt.received_us += 1;
+                    records.receipts.insert(positions[0] + 1, receipt);
+                } else {
+                    let first_us = records.receipts[positions[0]].received_us;
+                    let second_us = records.receipts[positions[1]].received_us;
+                    records.receipts.swap(positions[0], positions[1]);
+                    records.receipts[positions[0]].received_us = first_us;
+                    records.receipts[positions[1]].received_us = second_us;
+                }
+            }
+            let summary = super::summarize(
+                &plans,
+                &roster,
+                &records,
+                1_000,
+                96,
+                DeliveryClass::Reliable,
+                &churn,
+                None,
+            );
+            let first = summary
+                .reasons
+                .iter()
+                .find_map(|reason| match reason {
+                    InvalidReason::DuplicateDeliveries { count: 2, first } if duplicate => {
+                        Some(first)
+                    }
+                    InvalidReason::OutOfOrderDeliveries { count: 2, first } if !duplicate => {
+                        Some(first)
+                    }
+                    _ => None,
+                })
+                .expect("observed violation");
+            assert_eq!(first.sender, "r0p2");
+        }
+    }
+
+    // #1130: a rejoin must not erase earlier observed contract violations.
+    #[test]
+    fn closed_epochs_preserve_observed_arrival_and_gap_contracts() {
+        use signal_fish_server::protocol::DeliveryGapReason;
+        let mut missed = Vec::new();
+        for class in [
+            DeliveryClass::Reliable,
+            DeliveryClass::Latest,
+            DeliveryClass::Volatile,
+        ] {
+            let (context, churn) = crate::churn_context(class);
+            let baseline = crate::churned_records(&context, &churn);
+            let summarize = |records: &RunRecords| {
+                super::summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    1_000,
+                    96,
+                    class,
+                    &churn,
+                    None,
+                )
+            };
+            assert!(summarize(&baseline).valid);
+            for mutation in [
+                "duplicate",
+                "order",
+                "gap_bounds",
+                "gap_receipt",
+                "gap_overlap",
+                "legal_gap",
+            ] {
+                if class == DeliveryClass::Reliable && mutation.contains("gap") {
+                    continue;
+                }
+                let mut records = baseline.clone();
+                let positions: Vec<_> = records
+                    .receipts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, receipt)| {
+                        (receipt.recipient == "r0p0"
+                            && receipt.sender == "r0p1"
+                            && receipt.epoch == 1)
+                            .then_some(position)
+                    })
+                    .collect();
+                assert_eq!(positions.len(), 2);
+                match mutation {
+                    "duplicate" => {
+                        let mut receipt = records.receipts[positions[0]].clone();
+                        receipt.received_us += 1;
+                        records.receipts.insert(positions[0] + 1, receipt);
+                    }
+                    "order" => {
+                        let first_us = records.receipts[positions[0]].received_us;
+                        let second_us = records.receipts[positions[1]].received_us;
+                        records.receipts.swap(positions[0], positions[1]);
+                        records.receipts[positions[0]].received_us = first_us;
+                        records.receipts[positions[1]].received_us = second_us;
+                    }
+                    _ => {
+                        let reason = if class == DeliveryClass::Latest {
+                            DeliveryGapReason::LatestSuperseded
+                        } else {
+                            DeliveryGapReason::VolatileDropped
+                        };
+                        let mut gap = crate::gap_for("r0p0", "r0p1", 0, reason);
+                        if mutation == "gap_bounds" {
+                            gap.from_seq = 3;
+                            gap.to_seq = 3;
+                        }
+                        if mutation == "gap_overlap" || mutation == "legal_gap" {
+                            records.receipts.remove(positions[0]);
+                        }
+                        records.gaps.push(gap.clone());
+                        if mutation == "gap_overlap" {
+                            records.gaps.push(gap);
+                        }
+                    }
+                }
+                let summary = summarize(&records);
+                if mutation == "legal_gap" {
+                    assert!(summary.valid, "{class:?} {mutation}: {:?}", summary.reasons);
+                } else {
+                    if !summary.reasons.iter().any(|reason| {
+                        matches!(
+                            (mutation, reason),
+                            (
+                                "duplicate",
+                                InvalidReason::DuplicateDeliveries { count: 1, .. }
+                            ) | (
+                                "order",
+                                InvalidReason::OutOfOrderDeliveries { count: 1, .. }
+                            ) | (
+                                "gap_bounds" | "gap_receipt" | "gap_overlap",
+                                InvalidReason::InvalidGapReports { count: 1, .. }
+                            )
+                        )
+                    }) {
+                        missed.push(format!("{class:?} {mutation}: {:?}", summary.reasons));
+                    }
+                }
+                let output = tempfile::tempdir().expect("closed epoch artifacts");
+                crate::artifacts::write_deliveries(output.path(), &records).expect("write records");
+                let replayed = crate::artifacts::read_records(output.path()).expect("read records");
+                assert_eq!(
+                    serde_json::to_value(summarize(&replayed)).unwrap(),
+                    serde_json::to_value(&summary).unwrap()
+                );
+                if class == DeliveryClass::Reliable && mutation == "duplicate" {
+                    // The small fixture intentionally records one sender. Full
+                    // replay also reports the other peers' unsent work; compare
+                    // its whole verdict against the same full declared shape.
+                    let mut config = crate::scenario_config(crate::Encoding::V3Json);
+                    config.players_per_room = 4;
+                    config.warmup = std::time::Duration::ZERO;
+                    config.duration = std::time::Duration::from_millis(400);
+                    config.send_rate_per_sender = 10.0;
+                    config.generator_lag_bound = std::time::Duration::from_micros(1_000);
+                    config.churn = crate::ChurnSchedule::ReconnectBurst {
+                        fraction_percent: 25,
+                        start: std::time::Duration::from_millis(250),
+                        window: std::time::Duration::from_millis(100),
+                    };
+                    let endpoint = "ws://127.0.0.1:1".to_string();
+                    config.endpoint = Some(endpoint.clone());
+                    crate::artifacts::write_manifest(
+                        output.path(),
+                        "closed-epoch",
+                        &config,
+                        crate::artifacts::WorkloadShape {
+                            senders: 4,
+                            recipients: 4,
+                            scheduled_sends_per_sender: 4,
+                            warmup_sends_per_sender: 0,
+                            measured_sends_per_sender: 4,
+                        },
+                        crate::artifacts::ServerIdentity {
+                            endpoint,
+                            pid: None,
+                            binary_sha256: None,
+                            binary_bytes: None,
+                            config_overlay_sha256: crate::diagnostics::sha256_bytes(
+                                &serde_json::to_vec(&config.server_overlay).unwrap(),
+                            ),
+                            config_provenance: crate::artifacts::ConfigProvenance::UnknownExternal,
+                        },
+                        crate::artifacts::BuildIdentity::current(),
+                    )
+                    .expect("write replay manifest");
+                    let (plans, churn) = crate::build_run_shape(&config).unwrap();
+                    let expected = super::summarize(
+                        &plans,
+                        &context.roster,
+                        &records,
+                        1_000,
+                        96,
+                        class,
+                        &churn,
+                        None,
+                    );
+                    let replayed =
+                        crate::artifacts::replay(output.path()).expect("replay closed epoch");
+                    assert_eq!(
+                        serde_json::to_value(&replayed).unwrap(),
+                        serde_json::to_value(expected).unwrap()
+                    );
+                    assert!(replayed.reasons.iter().any(|reason| matches!(
+                        reason,
+                        InvalidReason::DuplicateDeliveries { count: 1, .. }
+                    )));
+                }
+            }
+        }
+        assert!(missed.is_empty(), "missed observed violations: {missed:?}");
+    }
 
     // #775/#636: fan-out summaries retain one sender spelling per run.
     #[test]

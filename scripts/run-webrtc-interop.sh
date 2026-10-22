@@ -81,6 +81,10 @@ echo "==> Verifying public channel recovery after SCTP handshake loss"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib sctp_handshake_loss_ --features runtime-mock
 
+echo "==> Verifying native link recovery after handshake retry exhaustion"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib dtls_handshake_loss_ --features runtime-mock
+
 echo "==> Verifying RTC channel statistics retention"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib statistics
@@ -104,6 +108,10 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
 echo "==> Verifying RTC handshake failure recovery"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib sctp_handshake_failure_
+
+echo "==> Verifying RTC terminal handshake timeout state"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib dtls_retry_exhaustion_
 
 echo "==> Verifying RTC negotiated stream allocation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
