@@ -402,11 +402,11 @@ fn signed_binary_message(
     rmp_serde::to_vec_named(&frame).expect("encode signed binary envelope")
 }
 
-async fn authenticate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+async fn send_authentication<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     socket: &mut WebSocketStream<S>,
     binding: &mut TokenBindingClient,
     fingerprint: Option<&str>,
-) -> Value {
+) {
     let message = ClientMessage::Authenticate {
         app_id: "mtls_e2e".to_string(),
         connect_token: None,
@@ -424,6 +424,14 @@ async fn authenticate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         ))
         .await
         .expect("send token-bound authentication");
+}
+
+async fn authenticate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    binding: &mut TokenBindingClient,
+    fingerprint: Option<&str>,
+) -> Value {
+    send_authentication(socket, binding, fingerprint).await;
     tokio::time::timeout(Duration::from_secs(5), next_json_message(socket))
         .await
         .expect("server response deadline")
@@ -461,6 +469,134 @@ async fn next_json_message<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
             return Some(value);
         }
     }
+}
+
+// docs/protocol.md makes the coded close authoritative and farewells advisory.
+async fn expect_terminal_rejection<S>(socket: &mut S) -> Result<(), String>
+where
+    S: futures_util::Stream<Item = Result<Message, WebSocketError>> + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut protocol_info_seen = false;
+        let mut error_seen = false;
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .ok_or("stream ended before the close frame")?
+                .map_err(|error| format!("transport failed before the close frame: {error}"))?;
+            match frame {
+                Message::Close(Some(close)) => {
+                    if u16::from(close.code) == 1000 && close.reason == "unregistered" {
+                        return Ok(());
+                    }
+                    return Err(format!("unexpected close: {close:?}"));
+                }
+                Message::Text(text) => {
+                    let message: signal_fish_server::protocol::ServerMessage =
+                        serde_json::from_str(&text)
+                            .map_err(|error| format!("invalid server message: {error}"))?;
+                    match message {
+                        signal_fish_server::protocol::ServerMessage::ProtocolInfo(info)
+                            if !protocol_info_seen
+                                && !error_seen
+                                && info.protocol_version == Some(3) =>
+                        {
+                            protocol_info_seen = true;
+                        }
+                        signal_fish_server::protocol::ServerMessage::Error {
+                            error_code: Some(signal_fish_server::protocol::ErrorCode::Unauthorized),
+                            ..
+                        } if !error_seen => error_seen = true,
+                        other => return Err(format!("unexpected terminal message: {other:?}")),
+                    }
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
+                other => return Err(format!("unexpected terminal frame: {other:?}")),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "terminal close deadline expired".to_string())?
+}
+
+#[tokio::test(start_paused = true)]
+async fn terminal_rejection_observer_requires_coded_close_and_checks_advisories() {
+    use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+    let close = || {
+        Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "unregistered".into(),
+        }))
+    };
+    let error = || {
+        Message::Text(
+            json!({"type":"Error", "data":{"message":"rejected", "error_code":"UNAUTHORIZED"}})
+                .to_string()
+                .into(),
+        )
+    };
+    let prelude = || {
+        Message::Text(
+            json!({"type":"ProtocolInfo", "data":{"protocol_version":3}})
+                .to_string()
+                .into(),
+        )
+    };
+    for frames in [
+        vec![close()],
+        vec![error(), close()],
+        vec![prelude(), error(), close()],
+    ] {
+        expect_terminal_rejection(&mut futures_util::stream::iter(frames.into_iter().map(Ok)))
+            .await
+            .expect("clean coded close with an optional valid advisory");
+    }
+    for (case, frames) in [
+        vec![],
+        vec![error()],
+        vec![Message::Close(None)],
+        vec![Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "other".into(),
+        }))],
+        vec![Message::Close(Some(CloseFrame {
+            code: CloseCode::Away,
+            reason: "unregistered".into(),
+        }))],
+        vec![
+            Message::Text(json!({"type":"Pong"}).to_string().into()),
+            close(),
+        ],
+        vec![
+            Message::Text(
+                json!({"type":"Error", "data":{"message":"wrong", "error_code":"INTERNAL_ERROR"}})
+                    .to_string()
+                    .into(),
+            ),
+            close(),
+        ],
+        vec![error(), error(), close()],
+        vec![error(), prelude(), close()],
+        vec![prelude(), prelude(), close()],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result =
+            expect_terminal_rejection(&mut futures_util::stream::iter(frames.into_iter().map(Ok)))
+                .await;
+        assert!(result.is_err(), "negative frame case {case}: {result:?}");
+    }
+    assert!(
+        expect_terminal_rejection(&mut futures_util::stream::iter([Err(
+            WebSocketError::ConnectionClosed
+        )]))
+        .await
+        .is_err()
+    );
+    let timeout = expect_terminal_rejection(&mut futures_util::stream::pending()).await;
+    assert_eq!(timeout.unwrap_err(), "terminal close deadline expired");
 }
 
 async fn next_message_of_type<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
@@ -516,17 +652,15 @@ async fn verified_mtls_fingerprint_is_bound_end_to_end_and_headers_cannot_overri
         connect(server.port, Some((&client_102_cert, &client_102_key)), None)
             .await
             .expect("rotated certificate WebSocket upgrade");
-    let rejection = authenticate(
+    send_authentication(
         &mut rotated_with_old_proof,
         &mut rotated_binding,
         Some(&fingerprint_101),
     )
     .await;
-    assert_eq!(
-        rejection.get("type").and_then(Value::as_str),
-        Some("Error"),
-        "a proof bound to the old certificate must fail after rotation: {rejection}"
-    );
+    expect_terminal_rejection(&mut rotated_with_old_proof)
+        .await
+        .expect("terminal rejection follows the generic close contract");
 
     let (mut rotated, mut rotated_binding) =
         connect(server.port, Some((&client_102_cert, &client_102_key)), None)
@@ -928,27 +1062,9 @@ async fn fingerprint_bound_connections_reject_unsigned_binary_frames() {
         .await
         .expect("send unsigned binary frame");
 
-    let response = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match next_json_message(&mut socket).await {
-                Some(response) if response.get("type").and_then(Value::as_str) == Some("Error") => {
-                    break response;
-                }
-                Some(_) => {}
-                None => panic!("server closed without an error response"),
-            }
-        }
-    })
-    .await
-    .expect("server error response deadline");
-    assert_eq!(response.get("type").and_then(Value::as_str), Some("Error"));
-    assert_eq!(
-        response
-            .get("data")
-            .and_then(|data| data.get("error_code"))
-            .and_then(Value::as_str),
-        Some("UNAUTHORIZED")
-    );
+    expect_terminal_rejection(&mut socket)
+        .await
+        .expect("terminal rejection follows the generic close contract");
 }
 
 #[tokio::test]
@@ -962,29 +1078,9 @@ async fn non_fingerprint_token_binding_also_rejects_unsigned_binary_frames() {
         .send(Message::Binary(vec![1, 2, 3].into()))
         .await
         .expect("send unsigned binary frame");
-    // The Error JSON farewell is advisory by contract (see
-    // `enqueue_farewell_message`): the close itself is the authoritative
-    // rejection signal, and when the close lands while the send task is mid-
-    // write, the final drain legally abandons queued advisories instead of
-    // writing past a payload with an unknown wire position. Under load the
-    // socket can therefore close without the farewell having been observed,
-    // so the farewell is asserted only when it is observed.
-    loop {
-        let Some(response) = next_json_message(&mut socket).await else {
-            break;
-        };
-        if response.get("type").and_then(Value::as_str) != Some("Error") {
-            continue;
-        }
-        assert_eq!(
-            response
-                .get("data")
-                .and_then(|data| data.get("error_code"))
-                .and_then(Value::as_str),
-            Some("UNAUTHORIZED")
-        );
-        break;
-    }
+    expect_terminal_rejection(&mut socket)
+        .await
+        .expect("terminal rejection follows the generic close contract");
 }
 
 #[tokio::test]
