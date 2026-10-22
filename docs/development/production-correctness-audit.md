@@ -6961,3 +6961,22 @@ for the historical #853/#889 failures or the separate #1120 Closed-state timeout
 The server wire format and API stay the same. Rust, .NET, and Godot SDKs do not
 use this standalone reference-client dependency patch and need no migration.
 The broader A20 audit remains open.
+
+The first hosted native interop run exposed an admission regression in the new
+SCTP preflight. A valid negotiated channel can report `Open` while its local
+stream initialization is still queued. The unchanged paired-wire boundary
+control failed its first send with `ErrDataChannelClosed`. Removing that
+redundant preflight lets the target channel hand its initialization and payload
+to SCTP in FIFO order. Send accounting still commits only after SCTP accepts
+the body.
+
+A new remote-first control then fills the existing application read backlog.
+SCTP learns the negotiated stream from peer DATA while the channel handler
+cannot drain that input. Its first local send failed with `ErrStreamAlreadyExist`
+although its body could emit. Negotiated initialization now configures the
+existing stream without reopening it. In-band duplicate OPEN remains an error.
+The helper stops and discards the remaining own batch on a handoff error.
+Eight role, mode, and encoding histories require first-send success, exact
+sent credit, both directional bodies, and correct wire type and ordering.
+Both boundary controls pass after repair. The existing hosted
+`stream_count_boundary` filter includes the new regression.

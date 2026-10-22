@@ -108,8 +108,12 @@ Published replacement qualification in #912 must retain these controls.
 
 Public text and binary sends enter SCTP during admission, before a peer reset
 can stop the outgoing stream. Local close queues its reset after those writes.
-The driver still generates and batches transport packets. Earlier driver control
-errors do not reject the new payload. Refused payloads add no outstanding byte
+The driver still generates and batches transport packets. A negotiated channel's
+pending local initialization precedes its first payload. If inbound DATA already
+created its SCTP stream, negotiated initialization configures that existing
+stream. It does not reopen a closed stream. In-band duplicate OPEN still fails.
+A failed own initialization discards the remaining own batch before payload can
+emit. Earlier driver control errors do not reject the new payload. Refused payloads add no outstanding byte
 charge or sent statistics and leave no body for a later flush.
 The delta changes `src/data_channel/mod.rs` and the peer-connection write and
 SCTP handlers. Controls inspect accepted text/binary DATA before reciprocal

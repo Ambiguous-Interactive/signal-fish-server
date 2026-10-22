@@ -692,7 +692,12 @@ impl<'a>
                                 ::datachannel::data_channel::DataChannel::get_reliability_params(
                                     data_channel_open.channel_type,
                                 );
-                            let mut stream = conn.open_stream(message.stream_id, message.ppi)?;
+                            let mut stream =
+                                if message.negotiated && conn.stream(message.stream_id).is_ok() {
+                                    conn.stream(message.stream_id)?
+                                } else {
+                                    conn.open_stream(message.stream_id, message.ppi)?
+                                };
                             stream.set_reliability_params(
                                 unordered,
                                 reliability_type,
@@ -1654,6 +1659,174 @@ mod tests {
                     vec![Bytes::from_static(b"boundary-gameplay")],
                     "count={count}, role={role:?}, ordered={ordered}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn stream_count_boundary_remote_first_negotiated_send_keeps_admission() {
+        use crate::data_channel::{RTCDataChannelInit, RTCDataChannelMessage};
+        use crate::peer_connection::{
+            RTCPeerConnectionBuilder,
+            message::{RTCMessage, TaggedRTCMessage},
+        };
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            for ordered in [true, false] {
+                for binary in [false, true] {
+                    let now = Instant::now();
+                    let pair = establish();
+                    let (sender_ep, sender_ch, sender, mut receiver_ep, mut receiver, source) =
+                        if role == RTCDtlsRole::Client {
+                            (
+                                pair.client_ep,
+                                pair.client_ch,
+                                pair.client_conn,
+                                pair.server_ep,
+                                pair.server_conn,
+                                client_addr(),
+                            )
+                        } else {
+                            (
+                                pair.server_ep,
+                                pair.server_ch,
+                                pair.server_conn,
+                                pair.client_ep,
+                                pair.client_conn,
+                                server_addr(),
+                            )
+                        };
+                    let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+                    pc.pipeline_context.sctp_handler_context =
+                        client_ctx(now, sender_ep, sender_ch, sender);
+                    pc.dtls_transport_mut().dtls_role = role;
+                    let sid = if role == RTCDtlsRole::Client { 0 } else { 1 };
+                    let id = pc
+                        .create_data_channel(
+                            "remote-first-negotiated",
+                            Some(RTCDataChannelInit {
+                                ordered,
+                                max_retransmits: (!ordered).then_some(0),
+                                negotiated: Some(sid),
+                                ..Default::default()
+                            }),
+                        )
+                        .unwrap()
+                        .id();
+                    assert!(
+                        matches!(pc.poll_read().unwrap().message, RTCMessage::DataChannelOpened(open) if open == id)
+                    );
+                    receiver
+                        .open_stream(sid, PayloadProtocolIdentifier::String)
+                        .unwrap()
+                        .write_sctp(
+                            now,
+                            &Bytes::from_static(b"remote-first"),
+                            PayloadProtocolIdentifier::String,
+                        )
+                        .unwrap();
+                    /*
+                       Backpressure can let SCTP learn the stream before the
+                       channel handler observes its first inbound body.
+                    */
+                    for _ in 0..SCTP_PIPELINE_READ_BACKLOG_LIMIT {
+                        pc.pipeline_context
+                            .data_read_outs
+                            .push_back(TaggedRTCMessage {
+                                now,
+                                message: RTCMessage::DataChannelMessage(
+                                    id,
+                                    RTCDataChannelMessage {
+                                        is_string: true,
+                                        data: BytesMut::new(),
+                                    },
+                                ),
+                            });
+                    }
+                    for raw in drain_transmits(&mut receiver, now) {
+                        let mut incoming = raw_read(now, raw);
+                        incoming.transport.local_addr = source;
+                        incoming.transport.peer_addr = if role == RTCDtlsRole::Client {
+                            server_addr()
+                        } else {
+                            client_addr()
+                        };
+                        pc.pipeline_context
+                            .dtls_handler_context
+                            .read_outs
+                            .push_back(incoming);
+                        pc.pump_reads(None);
+                    }
+                    assert!(
+                        pc.pipeline_context
+                            .sctp_handler_context
+                            .sctp_transport
+                            .sctp_associations
+                            .get_mut(&sender_ch)
+                            .unwrap()
+                            .stream(sid)
+                            .unwrap()
+                            .is_writable()
+                    );
+                    let body = "accepted-local-first";
+                    let result = if binary {
+                        pc.data_channel(id).unwrap().send(now, BytesMut::from(body))
+                    } else {
+                        pc.data_channel(id).unwrap().send_text(now, body)
+                    };
+                    assert_eq!(
+                        result,
+                        Ok(()),
+                        "role={role:?}, ordered={ordered}, binary={binary}"
+                    );
+                    assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), body.len());
+                    let stats = &pc.pipeline_context.stats.data_channels[&id];
+                    assert_eq!(
+                        (stats.messages_sent, stats.bytes_sent),
+                        (1, u64::try_from(body.len()).unwrap())
+                    );
+                    pc.pipeline_context.data_read_outs.clear();
+                    let mut incoming = Vec::new();
+                    while let Some(message) = pc.poll_read() {
+                        if let RTCMessage::DataChannelMessage(channel, message) = message.message {
+                            assert_eq!(channel, id);
+                            incoming.push(message.data);
+                        }
+                    }
+                    assert_eq!(incoming, [BytesMut::from("remote-first")]);
+                    let mut received = Vec::new();
+                    while let Some(message) = pc.get_sctp_handler().poll_write() {
+                        if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                            let mut offset = 12;
+                            while offset + 4 <= raw.len() {
+                                let length = usize::from(u16::from_be_bytes([
+                                    raw[offset + 2],
+                                    raw[offset + 3],
+                                ]));
+                                if raw[offset] == 0 {
+                                    assert_eq!(raw[offset + 1] & 4 != 0, !ordered);
+                                    assert_eq!(
+                                        u32::from_be_bytes(
+                                            raw[offset + 12..offset + 16].try_into().unwrap()
+                                        ),
+                                        if binary { 53 } else { 51 }
+                                    );
+                                }
+                                offset += length.next_multiple_of(4);
+                            }
+                            if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                                receiver_ep.handle(now, source, None, raw.freeze())
+                            {
+                                receiver.handle_event(event);
+                            }
+                            if let Ok(mut stream) = receiver.stream(sid) {
+                                while let Some(message) = stream.read_sctp().unwrap() {
+                                    received.push(message.to_payload(64).unwrap());
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(received, [Bytes::from_static(b"accepted-local-first")]);
+                }
             }
         }
     }

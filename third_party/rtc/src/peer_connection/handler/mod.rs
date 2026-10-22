@@ -381,32 +381,6 @@ impl RTCPeerConnection {
                 warn!("SctpHandler.handle_write got error: {}", error);
             }
         }
-        if let RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
-            data_channel_id,
-            data_channel_event: DataChannelEvent::Message(_),
-        })) = &message.message
-        {
-            let channel = self
-                .data_channels
-                .get(data_channel_id)
-                .and_then(|channel| channel.data_channel.as_ref())
-                .ok_or(Error::ErrDataChannelClosed)?;
-            let (association, stream) = (channel.association_handle(), channel.stream_identifier());
-            let connection = self
-                .pipeline_context
-                .sctp_handler_context
-                .sctp_transport
-                .sctp_associations
-                .get_mut(&::sctp::AssociationHandle(association))
-                .ok_or(Error::ErrDataChannelClosed)?;
-            if !connection
-                .stream(stream)
-                .map_err(|_| Error::ErrDataChannelClosed)?
-                .is_writable()
-            {
-                return Err(Error::ErrDataChannelClosed);
-            }
-        }
         let sent = match &message.message {
             RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
                 data_channel_id,
@@ -415,7 +389,6 @@ impl RTCPeerConnection {
             _ => None,
         };
         self.get_datachannel_handler().handle_write(message)?;
-        let mut result = Ok(());
         while let Some(message) = self
             .pipeline_context
             .datachannel_handler_context
@@ -433,11 +406,14 @@ impl RTCPeerConnection {
                     }
                 })
             {
-                result = Err(error);
+                self.pipeline_context
+                    .datachannel_handler_context
+                    .write_outs
+                    .clear();
+                return Err(error);
             }
         }
-        if result.is_ok()
-            && let Some((id, bytes)) = sent
+        if let Some((id, bytes)) = sent
             && let Some(channel) = self.data_channels.get(&id)
         {
             self.pipeline_context
@@ -445,7 +421,7 @@ impl RTCPeerConnection {
                 .get_or_create_data_channel(id, &channel.label, &channel.protocol)
                 .on_message_sent(bytes);
         }
-        result
+        Ok(())
     }
 
     /// Returns whether any handler raised an event during the sweep.
