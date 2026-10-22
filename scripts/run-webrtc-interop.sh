@@ -93,6 +93,10 @@ echo "==> Verifying RTC application send accounting"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib transport_control_ack_preserves_pending_gameplay_accounting
 
+echo "==> Verifying RTC timer-only send credit release"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib timer_abandonment_
+
 echo "==> Verifying RTC negotiated stream allocation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib data_channel::registry::tests

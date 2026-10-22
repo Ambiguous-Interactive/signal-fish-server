@@ -21,7 +21,7 @@ use std::sync::Arc;
 use hdrhistogram::{Counter, Histogram};
 
 use crate::config::{count_u64, DeliveryClass, Experiment};
-use crate::records::{ChurnPhase, GapEvent, RunRecords, SentEvent};
+use crate::records::{ChurnPhase, GapEvent, ReceiptName, RunRecords, SentEvent};
 use crate::schedule::{ChurnPlan, Phase, SenderPlan};
 
 /// One delivery key that violated the contract, named exactly. `epoch` and
@@ -237,7 +237,7 @@ pub struct RecipientOutcome {
     /// False once a disconnect was recorded for this recipient.
     pub connected_through: bool,
     /// Unique deliveries received, per sender.
-    pub received: BTreeMap<String, u64>,
+    pub received: BTreeMap<ReceiptName, u64>,
     /// Owed-but-unreceived count for connected recipients.
     pub missing: u64,
     /// Tail a disconnected recipient never saw (permitted with a disconnect).
@@ -1676,7 +1676,10 @@ pub fn summarize(
     let mut missing = Category::default();
     let mut leaked = Category::default();
 
-    let mut per_recipient = Vec::new();
+    // Share sender spellings across the fan-out summary. Retain owned keys so
+    // summaries outlive their raw run records without changing artifact JSON.
+    let mut summary_sender_names: BTreeMap<&str, ReceiptName> = BTreeMap::new();
+    let mut per_recipient = Vec::with_capacity(roster.len());
     let mut maximum_recipient_receipts = 0_u64;
     for (recipient, room) in roster {
         let view = views
@@ -1853,7 +1856,12 @@ pub fn summarize(
         }
         outcome.received = received_by_sender
             .iter()
-            .map(|(sender, count)| ((*sender).to_string(), *count))
+            .map(|(sender, count)| {
+                let name = summary_sender_names
+                    .entry(sender)
+                    .or_insert_with(|| ReceiptName::from(*sender));
+                (name.clone(), *count)
+            })
             .collect();
 
         per_recipient.push(outcome);
@@ -2291,6 +2299,167 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    // #775/#636: fan-out summaries retain one sender spelling per run.
+    #[test]
+    fn summary_sender_names_share_storage_and_preserve_json_replay() {
+        for unusual_names in [false, true] {
+            let mut context = crate::unit_context();
+            if unusual_names {
+                let names = ["", "a", "aa", "β\"\\\n"];
+                assert_eq!(context.plans.len(), names.len());
+                for (plan, name) in context.plans.iter_mut().zip(names) {
+                    plan.name = name.to_string();
+                }
+                context.roster = context
+                    .plans
+                    .iter()
+                    .map(|plan| (plan.name.clone(), plan.room))
+                    .collect();
+            }
+            let records = crate::complete_records(&context.plans);
+            let summarize_records = |records: &RunRecords| {
+                summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    1000,
+                    96,
+                    DeliveryClass::Reliable,
+                    &ChurnPlan::default(),
+                    None,
+                )
+            };
+            let summary = summarize_records(&records);
+            assert!(summary.valid);
+            let mut names = BTreeMap::new();
+            let mut shared = 0;
+            for outcome in &summary.per_recipient {
+                let legacy: BTreeMap<String, u64> = outcome
+                    .received
+                    .iter()
+                    .map(|(name, count)| (name.to_string(), *count))
+                    .collect();
+                assert_eq!(
+                    serde_json::to_value(&outcome.received).unwrap(),
+                    serde_json::to_value(&legacy).unwrap()
+                );
+                assert_eq!(
+                    outcome
+                        .received
+                        .keys()
+                        .map(|name| name.as_str())
+                        .collect::<Vec<_>>(),
+                    legacy.keys().map(String::as_str).collect::<Vec<_>>()
+                );
+                for name in outcome.received.keys() {
+                    assert_eq!(
+                        outcome.received.get(name.as_str()),
+                        legacy.get(name.as_str())
+                    );
+                    if let Some(previous) = names.insert(name.as_str(), name.as_str().as_ptr()) {
+                        assert_eq!(
+                            previous,
+                            name.as_str().as_ptr(),
+                            "sender {name} must share storage"
+                        );
+                        shared += 1;
+                    }
+                }
+            }
+            assert!(shared > 0);
+            let json = serde_json::to_value(&summary).unwrap();
+            let decoded: OutcomeSummary = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(summarize_records(&replayed)).unwrap(),
+                json
+            );
+            assert_eq!(
+                serde_json::to_value(&records).unwrap(),
+                serde_json::to_value(replayed).unwrap()
+            );
+            drop(records);
+            assert_eq!(serde_json::to_value(&summary).unwrap(), json);
+        }
+        let empty = summarize(
+            &[],
+            &[],
+            &RunRecords::default(),
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        assert!(empty.valid);
+        assert!(empty.per_recipient.is_empty());
+    }
+
+    /// Isolate retained sender-name maps from raw records and oracle scratch.
+    /// Both modes emit the same JSON through the bounded artifact writer.
+    #[test]
+    #[ignore = "isolated summary sender-name memory profile; run in a fresh process"]
+    fn generator_summary_sender_names_memory_profile() {
+        let rooms = std::env::var("CAPACITY_SUMMARY_NAMES_ROOMS")
+            .unwrap_or_else(|_| "250".into())
+            .parse::<u32>()
+            .expect("rooms");
+        assert!((1..=1000).contains(&rooms));
+        fn measure<Name: From<String> + Clone + Ord + serde::Serialize>(rooms: u32) {
+            let started = std::time::Instant::now();
+            let mut outcomes = Vec::with_capacity(rooms as usize * 64);
+            for room in 0..rooms {
+                let names: Vec<Name> = (0..64)
+                    .map(|player| crate::config::RunConfig::peer_name(room, player).into())
+                    .collect();
+                for player in 0..64 {
+                    let received: BTreeMap<Name, u64> = names
+                        .iter()
+                        .enumerate()
+                        .filter(|(sender, _)| *sender != player)
+                        .map(|(_, name)| (name.clone(), 43_200))
+                        .collect();
+                    outcomes.push(received);
+                }
+            }
+            let retained_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+            let build_us = started.elapsed().as_micros();
+            let output = tempfile::tempdir().unwrap();
+            let path = output.path().join("received.json");
+            crate::artifacts::write_json(&path, &outcomes).unwrap();
+            use sha2::{Digest, Sha256};
+            use std::io::Read as _;
+            let mut digest = Sha256::new();
+            let mut file = std::fs::File::open(&path).unwrap();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let read = file.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+            }
+            println!(
+                "SUMMARY_SENDER_NAMES_PROFILE {}",
+                serde_json::json!({
+                    "rooms": rooms, "players_per_room": 64, "name_bytes": std::mem::size_of::<Name>(),
+                    "entries": u64::from(rooms) * 64 * 63, "retained_rss_bytes": retained_rss,
+                    "build_us": build_us, "json_bytes": std::fs::metadata(path).unwrap().len(),
+                    "sha256": digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                })
+            );
+            std::hint::black_box(outcomes);
+        }
+        if std::env::var_os("CAPACITY_SUMMARY_NAMES_STRINGS").is_some() {
+            measure::<String>(rooms);
+        } else {
+            measure::<ReceiptName>(rooms);
+        }
+    }
 
     // #775/#636: ordinary rooms share their immutable epoch evidence while
     // affected rooms retain exact per-seat snapshots and unresolved identities.

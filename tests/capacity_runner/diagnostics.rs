@@ -123,6 +123,66 @@ pub fn cgroup_memory_bytes(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Cumulative cgroup v2 CPU counters. Usage includes descendant groups;
+/// bandwidth counters describe this group's limit, not ancestor throttling.
+/// These values describe the group, which may contain other processes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CgroupCpuStats {
+    pub path: String,
+    pub usage_usec: u64,
+    pub nr_periods: Option<u64>,
+    pub nr_throttled: Option<u64>,
+    pub throttled_usec: Option<u64>,
+}
+
+/// Read CPU counters at the conventional Linux cgroup v2 mount.
+/// Missing bandwidth counters remain unavailable when the controller is off.
+#[cfg(target_os = "linux")]
+pub fn cgroup_cpu_stats(pid: u32) -> Option<CgroupCpuStats> {
+    let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    cgroup_cpu_stats_from(&cgroup, Path::new("/sys/fs/cgroup"))
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_cpu_stats_from(cgroup: &str, root: &Path) -> Option<CgroupCpuStats> {
+    let path = cgroup.lines().find_map(|line| line.strip_prefix("0::/"))?;
+    let text = std::fs::read_to_string(root.join(path).join("cpu.stat")).ok()?;
+    let mut usage_usec = None;
+    let mut nr_periods = None;
+    let mut nr_throttled = None;
+    let mut throttled_usec = None;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let target = match fields.next()? {
+            "usage_usec" => &mut usage_usec,
+            "nr_periods" => &mut nr_periods,
+            "nr_throttled" => &mut nr_throttled,
+            "throttled_usec" => &mut throttled_usec,
+            _ => continue,
+        };
+        if target.is_some() {
+            return None;
+        }
+        *target = Some(fields.next()?.parse().ok()?);
+        if fields.next().is_some() {
+            return None;
+        }
+    }
+    Some(CgroupCpuStats {
+        path: format!("/{path}"),
+        usage_usec: usage_usec?,
+        nr_periods,
+        nr_throttled,
+        throttled_usec,
+    })
+}
+
+/// Cgroup CPU counters are unavailable off Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn cgroup_cpu_stats(_pid: u32) -> Option<CgroupCpuStats> {
+    None
+}
+
 /// Cumulative CPU seconds (user + system) a process has consumed
 /// (`utime + stime` from `/proc/<pid>/stat`, normalized by the kernel's
 /// fixed `USER_HZ = 100` stub — Linux has reported these fields in 100
@@ -374,6 +434,54 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_cpu_reads_root_and_nested_counters_with_explicit_missing_fields() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("game")).unwrap();
+        let full = "usage_usec 123\nuser_usec 100\nsystem_usec 23\nnr_periods 10\nnr_throttled 2\nthrottled_usec 45\nfuture_counter 99\n";
+        std::fs::write(root.path().join("cpu.stat"), full).unwrap();
+        std::fs::write(root.path().join("game/cpu.stat"), "usage_usec 0\n").unwrap();
+        let measured = cgroup_cpu_stats_from("0::/\n", root.path()).unwrap();
+        assert_eq!(measured.path, "/");
+        assert_eq!(measured.usage_usec, 123);
+        assert_eq!(measured.nr_periods, Some(10));
+        assert_eq!(measured.nr_throttled, Some(2));
+        assert_eq!(measured.throttled_usec, Some(45));
+        let nested = cgroup_cpu_stats_from("5:cpu:/legacy\n0::/game\n", root.path()).unwrap();
+        assert_eq!(nested.path, "/game");
+        assert_eq!(nested.usage_usec, 0);
+        assert_eq!(nested.nr_periods, None);
+        assert_eq!(nested.nr_throttled, None);
+        assert_eq!(nested.throttled_usec, None);
+        for cgroup in ["", "5:cpu:/game\n", "0::\n", "0::/missing\n"] {
+            assert_eq!(
+                cgroup_cpu_stats_from(cgroup, root.path()),
+                None,
+                "{cgroup:?}"
+            );
+        }
+        for malformed in [
+            "",
+            "nr_periods 1\n",
+            "usage_usec x\n",
+            "usage_usec -1\n",
+            "usage_usec 18446744073709551616\n",
+            "usage_usec 1\nusage_usec 2\n",
+            "usage_usec 1 2\n",
+            "usage_usec 1\nnr_throttled x\n",
+            "usage_usec 1\nthrottled_usec\n",
+        ] {
+            std::fs::write(root.path().join("cpu.stat"), malformed).unwrap();
+            assert_eq!(
+                cgroup_cpu_stats_from("0::/\n", root.path()),
+                None,
+                "{malformed:?}"
+            );
+        }
+        assert_eq!(cgroup_cpu_stats(u32::MAX), None);
     }
 
     #[cfg(target_os = "linux")]

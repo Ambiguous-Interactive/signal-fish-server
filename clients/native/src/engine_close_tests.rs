@@ -346,32 +346,236 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
 
 type RuntimeFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+#[derive(Debug, Default)]
+struct ResetPacketProgress {
+    sent: AtomicU64,
+    application_sent: AtomicU64,
+    received: AtomicU64,
+    dropped_datagrams: AtomicU64,
+    dropped_transmits: AtomicU64,
+    drop_next_application: AtomicBool,
+    reactor_polls: AtomicU64,
+    paused_polls: AtomicU64,
+}
+
+impl ResetPacketProgress {
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sent": self.sent.load(Ordering::SeqCst),
+            "application_sent": self.application_sent.load(Ordering::SeqCst),
+            "received": self.received.load(Ordering::SeqCst),
+            "dropped_datagrams": self.dropped_datagrams.load(Ordering::SeqCst),
+            "dropped_transmits": self.dropped_transmits.load(Ordering::SeqCst),
+            "reactor_polls": self.reactor_polls.load(Ordering::SeqCst),
+            "paused_polls": self.paused_polls.load(Ordering::SeqCst),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ResetUdpSocket {
+    inner: Arc<dyn webrtc::runtime::AsyncUdpSocket>,
+    progress: Arc<ResetPacketProgress>,
+}
+
+impl webrtc::runtime::AsyncUdpSocket for ResetUdpSocket {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn poll_send(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        transmit: &webrtc::runtime::Transmit<'_>,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        /* DTLS application records contain encrypted SCTP. Their chunk type is unknown. */
+        let datagrams = u64::try_from(
+            transmit.contents.len().div_ceil(
+                transmit
+                    .segment_size
+                    .unwrap_or(transmit.contents.len())
+                    .max(1),
+            ),
+        )
+        .unwrap();
+        if transmit.contents.first() == Some(&23)
+            && self
+                .progress
+                .drop_next_application
+                .swap(false, Ordering::SeqCst)
+        {
+            self.progress
+                .dropped_datagrams
+                .fetch_add(datagrams, Ordering::SeqCst);
+            self.progress
+                .dropped_transmits
+                .fetch_add(1, Ordering::SeqCst);
+            return std::task::Poll::Ready(Ok(transmit.contents.len()));
+        }
+        let result = self.inner.poll_send(cx, transmit);
+        if matches!(result, std::task::Poll::Ready(Ok(_))) {
+            self.progress.sent.fetch_add(datagrams, Ordering::SeqCst);
+            if transmit.contents.first() == Some(&23) {
+                self.progress
+                    .application_sent
+                    .fetch_add(datagrams, Ordering::SeqCst);
+            }
+        }
+        result
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buffers: &mut [std::io::IoSliceMut<'_>],
+        metadata: &mut [webrtc::runtime::RecvMeta],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = self.inner.poll_recv(cx, buffers, metadata);
+        if let std::task::Poll::Ready(Ok(count)) = result {
+            let datagrams: usize = metadata
+                .iter()
+                .take(count)
+                .map(|message| message.len.div_ceil(message.stride.max(1)))
+                .sum();
+            self.progress
+                .received
+                .fetch_add(u64::try_from(datagrams).unwrap(), Ordering::SeqCst);
+        }
+        result
+    }
+
+    fn max_gso_segments(&self) -> usize {
+        self.inner.max_gso_segments()
+    }
+
+    fn max_gro_segments(&self) -> usize {
+        self.inner.max_gro_segments()
+    }
+}
+
+#[tokio::test]
+async fn reset_packet_injector_preserves_control_traffic_and_drops_application_once() {
+    use webrtc::runtime::AsyncUdpSocket;
+
+    let progress = Arc::new(ResetPacketProgress::default());
+    let socket = ResetUdpSocket {
+        inner: default_runtime()
+            .unwrap()
+            .wrap_udp_socket(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap(),
+        progress: progress.clone(),
+    };
+    let remote = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    progress.drop_next_application.store(true, Ordering::SeqCst);
+    for packet in [&[0, 1][..], &[22, 2], &[23, 3], &[23, 4]] {
+        assert_eq!(
+            socket
+                .send_to(packet, remote.local_addr().unwrap())
+                .await
+                .unwrap(),
+            packet.len()
+        );
+    }
+    let mut buffer = [0; 64];
+    for expected in [&[0, 1][..], &[22, 2], &[23, 4]] {
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(1), remote.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&buffer[..length], expected);
+    }
+    remote
+        .send_to(&[23, 5], socket.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (length, _) = tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buffer[..length], &[23, 5]);
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot["sent"], 3);
+    assert_eq!(snapshot["received"], 1);
+    assert_eq!(snapshot["dropped_datagrams"], 1);
+    assert_eq!(snapshot["dropped_transmits"], 1);
+
+    progress.drop_next_application.store(true, Ordering::SeqCst);
+    let batch = webrtc::runtime::Transmit {
+        destination: remote.local_addr().unwrap(),
+        ecn: None,
+        contents: &[23; 9],
+        segment_size: Some(4),
+        src_ip: None,
+    };
+    assert_eq!(
+        std::future::poll_fn(|cx| socket.poll_send(cx, &batch))
+            .await
+            .unwrap(),
+        9
+    );
+    let snapshot = progress.snapshot();
+    assert_eq!(snapshot["dropped_transmits"], 2);
+    assert_eq!(snapshot["dropped_datagrams"], 4);
+    assert_eq!(snapshot["sent"], 3);
+}
+
 #[derive(Debug)]
 struct PausableReactor {
     inner: Arc<dyn Runtime>,
     paused: Arc<AtomicBool>,
     reactor_selected: AtomicBool,
+    dedicated: bool,
     waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
     held: Arc<tokio::sync::Notify>,
+    progress: Arc<ResetPacketProgress>,
 }
 
 impl PausableReactor {
     fn new() -> Arc<Self> {
+        Self::with_dedicated_reactor(true)
+    }
+
+    fn with_dedicated_reactor(dedicated: bool) -> Arc<Self> {
         Arc::new(Self {
             inner: default_runtime().unwrap(),
             paused: Arc::new(AtomicBool::new(false)),
             reactor_selected: AtomicBool::new(false),
+            dedicated,
             waker: Arc::new(std::sync::Mutex::new(None)),
             held: Arc::new(tokio::sync::Notify::new()),
+            progress: Arc::new(ResetPacketProgress::default()),
         })
     }
 
+    fn reactor_future(&self, mut future: RuntimeFuture<'static, ()>) -> RuntimeFuture<'static, ()> {
+        let paused = self.paused.clone();
+        let waker = self.waker.clone();
+        let held = self.held.clone();
+        let progress = self.progress.clone();
+        Box::pin(std::future::poll_fn(move |cx| {
+            *waker.lock().unwrap() = Some(cx.waker().clone());
+            if paused.load(Ordering::SeqCst) {
+                progress.paused_polls.fetch_add(1, Ordering::SeqCst);
+                held.notify_one();
+                return std::task::Poll::Pending;
+            }
+            progress.reactor_polls.fetch_add(1, Ordering::SeqCst);
+            future.as_mut().poll(cx)
+        }))
+    }
+
     async fn pause(&self) {
+        let previous_hold = self.progress.paused_polls.load(Ordering::SeqCst);
         self.paused.store(true, Ordering::SeqCst);
         self.waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
-        tokio::time::timeout(Duration::from_secs(5), self.held.notified())
-            .await
-            .expect("the remote reactor acknowledges the hold");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.progress.paused_polls.load(Ordering::SeqCst) == previous_hold {
+                self.held.notified().await;
+            }
+        })
+        .await
+        .expect("the reactor acknowledges this hold");
     }
 
     fn resume(&self) {
@@ -386,7 +590,11 @@ impl Runtime for PausableReactor {
         future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     ) -> Box<dyn JoinHandle> {
         if !self.reactor_selected.swap(true, Ordering::Relaxed) {
-            self.spawn_reactor(0, future)
+            if self.dedicated {
+                self.spawn_reactor(0, future)
+            } else {
+                self.inner.spawn(self.reactor_future(future))
+            }
         } else {
             self.inner.spawn(future)
         }
@@ -395,29 +603,19 @@ impl Runtime for PausableReactor {
     fn spawn_reactor(
         &self,
         pool: usize,
-        mut future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        future: RuntimeFuture<'static, ()>,
     ) -> Box<dyn JoinHandle> {
-        let paused = self.paused.clone();
-        let waker = self.waker.clone();
-        let held = self.held.clone();
-        self.inner.spawn_reactor(
-            pool,
-            Box::pin(std::future::poll_fn(move |cx| {
-                *waker.lock().unwrap() = Some(cx.waker().clone());
-                if paused.load(Ordering::SeqCst) {
-                    held.notify_one();
-                    return std::task::Poll::Pending;
-                }
-                future.as_mut().poll(cx)
-            })),
-        )
+        self.inner.spawn_reactor(pool, self.reactor_future(future))
     }
 
     fn wrap_udp_socket(
         &self,
         socket: std::net::UdpSocket,
     ) -> std::io::Result<Arc<dyn webrtc::runtime::AsyncUdpSocket>> {
-        self.inner.wrap_udp_socket(socket)
+        Ok(Arc::new(ResetUdpSocket {
+            inner: self.inner.wrap_udp_socket(socket)?,
+            progress: self.progress.clone(),
+        }))
     }
     fn wrap_tcp_listener(
         &self,
@@ -977,6 +1175,14 @@ async fn backpressure_pair(
     limit: Option<usize>,
     initiator_sends: bool,
 ) -> (LivePair, Arc<PausableReactor>) {
+    let (pair, remote, _) = backpressure_pair_with_runtimes(limit, initiator_sends).await;
+    (pair, remote)
+}
+
+async fn backpressure_pair_with_runtimes(
+    limit: Option<usize>,
+    initiator_sends: bool,
+) -> (LivePair, Arc<PausableReactor>, Arc<PausableReactor>) {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
     let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
     let settings = EngineSettings {
@@ -984,14 +1190,17 @@ async fn backpressure_pair(
         ..EngineSettings::default()
     };
     let remote_runtime = PausableReactor::new();
+    let local_runtime = PausableReactor::with_dedicated_reactor(false);
     let mut sender = Engine::new(settings, sender_tx).unwrap();
     let mut receiver = Engine::new(settings, receiver_tx).unwrap();
     sender.send_buffer_limit = limit;
     receiver.send_buffer_limit = limit;
     if initiator_sends {
         receiver.runtime = remote_runtime.clone();
+        sender.runtime = local_runtime.clone();
     } else {
         sender.runtime = remote_runtime.clone();
+        receiver.runtime = local_runtime.clone();
     }
     let mut pair = LivePair {
         sender,
@@ -1007,7 +1216,7 @@ async fn backpressure_pair(
         std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
         std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
     }
-    (pair, remote_runtime)
+    (pair, remote_runtime, local_runtime)
 }
 
 fn assert_channel_closed(result: webrtc::error::Result<()>) {
@@ -1023,10 +1232,14 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
     for initiator_sends in [true, false] {
         for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
             for limit in [1, 8] {
-                let (mut pair, remote_runtime) =
-                    backpressure_pair(Some(limit), initiator_sends).await;
+                let context =
+                    format!("initiator_sends={initiator_sends}, label={label}, limit={limit}");
+                let (mut pair, remote_runtime, local_runtime) =
+                    backpressure_pair_with_runtimes(Some(limit), initiator_sends).await;
                 let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
                 remote_runtime.pause().await;
+                let pause_started = std::time::Instant::now();
+                let local_before = local_runtime.progress.snapshot();
                 let accepted = "a".repeat(limit);
                 channel.send_text(&accepted).await.unwrap();
                 assert_eq!(channel.outstanding_bytes().await.unwrap(), limit);
@@ -1082,7 +1295,7 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                     sibling.ready_state().await.unwrap(),
                     rtc::data_channel::RTCDataChannelState::Open
                 );
-                sibling.try_send_text("sibling").await.unwrap();
+                eprintln!("local-close resume: {context}; paused_ms={}; outstanding={:?}; local_before={local_before}; local_after={}; remote_packets={}", pause_started.elapsed().as_millis(), channel.outstanding_bytes().await, local_runtime.progress.snapshot(), remote_runtime.progress.snapshot());
                 remote_runtime.resume();
                 tokio::time::timeout(Duration::from_secs(5), async {
                     let mut received = 0;
@@ -1097,7 +1310,7 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                                 received += 1;
                             }
                             EngineEvent::ChannelClosed { label: closed, .. } if closed == label => {
-                                assert_eq!(received, 1, "accepted input arrives once before close");
+                                assert_eq!(received, 1, "{context}: accepted input arrives once before close; elapsed_ms={}; local_before={local_before}; local_after={}; remote_packets={}; sender={}; receiver={}", pause_started.elapsed().as_millis(), local_runtime.progress.snapshot(), remote_runtime.progress.snapshot(), pair.sender.diagnostic_snapshot(pair.receiver_id), pair.receiver.diagnostic_snapshot(pair.sender_id));
                                 break;
                             }
                             _ => {}
@@ -1113,9 +1326,10 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                 .await
                 .expect("reset preserves accepted input and releases outstanding bytes");
                 /*
-                 * The engine stops gameplay admission after required-channel loss.
-                 * Transport stats still prove the sibling delivered independently.
-                 */
+                    #1126: a sibling observer can retire the pair before this channel's
+                    poller drains. Probe its transport only after the own-close FIFO.
+                */
+                sibling.try_send_text("sibling").await.unwrap();
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
                         let reports = pair.receiver.peers[&pair.sender_id]
@@ -1163,6 +1377,152 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
     }
 }
 
+// Regression #1126: physical receipt does not bypass observed pair-loss admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sibling_loss_fences_queued_target_input_before_own_poller_resumes() {
+    let mut pair = LivePair::connect().await;
+    let peer = pair.sender_id;
+    let link = &pair.receiver.peers[&peer];
+    let admission = link.receive_admission.clone();
+    let generation = link.generation;
+    for task in &link.channel_tasks {
+        task.abort();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let target = pair
+        .sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap();
+    target.send_text("accepted-before-own-close").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pair
+            .receiver
+            .channel_received_messages(peer, RELIABLE_LABEL)
+            .await
+            != 1
+            || target.outstanding_bytes().await.unwrap() != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("target input is physically received and acknowledged before reset");
+    target.close().await.unwrap();
+    let local_target = pair.receiver.channel(peer, RELIABLE_LABEL).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while matches!(
+            local_target.ready_state().await,
+            Ok(rtc::data_channel::RTCDataChannelState::Open)
+        ) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    pair.sender
+        .channel(pair.receiver_id, UNRELIABLE_LABEL)
+        .unwrap()
+        .send_text("sibling-probe")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pair
+            .receiver
+            .channel_received_messages(peer, UNRELIABLE_LABEL)
+            .await
+            != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let sibling_task = spawn_channel_event_loop(
+        &pair.receiver.runtime,
+        &pair.receiver.events,
+        peer,
+        generation,
+        UNRELIABLE_LABEL.into(),
+        pair.receiver.channel(peer, UNRELIABLE_LABEL).unwrap(),
+        admission.clone(),
+    );
+    pair.receiver
+        .peers
+        .get_mut(&peer)
+        .unwrap()
+        .channel_tasks
+        .push(sibling_task);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !admission.terminal.load(Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("sibling observes physical target loss before target poller resumes");
+    let target_task = spawn_channel_event_loop(
+        &pair.receiver.runtime,
+        &pair.receiver.events,
+        peer,
+        generation,
+        RELIABLE_LABEL.into(),
+        local_target,
+        admission,
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !target_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    pair.receiver
+        .peers
+        .get_mut(&peer)
+        .unwrap()
+        .channel_tasks
+        .push(target_task);
+    let mut target_closed = 0;
+    loop {
+        let event = match pair.receiver_events.try_recv() {
+            Ok(event) => event,
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                panic!("live receiver engine retains its event sender")
+            }
+        };
+        match event {
+            EngineEvent::ChannelMessage { .. } => {
+                panic!("observed pair loss fences all unadmitted input")
+            }
+            EngineEvent::ChannelClosed { label, .. } if label == RELIABLE_LABEL => {
+                target_closed += 1
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        target_closed, 1,
+        "sibling and target observers publish loss once"
+    );
+    let snapshot = pair.receiver.diagnostic_snapshot(peer);
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        assert_eq!(
+            snapshot["channels"][label]["receipts"],
+            serde_json::json!({
+                "raw": 1, "admitted": 0, "rejected": 0, "discarded": 1,
+            }),
+            "{label}: physically received input stays fenced after observed loss"
+        );
+    }
+    pair.cleanup().await;
+}
+
 // Regression #1088: default and zero (unlimited) limits still obey channel state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unlimited_channel_writable_rejects_local_closing_and_remote_closed() {
@@ -1203,19 +1563,110 @@ async fn unlimited_channel_writable_rejects_local_closing_and_remote_closed() {
     }
 }
 
+// Regression #1124: T3 abandonment releases public send capacity without peer input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timer_abandonment_releases_public_channel_writable_without_peer_input() {
+    for initiator_sends in [true, false] {
+        for binary in [false, true] {
+            let (pair, remote_runtime, local_runtime) =
+                backpressure_pair_with_runtimes(Some(1), initiator_sends).await;
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, UNRELIABLE_LABEL)
+                .unwrap();
+            remote_runtime.pause().await;
+            local_runtime.pause().await;
+            let remote_before = remote_runtime.progress.snapshot();
+            if binary {
+                channel.send(b"x".as_slice().into()).await.unwrap();
+            } else {
+                channel.send_text("x").await.unwrap();
+            }
+            assert_eq!(channel.outstanding_bytes().await.unwrap(), 1);
+            let writable = channel.writable();
+            tokio::pin!(writable);
+            assert!(futures_util::poll!(&mut writable).is_pending());
+            local_runtime.resume();
+            tokio::time::timeout(Duration::from_secs(5), &mut writable)
+                .await
+                .expect("local T3 abandonment wakes public writable without peer input")
+                .unwrap();
+            assert_eq!(channel.outstanding_bytes().await.unwrap(), 0);
+            assert_eq!(
+                channel.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Open
+            );
+            assert_eq!(
+                remote_runtime.progress.snapshot()["sent"],
+                remote_before["sent"],
+                "the paused peer emits no ACK or reset while local credit is released"
+            );
+            local_runtime.pause().await;
+            if binary {
+                channel.try_send(b"y".as_slice().into()).await.unwrap();
+            } else {
+                channel.try_send_text("y").await.unwrap();
+            }
+            assert_eq!(channel.outstanding_bytes().await.unwrap(), 1);
+            local_runtime.resume();
+            remote_runtime.resume();
+            pair.cleanup().await;
+        }
+    }
+}
+
 // Regression #1088: reciprocal reset must release senders blocked on the other peer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_channel_remote_reset_releases_senders() {
+    remote_reset_with_packet_history(false, false, false).await;
+}
+
+// Investigation #1120: keep the full-channel history under one application transmit loss.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_channel_remote_reset_releases_senders_after_remote_application_transmit_loss() {
+    remote_reset_with_packet_history(true, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_channel_remote_reset_releases_senders_after_local_application_transmit_loss() {
+    remote_reset_with_packet_history(false, true, false).await;
+    remote_reset_with_packet_history(true, true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_channel_remote_reset_starts_before_accepted_data_reaches_udp() {
+    remote_reset_with_packet_history(false, false, true).await;
+}
+
+async fn remote_reset_with_packet_history(
+    drop_remote_application_transmit: bool,
+    drop_local_application_transmit: bool,
+    hold_accepted_packet: bool,
+) {
     for initiator_sends in [true, false] {
         for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
             for limit in [1, 8] {
+                if (drop_local_application_transmit || hold_accepted_packet)
+                    && (label != UNRELIABLE_LABEL || limit != 1)
+                {
+                    continue;
+                }
                 let context =
-                    format!("initiator_sends={initiator_sends}, label={label}, limit={limit}");
+                    format!("initiator_sends={initiator_sends}, label={label}, limit={limit}, drop_remote_application_transmit={drop_remote_application_transmit}, drop_local_application_transmit={drop_local_application_transmit}, hold_accepted_packet={hold_accepted_packet}");
                 eprintln!("remote-reset start: {context}");
-                let (pair, remote_runtime) = backpressure_pair(Some(limit), initiator_sends).await;
+                let (pair, remote_runtime, local_runtime) =
+                    backpressure_pair_with_runtimes(Some(limit), initiator_sends).await;
                 let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
                 let remote = pair.receiver.channel(pair.sender_id, label).unwrap();
                 remote_runtime.pause().await;
+                if hold_accepted_packet {
+                    local_runtime.pause().await;
+                }
+                let before_local_send = local_runtime.progress.snapshot();
+                local_runtime
+                    .progress
+                    .drop_next_application
+                    .store(drop_local_application_transmit, Ordering::SeqCst);
                 channel.send_text(&"a".repeat(limit)).await.unwrap();
                 assert_eq!(channel.outstanding_bytes().await.unwrap(), limit);
                 let writable = channel.writable();
@@ -1225,12 +1676,37 @@ async fn full_channel_remote_reset_releases_senders() {
                 assert!(futures_util::poll!(&mut writable).is_pending());
                 assert!(futures_util::poll!(&mut binary).is_pending());
                 assert!(futures_util::poll!(&mut text).is_pending());
+                let before_reset = remote_runtime.progress.snapshot();
+                remote_runtime
+                    .progress
+                    .drop_next_application
+                    .store(drop_remote_application_transmit, Ordering::SeqCst);
                 remote.close().await.unwrap();
                 assert_eq!(
                     remote.ready_state().await.unwrap(),
                     rtc::data_channel::RTCDataChannelState::Closing
                 );
                 remote_runtime.resume();
+                if hold_accepted_packet {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while remote_runtime
+                            .progress
+                            .application_sent
+                            .load(Ordering::SeqCst)
+                            <= before_reset["application_sent"].as_u64().unwrap()
+                        {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("remote SCTP output reaches UDP before local DATA gathering resumes");
+                    assert_eq!(
+                        local_runtime.progress.snapshot()["application_sent"],
+                        before_local_send["application_sent"],
+                        "local accepted DATA stays before UDP while the remote reset starts"
+                    );
+                    local_runtime.resume();
+                }
                 /*
                  * An ACK can free capacity before reset arrives. Keep the
                  * caller suspended until the public state proves terminal reset,
@@ -1258,12 +1734,43 @@ async fn full_channel_remote_reset_releases_senders() {
                         )
                     }).await;
                     panic!(
-                        "remote reset reaches the local public channel state: {context}; states={states:?}; sender={}; receiver={}",
+                        "remote reset reaches the local public channel state: {context}; states={states:?}; remote_packets_before={before_reset}; remote_packets_after={}; local_packets_before={before_local_send}; local_packets_after={}; sender={}; receiver={}",
+                        remote_runtime.progress.snapshot(),
+                        local_runtime.progress.snapshot(),
                         pair.sender.diagnostic_snapshot(pair.receiver_id),
                         pair.receiver.diagnostic_snapshot(pair.sender_id),
                     );
                 }
-                eprintln!("remote-reset complete: {context}");
+                let after_reset = remote_runtime.progress.snapshot();
+                for (endpoint, progress, inject_loss) in [
+                    (
+                        "local",
+                        local_runtime.progress.snapshot(),
+                        drop_local_application_transmit,
+                    ),
+                    (
+                        "remote",
+                        after_reset.clone(),
+                        drop_remote_application_transmit,
+                    ),
+                ] {
+                    assert_eq!(
+                        progress["dropped_transmits"],
+                        u64::from(inject_loss),
+                        "{context}: {endpoint} loses exactly the requested application transmit"
+                    );
+                    assert_eq!(
+                        progress["dropped_datagrams"].as_u64().unwrap() > 0,
+                        inject_loss,
+                        "{context}: {endpoint} reports all datagrams lost in that transmit"
+                    );
+                }
+                assert!(
+                    after_reset["reactor_polls"].as_u64().unwrap()
+                        > before_reset["reactor_polls"].as_u64().unwrap(),
+                    "{context}: remote reactor resumes"
+                );
+                eprintln!("remote-reset complete: {context}; remote_packets_before={before_reset}; remote_packets_after={after_reset}; local_packets_before={before_local_send}; local_packets_after={}", local_runtime.progress.snapshot());
 
                 tokio::time::timeout(Duration::from_secs(5), async {
                     let (ready, binary, text) = tokio::join!(&mut writable, &mut binary, &mut text);

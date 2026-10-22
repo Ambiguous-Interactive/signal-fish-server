@@ -409,6 +409,12 @@ pub struct IntervalSample {
     /// load generator's own cost must be distinguishable from server
     /// saturation.
     pub generator_cpu_seconds: Option<f64>,
+    /// Cgroup-wide CPU counters for each process; absent on unsupported hosts
+    /// and in old artifacts. A shared cgroup includes both processes.
+    #[serde(default)]
+    pub server_cgroup_cpu: Option<diagnostics::CgroupCpuStats>,
+    #[serde(default)]
+    pub generator_cgroup_cpu: Option<diagnostics::CgroupCpuStats>,
     /// Kernel TCP socket-buffer memory of the server process, in pages
     /// (TCP + TCP6 `mem` from `/proc/<pid>/net/sockstat`).
     pub server_socket_tcp_mem_pages: Option<u64>,
@@ -826,7 +832,7 @@ mod tests {
                     outcome.room = room;
                     outcome.received = (0..16)
                         .filter(|&sender| sender != player)
-                        .map(|sender| (RunConfig::peer_name(room, sender), 43_200))
+                        .map(|sender| (RunConfig::peer_name(room, sender).into(), 43_200))
                         .collect();
                     outcome
                 })
@@ -1046,6 +1052,28 @@ mod tests {
             );
             assert_eq!(actual[0].counters, samples[0]["counters"]);
         }
+    }
+
+    #[test]
+    fn interval_cpu_throttling_evidence_survives_round_trip_and_old_artifacts() {
+        let old = serde_json::json!({"t_us":9,"counters":{}});
+        let sample: IntervalSample = serde_json::from_value(old).unwrap();
+        let old_output = serde_json::to_value(sample).unwrap();
+        assert!(old_output
+            .get("generator_cgroup_cpu")
+            .is_none_or(Value::is_null));
+        let stats = serde_json::json!({"path":"/game", "usage_usec":123,
+            "nr_periods":10, "nr_throttled":2, "throttled_usec":45});
+        let mut input = old_output;
+        input["server_cgroup_cpu"] = stats.clone();
+        input["generator_cgroup_cpu"] = stats.clone();
+        let output = tempfile::tempdir().unwrap();
+        let parsed: IntervalSample = serde_json::from_value(input).unwrap();
+        write_intervals(output.path(), &[parsed]).unwrap();
+        let restored = read_intervals(output.path()).unwrap();
+        let actual = serde_json::to_value(&restored[0]).unwrap();
+        assert_eq!(actual["server_cgroup_cpu"], stats);
+        assert_eq!(actual["generator_cgroup_cpu"], stats);
     }
 
     #[test]
