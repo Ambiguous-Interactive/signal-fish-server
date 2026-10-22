@@ -65,7 +65,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97 |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97; closed-epoch delivery evidence in F130 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -7078,3 +7078,91 @@ The external Rust, .NET, and Godot clients do not use this RTC path patch.
 This confirmed recovery defect does not establish the cause of the historical
 initial-exchange failures in #853 or #889, or the reciprocal-reset timeout in
 issue #1120. Those investigations remain open with their original acceptance criteria.
+
+### A20 — Combined reciprocal-reset packet loss
+
+A new typed SCTP history advances open
+[#1120](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1120).
+It loses three distinct packets: accepted local DATA, the peer's initial reset
+request, and the final success reply to the reciprocal reset. Four cells cover
+reliable and zero-retransmit DATA with ordinary and wrapped TSNs.
+
+The initial prefix retains one local byte before the reset arrives, while the
+peer has requested reset with no buffered bytes. The real timer deadlines drive
+reset retransmission, reciprocal InProgress, and DATA recovery. Reliable DATA
+retransmits once and reaches the application. Zero-retransmit DATA produces one
+FORWARD-TSN. Losing the final success reply requires the cached reply on retry.
+Both reset directions finish, both retry timers stop, retained bytes reach zero,
+and the same SID delivers fresh gameplay. Synthetic time never moves backward.
+
+The four cells pass. Removing reset retransmission fails the exact retry count.
+Removing cached success replay leaves the SID reserved. Production source is
+restored byte for byte. The existing hosted SCTP `reset` selector includes the
+new `reciprocal_reset_recovers_lost_request_data_and_final_response` test.
+
+This narrows a combined packet-loss history that the native encrypted-datagram
+controls could not identify. It does not reproduce the historical native
+Open/Closing timeout or establish its cause. The public-channel state and async
+reactor scheduling remain separate boundaries. Keep #1120 open.
+
+### F130 — Closed epochs hide observed delivery violations
+
+Issue [#1130](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1130),
+under open #826 (A22), also affects the exact evidence contract in #775 and #636.
+At `d2413907`, the capacity oracle records old-epoch duplicates and backward
+receipts, then skips their verdict checks after reconnect closes that epoch.
+The gap pass also skips bounds and overlap checks when completeness is exempt.
+
+A valid small churn history inserts a duplicate before the next old-epoch
+receipt and before reconnect, with increasing receipt timestamps. The baseline
+oracle reports no reason. Twelve independent mutations are accepted: duplicate
+and backward arrivals in all three delivery classes, plus out-of-range gaps,
+gap/receipt overlap, and repeated gaps in both lossy classes. Legal old-epoch
+gaps remain valid. The controls preserve the original event chronology.
+
+The repair checks observed arrival and gap validity independently of whether a
+stream still owes completeness. Closing an epoch still exempts its missing
+receipts across the offline window. It does not permit observed duplicates,
+backward arrivals, impossible ranges, or overlapping reports. Artifact replay
+uses the same repaired oracle. The raw ledger and workload remain unchanged.
+
+This changes internal capacity validation. The server protocol, runtime, and
+external Rust, .NET, and Godot clients have no behavior or migration change.
+The broader audit, memory campaign, and historical gameplay investigations
+remain open with their original acceptance criteria.
+
+### F131 — Handshake timer failure stops the driver without peer failure
+
+Issue [#1131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1131),
+under open #826 (A20), is distinct from F129's SCTP failure after DTLS connects.
+The DTLS timeout handler returns retry exhaustion as an error. The async driver
+then stops without publishing a failed connection callback. A responder with no
+admitted remote channels has no channel poller to notice that exit.
+
+The public asynchronous control preserves ICE traffic and drops DTLS handshake
+records. The offerer creates one pending gameplay channel. The responder starts
+its handshake, exhausts at least eight attempts, and remains Connecting before
+repair. Its ICE state has not failed. The baseline fails the exact missing
+Failed-callback assertion in 1.58 seconds. This does not prove the cause of the
+historical #853 or #889 initial-exchange failures.
+
+The handler now records Failed, retains queued final output, retires its endpoint
+and pending handshake setup, and publishes the existing terminal transport event.
+The existing pipeline closes pending channels and publishes peer failure even
+without an admitted channel. Late handshake input cannot reopen that physical
+transport. Public channel creation rejects the terminal transport.
+
+Two public histories cover a responder with no local channel and a responder
+with pending in-band and negotiated handles. They require one Failed callback,
+terminal channel events and typed Closed send/writable errors where handles
+exist, and fresh-peer gameplay on the same network. The offerer that never
+received a first handshake flight is not claimed to have exhausted a timer.
+A direct RTC control replays a late first flight and processes later timeout and
+candidate-pair events while checking terminal state and one failure callback.
+Hosted selectors retain both the public and direct-core controls.
+
+Only the native reference RTC patch changes runtime behavior. The server wire
+contract stays the same. Refreshed source assessments show that the external
+Rust SDK has no dependency on this patch, the .NET SDK has no native package
+dependency, and Godot uses its engine's WebRTC implementation. All three are
+unaffected and need no migration issue. The broader investigations remain open.

@@ -187,3 +187,14 @@ one close per pending channel, reject late INIT input, and deliver gameplay
 on a fresh peer.
 See [#1128](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1128).
 Published replacement qualification in #912 must retain these controls.
+
+DTLS handshake retry exhaustion publishes a failed peer-connection state before
+retiring the transport. A responder with no admitted remote channels receives
+that callback. Pending local channels receive their terminal close through the
+existing ordered pipeline. Late input and new channels cannot restart the failed
+physical transport. Final queued transport output is retained before retirement.
+The delta changes `src/peer_connection/handler/dtls.rs` and
+`src/peer_connection/mod.rs`. Public async controls preserve ICE traffic while
+losing handshake records and drive the actual retry timers.
+See [#1131](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1131).
+Published replacement qualification in #912 must retain these controls.

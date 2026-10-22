@@ -281,7 +281,6 @@ use crate::peer_connection::state::peer_connection_state::{
     NegotiationNeededState, RTCPeerConnectionState,
 };
 use crate::peer_connection::state::signaling_state::{RTCSignalingState, StateChangeOp};
-use crate::peer_connection::transport::RTCSctpTransport;
 use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
 use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
 use crate::peer_connection::transport::dtls::role::{
@@ -294,6 +293,7 @@ use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::peer_connection::transport::ice::role::RTCIceRole;
 use crate::peer_connection::transport::sctp::SctpTransport;
 use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
+use crate::peer_connection::transport::{RTCDtlsTransportState, RTCSctpTransport};
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodecParameters;
@@ -1937,7 +1937,10 @@ impl RTCPeerConnection {
             return Err(Error::ErrConnectionClosed);
         }
 
-        if self.sctp_transport().handshake_failed
+        if matches!(
+            self.dtls_transport().state(),
+            RTCDtlsTransportState::Failed | RTCDtlsTransportState::Closed
+        ) || self.sctp_transport().handshake_failed
             || self
                 .sctp_transport()
                 .sctp_associations

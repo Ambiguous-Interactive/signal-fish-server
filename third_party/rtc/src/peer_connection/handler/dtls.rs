@@ -203,12 +203,15 @@ impl<'a>
         if let RTCMessageInternal::Dtls(DTLSMessage::Raw(dtls_message)) = msg.message {
             debug!("recv dtls RAW {:?}", msg.transport.peer_addr);
 
-            // Once the transport is closed, by either side, nothing more is exchanged on it. A
+            // Once the transport is closed or failed, nothing more is exchanged on it. A
             // late datagram (the peer's close_notify reply, say) must not reach an endpoint whose
             // connection is gone, where a server would take it for a new handshake.
-            if self.ctx.dtls_transport.state == RTCDtlsTransportState::Closed {
+            if matches!(
+                self.ctx.dtls_transport.state,
+                RTCDtlsTransportState::Closed | RTCDtlsTransportState::Failed
+            ) {
                 debug!(
-                    "drop dtls datagram from {:?} on a closed transport",
+                    "drop dtls datagram from {:?} on a terminal transport",
                     msg.transport.peer_addr
                 );
                 return Ok(());
@@ -414,14 +417,35 @@ impl<'a>
         };
 
         let remotes: Vec<SocketAddr> = dtls_endpoint.get_connections_keys().copied().collect();
+        let mut failure = None;
         for remote in remotes {
-            dtls_endpoint.handle_timeout(remote, now)?;
+            if let Err(error) = dtls_endpoint.handle_timeout(remote, now) {
+                failure = Some(error);
+                break;
+            }
         }
         while let Some(transmit) = dtls_endpoint.poll_transmit() {
             self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                 now: transmit.now,
                 transport: transmit.transport,
                 message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
+            });
+        }
+
+        if let Some(error) = failure {
+            /* Responders without channels still need the failed-link callback. */
+            warn!("DTLS handshake timer failed: {}", error);
+            self.ctx
+                .dtls_transport
+                .state_change(RTCDtlsTransportState::Failed);
+            self.stats
+                .transport
+                .on_dtls_state_changed(RTCDtlsTransportState::Failed);
+            self.ctx.dtls_transport.dtls_endpoint = None;
+            self.ctx.dtls_transport.dtls_handshake_config = None;
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::DTLSClosed,
             });
         }
 
@@ -605,5 +629,113 @@ mod tests {
             "the whole chain is retained, not just the first entry the stats path consumes"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::peer_connection::RTCPeerConnectionBuilder;
+    use crate::peer_connection::event::RTCPeerConnectionEvent;
+    use crate::peer_connection::state::RTCPeerConnectionState;
+    use crate::peer_connection::transport::dtls::parameters::RTCDtlsParameters;
+    use crate::peer_connection::transport::ice::role::RTCIceRole;
+    use sansio::Protocol;
+    use std::time::Duration;
+
+    // #1131: a lost DTLS flight must terminate the physical link once.
+    #[test]
+    fn dtls_retry_exhaustion_fences_late_records_and_new_channels() {
+        let start = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new().build(start).unwrap();
+        pc.create_data_channel("pending", None).unwrap();
+        pc.dtls_transport_mut()
+            .start(
+                RTCIceRole::Controlled,
+                RTCDtlsParameters {
+                    role: RTCDtlsRole::Server,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        pc.get_dtls_handler()
+            .handle_event(TaggedRTCEventInternal {
+                now: start,
+                event: RTCEventInternal::ICESelectedCandidatePairChange,
+            })
+            .unwrap();
+        pc.get_dtls_handler().handle_timeout(start).unwrap();
+        let initial = pc
+            .get_dtls_handler()
+            .poll_write()
+            .expect("initial DTLS flight");
+        let mut now = start;
+        for _ in 0..16 {
+            let Some(deadline) = pc.get_dtls_handler().poll_timeout() else {
+                break;
+            };
+            now = deadline;
+            pc.get_dtls_handler().handle_timeout(now).unwrap();
+            while pc.get_dtls_handler().poll_write().is_some() {}
+        }
+        assert_eq!(pc.dtls_transport().state(), RTCDtlsTransportState::Failed);
+        let mut failures = 0;
+        while let Some(event) = pc.poll_event() {
+            if matches!(
+                event,
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(
+                    RTCPeerConnectionState::Failed
+                )
+            ) {
+                failures += 1;
+            }
+        }
+        assert_eq!(failures, 1, "publish terminal failure once");
+        assert!(pc.get_dtls_handler().poll_timeout().is_none());
+        assert!(
+            pc.pipeline_context
+                .dtls_handler_context
+                .dtls_transport
+                .dtls_endpoint
+                .is_none()
+        );
+        // Replay a real first flight after terminal state. It must not create
+        // an endpoint, queue a reply, or produce another failure transition.
+        let late = TaggedRTCMessageInternal {
+            now: now + Duration::from_secs(60),
+            ..initial
+        };
+        pc.get_dtls_handler().handle_read(late).unwrap();
+        pc.get_dtls_handler()
+            .handle_timeout(now + Duration::from_secs(120))
+            .unwrap();
+        pc.get_dtls_handler()
+            .handle_event(TaggedRTCEventInternal {
+                now: now + Duration::from_secs(180),
+                event: RTCEventInternal::ICESelectedCandidatePairChange,
+            })
+            .unwrap();
+        assert!(pc.get_dtls_handler().poll_write().is_none());
+        assert!(pc.get_dtls_handler().poll_timeout().is_none());
+        assert!(
+            pc.pipeline_context
+                .dtls_handler_context
+                .dtls_transport
+                .dtls_endpoint
+                .is_none()
+        );
+        assert_eq!(pc.dtls_transport().state(), RTCDtlsTransportState::Failed);
+        while let Some(event) = pc.poll_event() {
+            assert!(!matches!(
+                event,
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(
+                    RTCPeerConnectionState::Failed
+                )
+            ));
+        }
+        assert!(matches!(
+            pc.create_data_channel("late", None),
+            Err(Error::ErrSCTPNotEstablished)
+        ));
     }
 }
