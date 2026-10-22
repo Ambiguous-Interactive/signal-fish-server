@@ -2562,7 +2562,14 @@ mod coverage_tests {
                         start: std::time::Duration::from_millis(250),
                         window: std::time::Duration::from_millis(100),
                     };
-                    let endpoint = "ws://127.0.0.1:1".to_string();
+                    let replay_listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+                        .expect("replay fixture listener");
+                    let endpoint = format!(
+                        "ws://{}",
+                        replay_listener
+                            .local_addr()
+                            .expect("replay fixture address")
+                    );
                     config.endpoint = Some(endpoint.clone());
                     crate::artifacts::write_manifest(
                         output.path(),
