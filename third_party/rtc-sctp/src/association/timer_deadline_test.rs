@@ -1,6 +1,7 @@
 //! Incoming work must not erase a T3 expiration that the caller has yet to service.
 
 use super::*;
+use crate::TimerConfig;
 use crate::chunk::chunk_selective_ack::GapAckBlock;
 
 const PAYLOAD: &[u8] = &[0x5a; 1024];
@@ -197,5 +198,96 @@ fn due_t3_survives_forward_only_sack_and_same_instant_is_idempotent() -> Result<
     )?;
     assert!(a.inflight_queue.is_empty());
     assert!(a.timers.get(Timer::T3RTX).is_none());
+    Ok(())
+}
+
+// Regression #1140: configured exhaustion must not leave timerless gameplay streams.
+#[test]
+fn recovery_retry_exhaustion_retires_all_streams() -> Result<()> {
+    for timer in [Timer::T3RTX, Timer::T2Shutdown] {
+        for retries in [0, 1, 5] {
+            for shutdown_receiver in [false, true] {
+                if timer == Timer::T3RTX && shutdown_receiver {
+                    continue;
+                }
+                let mut a = timed_test_association();
+                a.timers = TimerTable::new(TimerConfig {
+                    max_t3_rtx_retrans: retries,
+                    max_t2_shutdown_retrans: retries,
+                    ..TimerConfig::default()
+                });
+                let now = Instant::now();
+                let ppi = PayloadProtocolIdentifier::Binary;
+                a.open_stream(1, ppi)?
+                    .write_sctp(now, &Bytes::from_static(b"gameplay"), ppi)?;
+                a.open_stream(2, ppi)?;
+                assert_eq!(transmitted_data(&a.gather_outbound(now).0).len(), 1);
+                if timer == Timer::T2Shutdown {
+                    // Drain gameplay normally before testing loss of SHUTDOWN or its ACK.
+                    a.handle_sack(
+                        &ChunkSelectiveAck {
+                            cumulative_tsn_ack: a.my_next_tsn.wrapping_sub(1),
+                            advertised_receiver_window_credit: 65536,
+                            ..Default::default()
+                        },
+                        now,
+                    )?;
+                    if shutdown_receiver {
+                        a.handle_shutdown(&ChunkShutdown {
+                            cumulative_tsn_ack: a.my_next_tsn.wrapping_sub(1),
+                        })?;
+                    } else {
+                        a.shutdown()?;
+                    }
+                    assert!(!a.gather_outbound(now).0.is_empty());
+                }
+                for _ in 0..retries {
+                    let at = a.timers.get(timer).expect("retry remains armed");
+                    a.handle_timeout(at);
+                    assert!(!a.gather_outbound(at).0.is_empty());
+                    assert_ne!(a.state(), AssociationState::Closed);
+                }
+                let at = a.timers.get(timer).expect("final expiration remains armed");
+                a.handle_timeout(at);
+                assert_eq!(
+                    a.state(),
+                    AssociationState::Closed,
+                    "timer={timer:?}, retries={retries}, receiver={shutdown_receiver}"
+                );
+                assert!(a.streams.is_empty());
+                assert!(a.poll_timeout().is_none());
+                assert!(a.gather_outbound(at).0.is_empty());
+                assert!(a.open_stream(3, ppi).is_err());
+                assert_eq!(
+                    a.events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            Event::AssociationFailed {
+                                reason: AssociationError::TimedOut
+                            }
+                        ))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    a.events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            Event::AssociationLost {
+                                reason: AssociationError::TimedOut,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    2
+                );
+                a.events.clear();
+                a.handle_timeout(at + Duration::from_secs(1000));
+                assert!(a.poll().is_none(), "terminal timeout notifies once");
+            }
+        }
+    }
     Ok(())
 }

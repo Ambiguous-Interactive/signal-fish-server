@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close native gameplay channels and release blocked sends when DATA or shutdown recovery reaches its retry limit (#1140).
+- Restore browser exchange error reports after a peer link restarts (#1141).
 - Prevent delayed packets from reopening closed native gameplay transports (#1138).
 - Refuse capacity workloads that exceed the configured sender payload byte budget (#775).
 - Close native gameplay channels when stream reset retries expire (#1133).

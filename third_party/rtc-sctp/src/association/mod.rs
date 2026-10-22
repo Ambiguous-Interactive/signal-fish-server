@@ -2567,6 +2567,9 @@ impl Association {
         accept: bool,
         default_payload_type: PayloadProtocolIdentifier,
     ) -> Option<Stream<'_>> {
+        if self.retired {
+            return None;
+        }
         let mut s = StreamState::new(
             self.side,
             stream_identifier,
@@ -3898,14 +3901,12 @@ impl Association {
                 ));
             }
 
-            Timer::T2Shutdown => {
-                error!("[{}] retransmission failure: T2-shutdown", self.side);
-            }
-
-            Timer::Reconfig => {
-                // RFC 6525 5.1.1: enforce the configured retransmission
-                // threshold. A timerless request would reserve its SID forever.
-                error!("[{}] retransmission failure: RECONFIG", self.side);
+            Timer::T2Shutdown | Timer::T3RTX | Timer::Reconfig => {
+                /*
+                 * A configured recovery limit must retire the transport.
+                 * Clearing only its timer strands gameplay streams and send credit.
+                 */
+                error!("[{}] retransmission failure: {id:?}", self.side);
                 if let Err(err) = self.close(AssociationError::TimedOut) {
                     error!("[{}] failed to close association: {err}", self.side);
                 }
@@ -3914,14 +3915,6 @@ impl Association {
                     reason: AssociationError::TimedOut,
                 });
                 self.endpoint_events.push_back(EndpointEventInner::Drained);
-            }
-
-            Timer::T3RTX => {
-                // T3-rtx timer will not fail by design
-                // Justifications:
-                //  * ICE would fail if the connectivity is lost
-                //  * WebRTC spec is not clear how this incident should be reported to ULP
-                error!("[{}] retransmission failure: T3-rtx (DATA)", self.side);
             }
 
             _ => {}

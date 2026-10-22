@@ -20,7 +20,8 @@ pub struct TimerConfig {
     pub max_t2_shutdown_retrans: usize,
     /// How many times a DATA chunk may be retransmitted on T3-rtx expiry.
     ///
-    /// Defaults to unlimited, leaving reliability to the per-stream partial-reliability settings.
+    /// Defaults to five recovery attempts. Exhaustion retires the association;
+    /// per-stream partial reliability may abandon individual messages earlier.
     pub max_t3_rtx_retrans: usize,
     /// How many times a RE-CONFIG chunk (stream reset) may be retransmitted.
     pub max_reconfig_retrans: usize,
