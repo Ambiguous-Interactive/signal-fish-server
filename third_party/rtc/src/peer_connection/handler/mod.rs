@@ -563,13 +563,14 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
             return Some(evt);
         }
 
-        // Handling an event can queue read messages, like the open of a negotiated data channel
-        // on `SCTPHandshakeComplete`. Deliver them, and the events they raise, now rather than
-        // on the next incoming packet.
-        if self.pump_events() {
-            self.pump_reads(None);
-            self.pump_events();
-        }
+        /*
+            Events can queue reads, such as a negotiated channel's open marker.
+            Timers and transmit collection also queue reads without raising events.
+            Pump both paths before split-read consumers check their output queues.
+        */
+        self.pump_events();
+        self.pump_reads(None);
+        self.pump_events();
 
         self.pipeline_context.event_outs.pop_front()
     }

@@ -6980,3 +6980,75 @@ Eight role, mode, and encoding histories require first-send success, exact
 sent credit, both directional bodies, and correct wire type and ordering.
 Both boundary controls pass after repair. The existing hosted
 `stream_count_boundary` filter includes the new regression.
+
+### F126 — Native abandonment retains public send credit without input
+
+Issue [#1124](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1124),
+under open #826 (A20). SCTP queues application-byte release events when a T3
+timeout abandons zero-retransmit DATA. The RTC timeout path did not drain those
+association events. The transmit path also missed events when a timed message
+expired before its first packet was collected. Both paths could leave public
+send capacity charged until unrelated input arrived.
+
+The event-first core pump had another gap. It pumped internal read messages
+only when lifecycle events were pending. The async driver's split read queues
+could therefore miss a release that the SCTP handler had already forwarded.
+A control using the driver's write/event/media/data poll order retains eight
+bytes before this second repair. The event poll now pumps queued reads before
+the split consumers inspect their output queues.
+
+Two deterministic controls fail before repair. The no-inbound T3 history
+releases zero of eight application bytes. The gather-only timed history retains
+eight public outstanding bytes after expiry. Neither history needs a new
+inbound packet. The repair drains association events after timeout processing
+and transmit collection. It preserves the shared payload-read budget, pending
+reads, per-association transport metadata, and final teardown packets.
+
+Controls cover ordered and unordered zero-retransmit sends, text and binary,
+unsent timed expiry, a full read backlog, one-time release, and reliable sends
+that must keep their unacknowledged bytes and stay open. The native public
+`writable()` control holds the remote reactor, requires release before the
+unchanged deadline, and admits another send in both offerer roles and encodings.
+The hosted interop script retains the `timer_abandonment_` controls.
+
+The same investigation adds endpoint datagram and reactor progress evidence to
+the unchanged remote-reset matrix. Explicit application-transmit loss and
+pre-transmit hold histories pass. Encrypted datagrams do not identify their
+SCTP chunk type. This does not prove a cause for the macOS failure in
+[#1120](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1120):
+at `cf36f243`, the offerer-sends/unreliable/one-byte cell retains local Open and
+one outstanding byte while remote Closing retains zero. Keep #1120 open.
+The server wire contract and the external Rust, .NET, and Godot clients remain
+unchanged; none consumes this reference-client RTC patch.
+
+### F127 — Repeated native reads renew one pump's payload budget
+
+Issue [#1125](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1125),
+under open #826 (A20). During one core pump, SCTP payloads move through an
+intermediate queue before the application queue depth changes. The handler
+recomputed its remaining budget after its own output queue emptied. It omitted
+payloads already moved to that intermediate queue and could refill repeatedly.
+
+A paired-SCTP history queues 320 messages with normal acknowledgments. The
+event-first pump exceeds the 256-message application backlog before repair.
+Each popped payload now stays charged to that handler's downstream depth until
+the pump completes. A later handler reads the updated application queue depth.
+The control requires bounded pumps and all 320 messages after the application
+drains. Stream recovery and control events retain their existing paths.
+This qualifies the bound activated by F126's event-first pump. It changes the
+native reference RTC patch, with no server wire or external SDK migration.
+
+### F128 — Native close oracle races sibling admission retirement
+
+Issue [#1126](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1126),
+under open #826 (A22). Local validation required one target receipt before
+close but sent a sibling probe first. The sibling poller could observe required
+channel loss and apply the existing pair-wide admission fence before the target
+poller drained its queued input. A reliable, acknowledged target history
+reproduces zero admitted receipts with raw=1 and discarded=1.
+
+The original fixture keeps its exact one-receipt and close assertions. It now
+checks sibling transport delivery afterward. A separate held-poller history
+requires the established sibling-first fence, exact discard counters for both
+labels, and one target close event. Production engine behavior stays unchanged.
+This explains the local oracle failure, not the separate historical #1120 reset.

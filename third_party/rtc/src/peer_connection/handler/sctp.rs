@@ -115,13 +115,15 @@ pub(crate) const SCTP_PIPELINE_READ_BACKLOG_LIMIT: usize = 256;
 /// SctpHandler implements SCTP Protocol handling
 pub(crate) struct SctpHandler<'a> {
     ctx: &'a mut SctpHandlerContext,
-    /// Undelivered messages already sitting in `pipeline_context.read_outs`.
+    /// Undelivered pipeline messages plus payloads popped during this handler sweep.
     ///
     /// Passed in rather than read from `ctx` because **this handler's own `read_outs` is not
     /// where the backlog forms**: the pipeline drains it into `intermediate_routs` inside the
     /// same `handle_read` call, so it is empty again by the time anything could observe it.
     /// Bounding against it would be a no-op. The queue that actually grows when the
-    /// application stops consuming is the pipeline's, one hop downstream.
+    /// application stops consuming is the pipeline's, one hop downstream. Payloads
+    /// popped into `intermediate_routs` also keep their slots charged until this
+    /// handler sweep ends.
     downstream_backlog: usize,
 }
 
@@ -393,6 +395,63 @@ impl<'a> SctpHandler<'a> {
         self.flush_transmits(self.ctx.now);
     }
 
+    /*
+        Abandonment can run during timeout handling or transmit collection.
+        Deliver its events without requiring another inbound packet.
+    */
+    fn drain_pending_association_events(&mut self, now: Instant) -> Result<()> {
+        let max_len = self.ctx.sctp_transport.internal_buffer.len();
+        let mut budget = self.read_budget();
+        for (ch, conn) in self.ctx.sctp_transport.sctp_associations.iter_mut() {
+            let transport =
+                self.ctx
+                    .association_transport
+                    .get(ch)
+                    .copied()
+                    .unwrap_or(TransportContext {
+                        local_addr: conn.local_addr(),
+                        peer_addr: conn.remote_addr(),
+                        ..Default::default()
+                    });
+            let mut messages = vec![];
+            Self::drain_association_events(
+                &mut self.ctx.pending_readable,
+                &mut self.ctx.event_outs,
+                conn,
+                *ch,
+                now,
+                (max_len, &mut budget),
+                &mut messages,
+            )?;
+            for message in messages {
+                let message = match message {
+                    SctpMessage::StreamEvent(event) => DTLSMessage::SctpStreamEvent(event),
+                    SctpMessage::Inbound(message) => DTLSMessage::Sctp(message),
+                    SctpMessage::Outbound(transmit) => {
+                        if let Payload::RawEncode(raw_data) = transmit.message {
+                            for raw in raw_data {
+                                self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                                    now: transmit.now,
+                                    transport: transmit.transport,
+                                    message: RTCMessageInternal::Dtls(DTLSMessage::Raw(
+                                        BytesMut::from(&raw[..]),
+                                    )),
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                };
+                self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                    now,
+                    transport,
+                    message: RTCMessageInternal::Dtls(message),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Batch-drain flush: gather every association's pending outbound in one pass
     /// into `write_outs`. Called once per event-loop iteration from poll_write when
     /// `flush_dirty` is set, after a burst of inbound packets has been ingested, so
@@ -414,6 +473,9 @@ impl<'a> SctpHandler<'a> {
                     }
                 }
             }
+        }
+        if let Err(error) = self.drain_pending_association_events(now) {
+            warn!("failed to drain SCTP transmit events: {}", error);
         }
     }
 }
@@ -617,7 +679,18 @@ impl<'a>
                 warn!("failed to resume parked SCTP streams: {}", err);
             }
         }
-        self.ctx.read_outs.pop_front()
+        let message = self.ctx.read_outs.pop_front()?;
+        if matches!(
+            message.message,
+            RTCMessageInternal::Dtls(DTLSMessage::Sctp(_))
+        ) {
+            /*
+                The pipeline still holds this payload until the handler sweep ends.
+                Keep its slot charged when a later poll resumes another parked stream.
+            */
+            self.downstream_backlog = self.downstream_backlog.saturating_add(1);
+        }
+        Some(message)
     }
 
     fn handle_write(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
@@ -858,6 +931,10 @@ impl<'a>
             return Ok(());
         }
 
+        for conn in self.ctx.sctp_transport.sctp_associations.values_mut() {
+            conn.handle_timeout(now);
+        }
+        self.drain_pending_association_events(now)?;
         let mut transmits = vec![];
 
         let (sctp_endpoint, sctp_associations) = (
@@ -871,8 +948,6 @@ impl<'a>
 
         let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
         for (ch, conn) in sctp_associations.iter_mut() {
-            conn.handle_timeout(now);
-
             while let Some(event) = conn.poll_endpoint_event() {
                 endpoint_events.push((*ch, event));
             }
@@ -3348,6 +3423,273 @@ mod tests {
 
         assert!(a_up && b_up, "both associations must connect");
         (client_ep, ch_a, conn_a, ch_b, conn_b)
+    }
+
+    // Regression #1124: timer recovery must not wait for a packet to release senders.
+    #[test]
+    fn timer_abandonment_releases_gameplay_without_new_inbound_data() {
+        for (unordered, backlog) in [
+            (false, 0),
+            (true, 0),
+            (true, SCTP_PIPELINE_READ_BACKLOG_LIMIT),
+        ] {
+            let now = Instant::now();
+            let pair = establish();
+            let ch = pair.client_ch;
+            let mut ctx = client_ctx(now, pair.client_ep, ch, pair.client_conn);
+            let transport = TransportContext {
+                local_addr: client_addr(),
+                peer_addr: server_addr(),
+                transport_protocol: TransportProtocol::TCP,
+                ..Default::default()
+            };
+            ctx.association_transport.insert(ch, transport);
+            ctx.sctp_transport
+                .sctp_associations
+                .get_mut(&ch)
+                .unwrap()
+                .open_stream(0, PayloadProtocolIdentifier::String)
+                .unwrap()
+                .set_reliability_params(unordered, sctp::ReliabilityType::Rexmit, 0)
+                .unwrap();
+            let mut handler = SctpHandler::new(&mut ctx, backlog);
+            handler
+                .handle_write(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
+                        association_handle: ch.0,
+                        stream_id: 0,
+                        ppi: PayloadProtocolIdentifier::String,
+                        payload: BytesMut::from("gameplay"),
+                        negotiated: false,
+                    })),
+                })
+                .unwrap();
+            let mut initial = Vec::new();
+            while let Some(packet) = handler.poll_write() {
+                initial.push(packet);
+            }
+            assert!(
+                initial.iter().any(|message| matches!(&message.message,
+                RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) if raw[12] == CT_PAYLOAD_DATA)),
+                "initial DATA must reach the wire"
+            );
+            let deadline = handler.poll_timeout().expect("DATA arms T3");
+            handler
+                .handle_timeout(deadline - Duration::from_nanos(1))
+                .unwrap();
+            assert!(
+                handler.poll_read().is_none(),
+                "credit stays charged before T3"
+            );
+            // Drop the initial DATA. No inbound datagram can release its credit.
+            handler.handle_timeout(deadline).unwrap();
+            let mut released = 0;
+            while let Some(message) = handler.poll_read() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::SctpStreamEvent(
+                    SctpStreamEvent::BufferReleased(handle, id, bytes),
+                )) = message.message
+                {
+                    assert_eq!((handle, id), (ch.0, 0));
+                    assert_eq!(message.transport.local_addr, transport.local_addr);
+                    assert_eq!(message.transport.peer_addr, transport.peer_addr);
+                    assert_eq!(message.transport.transport_protocol, TransportProtocol::TCP);
+                    released += bytes;
+                }
+            }
+            assert_eq!(
+                released, 8,
+                "timer abandonment must release gameplay credit"
+            );
+            handler.handle_timeout(deadline).unwrap();
+            assert!(handler.poll_read().is_none(), "credit releases once");
+        }
+    }
+
+    // Regression #1125: an event-first pump must keep every pending payload bounded.
+    #[test]
+    fn timer_abandonment_event_pump_preserves_the_read_backlog_limit() {
+        use crate::data_channel::{
+            internal::RTCDataChannelInternal, parameters::DataChannelParameters,
+        };
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        let now = Instant::now();
+        let mut pair = establish();
+        let ch = pair.client_ch;
+        let count = SCTP_PIPELINE_READ_BACKLOG_LIMIT + 64;
+        let expected: Vec<_> = (0..count)
+            .map(|index| (index as u64).to_be_bytes().to_vec())
+            .collect();
+        {
+            let mut stream = pair
+                .server_conn
+                .open_stream(0, PayloadProtocolIdentifier::Binary)
+                .unwrap();
+            for payload in &expected {
+                stream
+                    .write_sctp(
+                        now,
+                        &Bytes::copy_from_slice(payload),
+                        PayloadProtocolIdentifier::Binary,
+                    )
+                    .unwrap();
+            }
+        }
+        let mut packets = drain_transmits(&mut pair.server_conn, now);
+        let mut ctx = client_ctx(now, pair.client_ep, ch, pair.client_conn);
+        for round in 0..100 {
+            if packets.is_empty() {
+                break;
+            }
+            let tick = now + Duration::from_millis(500 * (round + 1));
+            let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
+            for packet in packets {
+                handler.handle_read(raw_read(tick, packet)).unwrap();
+            }
+            handler
+                .handle_timeout(tick + Duration::from_millis(250))
+                .unwrap();
+            while let Some(message) = handler.poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message
+                    && let Some((_, DatagramEvent::AssociationEvent(event))) = pair
+                        .server_ep
+                        .handle(tick, client_addr(), None, raw.freeze())
+                {
+                    pair.server_conn.handle_event(event);
+                }
+            }
+            packets = drain_transmits(&mut pair.server_conn, tick);
+        }
+        assert!(ctx.read_outs.is_empty());
+        assert!(!ctx.pending_readable.is_empty());
+        let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+        pc.pipeline_context.sctp_handler_context = ctx;
+        let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+            negotiated: Some(0),
+            ..Default::default()
+        });
+        dc.dial(ch.0).unwrap();
+        while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+        let id = pc.data_channels.insert(dc);
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            while pc.poll_event().is_some() {}
+            assert!(
+                pc.pipeline_context.data_read_outs.len() <= SCTP_PIPELINE_READ_BACKLOG_LIMIT,
+                "the event-first pump must retain SCTP backpressure"
+            );
+            while let Some(message) = pc.poll_data_read() {
+                if let crate::peer_connection::message::RTCMessage::DataChannelMessage(
+                    channel_id,
+                    payload,
+                ) = message.message
+                {
+                    assert_eq!(channel_id, id);
+                    assert!(!payload.is_string);
+                    received.push(payload.data.to_vec());
+                }
+            }
+        }
+        assert_eq!(
+            received, expected,
+            "the next pump resumes every retained payload"
+        );
+        while pc.poll_event().is_some() {}
+        assert!(
+            pc.poll_data_read().is_none(),
+            "no duplicate payload remains"
+        );
+    }
+
+    #[test]
+    fn timer_abandonment_updates_public_channel_credit_without_inbound_data() {
+        use crate::data_channel::{
+            internal::RTCDataChannelInternal, parameters::DataChannelParameters,
+        };
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        for (reliable, unsent_timed) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            for binary in [false, true] {
+                let now = Instant::now();
+                let pair = establish();
+                let ch = pair.client_ch;
+                let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+                pc.pipeline_context.sctp_handler_context =
+                    client_ctx(now, pair.client_ep, ch, pair.client_conn);
+                pc.pipeline_context
+                    .sctp_handler_context
+                    .sctp_transport
+                    .sctp_associations
+                    .get_mut(&ch)
+                    .unwrap()
+                    .open_stream(0, PayloadProtocolIdentifier::String)
+                    .unwrap()
+                    .set_reliability_params(
+                        !reliable,
+                        if reliable {
+                            sctp::ReliabilityType::Reliable
+                        } else if unsent_timed {
+                            sctp::ReliabilityType::Timed
+                        } else {
+                            sctp::ReliabilityType::Rexmit
+                        },
+                        u32::from(unsent_timed),
+                    )
+                    .unwrap();
+                let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                    ordered: reliable,
+                    max_retransmits: (!reliable && !unsent_timed).then_some(0),
+                    max_packet_life_time: (!reliable && unsent_timed).then_some(1),
+                    negotiated: Some(0),
+                    ..Default::default()
+                });
+                dc.dial(ch.0).unwrap();
+                while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+                let id = pc.data_channels.insert(dc);
+                if binary {
+                    pc.data_channel(id)
+                        .unwrap()
+                        .send(now, BytesMut::from("gameplay"))
+                        .unwrap();
+                } else {
+                    pc.data_channel(id)
+                        .unwrap()
+                        .send_text(now, "gameplay")
+                        .unwrap();
+                }
+                assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 8);
+                if unsent_timed {
+                    assert!(
+                        pc.get_sctp_handler().poll_timeout().is_none(),
+                        "unsent DATA has no T3"
+                    );
+                    pc.get_sctp_handler()
+                        .handle_timeout(now + Duration::from_millis(10))
+                        .unwrap();
+                    while pc.get_sctp_handler().poll_write().is_some() {}
+                } else {
+                    // Drop all initial DATA. Drive only the actual armed deadline.
+                    while pc.get_sctp_handler().poll_write().is_some() {}
+                    let deadline = pc.get_sctp_handler().poll_timeout().unwrap();
+                    pc.get_sctp_handler().handle_timeout(deadline).unwrap();
+                }
+                // Match the async driver's event-first, split-read pump.
+                while pc.poll_write().is_some() {}
+                while pc.poll_event().is_some() {}
+                while pc.poll_media_read().is_some() {}
+                while pc.poll_data_read().is_some() {}
+                assert_eq!(
+                    pc.data_channel(id).unwrap().outstanding_bytes(),
+                    if reliable { 8 } else { 0 },
+                    "reliable={reliable}, binary={binary}, unsent_timed={unsent_timed}"
+                );
+                assert_eq!(
+                    pc.data_channel(id).unwrap().ready_state(),
+                    crate::data_channel::RTCDataChannelState::Open
+                );
+            }
+        }
     }
 
     /// Wrap an established client endpoint + association in a handler context.

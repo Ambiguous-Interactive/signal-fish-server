@@ -163,3 +163,19 @@ DCEP OPEN/ACK bytes and empty-message filler bytes do not reduce pending gamepla
 bytes. Real paired SCTP acknowledgments preserve queued gameplay until its own
 acknowledgment releases it. SCTP fragment, gap-ACK, duplicate, and abandonment
 controls retain separate application and transport byte totals.
+
+The [#1124](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1124)
+repair delivers SCTP timer events before removing drained associations and
+collects events from transmit-time expiry.
+Abandoned gameplay releases pending send bytes without waiting for another packet.
+The timer path preserves each association's transport metadata and read budget.
+Controls drop initial DATA, advance its actual T3 deadline, and verify one release
+for zero-retry DATA while reliable DATA keeps its charge. Public text and binary
+sends retain the same behavior. An unsent timed-message control expires its
+lifetime before the first transmit flush and releases its bytes without a T3 timer.
+The core event pump also delivers these reads when no lifecycle event is raised.
+The public controls use the async driver's event-first and split-read call order.
+The [#1125](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1125)
+repair keeps a payload's read slot charged until its handler sweep ends.
+A paired-wire control holds 320 messages in SCTP, limits each event-first pump
+to 256 queued messages, and drains every retained message in later pumps.
