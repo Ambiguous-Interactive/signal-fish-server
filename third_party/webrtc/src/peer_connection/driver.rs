@@ -777,6 +777,17 @@ where
         self.inner.data_channel_backpressure.notify_waiters();
     }
 
+    /// Retire the core after an I/O failure, including before channels exist.
+    pub(crate) async fn retire_after_error(&mut self) {
+        self.signal_stopped();
+        if let Err(error) = self.inner.core.lock().await.close() {
+            error!("Failed to close the stopped peer connection: {}", error);
+        }
+        // A responder can have no data-channel streams to signal its loss.
+        // Publish the core's terminal connection event before ending streams.
+        self.poll_events().await;
+    }
+
     /// Run the driver event loop
     ///
     /// This follows rtc Event Loop pattern exactly with select!
@@ -2327,6 +2338,50 @@ mod tests {
     use super::*;
     use crate::data_channel::RTCDataChannelMessage;
     use crate::runtime::channel;
+
+    // Issue #1134: driver shutdown can overtake a creator waiting to register.
+    #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
+    #[test]
+    fn stopped_driver_rejects_creation_waiting_for_registration() {
+        use crate::peer_connection::{PeerConnection, PeerConnectionImpl};
+        use crate::runtime::Mutex;
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            let (inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            let pc = PeerConnectionImpl {
+                inner: inner.clone(),
+                driver_handle: Mutex::new(None),
+                driver_stopped: Mutex::new(None),
+            };
+            let driver = PeerConnectionDriver::<SocketAddr>::new(
+                inner.clone(),
+                Vec::new(),
+                Vec::new(),
+                MulticastDnsMode::Disabled,
+                Vec::new(),
+                RTCIceTransportPolicy::All,
+                rtc::crypto::default_provider().unwrap(),
+                false,
+                None,
+            );
+            let registration = inner.data_channel_events_tx.lock().await;
+            let creation = pc.create_data_channel("stopped", None);
+            futures::pin_mut!(creation);
+            assert!(creation.as_mut().now_or_never().is_none());
+            assert!(
+                inner.core.try_lock().is_none(),
+                "creator holds the core while registration waits"
+            );
+            driver.signal_stopped();
+            drop(registration);
+            assert!(matches!(creation.await, Err(Error::ErrConnectionClosed)));
+            assert!(inner.data_channel_events_tx.lock().await.is_empty());
+            assert!(
+                inner.core.lock().await.data_channel(0).is_none(),
+                "stopped creation must leave no core handle"
+            );
+        }));
+    }
 
     // Regression #1086: the driver must not observe a local channel before registration.
     #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]

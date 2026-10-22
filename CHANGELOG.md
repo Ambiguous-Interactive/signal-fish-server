@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close native gameplay channels when stream reset retries expire (#1133).
+- Report native peer closure after a fatal socket error, including before channel admission (#1134).
+- Reject native sends after shutdown and return blocked-send closure errors without a polling delay (#1135).
 - Report native gameplay link failure when handshake retries expire before channel admission (#1131).
 - Close pending native gameplay channels when the SCTP handshake fails (#1128).
 - Release native channel send capacity when unreliable gameplay is abandoned (#1124).

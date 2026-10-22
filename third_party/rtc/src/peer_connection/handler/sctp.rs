@@ -218,19 +218,19 @@ impl<'a> SctpHandler<'a> {
         let mut failed = false;
         while let Some(event) = conn.poll() {
             match event {
-                Event::HandshakeFailed { reason } => {
+                Event::HandshakeFailed { reason } | Event::AssociationFailed { reason } => {
                     debug!(
-                        "association_handle {} handshake failed due to {}",
+                        "association_handle {} transport failed due to {}",
                         ch.0, reason
                     );
-                    // No DCEP deadline exists before SCTP connects. Make this
-                    // terminal failure visible to every waiting channel now.
+                    // Pending channels may have no stream or DCEP deadline.
+                    // A terminal failure retires the whole physical transport.
                     conn.close(reason)?;
                     failed = true;
                     ctx_pending.retain(|(association, _)| *association != ch);
                     event_outs.push_back(TaggedRTCEventInternal {
                         now,
-                        event: RTCEventInternal::SCTPHandshakeFailed,
+                        event: RTCEventInternal::SCTPTransportFailed,
                     });
                 }
                 Event::Connected => {
@@ -348,7 +348,7 @@ impl<'a> SctpHandler<'a> {
                 (max_len, &mut budget),
                 &mut messages,
             )?;
-            self.ctx.sctp_transport.handshake_failed |= failed;
+            self.ctx.sctp_transport.transport_failed |= failed;
             for message in messages {
                 if let SctpMessage::StreamEvent(event) = &message {
                     self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
@@ -433,7 +433,7 @@ impl<'a> SctpHandler<'a> {
                 (max_len, &mut budget),
                 &mut messages,
             )?;
-            self.ctx.sctp_transport.handshake_failed |= failed;
+            self.ctx.sctp_transport.transport_failed |= failed;
             for message in messages {
                 let message = match message {
                     SctpMessage::StreamEvent(event) => DTLSMessage::SctpStreamEvent(event),
@@ -510,7 +510,7 @@ impl<'a>
     fn handle_read(&mut self, msg: TaggedRTCMessageInternal) -> Result<()> {
         let now = msg.now;
         if let RTCMessageInternal::Dtls(DTLSMessage::Raw(dtls_message)) = msg.message {
-            if self.ctx.sctp_transport.handshake_failed {
+            if self.ctx.sctp_transport.transport_failed {
                 return Ok(());
             }
             debug!("recv sctp RAW {:?}", msg.transport.peer_addr);
@@ -586,7 +586,7 @@ impl<'a>
                         (max_len, &mut budget),
                         &mut messages,
                     )?;
-                    self.ctx.sctp_transport.handshake_failed |= failed;
+                    self.ctx.sctp_transport.transport_failed |= failed;
 
                     while let Some(event) = conn.poll_endpoint_event() {
                         endpoint_events.push((*ch, event));
@@ -886,7 +886,7 @@ impl<'a>
 
         // DTLSHandshakeComplete is not terminated here since SRTP handler needs it
         let dtls_complete = matches!(&evt.event, RTCEventInternal::DTLSHandshakeComplete(_, _));
-        if dtls_complete && !self.ctx.sctp_transport.handshake_failed {
+        if dtls_complete && !self.ctx.sctp_transport.transport_failed {
             debug!("sctp recv dtls handshake complete");
 
             if let Some(sctp_transport_config) =

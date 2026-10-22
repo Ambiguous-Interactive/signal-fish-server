@@ -318,13 +318,6 @@ impl DataChannelImpl {
         }
         Ok(())
     }
-
-    async fn await_send_capacity(&self) {
-        futures::select! {
-            _ = self.inner.data_channel_backpressure.notified().fuse() => {}
-            _ = self.inner.runtime.sleep(Duration::from_millis(50)).fuse() => {}
-        }
-    }
 }
 
 impl Drop for DataChannelImpl {
@@ -469,6 +462,9 @@ impl DataChannel for DataChannelImpl {
         self.wait_for_send_buffer().await?;
         {
             let mut peer_connection = self.inner.core.lock().await;
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(Error::ErrDataChannelClosed);
+            }
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
@@ -486,6 +482,9 @@ impl DataChannel for DataChannelImpl {
         self.wait_for_send_buffer().await?;
         {
             let mut peer_connection = self.inner.core.lock().await;
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(Error::ErrDataChannelClosed);
+            }
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
@@ -498,12 +497,17 @@ impl DataChannel for DataChannelImpl {
 
     async fn writable(&self) -> Result<()> {
         let limit = self.inner.data_channel_send_buffer_limit;
+        let mut waiting = false;
         loop {
+            let listener = waiting.then(|| self.inner.data_channel_backpressure.listen());
             if self.inner.closing.load(Ordering::Acquire) {
                 return Err(Error::ErrDataChannelClosed);
             }
             {
                 let mut peer_connection = self.inner.core.lock().await;
+                if self.inner.closing.load(Ordering::Acquire) {
+                    return Err(Error::ErrDataChannelClosed);
+                }
                 let dc = peer_connection
                     .data_channel(self.id)
                     .ok_or(Error::ErrDataChannelClosed)?;
@@ -517,7 +521,16 @@ impl DataChannel for DataChannelImpl {
                     return Ok(());
                 }
             }
-            self.await_send_capacity().await;
+            if let Some(notified) = listener {
+                futures::select! {
+                    _ = notified.fuse() => {}
+                    _ = self.inner.runtime.sleep(Duration::from_millis(50)).fuse() => {}
+                }
+            } else {
+                // Register before checking again: closure or released capacity
+                // can race the core lock above. Healthy sends allocate no listener.
+                waiting = true;
+            }
         }
     }
 
@@ -532,6 +545,9 @@ impl DataChannel for DataChannelImpl {
         let limit = self.inner.data_channel_send_buffer_limit;
         {
             let mut peer_connection = self.inner.core.lock().await;
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(Error::ErrDataChannelClosed);
+            }
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
@@ -564,6 +580,9 @@ impl DataChannel for DataChannelImpl {
         let limit = self.inner.data_channel_send_buffer_limit;
         {
             let mut peer_connection = self.inner.core.lock().await;
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(Error::ErrDataChannelClosed);
+            }
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
@@ -628,6 +647,86 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
     use std::sync::atomic::AtomicUsize;
+
+    // Issue #1135: a writer can wait on the core lock when the driver stops.
+    #[test]
+    fn writable_observes_stop_before_capacity_wait_registration() {
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            for limit in [0, usize::MAX] {
+            let (mut inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            Arc::get_mut(&mut inner)
+                .unwrap()
+                .data_channel_send_buffer_limit = limit;
+            let id = inner
+                .core
+                .lock()
+                .await
+                .create_data_channel("pending", None)
+                .unwrap()
+                .id();
+            let (_sender, receiver) = crate::runtime::channel(1);
+            let dc = DataChannelImpl::new(id, inner.clone(), receiver);
+            let core = inner.core.lock().await;
+            let writable = dc.writable();
+            futures::pin_mut!(writable);
+            assert!(
+                writable.as_mut().now_or_never().is_none(),
+                "writer waits for the held core lock"
+            );
+            inner.closing.store(true, Ordering::Release);
+            inner.data_channel_backpressure.notify_waiters();
+            drop(core);
+            assert!(
+                matches!(
+                    writable.as_mut().now_or_never(),
+                    Some(Err(Error::ErrDataChannelClosed))
+                ),
+                "a terminal wake before capacity registration must not require the polling timer"
+            );
+            }
+        }));
+    }
+
+    // Issue #1135: stop can overtake every send while it acquires the core.
+    #[test]
+    fn sends_observe_stop_before_core_enqueue() {
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            let (inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            let id = inner
+                .core
+                .lock()
+                .await
+                .create_data_channel("pending", None)
+                .unwrap()
+                .id();
+            let (_sender, receiver) = crate::runtime::channel(1);
+            let dc = DataChannelImpl::new(id, inner.clone(), receiver);
+            let core = inner.core.lock().await;
+            let mut writes = vec![
+                dc.send(BytesMut::from(&b"x"[..])).boxed(),
+                dc.send_text("x").boxed(),
+                dc.try_send(BytesMut::from(&b"x"[..])).boxed(),
+                dc.try_send_text("x").boxed(),
+            ];
+            for write in &mut writes {
+                assert!(write.as_mut().now_or_never().is_none());
+            }
+            inner.closing.store(true, Ordering::Release);
+            inner.data_channel_backpressure.notify_waiters();
+            drop(core);
+            for write in &mut writes {
+                assert!(
+                    matches!(
+                        write.as_mut().now_or_never(),
+                        Some(Err(Error::ErrDataChannelClosed))
+                    ),
+                    "a stopped send must not enter the live channel path"
+                );
+            }
+        }));
+    }
 
     /// A minimal external `DataChannel` that overrides only `send`/`send_text` (to record that
     /// they ran) and leaves `outstanding_bytes`, `writable`, `try_send` and `try_send_text` to

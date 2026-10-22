@@ -25,6 +25,11 @@ InProgress retains and retries the outgoing request without consuming the
 reset retransmission error budget. A busy receiver retains the same request
 sequence for retry with the normal retransmission error budget.
 Denied resets keep the SID reserved and permit an explicit retry.
+Reset retry exhaustion closes the association at its configured retry limit.
+It closes every stream once, stops all timers, and emits a typed terminal
+association event. The RTC layer uses this event to retire the physical transport.
+Controls retain limits 0, 1, and 5, plus public blocked-send recovery.
+See [#1133](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1133).
 
 DATA for a new stream generation can arrive before the final reset response.
 The receiver acknowledges it at once and saves its reassembly separately until

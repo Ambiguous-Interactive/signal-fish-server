@@ -85,6 +85,18 @@ echo "==> Verifying native link recovery after handshake retry exhaustion"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib dtls_handshake_loss_ --features runtime-mock
 
+echo "==> Verifying native reset retry exhaustion"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib sctp_reset_loss_ --features runtime-mock
+
+echo "==> Verifying native fatal socket recovery"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib fatal_socket_loss_ --features runtime-mock
+
+echo "==> Verifying native terminal capacity wakeups"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib data_channel::tests
+
 echo "==> Verifying RTC channel statistics retention"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib statistics

@@ -25,7 +25,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, GameDataEncoding, ServerMessage, Topology, Transport,
+    ClientMessage, GameDataEncoding, PlayerId, ServerMessage, Topology, Transport,
 };
 // The runner's config delivery class and the wire enum share the token set;
 // the alias keeps the mapping at the one boundary where they meet.
@@ -75,8 +75,10 @@ pub type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 /// own incarnation index. Each peer task registers its id at every join;
 /// receiving tasks resolve every inbound frame's `from_player` through
 /// here, which classifies deliveries exactly even across a rejoin storm.
+/// Keys stay typed on the receive path: UUID formatting allocates and must
+/// occur only when the completed registry is written to artifacts.
 /// `pub(crate)` for the deterministic inbound-classification controls.
-pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<String, (ReceiptName, u32)>>>;
+pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<PlayerId, (ReceiptName, u32)>>>;
 
 /// The result of one completed run.
 #[derive(Debug)]
@@ -369,7 +371,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         room: u32,
         sink: WsSink,
         rx: WsReceiver,
-        player_id: String,
+        player_id: PlayerId,
         tails: BTreeMap<String, (String, u64)>,
     }
     let mut peers: Vec<JoinedPeer> = Vec::new();
@@ -407,7 +409,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                     room: plan.room,
                     sink,
                     rx,
-                    player_id: player_id.to_string(),
+                    player_id,
                     tails,
                 }),
                 Err(failure) => log.push_join_failure(format!(
@@ -692,7 +694,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             .lock()
             .expect("sender registry poisoned")
             .iter()
-            .map(|(id, (name, epoch))| (id.clone(), (name.to_string(), *epoch)))
+            .map(|(id, (name, epoch))| (id.to_string(), (name.to_string(), *epoch)))
             .collect(),
     );
     let records = log.take_records();
@@ -1353,7 +1355,12 @@ async fn peer_task(
     mut start: tokio::sync::watch::Receiver<Option<Instant>>,
     ready: tokio::sync::oneshot::Sender<()>,
     registry: SenderRegistry,
-    initial: (WsSink, WsReceiver, String, BTreeMap<String, (String, u64)>),
+    initial: (
+        WsSink,
+        WsReceiver,
+        PlayerId,
+        BTreeMap<String, (String, u64)>,
+    ),
     log: Arc<EventLog>,
     quiescence_us: u64,
     hold_reads_for: Option<Duration>,
@@ -1413,10 +1420,10 @@ async fn peer_task(
                 {
                     Ok((next_sink, next_rx, player_id, tails)) => {
                         incarnation += 1;
-                        registry.lock().expect("sender registry").insert(
-                            player_id.to_string(),
-                            (receipt_recipient.clone(), incarnation),
-                        );
+                        registry
+                            .lock()
+                            .expect("sender registry")
+                            .insert(player_id, (receipt_recipient.clone(), incarnation));
                         // The snapshot tails are recorded UNRESOLVED
                         // (`PlayerId`, tail): the oracle resolves them
                         // against the registry recorded at end of run, so
@@ -1771,7 +1778,7 @@ pub(crate) async fn handle_inbound(
                     let resolved = registry
                         .lock()
                         .expect("sender registry")
-                        .get(&from_player.to_string())
+                        .get(&from_player)
                         .cloned();
                     if let Some((sender, sender_incarnation)) = resolved {
                         if sender != ledger_sender {
@@ -1833,7 +1840,7 @@ pub(crate) async fn handle_inbound(
                     let resolved = registry
                         .lock()
                         .expect("sender registry")
-                        .get(&gap.from_player.to_string())
+                        .get(&gap.from_player)
                         .cloned();
                     let Some((sender, sender_incarnation)) = resolved else {
                         // Record the violation and keep reading: the
@@ -2580,7 +2587,7 @@ mod session_poll_tests {
             receiver,
             ready,
             Arc::clone(&registry),
-            (sink, reader, "player-id".to_string(), BTreeMap::new()),
+            (sink, reader, PlayerId::nil(), BTreeMap::new()),
             Arc::clone(&log),
             1_000_000,
             None,
@@ -2610,7 +2617,7 @@ mod session_poll_tests {
         assert!(records.faults.is_empty(), "{:?}", records.faults);
         assert_eq!(records.sent.len(), scheduled.len());
         let registry = registry.lock().expect("registry");
-        let identity = &registry["player-id"].0;
+        let identity = &registry[&PlayerId::nil()].0;
         for event in &records.sent {
             assert_eq!(event.sender.as_ptr(), identity.as_ptr());
         }
@@ -2623,7 +2630,7 @@ mod session_poll_tests {
         let recipient: ReceiptName = "r0p1".into();
         let sender: ReceiptName = "r0p0".into();
         let registry: SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
-            player.to_string(),
+            player,
             (sender.clone(), 1),
         )])));
         let epoch = Instant::now();
@@ -2677,15 +2684,76 @@ mod session_poll_tests {
             );
             assert_eq!(
                 receipt.sender.as_ptr(),
-                registry
-                    .lock()
-                    .unwrap()
-                    .get(&player.to_string())
-                    .unwrap()
-                    .0
-                    .as_ptr(),
+                registry.lock().unwrap().get(&player).unwrap().0.as_ptr(),
                 "sender must share registry storage"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_registry_preserves_receipt_and_gap_incarnations() {
+        use signal_fish_server::protocol::{DeliveryGap, DeliveryGapReason, DeliveryReportPayload};
+        let players = [PlayerId::nil(), PlayerId::from_u128(u128::MAX)];
+        let sender: ReceiptName = "r0p0".into();
+        let recipient: ReceiptName = "r0p1".into();
+        let registry: SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::from([
+            (players[0], (sender.clone(), 1)),
+            (players[1], (sender.clone(), 2)),
+        ])));
+        let epoch = Instant::now();
+        let log = Arc::new(EventLog::new());
+        for player in players {
+            for message in [
+                ServerMessage::GameData {
+                    from_player: player,
+                    data: ledger_application_data(&sender, 0, 96).expect("ledger"),
+                    seq: Some(1),
+                    epoch: Some(1),
+                    class: None,
+                    key: None,
+                },
+                ServerMessage::DeliveryReport(Box::new(DeliveryReportPayload {
+                    gaps: vec![DeliveryGap {
+                        from_player: player,
+                        epoch: 1,
+                        from_seq: 2,
+                        to_seq: 3,
+                        reason: DeliveryGapReason::VolatileDropped,
+                    }],
+                    ..Default::default()
+                })),
+            ] {
+                let frame = serde_json::to_string(&message).expect("frame");
+                assert!(
+                    handle_inbound(
+                        &recipient,
+                        Ok(Message::Text(frame.into())),
+                        &registry,
+                        epoch,
+                        &log,
+                        ExperimentContext {
+                            active: false,
+                            opaque_sender: false
+                        },
+                    )
+                    .await
+                );
+            }
+        }
+        let records = log.take_records();
+        assert!(records.faults.is_empty(), "{:?}", records.faults);
+        assert_eq!(records.receipts.len(), 2);
+        assert_eq!(records.gaps.len(), 2);
+        for (index, (receipt, gap)) in records.receipts.iter().zip(&records.gaps).enumerate() {
+            let incarnation = u32::try_from(index + 1).expect("incarnation");
+            assert_eq!(receipt.epoch, incarnation);
+            assert_eq!(gap.epoch, incarnation);
+            assert_eq!(receipt.sender, sender);
+            assert_eq!(gap.sender, sender);
+            assert_eq!(receipt.recipient, recipient);
+            assert_eq!(gap.recipient, recipient);
+            assert_eq!(receipt.server_seq, 1);
+            assert_eq!((gap.from_seq, gap.to_seq), (2, 3));
         }
     }
 
@@ -3179,7 +3247,7 @@ mod session_poll_tests {
         ] {
             let player = PlayerId::new_v4();
             let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
-                player.to_string(),
+                player,
                 ("r0p1".into(), 1),
             )])));
             let log = Arc::new(EventLog::new());
@@ -3413,7 +3481,7 @@ mod session_poll_tests {
             };
             server.send(frame(0)).await.expect("queue initial inbound");
             let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
-                player.to_string(),
+                player,
                 ("r0p1".into(), 1),
             )])));
             let log = Arc::new(EventLog::new());
@@ -3454,12 +3522,7 @@ mod session_poll_tests {
                 receiver,
                 ready,
                 Arc::clone(&registry),
-                (
-                    sink,
-                    reader,
-                    PlayerId::new_v4().to_string(),
-                    BTreeMap::new(),
-                ),
+                (sink, reader, PlayerId::new_v4(), BTreeMap::new()),
                 Arc::clone(&log),
                 4_000_000,
                 Some(Duration::from_secs(2)),
@@ -3790,7 +3853,7 @@ mod session_poll_tests {
         assert!(futures_util::poll!(writer.as_mut()).is_pending());
         let player = PlayerId::new_v4();
         let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
-            player.to_string(),
+            player,
             ("r0p0".into(), 1),
         )])));
         let log = Arc::new(EventLog::new());

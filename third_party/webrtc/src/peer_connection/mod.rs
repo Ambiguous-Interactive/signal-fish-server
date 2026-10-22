@@ -1072,6 +1072,7 @@ impl PeerConnectionImpl {
 
             if let Err(e) = driver.event_loop(driver_event_rx, init_tx).await {
                 error!("I/O error: {}", e);
+                driver.retire_after_error().await;
             }
             // The driver has stopped for good (clean shutdown OR an abnormal error exit).
             // Mark closing and wake any sender parked in send back-pressure, so a blocking
@@ -1365,6 +1366,9 @@ impl PeerConnection for PeerConnectionImpl {
             */
             let mut core = self.inner.core.lock().await;
             let mut data_channels = self.inner.data_channel_events_tx.lock().await;
+            if self.inner.is_closing() {
+                return Err(Error::ErrConnectionClosed);
+            }
             /*
                 Sample after contention: an idle core must not shorten a new
                 channel's DCEP timeout by using its previous input timestamp.
