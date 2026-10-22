@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 

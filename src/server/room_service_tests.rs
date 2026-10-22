@@ -2284,8 +2284,39 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         Ok(outcome)
     }
 
+    async fn register_local_spectator_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        _delivery: ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        _commit_gate: Option<&'a StdMutex<()>>,
+        drain: Option<watch::Receiver<bool>>,
+        build_message: crate::coordination::RoomSnapshotBuilder<'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        // This drain-injection adapter models seated routes only. Exercise its
+        // routed-roster fault and conditional delivery without seating observers.
+        let routed = self.routed_player_ids(&room_id).await?.unwrap_or_default();
+        let message = build_message(routed).await?;
+        let (_drain_owner, fallback_drain) = watch::channel(false);
+        let delivered = self
+            .send_to_player_if(
+                &player_id,
+                message,
+                should_commit,
+                drain.unwrap_or(fallback_drain),
+            )
+            .await?;
+        Ok(if delivered {
+            DeliveryOutcome::Delivered
+        } else {
+            DeliveryOutcome::Canceled
+        })
+    }
+
     async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
         if self.trigger == DrainTrigger::SpectatorRoutingLookupFailure {
+            self.triggered.store(true, Ordering::Release);
             anyhow::bail!("injected spectator routing lookup failure");
         }
         let room_players = self.room_players.read().await;
@@ -5077,6 +5108,10 @@ async fn failed_spectator_publication_retries_rollback_and_restores_transport_ge
     assert!(
         result.is_err(),
         "injected routed-member lookup must fail admission"
+    );
+    assert!(
+        coordinator.triggered.load(Ordering::Acquire),
+        "admission must reach the injected routed-roster failure"
     );
     assert!(!server.spectator_service.is_spectating(&spectator));
     assert!(database

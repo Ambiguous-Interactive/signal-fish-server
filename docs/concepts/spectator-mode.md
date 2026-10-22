@@ -137,9 +137,21 @@ Older v3 servers lack the token. A successful spectator join alone does not
 prove live delivery. Protocol v2 keeps its frozen capability bytes; use a
 qualified server deployment to enable live viewing on that version.
 
-Custom `MessageCoordinator` implementations must implement read-only spectator
-publication and its snapshot fence. The default refuses spectator admission
-rather than sending an incomplete baseline or treating observers as players.
+### Custom coordinators
+
+This changes the public `MessageCoordinator` extension API.
+`commit_room_messages_if_members_with_hook` now takes `spectator_messages`
+after `recipient_messages`. Reserve these public frames only for observers,
+and keep them in the same publication phases. Keep observer failures outside
+the seated failure count and transaction outcome. Private player plans must
+never enter that vector.
+
+Implement `register_local_spectator_with_initial_message_async` to capture the
+seated roster and relay watermarks, enqueue the baseline, and publish the
+observer under one routing fence. The default refuses admission. Keep
+`routed_player_ids` restricted to seated players, while room-wide broadcasts
+include observers. Roomless registration and unregister must clear observer
+routes. The production in-memory coordinator implements this contract.
 
 ## What Spectators Cannot Do
 
