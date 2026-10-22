@@ -138,9 +138,9 @@ impl RoomRecipientMessages {
 /// Result of an exact-membership room-message transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomMessageTransactionOutcome {
-    /// The fallible hook succeeded and every reserved frame was committed.
+    /// The fallible hook succeeded and every reserved seated frame was committed.
     Committed,
-    /// Durable state committed, but one or more already-reserved frames could
+    /// Durable state committed, but one or more already-reserved seated frames could
     /// not be enqueued because their recipient closed or changed generation
     /// during the async commit hook, or the phase callback canceled dependent
     /// later frames after phase zero degraded. Independent healthy phases are
@@ -707,6 +707,16 @@ impl ConnectionCloseListener {
         *self.rx.borrow()
     }
 }
+
+/// Build a room snapshot under the routing fence from the seated member ids.
+pub type RoomSnapshotBuilder<'a> = Box<
+    dyn FnOnce(
+            Vec<PlayerId>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<Arc<ServerMessage>>> + Send + 'a>,
+        > + Send
+        + 'a,
+>;
 
 /// Everything the delivery layer needs to reach one connection: the bounded
 /// outbound message queue plus the kill switch used when that queue cannot
@@ -2145,10 +2155,15 @@ pub trait MessageCoordinator: Send + Sync {
     /// result from the hook must release every reservation without delivering a
     /// frame. Once the hook succeeds, frames are committed phase-by-phase so no
     /// tailored second frame can precede another member's uniform first frame.
+    /// `spectator_messages` contains only public lifecycle frames, committed in
+    /// those same phases to observer routes. Observers never enter the exact
+    /// seated membership set or receive per-member session plans.
     /// A valid production configuration provides at least two control slots per
     /// recipient; implementations must reject batches beyond these two phases.
     /// `after_first_phase` runs exactly once between those phases under the same
-    /// routing guard and receives the number of phase-zero frames that failed.
+    /// routing guard and receives the number of seated phase-zero frames that failed.
+    /// Observer failures use per-connection delivery metrics and close handling;
+    /// they never change game confirmation or the transaction outcome.
     /// Returning `false` cancels all reserved later-phase frames; returning
     /// `true` commits them even when phase zero degraded. Neither callback may
     /// call back into `MessageCoordinator` or wait on routing.
@@ -2157,6 +2172,7 @@ pub trait MessageCoordinator: Send + Sync {
         room_id: &RoomId,
         expected_members: &[PlayerId],
         recipient_messages: Vec<RoomRecipientMessages>,
+        spectator_messages: Vec<Arc<ServerMessage>>,
         before_send: Box<
             dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>>
                 + Send
@@ -2398,18 +2414,7 @@ pub trait MessageCoordinator: Send + Sync {
         should_commit: &'a (dyn Fn() -> bool + Send + Sync),
         commit_gate: Option<&'a std::sync::Mutex<()>>,
         _drain: Option<tokio::sync::watch::Receiver<bool>>,
-        build_message: Box<
-            dyn FnOnce(
-                    Vec<PlayerId>,
-                ) -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<Output = anyhow::Result<Arc<ServerMessage>>>
-                            + Send
-                            + 'a,
-                    >,
-                > + Send
-                + 'a,
-        >,
+        build_message: crate::coordination::RoomSnapshotBuilder<'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
         // Only a coordinator that implements the atomic commit path can
         // accept a drain-gated reconnect. Refuse a fallback implementation
@@ -2428,6 +2433,23 @@ pub trait MessageCoordinator: Send + Sync {
             Box::new(move || message),
         )
         .await
+    }
+
+    /// Publish a read-only room recipient after its fenced snapshot. Production
+    /// excludes this role from seated membership checks and personalized plans.
+    /// Custom coordinators must implement the snapshot fence and observer role;
+    /// the default refuses admission before delivering a misleading baseline.
+    async fn register_local_spectator_with_initial_message_async<'a>(
+        &'a self,
+        _player_id: PlayerId,
+        _room_id: RoomId,
+        _delivery: ClientDeliveryHandle,
+        _should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        _commit_gate: Option<&'a std::sync::Mutex<()>>,
+        _drain: Option<tokio::sync::watch::Receiver<bool>>,
+        _build_message: crate::coordination::RoomSnapshotBuilder<'a>,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        anyhow::bail!("coordinator does not support read-only spectator publication")
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()>;
@@ -3329,6 +3351,7 @@ mod tests {
             _room_id: &RoomId,
             _expected_members: &[PlayerId],
             recipient_messages: Vec<RoomRecipientMessages>,
+            _spectator_messages: Vec<Arc<ServerMessage>>,
             before_send: Box<
                 dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>>
                     + Send

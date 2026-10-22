@@ -1,10 +1,10 @@
 # Spectator
 
 This scenario shows the server's current spectator contract. A spectator joins a
-running room by its code, receives a one-time roster and spectator snapshot, then
-leaves. Spectators never send `GameData` and never affect the lobby or readiness.
-They are not currently members of the room broadcast set, so live gameplay and
-presence updates must come from an out-of-band application channel.
+running room by its code, receives a roster and spectator snapshot, then live
+relay data and public room events. Spectators never send `GameData` and never
+affect the lobby or readiness. On v3, check the `spectator_relay` capability
+before enabling this flow.
 
 Throughout this page:
 
@@ -52,14 +52,16 @@ The server admits Observer1 and replies with the current room snapshot:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "epoch": 1
+        "epoch": 1,
+        "seq": 17
       },
       {
         "id": "00000000-0000-0000-0000-00000000000b",
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "epoch": 2
+        "epoch": 2,
+        "seq": 0
       }
     ],
     "current_spectators": [
@@ -74,27 +76,29 @@ The server admits Observer1 and replies with the current room snapshot:
 }
 ```
 
-Next: Observer1's client renders the one-time player and spectator snapshot.
-Alice and Bob receive `NewSpectatorJoined`; Observer1 does not receive subsequent
-room broadcasts.
+Next: Observer1 renders the baseline. Alice and Bob receive
+`NewSpectatorJoined`. Observer1 then receives live room broadcasts.
 
-## 2. Gameplay continues out of band
+## 2. Gameplay continues over the relay
 
-Intent: the application can use the snapshot to initialize a read-only view, but
-must carry live game state separately. When Alice sends a relayed `GameData`, Bob
-receives it and Observer1 receives no WebSocket frame.
+Intent: Alice sends `GameData` that includes the application state needed for
+viewing. Bob and Observer1 receive the same player payload. On v3, Observer1
+uses the snapshot's `epoch` and `seq` watermarks as its relay baseline.
+Reliable delivery stays contiguous; lossy delivery has exact `DeliveryReport`
+gaps under the existing queue rules. A late viewer needs an application state
+snapshot from a player; the server does not replay prior gameplay.
 
-Next: Observer1's application consumes its out-of-band stream. The signaling
-server does not issue `DeliveryReport` for gameplay the spectator was never
-eligible to receive.
+Next: Observer1 updates its read-only view. It receives no private session plan
+and does not enter the seated roster. Direct or WebRTC gameplay requires an
+additional server relay payload for viewing.
 
 ## 3. A second spectator joins
 
 Intent: Observer2 joins the same room (sending the identical `JoinAsSpectator` with `spectator_name: "Observer2"`).
-Observer2 receives its own `SpectatorJoined`; the room's **players** are told
-about the newcomer. Existing spectators are not broadcast recipients.
+Observer2 receives its own `SpectatorJoined`. Players and existing spectators
+receive the newcomer notification.
 
-Alice and Bob receive `NewSpectatorJoined`, carrying the new spectator and the
+Alice, Bob, and Observer1 receive `NewSpectatorJoined`, carrying the new spectator and the
 full updated spectator list (protocol v2 connections; on v3 connections the
 event is a join delta — `current_spectators` is `[]` and `spectator_count`
 holds the room total):
@@ -125,8 +129,7 @@ holds the room total):
 }
 ```
 
-Next: Observer1 receives no frame. It retains its original snapshot unless the
-application refreshes that state out of band.
+Next: Observer1 applies the spectator delta. Observer2 uses its own baseline.
 
 ## 4. Observer1 leaves
 

@@ -645,56 +645,11 @@ impl SpectatorService {
                         ));
                     }
                 };
-                let routed_player_ids = match self
-                    .message_coordinator
-                    .routed_player_ids(&room.id)
-                    .await
-                {
-                    Ok(routed) => routed.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
-                    Err(err) => {
-                        warn!(room_id = %room.id, error = %err, "Failed to resolve published players for spectator baseline");
-                        self.rollback_unpublished_spectator_join(player_id, &room.id, true)
-                            .await;
-                        return Err(SpectatorError::new(
-                            "Storage error",
-                            Some(ErrorCode::StorageError),
-                        ));
-                    }
-                };
                 let ready_players = crate::server::ready_state::snapshot_ready_players(
                     &current_room,
                     self.room_coordinator.as_ref(),
                 )
                 .await;
-                let current_players: Vec<PlayerInfo> = current_room
-                    .players
-                    .values()
-                    .cloned()
-                    .filter_map(|mut player| {
-                        // Same derivation as `RoomJoined` / `Reconnected`: the
-                        // stored flag is only written at finalize.
-                        player.is_ready = ready_players.contains(&player.id);
-                        let relay_stamp = self
-                            .connection_manager
-                            .current_relay_stamp_in_room(&player.id, &room.id);
-                        let is_published = routed_player_ids.as_ref().map_or_else(
-                            || relay_stamp.is_some(),
-                            |routed| routed.contains(&player.id),
-                        );
-                        if !is_published {
-                            return None;
-                        }
-                        player.epoch = None;
-                        player.seq = None;
-                        if !recipient_is_v3 {
-                            return Some(player);
-                        }
-                        let stamp = relay_stamp?;
-                        player.epoch = Some(stamp.epoch);
-                        player.seq = Some(stamp.seq);
-                        Some(player)
-                    })
-                    .collect();
                 // `current_room` was fetched after the successful insert while
                 // this room's mutation guard was held, so it is the
                 // authoritative roster for both the baseline and broadcast.
@@ -704,27 +659,77 @@ impl SpectatorService {
                 let join_reason = SpectatorStateChangeReason::Joined;
                 let drain = self.shutdown_drain_rx.clone();
                 let should_deliver = || !self.is_draining();
+                let Some(delivery) = self.connection_manager.client_delivery_handle(player_id)
+                else {
+                    self.rollback_unpublished_spectator_join(player_id, &room.id, true)
+                        .await;
+                    return Err(SpectatorError::new(
+                        "Connection is no longer active",
+                        Some(ErrorCode::SpectatorJoinFailed),
+                    ));
+                };
+                let snapshot_room = current_room.clone();
+                let snapshot_spectators = spectator_snapshot.clone();
+                let connection_manager = Arc::clone(&self.connection_manager);
                 let baseline_delivered = self
                     .message_coordinator
-                    .send_to_player_if(
-                        player_id,
-                        Arc::new(
-                            (ServerMessage::SpectatorJoined(Box::new(SpectatorJoinedPayload {
-                                room_id: current_room.id,
-                                room_code: current_room.code.clone(),
-                                spectator_id: *player_id,
-                                game_name: current_room.game_name.clone(),
-                                current_players,
-                                current_spectators: spectator_snapshot.clone(),
-                                lobby_state: current_room.lobby_state.clone(),
-                                reason: Some(join_reason.clone()),
-                            })))
-                            .correlate_room_operation(operation_id),
-                        ),
+                    .register_local_spectator_with_initial_message_async(
+                        *player_id,
+                        room.id,
+                        delivery,
                         &should_deliver,
-                        drain,
+                        None,
+                        Some(drain),
+                        Box::new(move |routed_player_ids| {
+                            Box::pin(async move {
+                                let current_room = snapshot_room;
+                                let routed_player_ids: HashSet<_> =
+                                    routed_player_ids.into_iter().collect();
+                                let current_players: Vec<PlayerInfo> = current_room
+                                    .players
+                                    .values()
+                                    .cloned()
+                                    .filter_map(|mut player| {
+                                        // Same derivation as `RoomJoined` / `Reconnected`: the
+                                        // stored flag is only written at finalize.
+                                        player.is_ready = ready_players.contains(&player.id);
+                                        let relay_stamp = connection_manager
+                                            .current_relay_stamp_in_room(&player.id, &room.id);
+                                        let is_published = routed_player_ids.contains(&player.id);
+                                        if !is_published {
+                                            return None;
+                                        }
+                                        player.epoch = None;
+                                        player.seq = None;
+                                        if !recipient_is_v3 {
+                                            return Some(player);
+                                        }
+                                        let stamp = relay_stamp?;
+                                        player.epoch = Some(stamp.epoch);
+                                        player.seq = Some(stamp.seq);
+                                        Some(player)
+                                    })
+                                    .collect();
+                                Ok(Arc::new(
+                                    (ServerMessage::SpectatorJoined(Box::new(
+                                        SpectatorJoinedPayload {
+                                            room_id: current_room.id,
+                                            room_code: current_room.code.clone(),
+                                            spectator_id: *player_id,
+                                            game_name: current_room.game_name.clone(),
+                                            current_players,
+                                            current_spectators: snapshot_spectators,
+                                            lobby_state: current_room.lobby_state.clone(),
+                                            reason: Some(SpectatorStateChangeReason::Joined),
+                                        },
+                                    )))
+                                    .correlate_room_operation(operation_id),
+                                ))
+                            })
+                        }),
                     )
                     .await
+                    .map(|outcome| outcome == crate::coordination::DeliveryOutcome::Delivered)
                     .unwrap_or(false);
                 if !baseline_delivered {
                     self.rollback_unpublished_spectator_join(player_id, &room.id, true)
@@ -788,6 +793,8 @@ impl SpectatorService {
                 let committed = Arc::new(AtomicBool::new(false));
                 let committed_in_hook = Arc::clone(&committed);
                 let room_id_for_replay = room.id;
+                let joined_spectator = *player_id;
+                let notification_drain = self.shutdown_drain_rx.clone();
                 let coordinator = Arc::clone(&self.message_coordinator);
                 let reconnection_manager = self.reconnection_manager.clone();
                 let completion = self.message_coordinator.enqueue_room_event(
@@ -795,9 +802,12 @@ impl SpectatorService {
                     Box::new(move || {
                         Box::pin(async move {
                             coordinator
-                                .broadcast_to_room_with_hook(
+                                .broadcast_to_room_except_if_with_hook(
                                     &room_id_for_replay,
+                                    &joined_spectator,
                                     notification,
+                                    &|| !*notification_drain.borrow(),
+                                    notification_drain.clone(),
                                     Box::new(move || {
                                         Box::pin(async move {
                                             if let Some(reconnection_manager) = reconnection_manager

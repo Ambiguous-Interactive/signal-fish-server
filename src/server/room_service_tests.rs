@@ -2096,6 +2096,7 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         _room_id: &RoomId,
         _expected_members: &[PlayerId],
         recipient_messages: Vec<crate::coordination::RoomRecipientMessages>,
+        _spectator_messages: Vec<Arc<ServerMessage>>,
         before_send: Box<
             dyn FnOnce() -> std::pin::Pin<
                     Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + 'a>,

@@ -448,6 +448,8 @@ pub struct RateLimitInfo {
 pub const PROTOCOL_INFO_TRANSPORT_WEBSOCKET: &str = "websocket";
 /// Capability token for correlated room-membership operation envelopes.
 pub const ROOM_OPERATION_IDS_CAPABILITY: &str = "room_operation_ids";
+/// Server support for live, read-only spectator relay after a fenced snapshot.
+pub const SPECTATOR_RELAY_CAPABILITY: &str = "spectator_relay";
 
 /// Describes negotiated protocol capabilities for a specific SDK.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7264,3 +7264,64 @@ classification, not successful admission on an already-open channel.
 
 This is a new confirmed wake-order defect. It does not establish the cause of
 any older hosted failure. The server protocol and external SDKs are unchanged.
+
+### F135 — Retired native SCTP accepts delayed gameplay
+
+Issue [#1138](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1138)
+advances A20 under #826, #1120, and #912. A deterministic packet history fails
+on main because delayed DATA recreates a stream after reset retry exhaustion.
+The same ingress accepts data after local abort or after an ABORT chunk in the
+same packet. Stream creation and ACK scheduling can resume after terminal
+cleanup.
+
+The association now records retirement separately from its public Closed
+state. Fresh server associations also start Closed and must still accept the
+first handshake. Retired associations ignore new packets. Chunk processing
+stops immediately if a chunk retires the association, before later chunks or
+end-of-packet ACK work can run. Four teardown histories require no recreated
+streams, timers, late events, or output. Delayed INIT and COOKIE-ECHO controls
+cannot reopen the retired association; a fresh Closed server still completes
+a real handshake. Existing reset, reliable gameplay, peer abort, graceful
+shutdown, and public full-channel reset controls pass. Independent source
+review approved the repair. Vendor production lint passes; its test target
+still reports pre-existing upstream lint warnings.
+
+This is a separate confirmed terminal-ingress defect. It does not establish
+the cause of #1120's historical hosted timeout. The external SDKs do not use
+this vendored SCTP association: Rust and .NET use other transport stacks and
+Godot uses engine WebRTC. Their spectator behavior assessment is separate.
+
+### F136 — Spectators have no live relay route
+
+Issue [#1137](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1137)
+advances the server lifecycle audit under #826. The new real WebSocket control
+receives `SpectatorJoined` on main, then times out waiting for player gameplay.
+Spectator admission records a read-only role but never publishes a room route.
+
+The repair publishes a separate observer role in the broadcast routing set.
+Its seated connection assignment stays empty. The join baseline captures live
+player relay watermarks under the same routing fence that queues the snapshot
+and publishes the route. Failed or canceled publication never makes the
+observer visible. Exact seated membership and capability decisions exclude
+observers. Personalized transactions reserve explicit public lifecycle frames
+for observers; private session plans remain seated-only. Observer delivery
+failure cannot degrade seated confirmation or cancel a later player plan.
+Leaving advances the queue generation and removes the route. Already admitted
+reliable data drains before the terminal membership barrier; old-room frames
+cannot enter the next membership.
+
+Focused controls cover real v2/v3 relay projection, all delivery classes,
+JSON and binary fan-out, read-only rejection, lobby readiness, game start,
+finalized late joins and reconnects, room switching, snapshot publication
+failure, the routing fence, and slow-observer isolation. The v3 server-owned
+`spectator_relay` capability lets clients detect support. V2 keeps its frozen
+bytes and needs a qualified deployment. Custom coordinators must implement
+read-only snapshot publication; its default refuses unsupported admission.
+
+External client acceptance remains tracked separately in
+[Rust #293](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/293),
+[.NET #144](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/144),
+and [Godot #368](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/368).
+Direct and WebRTC game traffic is not mirrored automatically. Applications
+must relay the viewing state and supply late viewers with an application
+snapshot. The server does not retain or replay prior gameplay for spectators.

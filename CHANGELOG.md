@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Relay live room events and gameplay to read-only spectators (#1137).
+
 ### Changed
 
 - Expose native reference-client channel receipt diagnostics through the engine API.
@@ -14,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep closed native gameplay transports retired when delayed packets arrive (#1138).
+- Refuse capacity workloads that exceed the configured sender payload byte budget (#775).
 - Close native gameplay channels when stream reset retries expire (#1133).
 - Report native peer closure after a fatal socket error, including before channel admission (#1134).
 - Reject native sends after shutdown and return blocked-send closure errors without a polling delay (#1135).

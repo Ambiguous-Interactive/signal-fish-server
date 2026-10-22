@@ -1301,6 +1301,7 @@ impl EnhancedGameServer {
                             &room_id,
                             &expected_members,
                             recipient_messages,
+                            vec![],
                             Box::new(move || {
                                 Box::pin(async move {
                                     if let Some((player_id, info)) = metadata_update {

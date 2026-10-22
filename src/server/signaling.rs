@@ -644,10 +644,7 @@ impl EnhancedGameServer {
                         let reconnection_manager = server.reconnection_manager.clone();
                         let replay_message = Arc::clone(&player_joined);
 
-                        if recipient_messages
-                            .iter()
-                            .all(|batch| batch.messages.is_empty())
-                        {
+                        if expected_members.is_empty() {
                             if let Some(update) = active_plan_update {
                                 if let Some(plan) = update {
                                     active_session_plans.insert(room_id, plan);
@@ -671,6 +668,7 @@ impl EnhancedGameServer {
                                 &room_id,
                                 &expected_members,
                                 recipient_messages,
+                                vec![Arc::clone(&player_joined)],
                                 Box::new(move || {
                                     Box::pin(async move {
                                         if let Some(update) = active_plan_update {

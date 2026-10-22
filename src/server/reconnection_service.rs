@@ -2137,10 +2137,7 @@ impl EnhancedGameServer {
                             })
                             .collect();
 
-                        if recipient_messages
-                            .iter()
-                            .all(|batch| batch.messages.is_empty())
-                        {
+                        if expected_members.is_empty() {
                             return server_for_publication
                                 .publish_reconnect_lifecycle_fallback(
                                     room_id_for_publication,
@@ -2160,6 +2157,7 @@ impl EnhancedGameServer {
                                 &room_id_for_publication,
                                 &expected_members,
                                 recipient_messages,
+                                vec![Arc::clone(&notification)],
                                 Box::new(move || {
                                     Box::pin(async move {
                                         server_for_hook

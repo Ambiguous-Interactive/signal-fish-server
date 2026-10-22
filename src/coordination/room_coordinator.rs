@@ -794,6 +794,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 authority_player: finalized.authority_player,
                 lobby_state,
             };
+            let public_game_start_message = Arc::clone(&game_start_message);
             let publication = build_publication(finalized, game_start_message);
             let coordinator = Arc::clone(&self.coordinator);
             let database = Arc::clone(&self.database);
@@ -812,6 +813,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                                 &finalize_room_id,
                                 &expected_members,
                                 recipient_messages,
+                                vec![public_game_start_message],
                                 Box::new(move || {
                                     Box::pin(async move {
                                         match database
@@ -1623,6 +1625,7 @@ mod tests {
             room_id: &RoomId,
             _expected_members: &[PlayerId],
             recipient_messages: Vec<RoomRecipientMessages>,
+            _spectator_messages: Vec<Arc<ServerMessage>>,
             before_send: Box<
                 dyn FnOnce() -> std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,
@@ -1836,6 +1839,7 @@ mod tests {
             _room_id: &RoomId,
             _expected_members: &[PlayerId],
             _recipient_messages: Vec<RoomRecipientMessages>,
+            _spectator_messages: Vec<Arc<ServerMessage>>,
             before_send: Box<
                 dyn FnOnce() -> std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<bool>> + Send + 'a>,
