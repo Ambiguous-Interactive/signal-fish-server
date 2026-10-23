@@ -87,3 +87,23 @@ sends allocate no listener. The deterministic control holds the core lock,
 stops the driver, and requires an immediate Closed error after releasing it.
 See [#1135](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1135).
 Replacement qualification in #912 must retain this wake ordering.
+
+Peer close uses a nonblocking driver wake after setting its durable closing flag.
+A full application queue cannot trap close inside a public driver callback or
+prevent an external caller from reaching the bounded driver-stop wait. Concurrent
+close callers leave the completion receiver with the task-handle owner, preserving
+its graceful flush opportunity. Controls fill the real driver queue on both
+ambient and dedicated reactors, close from a callback and an external task,
+and force competing close calls while the core is locked. The handle owner
+still waits for graceful driver completion; repeated close and already-closed
+queues remain covered. See
+[#1154](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1154).
+
+Canceling a suspended close still aborts its driver promptly, and the task-handle
+owner's independent weak-reference cleanup task ends application streams and
+closes the core when its lock becomes available. A completed close signals it to
+exit without changing the driver's graceful exit path. Controls cancel close
+while holding the core, confirm the real driver has stopped, and require a
+retained channel's poll to finish on both ambient and dedicated reactors. New
+channel creation remains rejected, and repeated close succeeds.
+See [#1156](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1156).

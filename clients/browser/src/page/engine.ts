@@ -115,6 +115,8 @@ export class Engine {
   private readonly peers = new Map<string, PeerLink>();
   private nextGeneration = 0;
   private readonly channelDiagnostics = new WeakMap<RTCDataChannel, ChannelDiagnostics>();
+  private readonly receiveEncoder = new TextEncoder();
+  private receiveScratch: Uint8Array<ArrayBuffer> | null = null;
 
   constructor(crippled: boolean, callbacks: EngineCallbacks) {
     this.crippled = crippled;
@@ -662,11 +664,25 @@ export class Engine {
         typeof data === 'string'
           ? data
           : new TextDecoder('utf-8', { ignoreBOM: true }).decode(data);
-      const textBytes = new TextEncoder().encode(text).byteLength;
-      if (textBytes > MAX_CHANNEL_MESSAGE_BYTES) {
-        count('rejected');
-        rejectMessage('incoming data-channel message exceeds 65536 bytes');
-        return;
+      /* Sizing matches normalized UTF-8, including replacement characters,
+       * without allocating another payload buffer for every receipt. */
+      let textBytes = 0;
+      if (text.length !== 0) {
+        /* Three bytes per UTF-16 unit bounds replacement and surrogate encoding.
+         * Grow geometrically so small gameplay does not reserve the maximum. */
+        const needed = Math.min(MAX_CHANNEL_MESSAGE_BYTES, text.length * 3);
+        if (this.receiveScratch === null || this.receiveScratch.length < needed) {
+          let capacity = this.receiveScratch?.length ?? 256;
+          while (capacity < needed) capacity *= 2;
+          this.receiveScratch = new Uint8Array(capacity);
+        }
+        const { read, written } = this.receiveEncoder.encodeInto(text, this.receiveScratch);
+        if (read !== text.length) {
+          count('rejected');
+          rejectMessage('incoming data-channel message exceeds 65536 bytes');
+          return;
+        }
+        textBytes = written;
       }
       if (
         this.callbacks.onChannelMessage(

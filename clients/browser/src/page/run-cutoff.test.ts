@@ -95,7 +95,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
   const originalSocket = globalThis.WebSocket;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const originalNow = performance.now;
-  const originalEncode = TextEncoder.prototype.encode;
+  const originalEncodeInto = TextEncoder.prototype.encodeInto;
   const originalDecode = TextDecoder.prototype.decode;
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
@@ -526,10 +526,10 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
               return decoded;
             };
           } else {
-            TextEncoder.prototype.encode = function (input) {
-              const bytes = originalEncode.call(this, input);
+            TextEncoder.prototype.encodeInto = function (input, destination) {
+              const sized = originalEncodeInto.call(this, input, destination);
               now = 1101;
-              return bytes;
+              return sized;
             };
           }
         }
@@ -548,7 +548,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
         }
         if (scenario.startsWith('queued-decoded-'))
           assert(now === 1101, 'UTF-8 normalization completes after the run cutoff');
-        TextEncoder.prototype.encode = originalEncode;
+        TextEncoder.prototype.encodeInto = originalEncodeInto;
         TextDecoder.prototype.decode = originalDecode;
       }
       if (scenario.startsWith('queued-')) now = 1101;
@@ -811,7 +811,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
     await turn();
     console.error = originalError;
     performance.now = originalNow;
-    TextEncoder.prototype.encode = originalEncode;
+    TextEncoder.prototype.encodeInto = originalEncodeInto;
     TextDecoder.prototype.decode = originalDecode;
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;

@@ -5304,3 +5304,98 @@ independent ledgers and focused artifact and real-socket replay controls.
 The relay allocation reduction does not bound complete default-budget process
 memory, qualify the original long live workload, explain the generator stalls,
 or establish server capacity. Those requirements remain open in #775.
+
+
+### Bounded batched relay queue scans (#1155)
+
+The receiver previously counted the entire current-generation data phase on
+every batched pop. Draining 1,024 Reliable items visited 524,800 queue entries.
+The receiver now scans only when it arms a Latest batch, and stops at the batch
+size. Reliable and Volatile pops do not scan. Control priority, generation
+barriers, payloads, order, and flush deadlines remain unchanged. Focused controls
+cover these invariants and count actual predicate visits.
+
+A fixed-source production receiver probe uses batch size 32, a 16 ms interval,
+and prefilled queues. Setup and enqueue time are excluded. Three alternating
+baseline/candidate pairs run for each class and depth: 72 fresh processes.
+Local builds and tests pause during capture on shared ARM64 WSL2 Linux. Every
+trial checks sequence, class, and checksum. The normal allocator is used and
+test-only visit counters are absent. Median drain times are nanoseconds/item:
+
+| Class | Depth | Previous | Bounded scan |
+| --- | --- | --- | --- |
+| Reliable | 64 | 1,067 | 883 |
+| Reliable | 1,024 | 1,173 | 900 |
+| Reliable | 4,096 | 2,530 | 842 |
+| Volatile | 64 | 1,130 | 852 |
+| Volatile | 1,024 | 1,083 | 823 |
+| Volatile | 4,096 | 2,684 | 953 |
+| Latest | 64 | 898 | 857 |
+| Latest | 1,024 | 1,133 | 819 |
+| Latest | 4,096 | 2,585 | 886 |
+| Mixed | 64 | 972 | 786 |
+| Mixed | 1,024 | 1,223 | 813 |
+| Mixed | 4,096 | 2,851 | 891 |
+
+All four 4,096-item cohorts have separated observed ranges. Small Latest and
+Volatile cohorts have overlapping ranges. These measurements describe receiver
+drain work with batching enabled; batching is disabled by default. They do not
+measure server throughput, network latency, or capacity, and do not explain
+historical gameplay stalls.
+
+The baseline source is `eab03f41c6665f130c58aafa31fa043885adb1c0`. Executable
+SHA-256 values are
+`656d3b9b8707d5215159a58e21a1138aad526b18aba4ebfe4b2716cfc059565f`
+(previous) and
+`37d4280186e3f5ad50863fe23b3a6781dbbca4f364889610539646691723ac44`
+(candidate). The probe lockfile SHA-256 is
+`1bcaf5023e9bf8599fd024f8ccdb8793dc72485f30b3a3c5374c942dd33ac76f`.
+The [issue](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1155)
+retains the exact portable probe, dependency lockfile, commands, registration,
+and all raw trials. Both relay allocation benchmark targets also pass.
+
+
+### Reusable browser receive sizing (#1157)
+
+The browser reference client now measures normalized UTF-8 into reusable
+storage. It previously allocated an encoded payload for every receipt. Storage
+grows geometrically from 256 to 65,536 bytes per Engine. Empty receipts allocate
+no scratch. A first 96-byte ASCII receipt retains 512 bytes instead of creating
+a transient 96-byte payload. Scratch survives peer replacement. Encoding still
+copies bytes; decoded strings and small result objects still allocate.
+
+The fixed-bundle experiment runs the actual Engine receive callback in Chromium
+156.0.8078.4 on shared ARM64 Linux. Physical channels are fake. Each cohort uses
+three alternating baseline/candidate pairs, 2,000 warmup receipts, and 5,000
+measured receipts. Separate allocation runs use 1,000 receipts. Cold controls
+use one receipt. Local builds and tests pause during capture. Every callback,
+normalized byte charge, and checksum matches. Median times are milliseconds:
+
+| Cohort | Previous | Reused storage |
+| --- | --- | --- |
+| 96-byte ASCII text | 16.8 | 9.1 |
+| 96-byte ASCII binary | 18.3 | 10.6 |
+| 4,096-byte ASCII text | 35.4 | 19.2 |
+| 4,096-byte ASCII binary | 42.5 | 26.7 |
+| 65,536-byte ASCII text | 621.2 | 161.0 |
+| 65,536-byte ASCII binary | 767.5 | 197.7 |
+| 65,536-byte UTF-8 text | 353.6 | 149.7 |
+| 65,536-byte UTF-8 binary | 953.2 | 736.4 |
+| 65,536-byte astral text | 538.8 | 329.1 |
+| 65,535-byte normalized malformed binary | 581.6 | 348.3 |
+
+At 1,000 maximum-size receipts, observed encoded-payload allocation falls from
+65,536,000 transient bytes to one 65,536-byte retained scratch buffer. This
+counts sizing storage only. It does not measure total heap, network throughput,
+or end-to-end gameplay latency. Single cold-call timing is too coarse for a
+latency claim. A JavaScript scalar-count alternative was slower and a fixed
+64 KiB cold reservation was rejected before the final registered experiment.
+
+The baseline bundle SHA-256 is
+`6781ddc4ada3302f310c51915bd9789adb990977f9fe910e8e78c81edb0bb361`;
+the candidate is
+`d28d3d2966dfb4a37bf1a09a6a399a2194e5cf83441f8841bb47b0f9a48c3e48`.
+The [issue](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1157)
+retains reproduction commands, harnesses, registration, and all 80 steady and
+24 cold rows. Byte-boundary, malformed-input, reuse, growth, and cutoff controls
+pass. These observations do not explain historical #853 or #889 failures.

@@ -7644,3 +7644,32 @@ terminal endpoint retirement. Separate controls cover all four draining states,
 repeated stops, stopped read rejection, and saved generation ownership. The
 public WebRTC wrapper still uses ABORT; this repair concerns low-level graceful
 shutdown and does not explain the historical #1120 timeout.
+
+### F147 — Full driver queues block public native close
+
+New [#1154](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1154)
+advances native lifecycle qualification under #826 and #912. Public close awaits
+space in the driver's command queue before it reaches its bounded driver wait.
+A close from a driver callback cannot free that space. An external close also
+waits indefinitely when the callback holds the driver.
+
+Close now records the durable closing flag and tries a nonblocking wake. A full
+queue already wakes the driver. Only the caller that owns the driver handle
+consumes its completion receiver. Normal driver exit retains its graceful
+cleanup window. Real public callback and external-close histories fail before
+repair and pass with both reactor modes. A separate concurrent-close control
+protects completion ownership.
+
+### F148 — Canceled native close strands channel readers
+
+New [#1156](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1156)
+extends #1151. Canceling close after it takes the driver handle aborts the driver
+but skips the async stream cleanup. A retained public channel then waits for an
+event that can never arrive. The regression holds the core lock, cancels close,
+observes driver completion, releases the lock, and requires terminal channel EOF.
+The baseline fails that requirement. Both reactor modes pass after repair.
+
+An independent cleanup task protects this close operation from caller
+cancellation. It uses a weak peer reference and exits when ordinary close
+finishes. This adds no task to an idle live peer. The wire format does not change.
+Neither finding establishes the cause of the historical #853 or #889 failures.
