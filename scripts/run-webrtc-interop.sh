@@ -97,6 +97,10 @@ echo "==> Verifying native terminal capacity wakeups"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib data_channel::tests
 
+echo "==> Verifying RTC peer close retires channel handles"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib peer_close_retires_all_channel_states
+
 echo "==> Verifying RTC channel statistics retention"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib statistics

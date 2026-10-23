@@ -774,6 +774,24 @@ impl<'a>
     }
 
     fn close(&mut self) -> Result<()> {
+        /* Peer close already flushed writes and SCTP ABORT; retained handles need no reset. */
+        self.ctx.rejected_streams.clear();
+        for dc in self.data_channels.values_mut() {
+            dc.ready_state = RTCDataChannelState::Closed;
+            dc.handshake_deadline = None;
+            dc.outstanding_bytes = 0;
+            dc.data_channel = None;
+            if !dc.close_emitted {
+                dc.close_emitted = true;
+                self.stats.peer_connection.on_data_channel_closed();
+                self.stats
+                    .get_or_create_data_channel(dc.id, &dc.label, &dc.protocol);
+                if let Some(stream_id) = dc.stream_id {
+                    self.stats.set_data_channel_stream_id(dc.id, stream_id);
+                }
+                self.stats.mark_data_channel_closed(dc.id);
+            }
+        }
         Ok(())
     }
 }
@@ -797,6 +815,60 @@ mod tests {
     use sansio::Protocol;
     use sctp::StreamId;
     use shared::marshal::Marshal;
+
+    // Issue #1151: peer close must retire pending and established public handles.
+    #[test]
+    fn peer_close_retires_all_channel_states_and_credit_once() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let mut channels = DataChannelRegistry::default();
+        let mut ids = vec![];
+        for state in [
+            RTCDataChannelState::Connecting,
+            RTCDataChannelState::Open,
+            RTCDataChannelState::Closing,
+            RTCDataChannelState::Closed,
+        ] {
+            let mut dc = in_band_channel(u16::try_from(ids.len() + 1).unwrap());
+            dc.dial(0).unwrap();
+            dc.ready_state = state;
+            dc.outstanding_bytes = 17;
+            dc.handshake_deadline = Some(now + Duration::from_secs(5));
+            dc.close_emitted = state == RTCDataChannelState::Closed;
+            ids.push(channels.insert(dc));
+        }
+        let mut stats = RTCStatsAccumulator::new();
+        stats.peer_connection.on_data_channel_closed();
+        for _ in 0..2 {
+            let mut handler = DataChannelHandler::new(
+                &mut ctx,
+                &mut channels,
+                &mut stats,
+                None,
+                RTCDtlsRole::Server,
+                None,
+            );
+            handler.close().unwrap();
+            assert!(handler.poll_timeout().is_none());
+        }
+        let already_closed = *ids.last().unwrap();
+        for id in ids {
+            let dc = channels
+                .get(&id)
+                .expect("terminal handle remains queryable");
+            assert_eq!(dc.ready_state, RTCDataChannelState::Closed);
+            assert_eq!(dc.outstanding_bytes, 0);
+            assert!(dc.handshake_deadline.is_none());
+            assert!(dc.data_channel.is_none());
+            assert!(dc.close_emitted);
+            if id != already_closed {
+                let summary = &stats.data_channels[&id];
+                assert_eq!(summary.data_channel_identifier, dc.stream_id.unwrap());
+                assert_eq!(summary.state, RTCDataChannelState::Closed);
+            }
+        }
+        assert_eq!(stats.peer_connection.data_channels_closed, 4);
+    }
 
     /// An in-band channel that already has its stream id, i.e. one past the point where
     /// `assign_stream_ids` would have run. These tests are about DCEP open/ack timing, not

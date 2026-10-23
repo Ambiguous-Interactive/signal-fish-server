@@ -118,6 +118,13 @@ The endpoint keeps routing through terminal packet transmission and unread
 message drain. Paired controls cover fragments, small receive windows, DATA
 loss, shutdown and ACK loss, simultaneous close, and delayed application reads.
 See [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+Reading a full receive queue now advertises its reopened window at the next
+transmit poll. Pending gameplay and graceful shutdown drain can resume without
+waiting for a zero-window probe. Reads with remaining credit keep the existing
+delayed-ACK policy. Empty and terminal reads do not send window updates.
+Paired-wire controls preserve exact admitted tail order without advancing time
+and verify delayed-ACK and empty-read behavior. Replacement qualification must
+retain these controls.
 Endpoints now answer repeated out-of-association SHUTDOWN ACK packets with a
 standalone SHUTDOWN COMPLETE. The reply reflects the received tag and sets
 its T bit. The Sans-I/O driver drains endpoint replies even without a live

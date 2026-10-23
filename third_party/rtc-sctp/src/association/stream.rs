@@ -143,6 +143,13 @@ impl Stream<'_> {
         {
             return Ok(None);
         }
+        let was_full = !self.association.retired
+            && self
+                .association
+                .streams
+                .get(&self.stream_identifier)
+                .is_some_and(StreamState::has_readable_data)
+            && self.association.get_my_receiver_window_credit() == 0;
         if let Some(s) = self
             .association
             .streams
@@ -162,6 +169,16 @@ impl Stream<'_> {
                     self.association
                         .retry_deferred_resets(self.stream_identifier);
                 }
+            }
+            if chunks.is_some()
+                && was_full
+                && !self.association.retired
+                && self.association.get_my_receiver_window_credit() > 0
+            {
+                /* Reopen a zero window now; reads with remaining credit keep normal ACK policy. */
+                self.association.ack_state = super::AckState::Immediate;
+                self.association.timers.stop(super::Timer::Ack);
+                self.association.awake_write_loop();
             }
             Ok(chunks)
         } else {

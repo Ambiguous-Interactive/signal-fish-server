@@ -222,3 +222,12 @@ retirement. Handshake peer-route events update the endpoint without retiring
 live associations. A paired handler control drops the first COMPLETE and
 closes the peer on its repeated ACK without retaining local association state.
 See [#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
+
+Peer connection close now marks all retained channel handles Closed, clears
+handshake deadlines, releases outstanding application bytes, and drops channel
+transport queues after the admitted-write and ABORT flush. Closure statistics
+advance once per channel. Repeated close does not add counts or reset work.
+Controls cover connecting, open, closing, and already closed channels. Native
+room-leave controls retain and query connecting and established public handles.
+See [#1151](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1151).
+Replacement qualification in #912 must retain these terminal-state controls.

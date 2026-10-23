@@ -1993,6 +1993,145 @@ fn graceful_shutdown_without_data_retires_after_final_packet() -> Result<()> {
     Ok(())
 }
 
+// Issue #1145: a reader must reopen a zero window without waiting for a DATA retry.
+#[test]
+fn application_read_reopens_full_window_during_gameplay_and_shutdown() -> Result<()> {
+    for (name, local_shutdown, remote_shutdown) in [
+        ("gameplay", false, false),
+        ("local shutdown", true, false),
+        ("peer shutdown", false, true),
+        ("simultaneous shutdown", true, true),
+    ] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.ack_mode = AckMode::NoDelay;
+        remote.ack_mode = AckMode::NoDelay;
+        local.rwnd = 3;
+        remote.max_receive_buffer_size = 3;
+        let first = Bytes::from_static(b"old");
+        let tail = [b"a".as_slice(), b"b", b"c"];
+        local
+            .stream(1)?
+            .write_sctp(now, &first, PayloadProtocolIdentifier::Binary)?;
+        for payload in tail {
+            local.stream(1)?.write(now, payload)?;
+        }
+        if local_shutdown {
+            local.shutdown()?;
+        }
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        if remote_shutdown {
+            remote.shutdown()?;
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(local.rwnd, 0);
+        assert!(local.inflight_queue.is_empty());
+        assert_eq!(local.pending_queue.len(), 3);
+        assert_eq!(remote.get_my_receiver_window_credit(), 0);
+        assert_eq!(
+            remote
+                .stream(1)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(3)?
+                .freeze(),
+            first
+        );
+        assert_eq!(remote.get_my_receiver_window_credit(), 3);
+        let updates = remote.gather_outbound(now).0;
+        assert!(
+            !updates.is_empty(),
+            "{name}: the read must advertise reopened credit"
+        );
+        for raw in updates {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(local.rwnd, 3);
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(
+            local.pending_queue.is_empty(),
+            "all admitted tail DATA must leave without a retry timer"
+        );
+        for payload in tail {
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(3)?
+                    .freeze()
+                    .as_ref(),
+                payload
+            );
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        if local_shutdown || remote_shutdown {
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert_eq!(local.state(), AssociationState::Closed);
+            assert_eq!(remote.state(), AssociationState::Closed);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_window_update_preserves_delayed_ack_and_empty_read_policy() -> Result<()> {
+    for full in [false, true] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        remote.ack_mode = AckMode::Normal;
+        remote.max_receive_buffer_size = if full { 1 } else { 2 };
+        local.stream(1)?.write(now, b"x")?;
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(remote.ack_state, AckState::Delay);
+        let ack_at = remote.timers.get(Timer::Ack).unwrap();
+        assert!(remote.stream(1)?.read_sctp()?.is_some());
+        assert_eq!(
+            remote.ack_state,
+            if full {
+                AckState::Immediate
+            } else {
+                AckState::Delay
+            }
+        );
+        assert_eq!(
+            remote.timers.get(Timer::Ack),
+            if full { None } else { Some(ack_at) }
+        );
+        let updates = remote.gather_outbound(now).0;
+        assert_eq!(!updates.is_empty(), full);
+        assert!(remote.stream(1)?.read_sctp()?.is_none());
+        assert!(
+            remote.gather_outbound(now).0.is_empty(),
+            "an empty read must not emit a window update"
+        );
+        if !full {
+            assert_eq!(remote.timers.get(Timer::Ack), Some(ack_at));
+            remote.handle_timeout(ack_at);
+            assert!(!remote.gather_outbound(ack_at).0.is_empty());
+        }
+    }
+    Ok(())
+}
+
 // Issue #1145: transport completion must not discard an unread accepted tail.
 #[test]
 fn graceful_shutdown_preserves_messages_until_application_reads() -> Result<()> {

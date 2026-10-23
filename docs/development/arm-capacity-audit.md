@@ -5205,3 +5205,50 @@ Historical duplicate-key decoding and malformed-input errors stay covered.
 Run the capacity-runner target with the `artifacts::tests::replay_` and
 `artifacts::tests::jsonl_` filters. These checks do not establish server
 capacity or explain earlier generator stalls.
+
+### Compact the index for sends recorded out of order (#775)
+
+Artifact replay now indexes unordered sends with four-byte offsets when the
+send count fits `u32`. The sort key includes the original offset, so duplicate
+keys retain their raw order and lookup still selects the last recorded send.
+The sort needs no separate stable-sort buffer. Canonical sorted sends still
+borrow sender blocks. Larger explicitly admitted inputs keep the wide index.
+Neither path changes raw events, epoch attribution, or artifact order.
+
+A red control retained 136 index bytes for 17 sends before the change. It now
+fits 68 bytes. The focused oracle and replay controls pass, including duplicate
+keys with different phases and epochs, sparse and extreme sequences, unknown
+senders, latency pairing, exact byte accounting, and full replay verdicts.
+The wide fallback and canonical path retain their independent controls.
+
+Seven fresh processes use one fixed executable and one million sends. The
+fixture has 64 sender names, repeated keys, and three interleaved epochs. It
+keeps the unchanged relay ledger index alive beside the send lookup index.
+Three alternating old/new pairs produce the same order checksum:
+
+| Measurement | Previous index | Compact index |
+| --- | --- | --- |
+| Send lookup index bytes | 8,000,000 | 4,000,000 |
+| Unchanged relay index bytes | 12,582,912 | 12,582,912 |
+| Median retained process RSS bytes | 94,552,064 | 90,746,880 |
+| Median peak child RSS KiB | 99,668 | 88,164 |
+
+The lookup index uses 50% less storage. Observed median peak RSS is 11.5% lower
+in this synthetic cohort. All six unordered runs and the sorted control emit
+checksum `1809168194542782856`. The canonical control retains only 1,536 lookup
+index bytes. Its fixture first sorts raw sends, so its process peak is not a
+comparable lookup-index measurement.
+
+Reproduce with the capacity-runner test executable and `--ignored --exact
+oracle::coverage_tests::generator_reordered_send_index_memory_profile
+--nocapture`. Set `CAPACITY_SEND_INDEX_PROBE_KIND` to `legacy`, `compact`, or
+`ordered`. `CAPACITY_SEND_INDEX_PROBE_COUNT` defaults to `1000000`. On Linux,
+collect each fresh child's peak RSS with `wait4` resource usage.
+
+Native compilation and tests overlapped this session's work. The host remains
+shared; these observations do not establish a runtime bound or causal timing
+improvement. This change measures lookup-index storage and one synthetic
+process shape. It does not bound complete default-budget process memory,
+stream retained records, qualify a long live cell on this change, explain
+historical generator stalls, or establish server capacity. The broader #775
+memory requirements remain open.
