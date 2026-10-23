@@ -133,6 +133,10 @@ impl TestEndpoint {
             }
         }
 
+        while let Some(transmit) = self.endpoint.poll_transmit() {
+            self.outbound.extend(split_transmit(transmit));
+        }
+
         let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
         for (ch, conn) in self.associations.iter_mut() {
             if self.timeout.map_or(false, |x| x <= now) {
@@ -3881,6 +3885,425 @@ fn test_graceful_shutdown_keeps_endpoint_registered_until_final_packet() -> Resu
         assert!(pair.server.endpoint.associations.is_empty());
         assert!(pair.client.endpoint.association_ids.is_empty());
         assert!(pair.server.endpoint.association_ids.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn test_graceful_shutdown_recovers_lost_final_complete() -> Result<()> {
+    for reverse_roles in [false, true] {
+        for simultaneous in [false, true] {
+            let (mut pair, mut client_ch, mut server_ch) =
+                create_association_pair(AckMode::NoDelay, 0)?;
+            if reverse_roles {
+                mem::swap(&mut pair.client, &mut pair.server);
+                mem::swap(&mut client_ch, &mut server_ch);
+            }
+            pair.client_conn_mut(client_ch).shutdown()?;
+            if simultaneous {
+                pair.server_conn_mut(server_ch).shutdown()?;
+            }
+            pair.drive_client();
+            pair.drive_server();
+            pair.drive_client();
+            assert!(
+                !pair.server.inbound.is_empty(),
+                "COMPLETE is queued on the wire"
+            );
+            assert!(pair.server.inbound.iter().all(|(_, _, raw)| {
+                Packet::unmarshal(raw).unwrap().chunks.iter().all(|chunk| {
+                    chunk
+                        .as_any()
+                        .downcast_ref::<ChunkShutdownComplete>()
+                        .is_some_and(|complete| !complete.reflected_verification_tag)
+                })
+            }));
+            pair.server.inbound.clear();
+            pair.drive_client();
+            assert!(pair.client.endpoint.associations.is_empty());
+            pair.time = pair.server_conn_mut(server_ch).poll_timeout().unwrap();
+            pair.drive_server();
+            assert!(!pair.client.inbound.is_empty(), "peer retries SHUTDOWN ACK");
+            pair.drive_client();
+            let reply = Packet::unmarshal(&pair.server.inbound.front().unwrap().2)?;
+            assert!(
+                reply.chunks[0]
+                    .as_any()
+                    .downcast_ref::<ChunkShutdownComplete>()
+                    .unwrap()
+                    .reflected_verification_tag
+            );
+            pair.drive_server();
+            assert_eq!(
+                pair.server_conn_mut(server_ch).state(),
+                AssociationState::Closed,
+                "retired endpoint must answer repeated ACK with COMPLETE"
+            );
+            for endpoint in [&mut pair.client, &mut pair.server] {
+                assert!(endpoint.endpoint.associations.is_empty());
+                assert!(endpoint.endpoint.association_ids.is_empty());
+                assert!(endpoint.endpoint.association_ids_init.is_empty());
+                assert!(endpoint.endpoint.poll_transmit().is_none());
+                assert!(
+                    endpoint
+                        .associations
+                        .values_mut()
+                        .all(|association| association.poll_timeout().is_none())
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_shutdown_complete_verification_tag_and_port_routing() -> Result<()> {
+    for reflected in [false, true] {
+        for valid_tag in [false, true] {
+            for valid_ports in [false, true] {
+                let (mut pair, client_ch, server_ch) =
+                    create_association_pair(AckMode::NoDelay, 0)?;
+                pair.client_conn_mut(client_ch).shutdown()?;
+                pair.drive_client();
+                pair.drive_server();
+                assert_eq!(
+                    pair.server_conn_mut(server_ch).state(),
+                    AssociationState::ShutdownAckSent
+                );
+                let server_local_tag = pair.server.endpoint.associations[server_ch].loc_cids[&0];
+                let (server_peer_tag, local_port, remote_port) = pair.server.endpoint.associations
+                    [server_ch]
+                    .peer_route
+                    .unwrap();
+                let correct_tag = if reflected {
+                    server_peer_tag
+                } else {
+                    server_local_tag
+                };
+                let packet = Packet {
+                    common_header: CommonHeader {
+                        source_port: if valid_ports {
+                            remote_port
+                        } else {
+                            remote_port.wrapping_add(1)
+                        },
+                        destination_port: local_port,
+                        verification_tag: if valid_tag {
+                            correct_tag
+                        } else {
+                            correct_tag ^ 0xffff_ffff
+                        },
+                    },
+                    chunks: vec![Box::new(ChunkShutdownComplete {
+                        reflected_verification_tag: reflected,
+                    })],
+                };
+                pair.server
+                    .inbound
+                    .push_back((pair.time, None, packet.marshal()?));
+                pair.drive_server();
+                assert_eq!(
+                    pair.server_conn_mut(server_ch).state(),
+                    if valid_tag && valid_ports {
+                        AssociationState::Closed
+                    } else {
+                        AssociationState::ShutdownAckSent
+                    },
+                    "reflected={reflected}, valid_tag={valid_tag}, valid_ports={valid_ports}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_out_of_association_shutdown_ack_reply_validation() -> Result<()> {
+    let local = "127.0.0.1:4000".parse().unwrap();
+    let remote = "127.0.0.1:4001".parse().unwrap();
+    let now = Instant::now();
+    let mut endpoint = Endpoint::new(
+        local,
+        TransportProtocol::UDP,
+        EndpointConfig::default().into(),
+        None,
+    );
+    for (description, chunks, reply_expected) in [
+        (
+            "standalone ACK",
+            vec![Box::new(ChunkShutdownAck::default()) as Box<dyn crate::chunk::Chunk>],
+            true,
+        ),
+        (
+            "unrelated COMPLETE",
+            vec![Box::new(ChunkShutdownComplete::default())],
+            false,
+        ),
+        (
+            "unrelated ERROR",
+            vec![Box::new(ChunkError::default())],
+            false,
+        ),
+        (
+            "ABORT before ACK",
+            vec![
+                Box::new(ChunkAbort::default()),
+                Box::new(ChunkShutdownAck::default()),
+            ],
+            false,
+        ),
+        (
+            "ABORT after ACK",
+            vec![
+                Box::new(ChunkShutdownAck::default()),
+                Box::new(ChunkAbort::default()),
+            ],
+            false,
+        ),
+        (
+            "ERROR before ACK",
+            vec![
+                Box::new(ChunkError::default()),
+                Box::new(ChunkShutdownAck::default()),
+            ],
+            true,
+        ),
+    ] {
+        let packet = Packet {
+            common_header: CommonHeader {
+                source_port: 6000,
+                destination_port: 7000,
+                verification_tag: 0x12345678,
+            },
+            chunks,
+        };
+        assert!(
+            endpoint
+                .handle(now, remote, None, packet.marshal()?)
+                .is_none(),
+            "{description}"
+        );
+        let transmit = endpoint.poll_transmit();
+        assert_eq!(transmit.is_some(), reply_expected, "{description}");
+        if let Some(transmit) = transmit {
+            assert_eq!(transmit.transport.local_addr, local);
+            assert_eq!(transmit.transport.peer_addr, remote);
+            assert_eq!(transmit.now, now);
+            let Payload::RawEncode(raw) = transmit.message else {
+                panic!("reply must be encoded")
+            };
+            let reply = Packet::unmarshal(&raw[0])?;
+            assert_eq!(reply.common_header.source_port, 7000);
+            assert_eq!(reply.common_header.destination_port, 6000);
+            assert_eq!(reply.common_header.verification_tag, 0x12345678);
+            assert_eq!(reply.chunks.len(), 1);
+            assert!(
+                reply.chunks[0]
+                    .as_any()
+                    .downcast_ref::<ChunkShutdownComplete>()
+                    .unwrap()
+                    .reflected_verification_tag
+            );
+        }
+        assert!(endpoint.poll_transmit().is_none());
+        assert!(endpoint.associations.is_empty());
+    }
+    let valid = Packet {
+        common_header: CommonHeader {
+            source_port: 6000,
+            destination_port: 7000,
+            verification_tag: 0x12345678,
+        },
+        chunks: vec![Box::new(ChunkShutdownAck::default())],
+    }
+    .marshal()?;
+    for (description, index, value, recalculate_crc) in [
+        ("invalid checksum", 8, 0, false),
+        ("zero source port", 0, 0, true),
+        ("zero destination port", 2, 0, true),
+        ("invalid ACK length", 15, 8, true),
+        ("truncated ACK", 15, 3, true),
+    ] {
+        let mut raw = valid.to_vec();
+        raw[index] = value;
+        if index == 0 || index == 2 {
+            raw[index + 1] = 0;
+        }
+        if recalculate_crc {
+            let checksum = crate::util::generate_packet_checksum(&Bytes::copy_from_slice(&raw));
+            raw[8..12].copy_from_slice(&checksum.to_le_bytes());
+        }
+        assert!(
+            endpoint
+                .handle(now, remote, None, Bytes::from(raw))
+                .is_none(),
+            "{description}"
+        );
+        assert!(endpoint.poll_transmit().is_none(), "{description}");
+    }
+    Ok(())
+}
+
+#[test]
+fn test_shutdown_ack_during_handshake_preserves_t1_and_state() -> Result<()> {
+    for cookie_echoed in [false, true] {
+        let mut pair = Pair::new(EndpointConfig::default(), server_config());
+        let ch = pair.begin_connect(client_config());
+        pair.drive_client();
+        if cookie_echoed {
+            pair.drive_server();
+            pair.drive_client();
+        }
+        let expected_state = if cookie_echoed {
+            AssociationState::CookieEchoed
+        } else {
+            AssociationState::CookieWait
+        };
+        let deadline = pair.client_conn_mut(ch).poll_timeout();
+        let local_tag = pair.client.endpoint.associations[ch].loc_cids[&0];
+        let packet = Packet {
+            common_header: CommonHeader {
+                source_port: 5000,
+                destination_port: 5000,
+                verification_tag: local_tag,
+            },
+            chunks: vec![Box::new(ChunkShutdownAck::default())],
+        };
+        pair.client
+            .inbound
+            .push_back((pair.time, None, packet.marshal()?));
+        pair.server.inbound.clear();
+        pair.drive_client();
+        assert_eq!(pair.client_conn_mut(ch).state(), expected_state);
+        assert_eq!(pair.client_conn_mut(ch).poll_timeout(), deadline);
+        assert_eq!(pair.client.endpoint.associations.len(), 1);
+        let reply = Packet::unmarshal(&pair.server.inbound.back().unwrap().2)?;
+        assert_eq!(reply.common_header.verification_tag, local_tag);
+        assert!(
+            reply.chunks[0]
+                .as_any()
+                .downcast_ref::<ChunkShutdownComplete>()
+                .unwrap()
+                .reflected_verification_tag
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_ignored_init_ack_does_not_change_reflected_shutdown_route() -> Result<()> {
+    let (mut pair, client_ch, _) = create_association_pair(AckMode::NoDelay, 0)?;
+    let route = pair.client.endpoint.associations[client_ch].peer_route;
+    let local_tag = pair.client.endpoint.associations[client_ch].loc_cids[&0];
+    let packet = Packet {
+        common_header: CommonHeader {
+            source_port: 5000,
+            destination_port: 5000,
+            verification_tag: local_tag,
+        },
+        chunks: vec![Box::new(ChunkInit {
+            is_ack: true,
+            initiate_tag: route.unwrap().0 ^ u32::MAX,
+            advertised_receiver_window_credit: 65535,
+            num_inbound_streams: 1,
+            num_outbound_streams: 1,
+            ..Default::default()
+        })],
+    };
+    pair.client
+        .inbound
+        .push_back((pair.time, None, packet.marshal()?));
+    pair.drive_client();
+    assert_eq!(
+        pair.client.endpoint.associations[client_ch].peer_route,
+        route
+    );
+    assert_eq!(
+        pair.client_conn_mut(client_ch).state(),
+        AssociationState::Established
+    );
+    Ok(())
+}
+
+#[test]
+fn test_graceful_shutdown_recovers_lost_complete_before_unread_tail_drains() -> Result<()> {
+    let (mut pair, client_ch, server_ch) = create_association_pair(AckMode::NoDelay, 0)?;
+    establish_session_pair(&mut pair, client_ch, server_ch, 1)?;
+    let expected = Bytes::from_static(b"unread gameplay survives final packet loss");
+    let now = pair.time;
+    pair.server_stream(server_ch, 1)?.write_sctp(
+        now,
+        &expected,
+        PayloadProtocolIdentifier::Binary,
+    )?;
+    pair.drive();
+    pair.client_conn_mut(client_ch).shutdown()?;
+    pair.drive_client();
+    pair.drive_server();
+    pair.drive_client();
+    pair.server.inbound.clear();
+    pair.drive_client();
+    assert_eq!(
+        pair.client.endpoint.associations.len(),
+        1,
+        "unread gameplay keeps the local association available"
+    );
+    pair.time = pair.server_conn_mut(server_ch).poll_timeout().unwrap();
+    pair.drive_server();
+    pair.drive_client();
+    pair.drive_server();
+    assert_eq!(
+        pair.server_conn_mut(server_ch).state(),
+        AssociationState::Closed,
+        "peer close must not wait for the application's reads"
+    );
+    assert!(pair.server_conn_mut(server_ch).poll_timeout().is_none());
+    assert!(pair.client_conn_mut(client_ch).poll_timeout().is_none());
+    let received = pair
+        .client_stream(client_ch, 1)?
+        .read_sctp()?
+        .unwrap()
+        .to_payload(4096)?
+        .freeze();
+    assert_eq!(received, expected);
+    pair.drive_client();
+    assert!(pair.client.endpoint.associations.is_empty());
+    assert!(pair.server.endpoint.associations.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_shutdown_ack_during_handshake_does_not_reply_before_abort() -> Result<()> {
+    for cookie_echoed in [false, true] {
+        let mut pair = Pair::new(EndpointConfig::default(), server_config());
+        let ch = pair.begin_connect(client_config());
+        pair.drive_client();
+        if cookie_echoed {
+            pair.drive_server();
+            pair.drive_client();
+        }
+        let local_tag = pair.client.endpoint.associations[ch].loc_cids[&0];
+        let packet = Packet {
+            common_header: CommonHeader {
+                source_port: 5000,
+                destination_port: 5000,
+                verification_tag: local_tag,
+            },
+            chunks: vec![
+                Box::new(ChunkShutdownAck::default()),
+                Box::new(ChunkAbort::default()),
+            ],
+        };
+        pair.server.inbound.clear();
+        pair.client
+            .inbound
+            .push_back((pair.time, None, packet.marshal()?));
+        pair.drive_client();
+        assert!(
+            pair.server.inbound.is_empty(),
+            "ABORT takes precedence over the handshake ACK reply"
+        );
+        assert_eq!(pair.client_conn_mut(ch).state(), AssociationState::Closed);
     }
     Ok(())
 }

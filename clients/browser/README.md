@@ -353,7 +353,18 @@ A pending or old sample cannot prove
 what the stack received at failure. Stack totals do not prove application
 admission, packet delivery, or the historical missing-exchange cause.
 
-Callback counters saturate at the largest safe integer. A replacement channel starts fresh.
+With `--exchange`, timeout snapshots also retain `received_probes` checks for
+each required label. `valid` counts admitted probes with the expected sender,
+label, and sequence. Other counters name the first mismatch: `invalid_json`,
+`invalid_shape`, `wrong_sender`, `wrong_label`, or `wrong_sequence`.
+`outside_window` counts admitted messages that arrived at or after the exchange cutoff.
+These checks survive physical link retirement. A new membership incarnation
+clears them. A valid check can still await queued processing; it does not pay
+logical receipt debt until that processing runs. Zero checks with zero raw
+callbacks differ from callbacks that carried unusable probes.
+
+All counters saturate at the largest safe integer. Callback counters start fresh
+on each replacement channel.
 A replacement link starts a new history. The history contains no SDP, candidate
 addresses, or message payloads. Browser events can combine state changes, so
 these observations do not prove a failure cause. Retain both endpoint logs and

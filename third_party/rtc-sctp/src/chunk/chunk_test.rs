@@ -399,6 +399,10 @@ fn test_chunk_shutdown_ack_success() -> Result<()> {
 #[test]
 fn test_chunk_shutdown_ack_failure() -> Result<()> {
     let tests = vec![
+        (
+            "unexpected body",
+            Bytes::from_static(&[0x08, 0x00, 0x00, 0x08, 0, 0, 0, 0]),
+        ),
         ("length too short", Bytes::from_static(&[0x08, 0x00, 0x00])),
         (
             "length too long",
@@ -425,7 +429,10 @@ use super::chunk_shutdown_complete::*;
 
 #[test]
 fn test_chunk_shutdown_complete_success() -> Result<()> {
-    let tests = vec![Bytes::from_static(&[0x0e, 0x00, 0x00, 0x04])];
+    let tests = vec![
+        Bytes::from_static(&[0x0e, 0x00, 0x00, 0x04]),
+        Bytes::from_static(&[0x0e, 0x01, 0x00, 0x04]),
+    ];
 
     for binary in tests {
         let actual = ChunkShutdownComplete::unmarshal(&binary)?;
@@ -439,6 +446,10 @@ fn test_chunk_shutdown_complete_success() -> Result<()> {
 #[test]
 fn test_chunk_shutdown_complete_failure() -> Result<()> {
     let tests = vec![
+        (
+            "unexpected body",
+            Bytes::from_static(&[0x0e, 0x00, 0x00, 0x08, 0, 0, 0, 0]),
+        ),
         ("length too short", Bytes::from_static(&[0x0e, 0x00, 0x00])),
         (
             "length too long",

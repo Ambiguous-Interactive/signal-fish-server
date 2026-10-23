@@ -15,18 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
-- Include browser data-channel send and receive totals in exchange timeout diagnostics (#889).
+- Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
 
+- Recover native graceful shutdown after the final completion packet is lost (#1147).
 - Drain admitted native gameplay and preserve unread messages without reopening stopped reads during graceful shutdown (#1145).
 - Complete native graceful shutdown when the final gameplay acknowledgment arrives in SHUTDOWN (#1143).
 - Resolve browser relay fallback immediately when remote SDP setup fails (#1144).
 - Close native gameplay channels and release blocked sends when DATA or shutdown recovery reaches its retry limit (#1140).
 - Restore browser exchange error reports after a peer link restarts (#1141).
 - Prevent delayed packets from reopening closed native gameplay transports (#1138).
-- Enforce sender payload and retained event budgets for capacity workloads (#775).
+- Enforce workload, retained event, and archive replay budgets for capacity runs (#775).
 - Close native gameplay channels when stream reset retries expire (#1133).
 - Report native peer closure after a fatal socket error, including before channel admission (#1134).
 - Reject native sends after shutdown and return blocked-send closure errors without a polling delay (#1135).

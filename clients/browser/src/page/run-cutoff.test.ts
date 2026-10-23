@@ -684,6 +684,11 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
         JSON.stringify(snapshot.missing_received) === JSON.stringify([channel!.label]),
         `${scenario}: retain the exact missing receipt label`,
       );
+      assert(
+        snapshot.received_probes[channel!.label].outside_window === 1 &&
+          snapshot.received_probes[channel!.label].valid === undefined,
+        `${scenario}: distinguish an admitted late probe from absent traffic`,
+      );
       continue;
     }
     // Deliver the latest room wake first. Leave the due peer timer uncalled.

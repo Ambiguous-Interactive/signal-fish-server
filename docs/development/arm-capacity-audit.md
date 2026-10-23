@@ -5166,3 +5166,42 @@ The scoped record and cancellation checks pass. This change does not bound
 arbitrary artifact replay input or qualify the planned ten-minute cell.
 Streaming retention, replay admission, and full-cell memory qualification
 remain open in #775.
+
+### Bound artifact replay input before retention (#775)
+
+Replay now applies host limits that do not come from the archived manifest.
+The defaults are 32,000,000 nonempty JSONL records per file, 4 GiB of input
+bytes per JSONL file, and 16 MiB per JSONL line. The manifest must fit both
+the byte and line limits. Blank lines consume bytes but do not consume a
+record. Newline bytes consume the byte budget. A final line without a
+newline follows the same rules.
+
+The host can explicitly override these limits with
+`CAPACITY_RUNNER_REPLAY_MAX_RECORDS`, `CAPACITY_RUNNER_REPLAY_MAX_BYTES`,
+and `CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES`. Each value must be a positive
+integer. The archived planned-record override cannot raise these limits.
+Replay checks the planned send-plus-delivery count and the peer count against
+the host record limit before building plans or the roster. Each JSONL reader
+checks line bytes before extending its line buffer, and checks record count
+before decoding and retaining the next record. A refusal returns an error;
+it never validates or reports a successful truncated prefix. The same
+per-file input limits apply when reading interval evidence.
+
+The defaults admit the original session-511 long cell's 11,059,712 planned
+send-plus-delivery records and 1,985,011,123-byte delivery artifact. An archive
+that exceeds a limit needs an explicit host override. Neither a summary nor
+a manifest can request that override. These limits bound admitted input,
+not process RSS. They do not cover allocator expansion, parsed JSON object
+costs, pooled identity maps, derived oracle structures, or every possible
+workload shape. Full process memory qualification remains open in #775.
+
+The red control accepted a second record despite a one-record limit before
+the repair. Focused controls now cover exact count and byte boundaries,
+fragmented UTF-8, CRLF, blank lines, final lines, large unread tails,
+manifest limits, invalid host overrides, and a manifest that raises its own
+planned budget. Missing, duplicate, misroute, arrival-order, and invalid-gap
+histories retain identical raw events and full summary JSON after replay.
+Historical duplicate-key decoding and malformed-input errors stay covered.
+Run the capacity-runner target with the `artifacts::tests::replay_` and
+`artifacts::tests::jsonl_` filters. These checks do not establish server
+capacity or explain earlier generator stalls.

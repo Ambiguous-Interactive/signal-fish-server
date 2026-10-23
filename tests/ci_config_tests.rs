@@ -32354,6 +32354,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("rtc", "deferred_channel_failures_"),
         ("rtc", "stream_count_boundary"),
         ("rtc-sctp", "reset"),
+        ("rtc-sctp", "shutdown"),
         ("rtc-sctp", "data_channel_credit_tracks_ppid"),
     ]
     .into_iter()

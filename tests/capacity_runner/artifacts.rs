@@ -22,7 +22,7 @@
 //! the host that produced it.
 
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write as _};
+use std::io::{BufRead, BufReader, BufWriter, Read as _, Write as _};
 use std::path::Path;
 
 use hdrhistogram::serialization::Serializer as _;
@@ -537,32 +537,134 @@ pub fn write_histogram(output_dir: &Path, records: &RunRecords) -> Result<(), St
 /// Read the manifest back from an output directory.
 pub fn read_manifest(output_dir: &Path) -> Result<Manifest, String> {
     let path = output_dir.join(MANIFEST_FILE);
-    let raw = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    read_manifest_with_limits(&path, ReplayLimits::from_env()?)
+}
+
+fn read_manifest_with_limits(path: &Path, limits: ReplayLimits) -> Result<Manifest, String> {
+    let file = fs::File::open(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let limit = u64::try_from(limits.line_bytes)
+        .map_err(|_| "replay line budget exceeds u64")?
+        .min(limits.input_bytes);
+    let mut raw = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut raw)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if crate::config::count_u64(raw.len()) > limit {
+        return Err(format!(
+            "replay manifest exceeds byte budget {limit}: {}; set CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES and CAPACITY_RUNNER_REPLAY_MAX_BYTES for a provisioned host",
+            path.display()
+        ));
+    }
     serde_json::from_slice(&raw).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+#[derive(Clone, Copy)]
+struct ReplayLimits {
+    records: u64,
+    input_bytes: u64,
+    line_bytes: usize,
+}
+
+impl ReplayLimits {
+    fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|name| match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err(format!("{name} must be UTF-8")),
+        })
+    }
+
+    fn from_lookup(
+        mut lookup: impl FnMut(&str) -> Result<Option<String>, String>,
+    ) -> Result<Self, String> {
+        let defaults = Self::default();
+        let mut value = |name, default| {
+            let parsed = lookup(name)?.map_or(Ok(default), |raw| {
+                raw.parse::<u64>()
+                    .map_err(|_| format!("{name} must be a positive integer"))
+            })?;
+            if parsed == 0 {
+                return Err(format!("{name} must be a positive integer"));
+            }
+            Ok(parsed)
+        };
+        Ok(Self {
+            records: value("CAPACITY_RUNNER_REPLAY_MAX_RECORDS", defaults.records)?,
+            input_bytes: value("CAPACITY_RUNNER_REPLAY_MAX_BYTES", defaults.input_bytes)?,
+            line_bytes: usize::try_from(value(
+                "CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES",
+                u64::try_from(defaults.line_bytes).map_err(|_| "replay line budget exceeds u64")?,
+            )?)
+            .map_err(|_| "replay line budget exceeds this host")?,
+        })
+    }
+}
+
+impl Default for ReplayLimits {
+    fn default() -> Self {
+        Self {
+            records: 32_000_000,
+            input_bytes: 4 * 1024 * 1024 * 1024,
+            line_bytes: 16 * 1024 * 1024,
+        }
+    }
 }
 
 /// Visit nonempty JSONL records in file order. The input buffer holds one
 /// line; parsed records retained by a visitor remain that visitor's state.
 fn visit_jsonl(
+    reader: impl BufRead,
+    path: &Path,
+    visit: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    visit_jsonl_with_limits(reader, path, ReplayLimits::from_env()?, visit)
+}
+
+fn visit_jsonl_with_limits(
     mut reader: impl BufRead,
     path: &Path,
+    limits: ReplayLimits,
     mut visit: impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut line = Vec::new();
+    let mut input_bytes = 0_u64;
+    let mut records = 0_u64;
     loop {
-        line.clear();
-        if reader
-            .read_until(b'\n', &mut line)
-            .map_err(|error| format!("read {}: {error}", path.display()))?
-            == 0
-        {
-            return Ok(());
+        let available = reader
+            .fill_buf()
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let at_end = available.is_empty();
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        input_bytes = input_bytes.checked_add(crate::config::count_u64(consumed))
+            .filter(|&bytes| bytes <= limits.input_bytes)
+            .ok_or_else(|| format!("replay byte budget {} exceeded: {}; set CAPACITY_RUNNER_REPLAY_MAX_BYTES for a provisioned host", limits.input_bytes, path.display()))?;
+        let content = newline.map_or(consumed, |index| index);
+        let line_len = line.len().checked_add(content)
+            .filter(|&length| length <= limits.line_bytes)
+            .ok_or_else(|| format!("replay line budget {} exceeded: {}; set CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES for a provisioned host", limits.line_bytes, path.display()))?;
+        if line_len > line.capacity() {
+            let capacity = line
+                .capacity()
+                .saturating_mul(2)
+                .max(line_len)
+                .min(limits.line_bytes);
+            line.try_reserve_exact(capacity - line.len())
+                .map_err(|error| format!("reserve replay line: {error}"))?;
         }
-        if line.last() == Some(&b'\n') {
-            line.pop();
-        }
-        if !line.is_empty() {
-            visit(&line)?;
+        line.extend_from_slice(&available[..content]);
+        reader.consume(consumed);
+        if newline.is_some() || at_end {
+            if !line.is_empty() {
+                records = records.checked_add(1)
+                    .filter(|&count| count <= limits.records)
+                    .ok_or_else(|| format!("replay record budget {} exceeded: {}; set CAPACITY_RUNNER_REPLAY_MAX_RECORDS for a provisioned host", limits.records, path.display()))?;
+                visit(&line)?;
+                line.clear();
+            }
+            if at_end {
+                return Ok(());
+            }
         }
     }
 }
@@ -669,12 +771,16 @@ fn append_delivery_event(
 
 /// Read the deliveries event log back from an output directory.
 pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
+    read_records_with_limits(output_dir, ReplayLimits::from_env()?)
+}
+
+fn read_records_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<RunRecords, String> {
     let path = output_dir.join(DELIVERIES_FILE);
     let file =
         fs::File::open(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let mut records = RunRecords::default();
     let mut receipt_names = crate::records::ReceiptNames::default();
-    visit_jsonl(BufReader::new(file), &path, |line| {
+    visit_jsonl_with_limits(BufReader::new(file), &path, limits, |line| {
         if let Ok(event) = serde_json::from_slice::<DeliveryEvent<ReplayName<'_>>>(line) {
             append_delivery_event(&mut records, &mut receipt_names, event);
         } else {
@@ -694,13 +800,18 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
 /// re-summarize the recorded events. The result must equal the recorded
 /// summary — the run summary is never authoritative over its raw events.
 pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
-    let manifest = read_manifest(output_dir)?;
+    replay_with_limits(output_dir, ReplayLimits::from_env()?)
+}
+
+fn replay_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<OutcomeSummary, String> {
+    let manifest = read_manifest_with_limits(&output_dir.join(MANIFEST_FILE), limits)?;
     if manifest.schema_version != SCHEMA_VERSION {
         return Err(format!(
             "unsupported artifact schema {} (expected {SCHEMA_VERSION})",
             manifest.schema_version
         ));
     }
+    validate_replay_shape(&manifest.config, limits)?;
     manifest.validate_config_provenance()?;
     let (plans, churn) = build_run_shape(&manifest.config)?;
     crate::runner::validate_payload_size(&plans, manifest.config.payload_bytes)?;
@@ -708,7 +819,7 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
         .collect::<Vec<_>>();
-    let records = read_records(output_dir)?;
+    let records = read_records_with_limits(output_dir, limits)?;
     Ok(summarize(
         &plans,
         &roster,
@@ -719,6 +830,27 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         &churn,
         manifest.config.experiment,
     ))
+}
+
+fn validate_replay_shape(config: &RunConfig, limits: ReplayLimits) -> Result<(), String> {
+    let mut admission = config.clone();
+    admission.planned_record_budget = limits.records;
+    admission
+        .validate_planned_record_budget()
+        .map_err(|error| {
+            format!(
+                "replay admission: {error}; host CAPACITY_RUNNER_REPLAY_MAX_RECORDS is {}",
+                limits.records
+            )
+        })?;
+    let peers = u64::from(admission.rooms)
+        .checked_mul(u64::from(admission.players_per_room))
+        .filter(|&count| count <= limits.records)
+        .ok_or_else(|| format!("replay peer count exceeds record budget {}", limits.records))?;
+    if peers == 0 {
+        return Err("replay needs at least one peer".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -734,6 +866,370 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn replay_input_budgets_refuse_crossing_rows_before_visiting() {
+        for (raw, limits, expected, visited) in [
+            (
+                "{}\n{}",
+                ReplayLimits {
+                    records: 1,
+                    input_bytes: 100,
+                    line_bytes: 10,
+                },
+                "record budget",
+                1,
+            ),
+            (
+                "{}\n{}",
+                ReplayLimits {
+                    records: 10,
+                    input_bytes: 4,
+                    line_bytes: 10,
+                },
+                "byte budget",
+                1,
+            ),
+            (
+                "{}\n{  }",
+                ReplayLimits {
+                    records: 10,
+                    input_bytes: 100,
+                    line_bytes: 3,
+                },
+                "line budget",
+                1,
+            ),
+        ] {
+            let mut actual = 0;
+            let result = visit_jsonl_with_limits(
+                Cursor::new(raw),
+                Path::new("fixture.jsonl"),
+                limits,
+                |_| {
+                    actual += 1;
+                    Ok(())
+                },
+            );
+            let error = result.expect_err("oversized replay must be refused");
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(
+                actual, visited,
+                "crossing record must not reach the decoder"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_input_boundaries_preserve_fragmented_lines_and_blank_line_cost() {
+        let raw = "\n{\"name\":\"鱼\"}\r\n{}";
+        let limits = ReplayLimits {
+            records: 2,
+            input_bytes: crate::config::count_u64(raw.len()),
+            line_bytes: raw.find('\r').unwrap(),
+        };
+        for capacity in [1, 2, 7, 8192] {
+            let mut rows = Vec::new();
+            visit_jsonl_with_limits(
+                BufReader::with_capacity(capacity, Cursor::new(raw)),
+                Path::new("boundary.jsonl"),
+                limits,
+                |line| {
+                    rows.push(serde_json::from_slice::<Value>(line).expect("complete JSON"));
+                    Ok(())
+                },
+            )
+            .expect("exact budgets fit");
+            assert_eq!(
+                rows,
+                vec![serde_json::json!({"name":"鱼"}), serde_json::json!({})]
+            );
+        }
+        let mut visited = 0;
+        let error = visit_jsonl_with_limits(
+            Cursor::new("\n\n\n"),
+            Path::new("blank.jsonl"),
+            ReplayLimits {
+                input_bytes: 2,
+                ..limits
+            },
+            |_| {
+                visited += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("byte budget"), "{error}");
+        assert_eq!(visited, 0);
+    }
+
+    #[test]
+    fn replay_line_budget_stops_before_reading_or_decoding_the_large_tail() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = GuardedTail {
+            prefix: Cursor::new(b"12345".to_vec()),
+            reads: Arc::clone(&reads),
+        };
+        let mut visits = 0;
+        let error = visit_jsonl_with_limits(
+            BufReader::with_capacity(2, reader),
+            Path::new("guarded.jsonl"),
+            ReplayLimits {
+                line_bytes: 4,
+                ..ReplayLimits::default()
+            },
+            |_| {
+                visits += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("line budget 4 exceeded"), "{error}");
+        assert_eq!(visits, 0);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            3,
+            "refuse at the first crossing chunk, before the tail read"
+        );
+    }
+
+    #[test]
+    fn replay_host_limits_parse_explicit_overrides_and_reject_invalid_values() {
+        let defaults = ReplayLimits::from_lookup(|_| Ok(None)).unwrap();
+        assert_eq!(defaults.records, 32_000_000);
+        assert_eq!(defaults.input_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(defaults.line_bytes, 16 * 1024 * 1024);
+        for name in [
+            "CAPACITY_RUNNER_REPLAY_MAX_RECORDS",
+            "CAPACITY_RUNNER_REPLAY_MAX_BYTES",
+            "CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES",
+        ] {
+            for value in ["", "0", "-1", "1.5", "18446744073709551616"] {
+                let error =
+                    ReplayLimits::from_lookup(|key| Ok((key == name).then(|| value.into())))
+                        .err()
+                        .expect("invalid limit");
+                assert!(error.contains(name), "{error}");
+            }
+        }
+        let overridden = ReplayLimits::from_lookup(|_| Ok(Some("17".into()))).unwrap();
+        assert_eq!(
+            (
+                overridden.records,
+                overridden.input_bytes,
+                overridden.line_bytes
+            ),
+            (17, 17, 17)
+        );
+        assert!(ReplayLimits::from_lookup(|_| Err("lookup failed".into())).is_err());
+    }
+
+    #[test]
+    fn replay_manifest_budget_refuses_large_input_before_json_decoding() {
+        let output = tempfile::tempdir().unwrap();
+        let path = output.path().join(MANIFEST_FILE);
+        fs::write(&path, b"{       ").unwrap();
+        for limits in [
+            ReplayLimits {
+                line_bytes: 7,
+                ..ReplayLimits::default()
+            },
+            ReplayLimits {
+                input_bytes: 7,
+                ..ReplayLimits::default()
+            },
+        ] {
+            let error = read_manifest_with_limits(&path, limits).unwrap_err();
+            assert!(error.contains("manifest exceeds byte budget 7"), "{error}");
+        }
+        fs::write(&path, b"{      ").unwrap();
+        let error = read_manifest_with_limits(
+            &path,
+            ReplayLimits {
+                line_bytes: 7,
+                ..ReplayLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("parse"),
+            "exact budget reaches JSON decoding: {error}"
+        );
+    }
+
+    #[test]
+    fn replay_host_budget_overrules_archived_plan_budget_before_building() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.planned_record_budget = u64::MAX;
+        let count = config.validate_planned_record_budget().unwrap();
+        validate_replay_shape(
+            &config,
+            ReplayLimits {
+                records: count,
+                ..ReplayLimits::default()
+            },
+        )
+        .unwrap();
+        let error = validate_replay_shape(
+            &config,
+            ReplayLimits {
+                records: count - 1,
+                ..ReplayLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("CAPACITY_RUNNER_REPLAY_MAX_RECORDS"),
+            "{error}"
+        );
+        config.warmup = std::time::Duration::ZERO;
+        config.duration = std::time::Duration::ZERO;
+        config.players_per_room = u32::MAX;
+        assert!(validate_replay_shape(&config, ReplayLimits::default())
+            .unwrap_err()
+            .contains("peer count"));
+    }
+
+    #[test]
+    fn replay_entrypoint_applies_host_admission_to_archived_plan_overrides() {
+        let output = tempfile::tempdir().unwrap();
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.endpoint = Some(crate::host_evidence_fixture().endpoint);
+        config.planned_record_budget = u64::MAX;
+        let planned = config.validate_planned_record_budget().unwrap();
+        let (plans, _) = build_run_shape(&config).unwrap();
+        let records = crate::complete_records(&plans);
+        write_manifest(
+            output.path(),
+            "bounded-replay",
+            &config,
+            WorkloadShape {
+                senders: 4,
+                recipients: 4,
+                scheduled_sends_per_sender: 28,
+                warmup_sends_per_sender: 4,
+                measured_sends_per_sender: 24,
+            },
+            ServerIdentity {
+                endpoint: config.endpoint.clone().unwrap(),
+                pid: None,
+                binary_sha256: None,
+                binary_bytes: None,
+                config_overlay_sha256: diagnostics::sha256_bytes(
+                    &serde_json::to_vec(&config.server_overlay).unwrap(),
+                ),
+                config_provenance: ConfigProvenance::UnknownExternal,
+            },
+            BuildIdentity {
+                toolchain: None,
+                os: "fixture".into(),
+                arch: "fixture".into(),
+                kernel: None,
+                features: Features::current(),
+                clock: "fixture".into(),
+                generator: "fixture".into(),
+            },
+        )
+        .unwrap();
+        let error = replay_with_limits(
+            output.path(),
+            ReplayLimits {
+                records: planned - 1,
+                ..ReplayLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("CAPACITY_RUNNER_REPLAY_MAX_RECORDS"),
+            "refuse the shape before opening the absent delivery file: {error}"
+        );
+        write_deliveries(output.path(), &records).unwrap();
+        let summary = replay_with_limits(
+            output.path(),
+            ReplayLimits {
+                records: planned + 1,
+                ..ReplayLimits::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.valid, "{:?}", summary.reasons);
+        assert_eq!(
+            summary.totals.sent,
+            crate::config::count_u64(records.sent.len())
+        );
+        assert_eq!(
+            summary.totals.receipts,
+            crate::config::count_u64(records.receipts.len())
+        );
+    }
+
+    #[test]
+    fn replay_budgets_keep_exact_delivery_evidence_and_verdicts() {
+        let context = crate::unit_context();
+        let output = tempfile::tempdir().unwrap();
+        for defect in [
+            "none",
+            "missing",
+            "duplicate",
+            "misroute",
+            "ordering",
+            "gap",
+        ] {
+            let mut records = crate::complete_records(&context.plans);
+            match defect {
+                "missing" => {
+                    records.receipts.remove(0);
+                }
+                "duplicate" => records.receipts.push(records.receipts[0].clone()),
+                "misroute" => records.receipts[0].recipient = "unknown鱼".into(),
+                "ordering" => records.receipts.swap(0, 1),
+                "gap" => records.gaps.push(crate::gap_for(
+                    "r0p1",
+                    "r0p0",
+                    0,
+                    signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                )),
+                _ => {}
+            }
+            write_deliveries(output.path(), &records).unwrap();
+            let path = output.path().join(DELIVERIES_FILE);
+            let raw = fs::read(&path).unwrap();
+            let limits = ReplayLimits {
+                records: crate::config::count_u64(records.events().count()),
+                input_bytes: crate::config::count_u64(raw.len()),
+                line_bytes: raw
+                    .split(|&byte| byte == b'\n')
+                    .map(<[u8]>::len)
+                    .max()
+                    .unwrap(),
+            };
+            let replay = read_records_with_limits(output.path(), limits).unwrap();
+            assert_eq!(
+                serde_json::to_value(&records).unwrap(),
+                serde_json::to_value(&replay).unwrap(),
+                "{defect}"
+            );
+            let verdict = |records| {
+                summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    500_000,
+                    96,
+                    context.delivery_class,
+                    &crate::schedule::ChurnPlan::default(),
+                    None,
+                )
+            };
+            let expected = verdict(&records);
+            assert_eq!(expected.valid, defect == "none", "{defect}");
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::to_value(verdict(&replay)).unwrap(),
+                "{defect}"
+            );
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

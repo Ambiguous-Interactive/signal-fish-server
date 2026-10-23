@@ -1095,10 +1095,46 @@ impl Association {
     /// handle_inbound parses incoming raw packets
     fn handle_inbound(&mut self, p: Packet, now: Instant) -> Result<()> {
         if self.retired {
+            if self.has_readable_data()
+                && p.check_packet().is_ok()
+                && p.common_header.verification_tag == self.my_verification_tag
+                && p.common_header.source_port == self.destination_port
+                && p.common_header.destination_port == self.source_port
+                && p.chunks
+                    .iter()
+                    .any(|chunk| chunk.as_any().is::<ChunkShutdownAck>())
+                && !p
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.as_any().is::<ChunkAbort>())
+            {
+                self.control_queue.push_back(
+                    self.create_packet(vec![Box::new(ChunkShutdownComplete::default())]),
+                );
+            }
             return Ok(());
         }
         if let Err(err) = p.check_packet() {
             warn!("[{}] failed validating packet {}", self.side, err);
+            return Ok(());
+        }
+
+        if p.chunks.iter().any(|chunk| {
+            chunk
+                .as_any()
+                .downcast_ref::<ChunkShutdownComplete>()
+                .is_some_and(|complete| {
+                    p.chunks.len() != 1
+                        || p.common_header.source_port != self.destination_port
+                        || p.common_header.destination_port != self.source_port
+                        || p.common_header.verification_tag
+                            != if complete.reflected_verification_tag {
+                                self.peer_verification_tag
+                            } else {
+                                self.my_verification_tag
+                            }
+                })
+        }) {
             return Ok(());
         }
 
@@ -1177,7 +1213,27 @@ impl Association {
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdown>() {
             self.handle_shutdown(c, now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownAck>() {
-            self.handle_shutdown_ack(c)?
+            if matches!(
+                self.state(),
+                AssociationState::CookieWait | AssociationState::CookieEchoed
+            ) && !p
+                .chunks
+                .iter()
+                .any(|chunk| chunk.as_any().is::<ChunkAbort>())
+            {
+                vec![Packet {
+                    common_header: CommonHeader {
+                        source_port: p.common_header.destination_port,
+                        destination_port: p.common_header.source_port,
+                        verification_tag: p.common_header.verification_tag,
+                    },
+                    chunks: vec![Box::new(ChunkShutdownComplete {
+                        reflected_verification_tag: true,
+                    })],
+                }]
+            } else {
+                self.handle_shutdown_ack(c)?
+            }
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownComplete>() {
             self.handle_shutdown_complete(c)?
         } else {
@@ -1287,8 +1343,18 @@ impl Association {
         init_ack.set_supported_extensions();
 
         outbound.chunks = vec![Box::new(init_ack)];
+        self.publish_peer_route();
 
         Ok(vec![outbound])
+    }
+
+    fn publish_peer_route(&mut self) {
+        self.endpoint_events
+            .push_back(EndpointEventInner::PeerRoute {
+                verification_tag: self.peer_verification_tag,
+                local_port: self.source_port,
+                remote_port: self.destination_port,
+            });
     }
 
     fn handle_init_ack(
@@ -1374,6 +1440,7 @@ impl Association {
                 .start(Timer::T1Cookie, now, self.rto_mgr.get_rto());
 
             self.set_state(AssociationState::CookieEchoed);
+            self.publish_peer_route();
 
             Ok(vec![])
         } else {
@@ -3051,7 +3118,7 @@ impl Association {
         } else if self.will_send_shutdown_complete {
             self.will_send_shutdown_complete = false;
 
-            let shutdown_complete = ChunkShutdownComplete {};
+            let shutdown_complete = ChunkShutdownComplete::default();
 
             if let Ok(raw) = self
                 .create_packet(vec![Box::new(shutdown_complete)])

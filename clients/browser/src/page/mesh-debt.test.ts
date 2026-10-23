@@ -13,6 +13,7 @@ for (const unpaidInitiates of [false, true]) {
       { recover: true, statsMode: 'closed' },
       { recover: false, statsMode: 'ready' },
       { recover: false, statsMode: 'pending' },
+      { recover: false, statsMode: 'invalid' },
     ]) {
       const keepOpen = statsMode !== 'closed';
       const originalSocket = globalThis.WebSocket;
@@ -266,6 +267,20 @@ for (const unpaidInitiates of [false, true]) {
             channel.receive(channel.label === missingLabel ? healthy : unpaid);
           }
         }
+        if (statsMode === 'invalid') {
+          const channel = unpaidLink.channels.get(missingLabel)!;
+          for (const payload of [
+            '{',
+            'null',
+            '[]',
+            JSON.stringify({ from: healthy, channel: missingLabel, seq: 0 }),
+            JSON.stringify({ from: unpaid, channel: 'other', seq: 0 }),
+            JSON.stringify({ from: unpaid, channel: missingLabel, seq: 1 }),
+          ]) {
+            channel.wireReceipts += 1;
+            channel.onmessage?.({ data: payload });
+          }
+        }
         await turn();
         assert(
           !events.some((event) => event['event'] === 'success_criteria_met'),
@@ -394,6 +409,34 @@ for (const unpaidInitiates of [false, true]) {
             string,
             unknown
           >;
+          const receivedProbes = snapshot['received_probes'] as
+            Record<string, Record<string, number>> | undefined;
+          const missingReceipts =
+            statsMode === 'invalid'
+              ? {
+                  invalid_json: 1,
+                  invalid_shape: 2,
+                  wrong_sender: 1,
+                  wrong_label: 1,
+                  wrong_sequence: 1,
+                }
+              : keepOpen
+                ? {}
+                : { wrong_sender: 1 };
+          assert(
+            receivedProbes !== undefined &&
+              Object.keys(receivedProbes[missingLabel] ?? {}).length ===
+                Object.keys(missingReceipts).length &&
+              Object.entries(missingReceipts).every(
+                ([kind, count]) => receivedProbes[missingLabel]?.[kind] === count,
+              ),
+            `${context}: retain exact invalid-probe evidence after callbacks or link retirement`,
+          );
+          const paidLabel = missingLabel === 'reliable' ? 'unreliable' : 'reliable';
+          assert(
+            receivedProbes?.[paidLabel]?.['valid'] === 1,
+            `${context}: count the valid sibling label independently`,
+          );
           if (keepOpen) {
             const link = snapshot['link'] as {
               dataChannelStats: {
@@ -402,7 +445,7 @@ for (const unpaidInitiates of [false, true]) {
                 ageMs: number | null;
                 channels: Record<string, { messagesReceived: number }>;
               };
-              channels: Record<string, { receipts: { raw: number } }>;
+              channels: Record<string, { receipts: { raw: number; admitted: number } }>;
             };
             assert(
               snapshot['connected'] === true &&
@@ -413,13 +456,17 @@ for (const unpaidInitiates of [false, true]) {
               timeout!.length < 16000,
               `${context}: complete snapshot fits CLI diagnostic bound`,
             );
-            if (statsMode === 'ready') {
+            if (statsMode === 'ready' || statsMode === 'invalid') {
               assert(
                 link.dataChannelStats.status === 'ready' &&
                   link.dataChannelStats.ageMs === 1000 &&
-                  link.dataChannelStats.channels[missingLabel]?.messagesReceived === 0 &&
-                  link.channels[missingLabel]?.receipts.raw === 0,
-                `${context}: failure snapshot retains recent stack absence and independent raw absence`,
+                  link.dataChannelStats.channels[missingLabel]?.messagesReceived ===
+                    (statsMode === 'invalid' ? 6 : 0) &&
+                  link.channels[missingLabel]?.receipts.raw ===
+                    (statsMode === 'invalid' ? 6 : 0) &&
+                  link.channels[missingLabel]?.receipts.admitted ===
+                    (statsMode === 'invalid' ? 6 : 0),
+                `${context}: failure snapshot retains independent stack, raw, and admitted totals`,
               );
             } else {
               assert(
@@ -433,6 +480,7 @@ for (const unpaidInitiates of [false, true]) {
                 JSON.stringify({
                   missing_sent: [],
                   missing_received: [missingLabel],
+                  received_probes: receivedProbes,
                   connected: false,
                   link: null,
                 }),

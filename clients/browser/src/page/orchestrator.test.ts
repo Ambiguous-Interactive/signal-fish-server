@@ -1,6 +1,7 @@
 import {
   ExchangeLedger,
   advanceAuthenticateHandshake,
+  classifyExchangeProbe,
   nextKeepaliveWake,
   scheduleSuccessReleasePoll,
   shouldDeferSuccessAtRunDeadline,
@@ -54,6 +55,17 @@ assert(
 );
 
 const departedPeer = '00000000-0000-0000-0000-000000000002';
+for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL, 'optional', '']) {
+  assert(
+    classifyExchangeProbe(
+      departedPeer,
+      label,
+      JSON.stringify({ from: departedPeer, channel: label, seq: 0 }),
+    ) === (label === RELIABLE_LABEL || label === UNRELIABLE_LABEL ? 'valid' : 'wrong_label'),
+    `${label}: only required channels carry exchange probes`,
+  );
+}
+
 const exchangeLedger = new ExchangeLedger();
 assert(
   exchangeLedger.unmetCriteria().length === 0,
@@ -134,6 +146,38 @@ for (const direction of ['sent to', 'received from']) {
   assert(
     ledger.unmetCriteria().length === 0,
     'fresh bidirectional traffic completes the exchange',
+  );
+}
+
+// Investigation #889: receipt checks belong to membership, not a physical link.
+{
+  const ledger = new ExchangeLedger();
+  ledger.noteConnected(departedPeer);
+  ledger.noteReceipt(departedPeer, RELIABLE_LABEL, 'wrong_sender');
+  ledger.noteReceipt(departedPeer, RELIABLE_LABEL, 'valid');
+  ledger.noteReceipt(departedPeer, RELIABLE_LABEL, 'valid');
+  ledger.invalidatePendingReceipts(departedPeer);
+  const snapshot = ledger.diagnosticSnapshot(departedPeer);
+  assert(
+    snapshot.received_probes[RELIABLE_LABEL]?.wrong_sender === 1 &&
+      snapshot.received_probes[RELIABLE_LABEL]?.valid === 2,
+    'receipt evidence retains duplicates and survives physical retirement',
+  );
+  assert(
+    ledger.unmetCriteria().length === 2,
+    'a valid admitted probe check alone does not pay pending receipt debt',
+  );
+  snapshot.received_probes[RELIABLE_LABEL]!.valid = 100;
+  assert(
+    ledger.diagnosticSnapshot(departedPeer).received_probes[RELIABLE_LABEL]?.valid === 2,
+    'diagnostic snapshots cannot change the retained receipt evidence',
+  );
+  ledger.resetIncarnation(departedPeer);
+  assert(
+    Object.values(ledger.diagnosticSnapshot(departedPeer).received_probes).every(
+      (counts) => Object.keys(counts).length === 0,
+    ),
+    'an authoritative membership replacement clears old receipt checks',
   );
 }
 
