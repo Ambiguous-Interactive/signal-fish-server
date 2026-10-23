@@ -1094,7 +1094,7 @@ mod tests {
     fn replay_entrypoint_applies_host_admission_to_archived_plan_overrides() {
         let output = tempfile::tempdir().unwrap();
         let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
-        config.endpoint = Some("ws://127.0.0.1:3536".into());
+        config.endpoint = Some(crate::host_evidence_fixture().endpoint);
         config.planned_record_budget = u64::MAX;
         let planned = config.validate_planned_record_budget().unwrap();
         let (plans, _) = build_run_shape(&config).unwrap();
