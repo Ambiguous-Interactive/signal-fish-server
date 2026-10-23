@@ -118,6 +118,17 @@ The endpoint keeps routing through terminal packet transmission and unread
 message drain. Paired controls cover fragments, small receive windows, DATA
 loss, shutdown and ACK loss, simultaneous close, and delayed application reads.
 See [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
-Recovery after loss of the final SHUTDOWN COMPLETE remains separate in
-[#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
+Endpoints now answer repeated out-of-association SHUTDOWN ACK packets with a
+standalone SHUTDOWN COMPLETE. The reply reflects the received tag and sets
+its T bit. The Sans-I/O driver drains endpoint replies even without a live
+association. Accepted handshake events register the peer tag and SCTP ports
+for reflected-COMPLETE routing. Stale INIT ACK packets cannot change that route.
+Complete-packet validation checks the T bit, tag, and ports before closure.
+A graceful association with unread gameplay also answers repeated ACK packets
+without consuming that gameplay or restarting timers. Handshake-time ACK
+packets receive reflected replies while their existing T1 timer remains armed.
+Deterministic controls drop the first COMPLETE in both endpoint roles and
+simultaneous close, preserve an unread tail through recovery, and cover
+malformed packets, ABORT precedence, unrelated controls, and tag/port mismatch.
+See [#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
 Replacement qualification in #912 must retain these acknowledgment controls.

@@ -465,21 +465,36 @@ export function shouldDeferSuccessAtRunDeadline(
   );
 }
 
-function isExchangeProbe(peer: string, label: string, text: string): boolean {
-  if (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) {
-    return false;
-  }
+type ExchangeReceiptOutcome =
+  | 'valid'
+  | 'invalid_json'
+  | 'invalid_shape'
+  | 'wrong_sender'
+  | 'wrong_label'
+  | 'wrong_sequence'
+  | 'outside_window';
+
+type ExchangeReceiptCounts = Partial<Record<ExchangeReceiptOutcome, number>>;
+
+export function classifyExchangeProbe(
+  peer: string,
+  label: string,
+  text: string,
+): ExchangeReceiptOutcome {
+  if (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) return 'wrong_label';
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
-    return false;
+    return 'invalid_json';
   }
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
-    return false;
+    return 'invalid_shape';
   }
   const probe = payload as Record<string, unknown>;
-  return probe['from'] === peer && probe['channel'] === label && probe['seq'] === 0;
+  if (probe['from'] !== peer) return 'wrong_sender';
+  if (probe['channel'] !== label) return 'wrong_label';
+  return probe['seq'] === 0 ? 'valid' : 'wrong_sequence';
 }
 
 /** Logical exchange debt survives transport teardown; receipts belong to an incarnation. */
@@ -488,6 +503,7 @@ export class ExchangeLedger {
   private readonly receiptOwners = new Map<string, object>();
   private readonly sent = new Map<string, Set<string>>();
   private readonly received = new Map<string, Set<string>>();
+  private readonly receivedProbes = new Map<string, Map<string, ExchangeReceiptCounts>>();
 
   noteConnected(peer: string): void {
     this.obligations.add(peer);
@@ -516,6 +532,7 @@ export class ExchangeLedger {
     this.invalidatePendingReceipts(peer);
     this.sent.delete(peer);
     this.received.delete(peer);
+    this.receivedProbes.delete(peer);
   }
 
   hasSent(peer: string, label: string): boolean {
@@ -540,20 +557,46 @@ export class ExchangeLedger {
     labels.add(label);
   }
 
-  unpaidPeers(): string[] {
-    return [...this.obligations].filter((peer) => {
-      const debt = this.diagnosticSnapshot(peer);
-      return debt.missing_sent.length !== 0 || debt.missing_received.length !== 0;
-    });
+  noteReceipt(peer: string, label: string, outcome: ExchangeReceiptOutcome): void {
+    if (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) return;
+    let labels = this.receivedProbes.get(peer);
+    if (labels === undefined) {
+      labels = new Map();
+      this.receivedProbes.set(peer, labels);
+    }
+    let counts = labels.get(label);
+    if (counts === undefined) {
+      counts = {};
+      labels.set(label, counts);
+    }
+    counts[outcome] = Math.min(Number.MAX_SAFE_INTEGER, (counts[outcome] ?? 0) + 1);
   }
 
-  diagnosticSnapshot(peer: string): { missing_sent: string[]; missing_received: string[] } {
+  unpaidPeers(): string[] {
+    return [...this.obligations].filter((peer) =>
+      [RELIABLE_LABEL, UNRELIABLE_LABEL].some(
+        (label) => !this.sent.get(peer)?.has(label) || !this.received.get(peer)?.has(label),
+      ),
+    );
+  }
+
+  diagnosticSnapshot(peer: string): {
+    missing_sent: string[];
+    missing_received: string[];
+    received_probes: Record<string, ExchangeReceiptCounts>;
+  } {
     return {
       missing_sent: [RELIABLE_LABEL, UNRELIABLE_LABEL].filter(
         (label) => !this.sent.get(peer)?.has(label),
       ),
       missing_received: [RELIABLE_LABEL, UNRELIABLE_LABEL].filter(
         (label) => !this.received.get(peer)?.has(label),
+      ),
+      received_probes: Object.fromEntries(
+        [RELIABLE_LABEL, UNRELIABLE_LABEL].map((label) => [
+          label,
+          { ...this.receivedProbes.get(peer)?.get(label) },
+        ]),
       ),
     };
   }
@@ -883,10 +926,14 @@ class Orchestrator {
         )
           return false;
         // Arrival owns the receipt window, even if output delays its handler.
-        const exchangeReceipt =
-          this.config.exchange &&
-          this.exchangeWindowOpen(arrivedAt) &&
-          isExchangeProbe(peer, label, text);
+        let exchangeReceipt = false;
+        if (this.config.exchange) {
+          const outcome = this.exchangeWindowOpen(arrivedAt)
+            ? classifyExchangeProbe(peer, label, text)
+            : 'outside_window';
+          this.exchangeLedger.noteReceipt(peer, label, outcome);
+          exchangeReceipt = outcome === 'valid';
+        }
         /* Membership owns all admitted payloads across physical teardown. */
         const receiptOwner = this.exchangeLedger.receiptOwner(peer);
         let receiptPending = exchangeReceipt;

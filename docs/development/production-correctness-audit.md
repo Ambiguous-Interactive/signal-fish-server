@@ -7487,3 +7487,43 @@ Both roles, required labels, byte limits, injected loss, original reset deadline
 blocked-send closure errors, byte release, and terminal send rejection remain.
 This removes the demonstrated setup race. It does not establish the exact
 waiter history of either hosted failure, so #1120 stays open.
+
+### F142 — Lost final shutdown completion strands the native peer
+
+Open [#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147)
+advances A20 under #826 and native replacement qualification under #912.
+After one endpoint sent SHUTDOWN COMPLETE and retired its association, a lost
+COMPLETE left the peer retransmitting SHUTDOWN ACK. The retired endpoint
+ignored that ACK, so the peer could only exhaust its shutdown retry budget.
+
+A deterministic paired-endpoint history drops the first final COMPLETE after
+association retirement. It fails before repair with the peer still in
+ShutdownAckSent. The endpoint now produces a stateless COMPLETE reply through
+its Sans-I/O output. The reply reflects the received verification tag and sets
+the T bit, as specified by RFC 9260 sections 8.4 and 8.5.1. Recovery needs no extra
+retention of closed associations or retirement timer. Accepted handshake metadata routes a
+reflected reply to the surviving peer association.
+
+A separate loss control delays the application's read of complete gameplay.
+While that unread tail keeps the closed association registered, a validated
+repeated ACK produces only a completion reply. It cannot revive DATA, timers,
+or the association state. Reading the tail still returns its exact bytes and
+permits final endpoint retirement.
+
+This repairs the low-level graceful shutdown API. The public native WebRTC
+wrapper still closes with ABORT. It does not establish the cause of either
+historical #1120 reset timeout or the browser exchange investigations.
+
+### A20 — Browser exchange receipt classifications
+
+Open [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889)
+now distinguishes admitted valid probes from invalid JSON, invalid shape, wrong
+sender, wrong label, wrong sequence, and arrival outside the exchange window.
+The counts remain separate from logical exchange debt. They survive physical
+link retirement and clear when authoritative membership starts a new incarnation.
+
+Both endpoint roles and both missing required labels have controls that compare
+zero callbacks against six admitted invalid probes. Stack, raw, and admission
+totals remain visible beside the exact classifications. Cutoff controls distinguish late
+receipts from absent traffic. These diagnostics do not pay receipt debt, extend
+run deadlines, or establish the historical incident's cause.

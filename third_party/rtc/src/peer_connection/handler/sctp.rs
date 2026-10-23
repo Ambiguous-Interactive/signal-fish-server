@@ -501,7 +501,11 @@ impl<'a> SctpHandler<'a> {
         }
         for (ch, event) in drained {
             if let Some(endpoint) = self.ctx.sctp_transport.sctp_endpoint.as_mut() {
+                let is_drained = event.is_drained();
                 endpoint.handle_event(ch, event);
+                if !is_drained {
+                    continue;
+                }
             }
             self.ctx.sctp_transport.sctp_associations.remove(&ch);
             self.ctx.association_transport.remove(&ch);
@@ -582,6 +586,10 @@ impl<'a>
             }
 
             let mut messages = vec![];
+            while let Some(mut transmit) = sctp_endpoint.poll_transmit() {
+                transmit.transport = msg.transport;
+                messages.push(SctpMessage::Outbound(transmit));
+            }
             {
                 let mut endpoint_events: Vec<(AssociationHandle, EndpointEvent)> = vec![];
 
@@ -622,7 +630,10 @@ impl<'a>
                 // would drop its final packets. Only the draining associations are
                 // touched, so non-draining ones keep coalescing and still flush
                 // normally in poll_write.
-                for (drained_ch, _event) in &endpoint_events {
+                for (drained_ch, event) in &endpoint_events {
+                    if !event.is_drained() {
+                        continue;
+                    }
                     if let Some(conn) = sctp_associations.get_mut(drained_ch) {
                         while let Some(x) = conn.poll_transmit(now) {
                             for transmit in split_transmit(x) {
@@ -633,7 +644,11 @@ impl<'a>
                 }
 
                 for (ch, event) in endpoint_events {
-                    sctp_endpoint.handle_event(ch, event); // handle drain event
+                    let is_drained = event.is_drained();
+                    sctp_endpoint.handle_event(ch, event);
+                    if !is_drained {
+                        continue;
+                    }
                     sctp_associations.remove(&ch);
                     // Drop the per-association bookkeeping with it, or a long-lived endpoint
                     // accumulates entries for associations that no longer exist.
@@ -993,7 +1008,10 @@ impl<'a>
         // Teardown safety (see handle_read): flush each draining association's final
         // packets before it is removed below, so the deferred flush doesn't drop
         // them. Non-draining associations flush normally in poll_write.
-        for (drained_ch, _event) in &endpoint_events {
+        for (drained_ch, event) in &endpoint_events {
+            if !event.is_drained() {
+                continue;
+            }
             if let Some(conn) = sctp_associations.get_mut(drained_ch) {
                 while let Some(x) = conn.poll_transmit(now) {
                     transmits.extend(split_transmit(x));
@@ -1002,7 +1020,11 @@ impl<'a>
         }
 
         for (ch, event) in endpoint_events {
-            sctp_endpoint.handle_event(ch, event); // handle drain event
+            let is_drained = event.is_drained();
+            sctp_endpoint.handle_event(ch, event);
+            if !is_drained {
+                continue;
+            }
             sctp_associations.remove(&ch);
             self.ctx.association_transport.remove(&ch);
             self.ctx.pending_readable.retain(|(pch, _)| *pch != ch);
@@ -1223,7 +1245,13 @@ mod tests {
 
         assert!(connected, "SCTP handshake did not complete");
         assert_eq!(server_conns.len(), 1, "exactly one server association");
-        let (server_ch, server_conn) = server_conns.into_iter().next().unwrap();
+        let (server_ch, mut server_conn) = server_conns.into_iter().next().unwrap();
+        while let Some(event) = client_conn.poll_endpoint_event() {
+            client_ep.handle_event(client_ch, event);
+        }
+        while let Some(event) = server_conn.poll_endpoint_event() {
+            server_ep.handle_event(server_ch, event);
+        }
 
         Established {
             client_ep,
@@ -4680,6 +4708,82 @@ mod tests {
             dgrams.len(),
             flushed.len()
         );
+    }
+
+    #[test]
+    fn graceful_shutdown_recovers_final_complete_loss_through_handler() {
+        let mut pair = establish();
+        let now = Instant::now();
+        pair.client_conn.shutdown().unwrap();
+        let ch = pair.client_ch;
+        let mut ctx = client_ctx(now, pair.client_ep, ch, pair.client_conn);
+        ctx.flush_dirty = true;
+        {
+            let mut handler = SctpHandler::new(&mut ctx, 0);
+            while let Some(message) = handler.poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    let (_, DatagramEvent::AssociationEvent(event)) = pair
+                        .server_ep
+                        .handle(now, client_addr(), None, raw.freeze())
+                        .unwrap()
+                    else {
+                        panic!("shutdown belongs to peer")
+                    };
+                    pair.server_conn.handle_event(event);
+                }
+            }
+            for raw in drain_transmits(&mut pair.server_conn, now) {
+                handler.handle_read(raw_read(now, raw)).unwrap();
+            }
+            let complete = handler.poll_write().expect("first final COMPLETE");
+            let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = complete.message else {
+                panic!("COMPLETE must be raw")
+            };
+            assert_eq!(raw[12], CT_SHUTDOWN_COMPLETE);
+            assert_eq!(raw[13] & 1, 0);
+            assert!(handler.poll_write().is_none());
+            assert!(handler.ctx.sctp_transport.sctp_associations.is_empty());
+        }
+        let retry_at = pair
+            .server_conn
+            .poll_timeout()
+            .expect("peer retries lost COMPLETE");
+        pair.server_conn.handle_timeout(retry_at);
+        let acks = drain_transmits(&mut pair.server_conn, retry_at);
+        assert_eq!(acks.len(), 1);
+        let original_tag = acks[0].slice(4..8);
+        let mut handler = SctpHandler::new(&mut ctx, 0);
+        handler
+            .handle_read(raw_read(retry_at, acks[0].clone()))
+            .unwrap();
+        let reply = handler
+            .poll_write()
+            .expect("retired endpoint stateless COMPLETE");
+        assert_eq!(reply.transport.local_addr, client_addr());
+        assert_eq!(reply.transport.peer_addr, server_addr());
+        assert_eq!(reply.now, retry_at);
+        let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = reply.message else {
+            panic!("COMPLETE must be raw")
+        };
+        assert_eq!(raw[12], CT_SHUTDOWN_COMPLETE);
+        assert_eq!(raw[13] & 1, 1);
+        assert_eq!(&raw[4..8], &original_tag[..]);
+        let (_, DatagramEvent::AssociationEvent(event)) = pair
+            .server_ep
+            .handle(retry_at, client_addr(), None, raw.freeze())
+            .unwrap()
+        else {
+            panic!("reflected COMPLETE belongs to peer")
+        };
+        pair.server_conn.handle_event(event);
+        assert!(pair.server_conn.is_closed());
+        assert!(pair.server_conn.poll_timeout().is_none());
+        while let Some(event) = pair.server_conn.poll_endpoint_event() {
+            pair.server_ep.handle_event(pair.server_ch, event);
+        }
+        assert!(handler.ctx.sctp_transport.sctp_associations.is_empty());
+        assert!(handler.ctx.association_transport.is_empty());
+        assert!(handler.poll_write().is_none());
     }
 
     // Issue #1145: a full pipeline must retain the complete graceful tail.

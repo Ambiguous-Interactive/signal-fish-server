@@ -36,6 +36,10 @@ impl Chunk for ChunkShutdownAck {
             return Err(Error::ErrChunkTypeNotShutdownAck);
         }
 
+        if header.value_length != 0 {
+            return Err(Error::ErrChunkHeaderInvalidLength);
+        }
+
         Ok(ChunkShutdownAck {})
     }
 

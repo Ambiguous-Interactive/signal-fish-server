@@ -2,7 +2,7 @@
 mod endpoint_test;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt, iter,
     net::SocketAddr,
     ops::{Index, IndexMut},
@@ -14,9 +14,14 @@ use rustc_hash::FxHashMap;
 
 use crate::Payload;
 use crate::association::Association;
-use crate::chunk::chunk_type::CT_INIT;
+use crate::chunk::chunk_abort::ChunkAbort;
+use crate::chunk::chunk_cookie_echo::ChunkCookieEcho;
+use crate::chunk::chunk_init::ChunkInit;
+use crate::chunk::chunk_shutdown_ack::ChunkShutdownAck;
+use crate::chunk::chunk_shutdown_complete::ChunkShutdownComplete;
+use crate::chunk::chunk_type::{CT_INIT, CT_SHUTDOWN_COMPLETE};
 use crate::config::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
-use crate::packet::PartialDecode;
+use crate::packet::{CommonHeader, Packet, PartialDecode};
 use crate::shared::{
     AssociationEvent, AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner,
 };
@@ -54,6 +59,7 @@ pub struct Endpoint {
     ///
     /// Equivalent to a `ServerConfig.accept_buffer` of `0`, but can be changed after the endpoint is constructed.
     reject_new_associations: bool,
+    pending_transmits: VecDeque<TransportMessage<Payload>>,
 }
 
 impl fmt::Debug for Endpoint {
@@ -87,6 +93,7 @@ impl Endpoint {
             associations: Slab::new(),
             local_cid_generator: (endpoint_config.aid_generator_factory.as_ref())(),
             reject_new_associations: false,
+            pending_transmits: VecDeque::new(),
             endpoint_config,
             server_config,
         }
@@ -100,6 +107,14 @@ impl Endpoint {
     /// Process `EndpointEvent`s emitted from related `Association`s
     pub fn handle_event(&mut self, ch: AssociationHandle, event: EndpointEvent) {
         match event.0 {
+            EndpointEventInner::PeerRoute {
+                verification_tag,
+                local_port,
+                remote_port,
+            } => {
+                self.associations[ch].peer_route =
+                    Some((verification_tag, local_port, remote_port));
+            }
             EndpointEventInner::Drained => {
                 let conn = self.associations.remove(ch.0);
                 self.association_ids_init.remove(&conn.init_cid);
@@ -130,7 +145,23 @@ impl Endpoint {
         // Handle packet on existing association, if any
         //
         let dst_cid = partial_decode.common_header.verification_tag;
-        let known_ch = if dst_cid > 0 {
+        let reflected_complete = partial_decode.first_chunk_type == CT_SHUTDOWN_COMPLETE
+            && partial_decode
+                .remaining
+                .get(1)
+                .is_some_and(|flags| flags & 1 != 0);
+        let known_ch = if reflected_complete {
+            self.associations.iter().find_map(|(id, association)| {
+                (association.peer_route
+                    == Some((
+                        dst_cid,
+                        partial_decode.common_header.destination_port,
+                        partial_decode.common_header.source_port,
+                    ))
+                    && association.initial_remote == remote)
+                    .then_some(AssociationHandle(id))
+            })
+        } else if dst_cid > 0 {
             self.association_ids.get(&dst_cid).cloned()
         } else {
             //TODO: improve INIT handling for DoS attack
@@ -166,8 +197,67 @@ impl Endpoint {
         //
         // Potentially create a new association
         //
+        if partial_decode.first_chunk_type != CT_INIT {
+            self.handle_out_of_association(now, remote, partial_decode);
+            return None;
+        }
         self.handle_first_packet(now, remote, ecn, partial_decode)
             .map(|(ch, a)| (ch, DatagramEvent::NewAssociation(a)))
+    }
+
+    /// Return a stateless reply prepared by [`Self::handle`].
+    ///
+    /// Drain replies after each incoming datagram, including when `handle` returns `None`.
+    pub fn poll_transmit(&mut self) -> Option<TransportMessage<Payload>> {
+        self.pending_transmits.pop_front()
+    }
+
+    fn handle_out_of_association(
+        &mut self,
+        now: Instant,
+        remote: SocketAddr,
+        decoded: PartialDecode,
+    ) {
+        let Ok(packet) = decoded.finish() else { return };
+        if packet.check_packet().is_err()
+            || packet.common_header.verification_tag == 0
+            || packet
+                .chunks
+                .iter()
+                .any(|chunk| chunk.as_any().is::<ChunkAbort>() || chunk.as_any().is::<ChunkInit>())
+            || packet
+                .chunks
+                .first()
+                .is_some_and(|chunk| chunk.as_any().is::<ChunkCookieEcho>())
+            || !packet
+                .chunks
+                .iter()
+                .any(|chunk| chunk.as_any().is::<ChunkShutdownAck>())
+        {
+            return;
+        }
+        let reply = Packet {
+            common_header: CommonHeader {
+                source_port: packet.common_header.destination_port,
+                destination_port: packet.common_header.source_port,
+                verification_tag: packet.common_header.verification_tag,
+            },
+            chunks: vec![Box::new(ChunkShutdownComplete {
+                reflected_verification_tag: true,
+            })],
+        };
+        if let Ok(raw) = reply.marshal() {
+            self.pending_transmits.push_back(TransportMessage {
+                now,
+                transport: TransportContext {
+                    local_addr: self.local_addr,
+                    peer_addr: remote,
+                    ecn: None,
+                    transport_protocol: self.transport_protocol,
+                },
+                message: Payload::RawEncode(vec![raw]),
+            });
+        }
     }
 
     /// Initiate an Association
@@ -285,6 +375,7 @@ impl Endpoint {
 
         let id = self.associations.insert(AssociationMeta {
             init_cid: remote_aid,
+            peer_route: None,
             cids_issued: 0,
             loc_cids: iter::once((0, local_aid)).collect(),
             initial_remote: remote_addr,
@@ -315,6 +406,7 @@ impl Endpoint {
 #[derive(Debug)]
 pub(crate) struct AssociationMeta {
     init_cid: AssociationId,
+    peer_route: Option<(AssociationId, u16, u16)>,
     /// Number of local association IDs.
     cids_issued: u64,
     loc_cids: HashMap<u64, AssociationId>,

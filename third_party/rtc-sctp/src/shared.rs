@@ -46,6 +46,11 @@ impl EndpointEvent {
 pub(crate) enum EndpointEventInner {
     /// The association has been drained
     Drained,
+    PeerRoute {
+        verification_tag: AssociationId,
+        local_port: u16,
+        remote_port: u16,
+    },
     /*// The association needs association identifiers
     NeedIdentifiers(Instant, u64),
     /// Stop routing Association ID for this sequence number to the Association

@@ -1732,7 +1732,7 @@ fn shutdown_acknowledges_received_gameplay_without_a_final_sack() -> Result<()> 
                 !remote.gather_outbound(retry_at).1,
                 "remote emits SHUTDOWN COMPLETE"
             );
-            local.handle_shutdown_complete(&ChunkShutdownComplete {})?;
+            local.handle_shutdown_complete(&ChunkShutdownComplete::default())?;
             assert_eq!(local.state(), AssociationState::Closed);
         }
     }

@@ -215,3 +215,10 @@ controls cover a tail larger than one read budget, final-packet ownership,
 unrelated association traffic, and abrupt teardown after graceful completion.
 See [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
 Replacement qualification in #912 must retain these drain controls.
+
+The SCTP handler now drains stateless endpoint replies for a lost final
+SHUTDOWN COMPLETE. It uses the triggering DTLS transport even after association
+retirement. Handshake peer-route events update the endpoint without retiring
+live associations. A paired handler control drops the first COMPLETE and
+closes the peer on its repeated ACK without retaining local association state.
+See [#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
