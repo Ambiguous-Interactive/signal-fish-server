@@ -129,10 +129,10 @@ async fn room_left_retires_links_and_work_without_forgiving_exchange_debt() {
             serde_json::from_str::<ClientMessage>(frame.to_text().unwrap()).unwrap(),
             ClientMessage::Ping
         ));
+        let after_keepalive =
+            tokio::time::timeout(Duration::from_millis(20), server_ws.next()).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), server_ws.next())
-                .await
-                .is_err(),
+            after_keepalive.is_err(),
             "leave must not write old-room status or gameplay after keepalive"
         );
         state.engine.pair_with(peer, false, &[]).await.unwrap();
