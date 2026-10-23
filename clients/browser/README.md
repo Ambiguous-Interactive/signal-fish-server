@@ -277,7 +277,9 @@ window also bounds these waits. A zero P2P timeout reports fallback immediately
 and still permits late connection. In that mode, each operation uses a
 `--run-for-secs` budget, capped by the active run window. Each peer has an ordered
 SDP and ICE queue. A stalled peer does not block relay input or other peers.
-A stalled operation closes its physical link at its deadline. A new session plan
+A rejected SDP operation closes its physical link and reports current transport
+availability immediately. A rejected ICE candidate keeps the link available for
+other candidates. A stalled operation closes its physical link at its deadline. A new session plan
 can build a fresh link. A late completion from the retired link cannot resume
 negotiation.
 

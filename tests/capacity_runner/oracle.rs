@@ -919,13 +919,14 @@ pub fn latency_histogram(samples: impl IntoIterator<Item = u64>) -> Histogram<u6
 /// no GameData at or below this sequence in the paired epoch"), and the
 /// stream's owed window starts one past it.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct ChurnView {
+struct ChurnView<'a> {
+    // All name keys borrow the immutable roster during summarization.
     /// Member -> the epoch this recipient's seat adopts (and every epoch it
     /// has adopted, which are the streams it can be owed).
-    adopted: BTreeMap<String, BTreeSet<u32>>,
+    adopted: BTreeMap<&'a str, BTreeSet<u32>>,
     /// `(sender, epoch) -> instant past which deliveries for the stream are
     /// stale-epoch misroutes (the sender rejoined past it)`.
-    closed_at: BTreeMap<(String, u32), u64>,
+    closed_at: BTreeMap<(&'a str, u32), u64>,
     /// `(sender, epoch) -> (owed floor, from_us, server_enforced)`: from
     /// `from_us` on, the stream's owed window starts at floor + 1. A
     /// `server_enforced` floor (a rejoin snapshot tail) is also a delivery
@@ -934,7 +935,7 @@ struct ChurnView {
     /// instant) is bookkeeping only: the server has no watermark for an
     /// omitted member, so a frame just past the seat can legally arrive
     /// with its recorded send time behind the rejoin instant.
-    floors: BTreeMap<(String, u32), (u64, u64, bool)>,
+    floors: BTreeMap<(&'a str, u32), (u64, u64, bool)>,
 }
 
 /// Rebuild every roster peer's [`ChurnView`] from the run's recorded churn
@@ -957,11 +958,11 @@ struct ChurnView {
 /// permitted-unobserved set. The derivation errs safe: a send whose
 /// recorded completion crossed the seat instant is either received (harmless
 /// to floor) or genuinely pre-seat (correctly floored).
-fn churn_views(
+fn churn_views<'a>(
     records: &RunRecords,
-    roster: &[(String, u32)],
+    roster: &'a [(String, u32)],
     blocks: &BTreeMap<(&str, u32), RelayBlock<'_>>,
-) -> (BTreeMap<String, Arc<ChurnView>>, Vec<String>) {
+) -> (BTreeMap<&'a str, Arc<ChurnView<'a>>>, Vec<String>) {
     let room_of: BTreeMap<&str, u32> = roster
         .iter()
         .map(|(name, room)| (name.as_str(), *room))
@@ -992,31 +993,25 @@ fn churn_views(
     // Ordinary rooms have the same immutable initial view at every seat.
     // Keep one per room, rather than one tree of names and epochs per peer.
     // A room with any recorded churn retains the full viewer-specific path.
-    let mut initial_views: BTreeMap<u32, Arc<ChurnView>> = BTreeMap::new();
-    let mut views: BTreeMap<String, Arc<ChurnView>> = BTreeMap::new();
+    let mut initial_views: BTreeMap<u32, Arc<ChurnView<'a>>> = BTreeMap::new();
+    let mut views: BTreeMap<&'a str, Arc<ChurnView<'a>>> = BTreeMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     for (viewer, room) in roster {
         if !changing_rooms.contains(room) {
             let initial = initial_views.entry(*room).or_insert_with(|| {
                 let mut view = ChurnView::default();
                 for member in &members_by_room[room] {
-                    view.adopted
-                        .entry((*member).to_string())
-                        .or_default()
-                        .insert(1);
+                    view.adopted.entry(*member).or_default().insert(1);
                 }
                 Arc::new(view)
             });
-            views.insert(viewer.clone(), Arc::clone(initial));
+            views.insert(viewer.as_str(), Arc::clone(initial));
             continue;
         }
         let mut view = ChurnView::default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
         for member in &members_by_room[room] {
-            view.adopted
-                .entry((*member).to_string())
-                .or_default()
-                .insert(1);
+            view.adopted.entry(*member).or_default().insert(1);
         }
         let mut events: Vec<&crate::records::ChurnEvent> = records
             .churn
@@ -1040,7 +1035,10 @@ fn churn_views(
                     let Some(new_epoch) = epoch else {
                         continue;
                     };
-                    let Some(epochs) = view.adopted.get_mut(recipient) else {
+                    let Some((&member, _)) = room_of.get_key_value(recipient.as_str()) else {
+                        continue;
+                    };
+                    let Some(epochs) = view.adopted.get_mut(member) else {
                         continue;
                     };
                     for old in epochs
@@ -1049,9 +1047,7 @@ fn churn_views(
                         .copied()
                         .collect::<Vec<_>>()
                     {
-                        view.closed_at
-                            .entry((recipient.clone(), old))
-                            .or_insert(*at_us);
+                        view.closed_at.entry((member, old)).or_insert(*at_us);
                     }
                     epochs.insert(*new_epoch);
                 }
@@ -1061,28 +1057,26 @@ fn churn_views(
                     // floor the stream at its tail. Members it omits are not
                     // closed — see the function doc — they receive a
                     // derived floor over every adopted stream instead.
-                    let adopted_members: Vec<String> = view.adopted.keys().cloned().collect();
-                    for member in &adopted_members {
+                    let adopted_members: Vec<&str> = view.adopted.keys().copied().collect();
+                    for member in adopted_members {
                         match tails.get(member) {
                             Some(&(ref player_id, tail)) => {
                                 let Some(snap_epoch) = resolve(records, player_id, &mut unresolved)
                                 else {
                                     continue;
                                 };
-                                let epochs = view.adopted.entry(member.clone()).or_default();
+                                let epochs = view.adopted.entry(member).or_default();
                                 for old in epochs
                                     .iter()
                                     .filter(|old| **old != snap_epoch)
                                     .copied()
                                     .collect::<Vec<_>>()
                                 {
-                                    view.closed_at
-                                        .entry((member.clone(), old))
-                                        .or_insert(*at_us);
+                                    view.closed_at.entry((member, old)).or_insert(*at_us);
                                 }
                                 epochs.insert(snap_epoch);
                                 view.floors
-                                    .insert((member.clone(), snap_epoch), (tail, *at_us, true));
+                                    .insert((member, snap_epoch), (tail, *at_us, true));
                             }
                             None => {
                                 // Absent from the snapshot: floor every
@@ -1091,15 +1085,13 @@ fn churn_views(
                                 if let Some(epochs) = view.adopted.get(member).cloned() {
                                     for old in epochs {
                                         let completed = blocks
-                                            .get(&(member.as_str(), old))
+                                            .get(&(member, old))
                                             .map(|block| block.completed_by(*at_us))
                                             .unwrap_or(0);
                                         let completed =
                                             u64::try_from(completed).unwrap_or(u64::MAX);
-                                        view.floors.insert(
-                                            (member.clone(), old),
-                                            (completed, *at_us, false),
-                                        );
+                                        view.floors
+                                            .insert((member, old), (completed, *at_us, false));
                                     }
                                 }
                             }
@@ -1108,7 +1100,7 @@ fn churn_views(
                 }
             }
         }
-        views.insert(viewer.clone(), Arc::new(view));
+        views.insert(viewer.as_str(), Arc::new(view));
     }
     (views, unresolved)
 }
@@ -1508,7 +1500,7 @@ pub fn summarize(
                     None
                 } else {
                     let view = views.get(recipient).expect("roster peer has a churn view");
-                    let stream_key = (receipt.sender.to_string(), epoch);
+                    let stream_key = (receipt.sender.as_str(), epoch);
                     Some(ArrivalContract {
                         closed_after: view.closed_at.get(&stream_key).copied(),
                         floor: view.floors.get(&stream_key).copied(),
@@ -1790,7 +1782,7 @@ pub fn summarize(
                 // further is owed. Arrivals there are stale-epoch
                 // misroutes, caught by the arrival scan above.
                 if !adopted.is_some_and(|epochs| epochs.contains(epoch))
-                    || view.closed_at.contains_key(&(sender.to_string(), *epoch))
+                    || view.closed_at.contains_key(&(sender, *epoch))
                 {
                     continue;
                 }
@@ -1810,7 +1802,7 @@ pub fn summarize(
                 // past it.
                 let (owed_floor, _floor_from_us, _enforced) = view
                     .floors
-                    .get(&((*sender).to_string(), *epoch))
+                    .get(&(sender, *epoch))
                     .copied()
                     .unwrap_or((0, 0, false));
 
@@ -2832,11 +2824,8 @@ mod coverage_tests {
         assert!(Arc::ptr_eq(&mixed["other"], &mixed["last"]));
         assert!(!Arc::ptr_eq(&mixed["alice"], &mixed["βob"]));
         assert_eq!(mixed["other"], initial["other"]);
-        assert_eq!(
-            mixed["alice"].floors[&("βob".to_string(), 1)],
-            (5, 100, true)
-        );
-        assert_eq!(mixed["βob"].closed_at[&("alice".to_string(), 1)], 100);
+        assert_eq!(mixed["alice"].floors[&("βob", 1)], (5, 100, true));
+        assert_eq!(mixed["βob"].closed_at[&("alice", 1)], 100);
         assert_eq!(mixed["βob"].adopted["alice"], BTreeSet::from([1, 2]));
 
         records.registry.clear();
@@ -2845,6 +2834,38 @@ mod coverage_tests {
         let (empty, unresolved) = churn_views(&records, &[], &blocks);
         assert!(empty.is_empty());
         assert!(unresolved.is_empty());
+    }
+
+    // #775: reuse immutable roster spellings in every oracle epoch and floor map.
+    #[test]
+    fn churn_view_keys_borrow_roster_names() {
+        let roster = vec![("αlice".to_string(), 0), ("bob".to_string(), 0)];
+        let records = RunRecords {
+            churn: vec![crate::records::ChurnEvent {
+                recipient: "αlice".to_string(),
+                phase: ChurnPhase::Rejoined,
+                at_us: 100,
+                epoch: Some(2),
+                tails: BTreeMap::from([("bob".to_string(), ("bob-id".to_string(), 5))]),
+            }],
+            registry: BTreeMap::from([("bob-id".to_string(), ("bob".to_string(), 2))]),
+            ..RunRecords::default()
+        };
+        let blocks = BTreeMap::new();
+        let (views, unresolved) = churn_views(&records, &roster, &blocks);
+        assert!(unresolved.is_empty());
+        let sources: Vec<_> = roster.iter().map(|(name, _)| name.as_ptr()).collect();
+        for (viewer, view) in &views {
+            assert!(sources.contains(&viewer.as_ptr()), "viewer name was copied");
+            for name in view
+                .adopted
+                .keys()
+                .chain(view.closed_at.keys().map(|(name, _)| name))
+                .chain(view.floors.keys().map(|(name, _)| name))
+            {
+                assert!(sources.contains(&name.as_ptr()), "stream name was copied");
+            }
+        }
     }
 
     /// Isolate retained oracle views from event storage and summary serialization.
@@ -2864,9 +2885,22 @@ mod coverage_tests {
         let roster: Vec<_> = (0..rooms)
             .flat_map(|room| (0..players).map(move |player| (format!("r{room}p{player}"), room)))
             .collect();
+        let mut records = RunRecords::default();
+        if std::env::var_os("CAPACITY_VIEW_PROBE_CHURN").is_some() {
+            for (recipient, _) in &roster {
+                records.churn.push(crate::records::ChurnEvent {
+                    recipient: recipient.clone(),
+                    phase: ChurnPhase::Rejoined,
+                    at_us: 100,
+                    epoch: Some(2),
+                    tails: BTreeMap::new(),
+                });
+            }
+        }
+        let blocks = BTreeMap::new();
         let before = crate::diagnostics::resident_memory_bytes(std::process::id());
         let started = std::time::Instant::now();
-        let (views, unresolved) = churn_views(&RunRecords::default(), &roster, &BTreeMap::new());
+        let (views, unresolved) = churn_views(&records, &roster, &blocks);
         assert!(unresolved.is_empty());
         assert_eq!(views.len(), roster.len());
         assert!(views

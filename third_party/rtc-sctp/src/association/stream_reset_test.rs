@@ -1628,3 +1628,226 @@ fn terminal_association_ignores_old_handshake_but_fresh_server_connects() -> Res
     }
     Ok(())
 }
+
+// Issue #1143: gameplay teardown must use SHUTDOWN's cumulative acknowledgment.
+#[test]
+fn shutdown_acknowledges_received_gameplay_without_a_final_sack() -> Result<()> {
+    for (wrap, simultaneous) in [(false, false), (false, true), (true, false), (true, true)] {
+        for ppi in [
+            PayloadProtocolIdentifier::Binary,
+            PayloadProtocolIdentifier::String,
+        ] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            if wrap {
+                local.my_next_tsn = u32::MAX;
+                local.cumulative_tsn_ack_point = u32::MAX - 1;
+                local.advanced_peer_tsn_ack_point = u32::MAX - 1;
+                remote.peer_last_tsn = u32::MAX - 1;
+            }
+            for text in [b"one".as_slice(), b"two".as_slice()] {
+                local
+                    .stream(1)?
+                    .write_sctp(now, &Bytes::copy_from_slice(text), ppi)?;
+            }
+            let data = transmitted_data(&local.gather_outbound(now).0);
+            assert_eq!(data.len(), 2);
+            for chunk in &data {
+                remote.handle_data(chunk)?;
+            }
+            // Drop every SACK. SHUTDOWN alone acknowledges the received DATA.
+            remote.gather_outbound(now);
+            remote.shutdown()?;
+            let shutdown = remote
+                .gather_outbound(now)
+                .0
+                .iter()
+                .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                .find_map(|c| c.as_any().downcast_ref::<ChunkShutdown>().cloned())
+                .expect("remote emits SHUTDOWN");
+            assert_eq!(
+                shutdown.cumulative_tsn_ack, data[1].tsn,
+                "SHUTDOWN must report peer DATA, wrap={wrap}, ppi={ppi:?}"
+            );
+            if simultaneous {
+                local.shutdown()?;
+            }
+            let shutdown: Box<dyn Chunk> = Box::new(shutdown);
+            local.handle_chunk(&local.create_packet(vec![]), &shutdown, now)?;
+            assert_eq!(local.state(), AssociationState::ShutdownAckSent);
+            assert!(local.inflight_queue.is_empty());
+            assert!(local.timers.get(Timer::T3RTX).is_none());
+            assert_eq!(local.stream(1)?.buffered_amount()?, 0);
+            let released: usize = std::iter::from_fn(|| local.poll())
+                .filter_map(|event| {
+                    if let Event::Stream(StreamEvent::BufferedAmountReleased {
+                        data_channel_bytes,
+                        ..
+                    }) = event
+                    {
+                        Some(data_channel_bytes)
+                    } else {
+                        None
+                    }
+                })
+                .sum();
+            assert_eq!(released, 6);
+            // Lose the first SHUTDOWN ACK. A repeated peer SHUTDOWN replays it
+            // without another DATA release or any DATA retransmission.
+            let lost_ack = local.gather_outbound(now).0;
+            assert!(
+                lost_ack
+                    .iter()
+                    .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                    .any(|c| c.as_any().is::<ChunkShutdownAck>())
+            );
+            let retry_at = remote
+                .timers
+                .get(Timer::T2Shutdown)
+                .expect("peer shutdown retry stays armed");
+            remote.handle_timeout(retry_at);
+            let retry = remote
+                .gather_outbound(retry_at)
+                .0
+                .iter()
+                .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                .find_map(|c| c.as_any().downcast_ref::<ChunkShutdown>().cloned())
+                .expect("lost SHUTDOWN ACK causes another SHUTDOWN");
+            assert_eq!(retry.cumulative_tsn_ack, data[1].tsn);
+            let retry: Box<dyn Chunk> = Box::new(retry);
+            local.handle_chunk(&local.create_packet(vec![]), &retry, retry_at)?;
+            assert!(!std::iter::from_fn(|| local.poll()).any(|event| matches!(
+                event,
+                Event::Stream(StreamEvent::BufferedAmountReleased { .. })
+            )));
+            let ack = local
+                .gather_outbound(retry_at)
+                .0
+                .iter()
+                .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                .find_map(|c| c.as_any().downcast_ref::<ChunkShutdownAck>().cloned())
+                .expect("local emits SHUTDOWN ACK without a retry");
+            remote.handle_shutdown_ack(&ack)?;
+            assert!(
+                !remote.gather_outbound(retry_at).1,
+                "remote emits SHUTDOWN COMPLETE"
+            );
+            local.handle_shutdown_complete(&ChunkShutdownComplete {})?;
+            assert_eq!(local.state(), AssociationState::Closed);
+        }
+    }
+    Ok(())
+}
+
+// Issue #1143: cumulative shutdown credit cannot acknowledge gaps or unsent DATA.
+#[test]
+fn shutdown_preserves_unacknowledged_and_unsent_gameplay() -> Result<()> {
+    for pending in [false, true] {
+        let (mut local, _) = reset_pair();
+        let now = Instant::now();
+        let ppi = PayloadProtocolIdentifier::Binary;
+        local.cwnd = 2;
+        for _ in 0..if pending { 3 } else { 2 } {
+            local
+                .stream(1)?
+                .write_sctp(now, &Bytes::from_static(b"x"), ppi)?;
+        }
+        let data = transmitted_data(&local.gather_outbound(now).0);
+        assert_eq!(data.len(), 2);
+        let rwnd = local.rwnd;
+        for (index, chunk) in data.iter().enumerate() {
+            local.handle_shutdown(
+                &ChunkShutdown {
+                    cumulative_tsn_ack: chunk.tsn,
+                },
+                now,
+            )?;
+            assert_eq!(local.rwnd, rwnd, "SHUTDOWN has no window evidence");
+            assert_eq!(local.pending_queue.len(), usize::from(pending));
+            assert_eq!(local.inflight_queue.len(), 1 - index);
+            assert_eq!(
+                local.stream(1)?.buffered_amount()?,
+                1 - index + usize::from(pending)
+            );
+            assert_eq!(
+                local.state(),
+                if index == 1 && !pending {
+                    AssociationState::ShutdownAckSent
+                } else {
+                    AssociationState::ShutdownReceived
+                }
+            );
+            if index == 0 {
+                assert!(local.timers.get(Timer::T3RTX).is_some());
+                assert!(
+                    !local.inflight_queue.get(data[1].tsn).unwrap().acknowledged,
+                    "cumulative credit must not become a selective ACK"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// Issue #1143: SHUTDOWN must retire the same partial-reliability ACK state as SACK.
+#[test]
+fn shutdown_acknowledgment_retires_forward_tsn_and_reset_fence() -> Result<()> {
+    let (mut local, _) = reset_pair();
+    let now = Instant::now();
+    local
+        .stream(1)?
+        .set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+    local.stream(1)?.write_sctp(
+        now,
+        &Bytes::from_static(b"movement"),
+        PayloadProtocolIdentifier::Binary,
+    )?;
+    local
+        .open_stream(2, PayloadProtocolIdentifier::Binary)?
+        .write_sctp(
+            now,
+            &Bytes::from_static(b"command"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+    let data = transmitted_data(&local.gather_outbound(now).0);
+    assert_eq!(data.len(), 2);
+    let tsn = data[0].tsn;
+    let cumulative_tsn_ack = data[1].tsn;
+    // A previously retired stream retains its TSN fence until cumulative ACK.
+    local.retired_reset_tsns.insert(9, tsn);
+    let retry_at = local.timers.get(Timer::T3RTX).unwrap();
+    local.handle_timeout(retry_at);
+    local.gather_outbound(retry_at);
+    assert_eq!(local.advanced_peer_tsn_ack_point, tsn);
+    assert_eq!(local.fwd_tsn_stream_map.get(&1), Some(&0));
+    assert_eq!(local.stream(1)?.buffered_amount()?, 0);
+    while local.poll().is_some() {}
+
+    local.handle_shutdown(&ChunkShutdown { cumulative_tsn_ack }, retry_at)?;
+    assert_eq!(local.cumulative_tsn_ack_point, cumulative_tsn_ack);
+    assert_eq!(local.advanced_peer_tsn_ack_point, cumulative_tsn_ack);
+    assert!(local.retired_reset_tsns.is_empty());
+    assert!(local.fwd_tsn_stream_map.is_empty());
+    assert!(local.inflight_queue.is_empty());
+    assert!(local.timers.get(Timer::T3RTX).is_none());
+    let released: Vec<_> = std::iter::from_fn(|| local.poll())
+        .filter_map(|event| {
+            if let Event::Stream(StreamEvent::BufferedAmountReleased {
+                id,
+                data_channel_bytes,
+                ..
+            }) = event
+            {
+                Some((id, data_channel_bytes))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        released,
+        vec![(2, 7)],
+        "only the reliable command releases new bytes"
+    );
+    Ok(())
+}

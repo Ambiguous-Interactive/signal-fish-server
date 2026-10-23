@@ -5062,3 +5062,45 @@ Raw paired logs and the launcher remain in local `progress/session-513/`.
 This removes a startup allocation toward #775 and #636. It does not establish
 full-run RSS bounds, bound unexpected event retention, or identify a past
 Linux or macOS generator stall. Those issue requirements remain open.
+
+### Borrowed churn-view names — session 514, #775 and #636
+
+The oracle now borrows roster names in its recipient, adopted-epoch,
+closed-epoch, and snapshot-floor maps. It no longer copies each spelling into
+these internal maps or formats temporary names for stream lookups. Views stay
+within summarization, while the immutable roster remains alive. Summary names
+still own their storage. Raw records, arrival order, and artifact JSON stay the
+same.
+
+A synthetic debug-build probe uses 20 rooms with 64 peers each. Every peer has
+one recorded rejoin at the same instant with an empty snapshot. It constructs
+1,280 separate recipient views, including closed epochs and derived floors.
+The unchanged default probe still measures rooms without churn. Three fresh
+processes per path alternate before/after using fixed executables. The final
+six processes ran from 00:33:08 to 00:33:19 UTC on 23 October 2026. Process lists
+before each run contain no Rust compiler or build process. An earlier cohort
+that overlapped compilation was excluded.
+
+| Metric | Owned names median | Borrowed names median |
+| --- | ---: | ---: |
+| Retained process RSS | 44,789,760 bytes | 33,722,368 bytes |
+| Peak process RSS | 43,672 KiB | 33,148 KiB |
+
+Retained process RSS falls by 24.7% in this fixture. These numbers include the
+process, roster, and raw churn baseline. They measure synthetic oracle views,
+not whole-run memory or server capacity. They do not bound unexpected event
+retention or qualify the full ten-minute workload. Those requirements remain
+open in #775.
+
+The new storage regression failed before the repair because the viewer name
+was copied. It now checks roster-backed keys, Unicode names, registered
+snapshot floors, and closed epochs. All 28 oracle controls pass, including
+unknown identities, tied and shuffled churn, duplicate and arrival-order
+violations, and exact artifact replay.
+
+Reproduce with the capacity-runner test executable and `--ignored --exact
+oracle::coverage_tests::generator_churn_view_memory_profile --nocapture`.
+Set `CAPACITY_VIEW_PROBE_ROOMS=20`, `CAPACITY_VIEW_PROBE_PLAYERS=64`, and
+`CAPACITY_VIEW_PROBE_CHURN=1`. Fixed executable hashes, source copies, paired
+logs, child `wait4` peak RSS, and excluded trials remain local in
+`progress/session-514-capacity-views/`.

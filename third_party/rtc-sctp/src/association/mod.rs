@@ -18,7 +18,7 @@ use crate::chunk::{
     chunk_payload_data::ChunkPayloadData,
     chunk_payload_data::{MessageId, MessageReliability, PayloadProtocolIdentifier},
     chunk_reconfig::ChunkReconfig,
-    chunk_selective_ack::ChunkSelectiveAck,
+    chunk_selective_ack::{ChunkSelectiveAck, GapAckBlock},
     chunk_shutdown::ChunkShutdown,
     chunk_shutdown_ack::ChunkShutdownAck,
     chunk_shutdown_complete::ChunkShutdownComplete,
@@ -1141,7 +1141,7 @@ impl Association {
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkForwardTsn>() {
             self.handle_forward_tsn(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdown>() {
-            self.handle_shutdown(c)?
+            self.handle_shutdown(c, now)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownAck>() {
             self.handle_shutdown_ack(c)?
         } else if let Some(c) = chunk_any.downcast_ref::<ChunkShutdownComplete>() {
@@ -1620,7 +1620,7 @@ impl Association {
 
         // Process selective ack
         let (bytes_acked_per_stream, total_bytes_acked, htna) =
-            self.process_selective_ack(d, now)?;
+            self.process_acknowledgments(d.cumulative_tsn_ack, &d.gap_ack_blocks, now)?;
 
         let mut cum_tsn_ack_point_advanced = false;
         if sna32lt(self.cumulative_tsn_ack_point, d.cumulative_tsn_ack) {
@@ -1653,6 +1653,14 @@ impl Association {
 
         self.process_fast_retransmission(d.cumulative_tsn_ack, htna, cum_tsn_ack_point_advanced)?;
 
+        self.process_forward_tsn_ack();
+
+        self.postprocess_sack(state, cum_tsn_ack_point_advanced, now);
+
+        Ok(vec![])
+    }
+
+    fn process_forward_tsn_ack(&mut self) {
         if self.use_forward_tsn {
             self.retired_reset_tsns
                 .retain(|_, boundary| sna32gt(*boundary, self.cumulative_tsn_ack_point));
@@ -1670,10 +1678,6 @@ impl Association {
             self.advance_peer_ack_point();
             self.awake_write_loop();
         }
-
-        self.postprocess_sack(state, cum_tsn_ack_point_advanced, now);
-
-        Ok(vec![])
     }
 
     fn handle_reconfig(&mut self, c: &ChunkReconfig, now: Instant) -> Result<Vec<Packet>> {
@@ -1820,25 +1824,45 @@ impl Association {
         self.handle_peer_last_tsn_and_acknowledgement(false)
     }
 
-    fn handle_shutdown(&mut self, _: &ChunkShutdown) -> Result<Vec<Packet>> {
+    fn handle_shutdown(&mut self, c: &ChunkShutdown, now: Instant) -> Result<Vec<Packet>> {
         let state = self.state();
+        if !matches!(
+            state,
+            AssociationState::Established
+                | AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+                | AssociationState::ShutdownSent
+                | AssociationState::ShutdownAckSent
+        ) {
+            return Ok(vec![]);
+        }
 
-        if state == AssociationState::Established {
-            if !self.inflight_queue.is_empty() {
-                self.set_state(AssociationState::ShutdownReceived);
-            } else {
-                // No more outstanding, send shutdown ack.
-                self.will_send_shutdown_ack = true;
-                self.set_state(AssociationState::ShutdownAckSent);
+        /*
+         * RFC 9260 section 9.2: SHUTDOWN acknowledges received DATA just like
+         * a cumulative SACK. It carries neither gap blocks nor a receive window.
+         */
+        if sna32gt(c.cumulative_tsn_ack, self.cumulative_tsn_ack_point) {
+            let (released, total_bytes_acked, _) =
+                self.process_acknowledgments(c.cumulative_tsn_ack, &[], now)?;
+            self.cumulative_tsn_ack_point = c.cumulative_tsn_ack;
+            self.on_cumulative_tsn_ack_point_advanced(total_bytes_acked, now);
+            self.release_stream_buffers(&released);
+            self.process_forward_tsn_ack();
+        }
 
-                self.awake_write_loop();
-            }
-        } else if state == AssociationState::ShutdownSent {
-            // self.cumulative_tsn_ack_point = c.cumulative_tsn_ack
-
+        if matches!(
+            state,
+            AssociationState::Established
+                | AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+        ) {
+            self.set_state(AssociationState::ShutdownReceived);
+            self.postprocess_sack(AssociationState::ShutdownReceived, true, now);
+        } else {
+            // Simultaneous or repeated SHUTDOWN must send (or replay) our ACK.
+            self.will_send_shutdown = false;
             self.will_send_shutdown_ack = true;
             self.set_state(AssociationState::ShutdownAckSent);
-
             self.awake_write_loop();
         }
 
@@ -2138,9 +2162,10 @@ impl Association {
         }
     }
 
-    fn process_selective_ack(
+    fn process_acknowledgments(
         &mut self,
-        d: &ChunkSelectiveAck,
+        cumulative_tsn_ack: u32,
+        gap_ack_blocks: &[GapAckBlock],
         now: Instant,
     ) -> Result<(FxHashMap<u16, ReleasedBytes>, i64, u32)> {
         let mut bytes_acked_per_stream: FxHashMap<u16, ReleasedBytes> = FxHashMap::default();
@@ -2158,8 +2183,8 @@ impl Association {
         // We add 1 because the "currentAckPoint" has already been popped from the inflight queue
         // For the first SACK we take care of this by setting the ackpoint to cumAck - 1
         let mut i = self.cumulative_tsn_ack_point.wrapping_add(1);
-        //log::debug!("[{}] i={} d={}", self.name, i, d.cumulative_tsn_ack);
-        while sna32lte(i, d.cumulative_tsn_ack) {
+        //log::debug!("[{}] i={} d={}", self.name, i, cumulative_tsn_ack);
+        while sna32lte(i, cumulative_tsn_ack) {
             if let Some(mut c) = self.inflight_queue.pop(i) {
                 if c.acknowledge() {
                     newly_acked_data |= c.nsent > 0;
@@ -2213,12 +2238,12 @@ impl Association {
             i = i.wrapping_add(1);
         }
 
-        let mut htna = d.cumulative_tsn_ack;
+        let mut htna = cumulative_tsn_ack;
 
         // Record peer acknowledgments independently of local payload release.
-        for g in &d.gap_ack_blocks {
+        for g in gap_ack_blocks {
             for i in g.start..=g.end {
-                let tsn = d.cumulative_tsn_ack.wrapping_add(i as u32);
+                let tsn = cumulative_tsn_ack.wrapping_add(i as u32);
 
                 let newly_acknowledged = self.inflight_queue.acknowledge(tsn);
                 let n_bytes_acked = if newly_acknowledged {
@@ -2275,7 +2300,7 @@ impl Association {
             self.timers.reset_retrans(Timer::T3RTX);
         }
         if earliest_outstanding.is_some_and(|tsn| {
-            sna32lte(tsn, d.cumulative_tsn_ack)
+            sna32lte(tsn, cumulative_tsn_ack)
                 || self.inflight_queue.get(tsn).is_some_and(|c| c.acknowledged)
         }) {
             // Postprocessing restarts T3 with the current RTO if DATA/FORWARD
@@ -2435,12 +2460,12 @@ impl Association {
             trace!("[{}] T3-rtx timer start (pt3)", self.side);
             self.timers
                 .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
-        } else if state == AssociationState::ShutdownPending {
+        } else if state == AssociationState::ShutdownPending && self.pending_queue.is_empty() {
             // No more outstanding, send shutdown.
             should_awake_write_loop = true;
             self.will_send_shutdown = true;
             self.set_state(AssociationState::ShutdownSent);
-        } else if state == AssociationState::ShutdownReceived {
+        } else if state == AssociationState::ShutdownReceived && self.pending_queue.is_empty() {
             // No more outstanding, send shutdown ack.
             should_awake_write_loop = true;
             self.will_send_shutdown_ack = true;
@@ -2948,7 +2973,7 @@ impl Association {
             self.will_send_shutdown = false;
 
             let shutdown = ChunkShutdown {
-                cumulative_tsn_ack: self.cumulative_tsn_ack_point,
+                cumulative_tsn_ack: self.peer_last_tsn,
             };
 
             if let Ok(raw) = self.create_packet(vec![Box::new(shutdown)]).marshal() {

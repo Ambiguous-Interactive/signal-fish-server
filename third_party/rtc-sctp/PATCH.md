@@ -101,3 +101,15 @@ requires blocked binary/text/writable callers to return Closed, and then
 exchanges gameplay on fresh peers. See
 [#1140](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1140).
 Replacement qualification in #912 must retain these recovery controls.
+
+SHUTDOWN now reports the cumulative TSN of received peer DATA. Its implicit
+acknowledgment releases only the acknowledged outgoing DATA, using the same
+byte, timer, and forward-TSN accounting as SACK. It does not supply selective
+acknowledgments or a receive-window update. Simultaneous and repeated shutdown
+replay the acknowledgment without releasing bytes twice. Pending unsent DATA
+prevents a premature SHUTDOWN ACK. Paired-wire controls lose the final SACK
+and first SHUTDOWN ACK for binary and text gameplay, including TSN wrap.
+See [#1143](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1143).
+The separate graceful pending-DATA and endpoint-drain work remains in
+[#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+Replacement qualification in #912 must retain these acknowledgment controls.

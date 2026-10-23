@@ -8,13 +8,30 @@ function assert(condition: boolean, message: string): void {
 // Regression #1011: a stalled peer must not hold relay or another peer's SDP/ICE.
 const ordinaryOutcomes = ['resolve', 'reject', 'pending', 'backlog'] as const;
 // Regression #1087: failed initial offers must resolve availability before their deadline.
-const failedOutcomes = ['pc-failed', 'pc-closed', 'offer-rejected', 'local-rejected'] as const;
+// Regression #1144: rejected remote SDP and answer generation also resolve availability.
+const failedOutcomes = [
+  'pc-failed',
+  'pc-closed',
+  'offer-rejected',
+  'local-rejected',
+  'remote-offer-rejected',
+  'answer-rejected',
+  'local-answer-rejected',
+  'remote-answer-rejected',
+  'candidate-rejected',
+] as const;
 for (const { oldOutcome, healthyConnected } of [
   ...ordinaryOutcomes.map((oldOutcome) => ({ oldOutcome, healthyConnected: false })),
   ...failedOutcomes.flatMap((oldOutcome) =>
     [false, true].map((healthyConnected) => ({ oldOutcome, healthyConnected })),
   ),
 ]) {
+  const responder = [
+    'remote-offer-rejected',
+    'answer-rejected',
+    'local-answer-rejected',
+  ].includes(oldOutcome);
+  const signalFailure = responder || oldOutcome === 'remote-answer-rejected';
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -57,7 +74,7 @@ for (const { oldOutcome, healthyConnected } of [
       connections.push(this);
     }
     createDataChannel(label: string) {
-      const channel = { label, readyState: 'connecting', onopen: null };
+      const channel = { label, readyState: 'connecting', onopen: null, send() {} };
       this.channels.push(channel);
       return channel;
     }
@@ -70,16 +87,33 @@ for (const { oldOutcome, healthyConnected } of [
       if (this.index === 2 && oldOutcome === 'resolve') await retryHeld;
       return { type: 'offer', sdp: `offer-${this.index}` };
     }
-    async setLocalDescription() {
+    async createAnswer() {
+      calls.push(`${this.index}:answer`);
+      if (this.index === 0 && oldOutcome === 'answer-rejected')
+        throw new Error('answer failed');
+      return { type: 'answer', sdp: `answer-${this.index}` };
+    }
+    async setLocalDescription(description: { type: string }) {
       calls.push(`${this.index}:local`);
-      if (this.index === 0 && oldOutcome === 'local-rejected')
+      if (
+        this.index === 0 &&
+        (oldOutcome === 'local-rejected' ||
+          (oldOutcome === 'local-answer-rejected' && description.type === 'answer'))
+      )
         throw new Error('local description failed');
     }
     async setRemoteDescription() {
       calls.push(`${this.index}:remote`);
+      if (this.index === 0 && signalFailure) {
+        await held;
+        if (oldOutcome === 'remote-offer-rejected' || oldOutcome === 'remote-answer-rejected')
+          throw new Error('remote description failed');
+      }
     }
     async addIceCandidate() {
       calls.push(`${this.index}:candidate`);
+      if (this.index === 0 && oldOutcome === 'candidate-rejected')
+        throw new Error('candidate failed');
     }
     close() {
       this.closed = true;
@@ -106,7 +140,10 @@ for (const { oldOutcome, healthyConnected } of [
         transport: 'webrtc',
         fallback: 'relay',
         ice_servers: [],
-        peers: peers.map((player_id) => ({ player_id, initiate: true })),
+        peers: peers.map((player_id) => ({
+          player_id,
+          initiate: player_id !== slow || !responder,
+        })),
       });
     }
     signal(from: string, signal: Record<string, unknown>) {
@@ -168,7 +205,7 @@ for (const { oldOutcome, healthyConnected } of [
       playerName: 'test',
       appId: 'test',
       platform: 'test',
-      exchange: false,
+      exchange: signalFailure,
       relayPayload: null,
       crippleIce: false,
       p2pTimeoutSecs: 1,
@@ -209,7 +246,7 @@ for (const { oldOutcome, healthyConnected } of [
       );
       continue;
     }
-    socket.signal(slow, { Answer: 'slow-answer' });
+    socket.signal(slow, responder ? { Offer: 'slow-offer' } : { Answer: 'slow-answer' });
     socket.signal(slow, { IceCandidate: 'slow-candidate' });
     socket.signal(healthy, { Answer: 'healthy-answer' });
     socket.signal(healthy, { IceCandidate: 'healthy-candidate' });
@@ -221,7 +258,7 @@ for (const { oldOutcome, healthyConnected } of [
     });
     await turn();
     assert(
-      !calls.includes('0:remote') && !calls.includes('0:candidate'),
+      (responder || !calls.includes('0:remote')) && !calls.includes('0:candidate'),
       'same-peer signals wait for the held offer',
     );
     assert(
@@ -241,7 +278,9 @@ for (const { oldOutcome, healthyConnected } of [
       oldOutcome === 'pc-failed' ||
       oldOutcome === 'pc-closed' ||
       oldOutcome === 'offer-rejected' ||
-      oldOutcome === 'local-rejected'
+      oldOutcome === 'local-rejected' ||
+      signalFailure ||
+      oldOutcome === 'candidate-rejected'
     ) {
       // The PC state changes before its browser event. Resuming the offer
       // observes the loss, but engine cleanup must not hide relay fallback.
@@ -257,6 +296,41 @@ for (const { oldOutcome, healthyConnected } of [
       if (oldOutcome.startsWith('pc-')) failed.connectionState = oldOutcome.slice(3);
       resolveOld();
       await turn();
+      if (oldOutcome === 'candidate-rejected') {
+        assert(
+          calls.filter((call) => call === '0:candidate').length === 1,
+          'the candidate reached the WebRTC stack',
+        );
+        assert(
+          events.some(
+            (event) =>
+              event['event'] === 'error' &&
+              String(event['message']).includes('candidate failed'),
+          ),
+          'the rejected candidate is reported',
+        );
+        assert(
+          !failed.closed && !connections[1]!.closed,
+          'candidate rejection keeps both peer links',
+        );
+        assert(
+          !events.some((event) => event['event'] === 'transport_status_sent'),
+          'candidate rejection does not force fallback',
+        );
+        failed.connectionState = 'connected';
+        for (const channel of failed.channels) {
+          channel.readyState = 'open';
+          channel.onopen?.();
+        }
+        await turn();
+        assert(
+          events.some(
+            (event) => event['event'] === 'p2p_pair_connected' && event['peer'] === slow,
+          ),
+          'the original link can connect after a candidate rejection',
+        );
+        continue;
+      }
       assert(now === 100, `${oldOutcome}: no P2P deadline elapsed`);
       assert(
         events.filter(
@@ -283,7 +357,10 @@ for (const { oldOutcome, healthyConnected } of [
       await turn();
       assert(connections.length === 3, 'retry starts a fresh link within the original window');
       socket.signal(slow, {
-        RetrySignal: { attempt: 1, signal: { Answer: 'retry-answer' } },
+        RetrySignal: {
+          attempt: 1,
+          signal: responder ? { Offer: 'retry-offer' } : { Answer: 'retry-answer' },
+        },
       });
       socket.signal(slow, {
         RetrySignal: { attempt: 1, signal: { IceCandidate: 'retry-candidate' } },
@@ -293,16 +370,49 @@ for (const { oldOutcome, healthyConnected } of [
         calls.includes('2:local') &&
           calls.includes('2:remote') &&
           calls.includes('2:candidate') &&
-          !calls.includes('0:remote') &&
+          (!calls.includes('0:remote') || signalFailure) &&
           !calls.includes('0:candidate'),
         'fresh retry negotiates without consuming failed-link signals',
       );
+      if (responder) {
+        const retry = connections[2]!;
+        for (const label of ['reliable', 'unreliable']) {
+          const channel = {
+            label,
+            readyState: 'connecting',
+            ordered: label === 'reliable',
+            maxRetransmits: label === 'reliable' ? null : 0,
+            maxPacketLifeTime: null,
+            onopen: null,
+            send() {},
+          };
+          retry.channels.push(channel);
+          (retry as unknown as { ondatachannel: (event: unknown) => void }).ondatachannel({
+            channel,
+          });
+        }
+      }
       connections[2]!.connectionState = 'connected';
       for (const channel of connections[2]!.channels) {
         channel.readyState = 'open';
         channel.onopen?.();
       }
       await turn();
+      if (signalFailure) {
+        for (const channel of connections[2]!.channels) {
+          (channel as unknown as { onmessage: (event: { data: string }) => void }).onmessage({
+            data: JSON.stringify({ from: slow, channel: channel.label, seq: 0 }),
+          });
+        }
+        await turn();
+        for (const eventName of ['channel_message_sent', 'channel_message']) {
+          assert(
+            events.filter((event) => event['event'] === eventName && event['peer'] === slow)
+              .length === 2,
+            `${oldOutcome}: fresh retry restores both gameplay labels (${eventName})`,
+          );
+        }
+      }
       assert(
         events.filter(
           (event) => event['event'] === 'p2p_pair_connected' && event['peer'] === slow,
