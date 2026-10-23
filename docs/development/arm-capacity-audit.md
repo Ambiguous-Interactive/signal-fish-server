@@ -5305,7 +5305,6 @@ The relay allocation reduction does not bound complete default-budget process
 memory, qualify the original long live workload, explain the generator stalls,
 or establish server capacity. Those requirements remain open in #775.
 
-
 ### Bounded batched relay queue scans (#1155)
 
 The receiver previously counted the entire current-generation data phase on
@@ -5354,7 +5353,6 @@ The [issue](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1
 retains the exact portable probe, dependency lockfile, commands, registration,
 and all raw trials. Both relay allocation benchmark targets also pass.
 
-
 ### Reusable browser receive sizing (#1157)
 
 The browser reference client now measures normalized UTF-8 into reusable
@@ -5366,7 +5364,7 @@ copies bytes; decoded strings and small result objects still allocate.
 
 The fixed-bundle experiment runs the actual Engine receive callback in Chromium
 156.0.8078.4 on shared ARM64 Linux. Physical channels are fake. Each cohort uses
-three alternating baseline/candidate pairs, 2,000 warmup receipts, and 5,000
+three baseline-first pairs, 2,000 warmup receipts, and 5,000
 measured receipts. Separate allocation runs use 1,000 receipts. Cold controls
 use one receipt. Local builds and tests pause during capture. Every callback,
 normalized byte charge, and checksum matches. Median times are milliseconds:
@@ -5388,7 +5386,8 @@ At 1,000 maximum-size receipts, observed encoded-payload allocation falls from
 65,536,000 transient bytes to one 65,536-byte retained scratch buffer. This
 counts sizing storage only. It does not measure total heap, network throughput,
 or end-to-end gameplay latency. Single cold-call timing is too coarse for a
-latency claim. A JavaScript scalar-count alternative was slower and a fixed
+latency claim. Fixed baseline-first execution can introduce order bias.
+A JavaScript scalar-count alternative was slower and a fixed
 64 KiB cold reservation was rejected before the final registered experiment.
 
 The baseline bundle SHA-256 is
