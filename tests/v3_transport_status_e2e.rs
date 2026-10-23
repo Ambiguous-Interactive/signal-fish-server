@@ -59,7 +59,8 @@ use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{
-    await_ready_count, expect_finalize_plan, ready, send, start_game, SERVER_MESSAGE_TIMEOUT,
+    await_ready_count, expect_finalize_plan, expect_only_lobby_updates_within, ready, send,
+    start_game, SERVER_MESSAGE_TIMEOUT,
 };
 use websocket_test_helpers::{
     expect_no_server_message_within, maybe_next_matching_server_message_within,
@@ -389,6 +390,54 @@ fn forbid_v3_leakage(message: &ServerMessage, who: &str) {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn legacy_lobby_updates_preserve_the_observation_deadline() {
+    let mut ws = Box::pin(futures_util::stream::unfold(0, |count| async move {
+        if count == 3 {
+            std::future::pending().await
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let message = ServerMessage::LobbyStateChanged {
+                lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
+                ready_players: vec![],
+                all_ready: false,
+            };
+            Some((
+                Ok(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::to_string(&message).unwrap().into(),
+                )),
+                count + 1,
+            ))
+        }
+    }));
+    let started = tokio::time::Instant::now();
+    expect_only_lobby_updates_within(&mut ws, SILENCE_WINDOW, "legacy lobby updates").await;
+    assert_eq!(started.elapsed(), SILENCE_WINDOW);
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "PeerTransportStatus")]
+async fn legacy_lobby_updates_do_not_hide_transport_status() {
+    let frames = [
+        ServerMessage::LobbyStateChanged {
+            lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
+            ready_players: vec![],
+            all_ready: false,
+        },
+        ServerMessage::PeerTransportStatus {
+            peer_id: PlayerId::from_u128(1),
+            transport: Transport::WebRtc,
+            connected: true,
+        },
+    ];
+    let mut ws = futures_util::stream::iter(frames.map(|message| {
+        Ok(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&message).unwrap().into(),
+        ))
+    }));
+    expect_only_lobby_updates_within(&mut ws, SILENCE_WINDOW, "legacy forbidden status").await;
+}
+
 /// `next_matching_server_message_within`, with every read message checked
 /// against the v2-only variant set first (for pure-v2 clients).
 async fn next_matching_v2_only<T>(
@@ -404,9 +453,8 @@ async fn next_matching_v2_only<T>(
     .await
 }
 
-/// Drive the room-full v2 join and drain the lobby transition so a following
-/// silence window is a strict assertion about the fan-out alone.
-async fn v2_join_and_settle(
+/// Wait for the v2 join response; lobby publication can still follow it.
+async fn v2_join_room(
     ws: &mut WsStream,
     game: &str,
     room_code: String,
@@ -467,11 +515,7 @@ async fn v2_transport_status_report_is_ignored() {
 
     let mut legacy = connect(addr).await;
     authenticate_v2(&mut legacy).await;
-    let legacy_id = v2_join_and_settle(&mut legacy, game, room_code, "Legacy", 3, legacy_who).await;
-    // The room entered Lobby EXACTLY ONCE, on the creator (PeerA) joining; the
-    // legacy member is a subsequent joiner, so its RoomJoined already reports the
-    // Lobby state and NO LobbyStateChanged is broadcast on its join — there is
-    // nothing further to drain for the v2 member.
+    let legacy_id = v2_join_room(&mut legacy, game, room_code, "Legacy", 3, legacy_who).await;
 
     // Drain the v3 observers' join-phase backlog (they see the v2 member join
     // last) so the silence windows below are strict assertions about the report.
@@ -1107,11 +1151,7 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
 
     let mut legacy = connect(addr).await;
     authenticate_v2(&mut legacy).await;
-    v2_join_and_settle(&mut legacy, game, room_code, "Legacy", 3, legacy_who).await;
-    // The room entered Lobby EXACTLY ONCE, on the creator (Reporter) joining; the
-    // legacy member is a subsequent joiner, so its RoomJoined already reports the
-    // Lobby state and NO LobbyStateChanged is broadcast on its join — there is
-    // nothing further to drain for the v2 member.
+    v2_join_room(&mut legacy, game, room_code, "Legacy", 3, legacy_who).await;
 
     report_transport_status(&mut reporter, Transport::WebRtc, true).await;
 
@@ -1125,9 +1165,9 @@ async fn peer_transport_status_v3_gated_not_capability_gated() {
     )
     .await;
 
-    // Half 2: the v2 member hears NOTHING (strict window, every frame checked
-    // against the v2-only variant set) and stays functional.
-    expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 member after fan-out").await;
+    // Half 2: a delayed lobby update is valid v2 traffic. Every v3-only frame
+    // still fails within the original fixed observation window.
+    expect_only_lobby_updates_within(&mut legacy, SILENCE_WINDOW, "v2 member after fan-out").await;
     send(&mut legacy, &ClientMessage::Ping).await;
     next_matching_v2_only(&mut legacy, "v2 Pong", legacy_who, |message| {
         matches!(message, ServerMessage::Pong).then_some(())

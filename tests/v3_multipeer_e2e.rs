@@ -59,8 +59,8 @@ use test_helpers::{test_protocol_config, test_server_config, RunningTestServer};
 use tokio_tungstenite::connect_async;
 use v3_conformance_helpers::{
     assert_full_mesh_glare_matrix, await_ready_count, expect_finalize_plan,
-    expect_session_plan_strict, expect_signal, ordered_pairs, ready, relay_one_signal, send,
-    start_game, SERVER_MESSAGE_TIMEOUT,
+    expect_only_lobby_updates_within, expect_session_plan_strict, expect_signal, ordered_pairs,
+    ready, relay_one_signal, send, start_game, SERVER_MESSAGE_TIMEOUT,
 };
 use websocket_test_helpers::{
     expect_no_server_message_within, maybe_next_matching_server_message_within,
@@ -1438,17 +1438,13 @@ async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
         },
     )
     .await;
-    // The room entered Lobby EXACTLY ONCE, on the creator (PeerA) joining; the
-    // legacy member is a subsequent joiner, so its RoomJoined already reports the
-    // Lobby state and NO LobbyStateChanged is broadcast on its join — there is
-    // nothing further to drain for the v2 member before the silence window below.
 
     report_transport_status(&mut peer_a, Transport::WebRtc, true).await;
 
     // The v3 peer hears the change…
     expect_peer_transport_status(&mut peer_b, "peer_b", id_a, Transport::WebRtc, true).await;
-    // …the v2 member hears NOTHING (strict window, every frame checked).
-    expect_no_server_message_within(&mut legacy, SILENCE_WINDOW, "v2 member after fan-out").await;
+    // Delayed lobby updates are valid v2 traffic; every other message fails.
+    expect_only_lobby_updates_within(&mut legacy, SILENCE_WINDOW, "v2 member after fan-out").await;
 
     // And the v2 member is still fully functional: Ping round-trips (any
     // late-leaking v3 frame would be caught by the v2-only guard first).

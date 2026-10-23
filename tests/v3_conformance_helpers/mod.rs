@@ -16,15 +16,33 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, Stream};
 use serde_json::json;
 use signal_fish_server::protocol::{ClientMessage, PlayerId, ServerMessage, SessionPlanPayload};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error, Message};
 
-use super::websocket_test_helpers::{next_matching_server_message_within, WsStream};
+use super::websocket_test_helpers::{
+    maybe_next_matching_server_message_within, next_matching_server_message_within, WsStream,
+};
 
 /// Generous per-message ceiling: a CI scheduling budget, not an expected wait.
 pub const SERVER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// #1153: RoomJoined does not fence delayed lobby publication. Reject every
+/// other frame, including all v3-only variants, within one fixed window.
+pub async fn expect_only_lobby_updates_within<S>(ws: &mut S, timeout: Duration, context: &str)
+where
+    S: Stream<Item = Result<Message, Error>> + Unpin,
+{
+    let unexpected = maybe_next_matching_server_message_within(ws, timeout, context, |message| {
+        (!matches!(message, ServerMessage::LobbyStateChanged { .. })).then_some(message)
+    })
+    .await;
+    assert!(
+        unexpected.is_none(),
+        "{context}: unexpected message: {unexpected:?}"
+    );
+}
 
 pub type SessionPlan = Box<SessionPlanPayload>;
 
