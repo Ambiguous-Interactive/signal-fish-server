@@ -2360,6 +2360,7 @@ class Orchestrator {
       this.peerTasks.get(from)?.token === taskToken;
     const kind = classifySignal(signal);
     const payload = signal as Record<string, unknown>;
+    let negotiatingSdp = false;
     try {
       switch (kind) {
         case 'offer': {
@@ -2367,6 +2368,7 @@ class Orchestrator {
           if (typeof sdp !== 'string') {
             throw new Error('Offer payload is not a string');
           }
+          negotiatingSdp = true;
           const answerSdp = await this.awaitPeerOperation(
             from,
             this.engine.handleOffer(from, sdp),
@@ -2381,6 +2383,7 @@ class Orchestrator {
           if (typeof sdp !== 'string') {
             throw new Error('Answer payload is not a string');
           }
+          negotiatingSdp = true;
           await this.awaitPeerOperation(from, this.engine.handleAnswer(from, sdp));
           this.assertActive();
           break;
@@ -2440,6 +2443,10 @@ class Orchestrator {
       this.assertActive();
       if (this.peerTasks.get(from)?.token !== taskToken) return;
       this.emit({ event: 'error', message: `signal from ${from} failed: ${describe(error)}` });
+      /* A rejected SDP operation cannot complete this one-shot negotiation.
+       * Retire it now so relay availability and retry do not wait for timeout.
+       * Candidate errors remain recoverable on the existing physical link. */
+      if (negotiatingSdp) this.handlePeerTransportLoss(from, 'SDP negotiation failed');
     }
   }
 

@@ -7386,3 +7386,43 @@ counts. The largest peak falls from 60,336 to 10,300 KiB. See the bounded
 measurement and remaining limits in [ARM capacity audit](arm-capacity-audit.md).
 This removes startup scratch only; retained event bounds and past generator
 stall causes remain open.
+
+### F139 — Graceful native shutdown loses gameplay acknowledgments
+
+Issue [#1143](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1143)
+advances A20 under #1120 and #912. Outbound SCTP SHUTDOWN reports the local
+send acknowledgment point instead of the last received peer TSN. Its receive
+path ignores the cumulative acknowledgment. If the final separate SACK is
+lost, already delivered gameplay remains outstanding during shutdown.
+
+The paired association control fails before repair on the outbound TSN.
+The repair shares cumulative acknowledgment processing with SACK, including
+stream byte release, retransmission timers, and forward-TSN bookkeeping.
+SHUTDOWN carries no selective gaps or receive window, so the repair does not
+invent those fields. The paired history covers text, binary, TSN wrap, a lost shutdown ACK,
+duplicate credit, and simultaneous shutdown. Partial credit preserves the
+remaining DATA and its timer. Pending unsent DATA prevents a premature ACK.
+
+This proves the low-level association path. Public WebRTC close uses abort.
+Separate pending-DATA drain and early endpoint retirement remain tracked in
+[#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+The original hosted reciprocal-reset failure remains unexplained. No server
+wire change occurs; the independent SDKs do not import this private stack.
+
+### F140 — Failed browser answers retain unusable gameplay links
+
+Issue [#1144](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1144)
+advances A20 under #853 and #889. Initial offer failure retires its link, but
+a rejected remote offer, answer creation, local answer, or remote answer only
+reports an error. The unusable link remains until its P2P deadline.
+
+The control fails before repair at the immediate availability assertion.
+The browser now retires the affected current link after an SDP operation
+rejects. The existing transport-loss path reports availability and permits a
+fresh peer-requested retry. Candidate errors remain nonterminal. The table
+covers all four SDP stages with a formed or unformed healthy sibling and
+completes both required-channel exchanges after recovery.
+
+This is a new failure history, not an explanation of either historical hosted
+browser incident. The independent Rust, .NET, and Godot SDKs use their own
+WebRTC implementations and do not import this reference orchestrator.

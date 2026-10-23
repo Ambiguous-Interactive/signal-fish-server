@@ -233,9 +233,12 @@ fn recovery_retry_exhaustion_retires_all_streams() -> Result<()> {
                         now,
                     )?;
                     if shutdown_receiver {
-                        a.handle_shutdown(&ChunkShutdown {
-                            cumulative_tsn_ack: a.my_next_tsn.wrapping_sub(1),
-                        })?;
+                        a.handle_shutdown(
+                            &ChunkShutdown {
+                                cumulative_tsn_ack: a.my_next_tsn.wrapping_sub(1),
+                            },
+                            now,
+                        )?;
                     } else {
                         a.shutdown()?;
                     }
