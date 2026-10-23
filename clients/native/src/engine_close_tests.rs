@@ -1238,6 +1238,7 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                     backpressure_pair_with_runtimes(Some(limit), initiator_sends).await;
                 let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
                 remote_runtime.pause().await;
+                local_runtime.pause().await;
                 let pause_started = std::time::Instant::now();
                 let local_before = local_runtime.progress.snapshot();
                 let accepted = "a".repeat(limit);
@@ -1256,12 +1257,19 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                 let text = channel.send_text("blocked-text");
                 tokio::pin!(writable, binary, text);
                 /*
-                 * Poll all three before closing to prove each future reached
-                 * the capacity wait.
+                 * Hold the driver while arming these deliberately suspended
+                 * futures. Pending must mean buffer pressure, not a core-lock
+                 * waiter whose notification the test then leaves unpolled.
                  */
                 assert!(futures_util::poll!(&mut writable).is_pending());
                 assert!(futures_util::poll!(&mut binary).is_pending());
                 assert!(futures_util::poll!(&mut text).is_pending());
+                assert_eq!(
+                    local_runtime.progress.snapshot()["reactor_polls"],
+                    local_before["reactor_polls"],
+                    "the local driver stays held while the callers reach capacity waits"
+                );
+                local_runtime.resume();
                 channel.close().await.unwrap();
                 assert_eq!(
                     channel.ready_state().await.unwrap(),
@@ -1659,9 +1667,13 @@ async fn remote_reset_with_packet_history(
                 let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
                 let remote = pair.receiver.channel(pair.sender_id, label).unwrap();
                 remote_runtime.pause().await;
-                if hold_accepted_packet {
-                    local_runtime.pause().await;
-                }
+                /*
+                 * These callers are intentionally not polled again until reset.
+                 * Hold the local driver so each Pending is a capacity wait. A
+                 * suspended core-lock waiter can consume the mutex wake that
+                 * the driver needs, invalidating the intended packet history.
+                 */
+                local_runtime.pause().await;
                 let before_local_send = local_runtime.progress.snapshot();
                 local_runtime
                     .progress
@@ -1676,6 +1688,14 @@ async fn remote_reset_with_packet_history(
                 assert!(futures_util::poll!(&mut writable).is_pending());
                 assert!(futures_util::poll!(&mut binary).is_pending());
                 assert!(futures_util::poll!(&mut text).is_pending());
+                assert_eq!(
+                    local_runtime.progress.snapshot()["reactor_polls"],
+                    before_local_send["reactor_polls"],
+                    "the local driver stays held while the callers reach capacity waits"
+                );
+                if !hold_accepted_packet {
+                    local_runtime.resume();
+                }
                 let before_reset = remote_runtime.progress.snapshot();
                 remote_runtime
                     .progress

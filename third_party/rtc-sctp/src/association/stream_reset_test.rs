@@ -2248,3 +2248,70 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
     }
     Ok(())
 }
+
+// PR #1148: stopping reads before graceful transport closure must stay final.
+#[test]
+fn graceful_shutdown_does_not_revive_stopped_receivers() -> Result<()> {
+    for finish_first in [false, true] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        remote.stream(1)?.write_sctp(
+            now,
+            &Bytes::from_static(b"stopped unread tail"),
+            PayloadProtocolIdentifier::Binary,
+        )?;
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(local.has_readable_data());
+        if finish_first {
+            local.stream(1)?.finish()?;
+        }
+        local.stream(1)?.stop(now)?;
+        assert!(
+            local
+                .streams
+                .get(&1)
+                .unwrap()
+                .reassembly_queue
+                .is_readable()
+        );
+        assert!(!local.stream(1)?.is_readable());
+        assert!(
+            !local.has_readable_data(),
+            "stopped queues cannot delay endpoint retirement"
+        );
+        assert!(
+            local.has_complete_queued_data(),
+            "stopped queues still block receive-buffer overflow"
+        );
+        local.max_receive_buffer_size = 1;
+        let tail = local.peer_last_tsn;
+        local.handle_data(&ChunkPayloadData {
+            tsn: tail.wrapping_add(1),
+            stream_identifier: 1,
+            stream_sequence_number: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"must remain backpressured"),
+            ..Default::default()
+        })?;
+        assert_eq!(
+            local.peer_last_tsn, tail,
+            "stopped complete queues cannot bypass a full receive window"
+        );
+        local.close(AssociationError::AssociationClosed)?;
+        local.endpoint_events.push_back(EndpointEventInner::Drained);
+        assert!(
+            local.streams.is_empty(),
+            "graceful close cannot revive stopped reads"
+        );
+        assert!(
+            local.poll_endpoint_event().is_some(),
+            "no unreadable queue may keep routing alive"
+        );
+        assert!(local.poll_endpoint_event().is_none());
+        assert!(local.poll_timeout().is_none());
+    }
+    Ok(())
+}

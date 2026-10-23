@@ -7437,8 +7437,8 @@ removed complete unread messages before the application consumed them.
 
 Paired wire controls fail before repair on premature ShutdownSent and Drained.
 Shutdown now refuses new writes, drains both outgoing queues, and waits for the
-cumulative tail acknowledgment. Complete received messages remain readable
-through graceful transport closure. Endpoint retirement waits for the final
+cumulative tail acknowledgment. Complete received messages on read-enabled streams remain readable
+through graceful transport closure. Stopped reads remain stopped. Endpoint retirement waits for the final
 packet and the application read or stop of retained messages. A bounded RTC
 pipeline control covers application read deferral beyond one handler budget.
 
@@ -7463,3 +7463,27 @@ Chromium paired-channel history verifies exact message counts and multibyte
 payload sizes at both endpoints. This improves future failure evidence; it does
 not establish the cause of #889 or #853. All three independent SDKs use their
 own transport implementations and do not import this reference engine.
+
+### A20 — Reciprocal-reset fixture core-lock placement
+
+PR [#1148](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1148)
+recorded a new macOS #1120 failure in the reliable eight-byte initiator cell.
+The local channel remained open with eight bytes outstanding. Local reactor
+polls stopped while the remote retried reset and public state queries still
+completed. The log does not reveal the exact pending core-lock waiter.
+
+A separate deterministic history proves a fixture invalidation. The fixture
+polls blocked binary, text, and writable futures once, then suspends them until
+reset completes. A caller can instead become pending on the shared core mutex.
+If it occupies the first notified waiter slot and stays unpolled, subsequent
+fast-path state queries can suppress wakeups of the driver behind it. The
+primitive uses an explicitly unfair mutex; the control cannot assume that any
+Pending result proves buffer pressure.
+
+The fixture now holds the local reactor while arming those suspended callers.
+It verifies that no local reactor poll ran during arming, then resumes it before
+ordinary reset. The explicit accepted-before-UDP control keeps its longer hold.
+Both roles, required labels, byte limits, injected loss, original reset deadline,
+blocked-send closure errors, byte release, and terminal send rejection remain.
+This removes the demonstrated setup race. It does not establish the exact
+waiter history of either hosted failure, so #1120 stays open.

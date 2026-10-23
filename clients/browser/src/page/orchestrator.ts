@@ -1463,12 +1463,26 @@ class Orchestrator {
     }
     if (this.wakeTimer !== null) {
       this.wakeTimer.cancel();
+      this.wakeTimer = null;
     }
+    /* Admitted work owns the next processing pass. Arming an expired timer
+     * while timer decisions are deferred would only queue repeated wakes. */
+    if (this.waitingForAdmittedWork(monotonicNowMs())) return;
     this.wakeTimer = scheduleDeadline(this.nextWake(), () => {
       this.wakeTimer = null;
       // Through the chain so a wake never interleaves with a live handler.
       this.enqueue(async () => {});
     });
+  }
+
+  /** Timely admitted work must settle before a run or linger cutoff decision. */
+  private waitingForAdmittedWork(now: number): boolean {
+    return (
+      (now >= this.runDeadline || (this.lingerUntil !== null && now >= this.lingerUntil)) &&
+      (this.pendingAdmittedTasks > 0 ||
+        this.pendingAdmittedServerFrames > 0 ||
+        this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
+    );
   }
 
   /** Fire due timers; finishes the run when it is over. */
@@ -1481,15 +1495,7 @@ class Orchestrator {
       Arrived server frames and engine callbacks can change lifecycle debt.
       Late traffic holds no marker, so it cannot keep an expired run alive.
     */
-    const terminalDecisionDue =
-      now >= this.runDeadline || (this.lingerUntil !== null && now >= this.lingerUntil);
-    if (
-      terminalDecisionDue &&
-      (this.pendingAdmittedTasks > 0 ||
-        this.pendingAdmittedServerFrames > 0 ||
-        this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
-    )
-      return;
+    if (this.waitingForAdmittedWork(now)) return;
 
     /* Sample quiet exchange debt every five seconds and once near the run cutoff.
      * No query can delay gameplay, teardown, or the run decision. */

@@ -111,8 +111,9 @@ prevents a premature SHUTDOWN ACK. Paired-wire controls lose the final SACK
 and first SHUTDOWN ACK for binary and text gameplay, including TSN wrap.
 See [#1143](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1143).
 Graceful shutdown also drains admitted pending DATA and preserves complete
-unread gameplay until application reads or stops the stream. It refuses new
-writes immediately. Both outgoing queues must clear before SHUTDOWN is sent.
+unread gameplay on read-enabled streams until the application reads or stops
+them. It never reopens stopped reads. It refuses new writes immediately.
+Both outgoing queues must clear before SHUTDOWN is sent.
 The endpoint keeps routing through terminal packet transmission and unread
 message drain. Paired controls cover fragments, small receive windows, DATA
 loss, shutdown and ACK loss, simultaneous close, and delayed application reads.

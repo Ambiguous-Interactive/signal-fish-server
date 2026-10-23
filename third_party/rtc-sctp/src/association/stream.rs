@@ -606,6 +606,15 @@ impl StreamState {
         }
     }
 
+    /// Complete data that the application can still consume in this generation.
+    pub(crate) fn has_readable_data(&self) -> bool {
+        matches!(
+            self.state,
+            RecvSendState::Readable | RecvSendState::ReadWritable
+        ) && !self.incoming_reset_complete
+            && self.reassembly_queue.is_readable()
+    }
+
     pub(crate) fn handle_data(&mut self, pd: &ChunkPayloadData) -> bool {
         self.reassembly_queue.push(pd.clone())
     }

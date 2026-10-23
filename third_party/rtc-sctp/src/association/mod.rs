@@ -840,7 +840,7 @@ impl Association {
             for si in self.streams.keys().cloned().collect::<Vec<u16>>() {
                 if reason == AssociationError::AssociationClosed
                     && let Some(stream) = self.streams.get_mut(&si)
-                    && stream.reassembly_queue.is_readable()
+                    && stream.has_readable_data()
                 {
                     /*
                      * Graceful transport completion acknowledges reception,
@@ -1572,8 +1572,8 @@ impl Association {
                     // accepted here is `peer_last_tsn + 1` — precisely the one that advances
                     // the cumulative ack — so every chunk would qualify and
                     // `max_receive_buffer_size` would stop bounding anything.
-                    let unblocks_reassembly =
-                        d.tsn == self.peer_last_tsn.wrapping_add(1) && !self.has_readable_data();
+                    let unblocks_reassembly = d.tsn == self.peer_last_tsn.wrapping_add(1)
+                        && !self.has_complete_queued_data();
 
                     if fills_gap || unblocks_reassembly {
                         debug!(
@@ -2528,12 +2528,7 @@ impl Association {
             .keys()
             .copied()
             .filter(|id| p.stream_identifiers.is_empty() || p.stream_identifiers.contains(id))
-            .filter(|id| {
-                self.streams.get(id).is_some_and(|s| {
-                    (s.state == RecvSendState::ReadWritable || s.state == RecvSendState::Readable)
-                        && s.reassembly_queue.is_readable()
-                })
-            })
+            .filter(|id| self.streams.get(id).is_some_and(|s| s.has_readable_data()))
             .collect()
     }
 
@@ -2688,16 +2683,18 @@ impl Association {
         }
     }
 
-    /// Whether any stream currently holds a complete message the application could read.
-    ///
-    /// Distinguishes a receiver that is merely slow — it has data to take, and back-pressure
-    /// should make it take it — from one wedged behind an incomplete chunk set, which cannot
-    /// drain anything however attentive it is. Only the second justifies accepting a chunk
-    /// into a full receive buffer.
+    /// Complete messages that can still delay graceful application drain.
     fn has_readable_data(&self) -> bool {
+        self.streams.values().any(StreamState::has_readable_data)
+    }
+
+    /// Complete queues block the full-buffer fragment escape, even when reads
+    /// have stopped. Ignoring stopped queues here would permit every next TSN
+    /// to exceed the receive bound without making any message consumable.
+    fn has_complete_queued_data(&self) -> bool {
         self.streams
             .values()
-            .any(|s| s.reassembly_queue.is_readable())
+            .any(|stream| stream.reassembly_queue.is_readable())
     }
 
     pub(crate) fn get_my_receiver_window_credit(&self) -> u32 {

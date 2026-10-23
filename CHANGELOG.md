@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Drain admitted native gameplay before graceful association shutdown (#1145).
+- Drain admitted native gameplay and preserve unread messages without reopening stopped reads during graceful shutdown (#1145).
 - Complete native graceful shutdown when the final gameplay acknowledgment arrives in SHUTDOWN (#1143).
 - Resolve browser relay fallback immediately when remote SDP setup fails (#1144).
 - Close native gameplay channels and release blocked sends when DATA or shutdown recovery reaches its retry limit (#1140).
