@@ -5252,3 +5252,55 @@ process shape. It does not bound complete default-budget process memory,
 stream retained records, qualify a long live cell on this change, explain
 historical generator stalls, or establish server capacity. The broader #775
 memory requirements remain open.
+
+### Compact reordered relay ledgers (#775)
+
+Unordered relay ledgers now keep four-byte raw offsets when the admitted send
+count fits `u32`. The sort key includes the raw offset, so equal sequences keep
+their original record order within each sender and epoch. Canonical blocks still
+borrow their raw slices. Inputs above the compact range keep the wide pointer
+fallback. Independent ledger checks cover interleaved epochs, duplicate
+sequences, completion cutoffs, and the wide access path. Raw events and replay
+verdicts do not change.
+
+The red resource control retained 32 bytes for four sends against a 16-byte
+bound. That single reversed block now fits the bound. This is not a universal
+four-byte allocation bound: interleaved blocks retain vector spare capacity,
+and the block descriptor is 16 bytes larger. Measurements below report actual
+allocated index capacity, including that spare capacity.
+
+The experiment registers three alternating baseline/candidate pairs at each
+of 100,000, 1,000,000, and 4,000,000 sends. Fixed executable hashes identify the
+two cohorts. All runs keep raw events and the already compact send lookup alive
+beside the relay ledger. Local agent builds and tests pause during measurement.
+The host remains shared. Peak RSS is a process observation, not an allocator
+bound or a source-specific timing result.
+
+All 18 trials complete with equal paired send-lookup checksums. Median Linux
+peak RSS and retained relay allocation are:
+
+| Sends | Previous relay bytes | Compact relay bytes | Previous peak RSS KiB | Compact peak RSS KiB |
+| --- | --- | --- | --- | --- |
+| 100,000 | 1,572,864 | 786,432 | 19,620 | 18,420 |
+| 1,000,000 | 12,582,912 | 6,291,456 | 88,100 | 82,692 |
+| 4,000,000 | 50,331,648 | 25,165,824 | 313,260 | 296,836 |
+
+Relay index allocation falls 50% in all three cohorts. Observed median peak
+RSS falls 5.24% in the four-million-send cohort. These are debug executables
+on ARM64 Linux under WSL2 with Rust 1.94.0. The baseline executable SHA-256 is
+`ed460afd96edce3ad1faada070e251a569835099b4ccd13bd2668d53ea79a200`;
+the candidate is
+`1f2801c557c31046616b39adc9a748b998ca3796d6501e72ff9aad9105cedcd2`.
+
+Reproduce with the existing ignored
+`oracle::coverage_tests::generator_reordered_send_index_memory_profile` control
+in a fresh capacity-runner test process. Use
+`CAPACITY_SEND_INDEX_PROBE_KIND=compact` and set
+`CAPACITY_SEND_INDEX_PROBE_COUNT` to each registered count. Collect Linux peak
+RSS with `wait4`. The probe checksum covers the unchanged send lookup visits;
+it is not a full-summary replay comparison. Relay semantics are checked by the
+independent ledgers and focused artifact and real-socket replay controls.
+
+The relay allocation reduction does not bound complete default-budget process
+memory, qualify the original long live workload, explain the generator stalls,
+or establish server capacity. Those requirements remain open in #775.

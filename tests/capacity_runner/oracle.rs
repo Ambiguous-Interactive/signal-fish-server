@@ -768,36 +768,68 @@ fn scheduled_send_evidence(
 }
 
 /// A sender incarnation's exact ledger, in sequence order. Canonical runs
-/// borrow raw events; arbitrary artifact order retains sorted pointers.
+/// borrow raw events; arbitrary artifact order uses four-byte raw offsets.
+/// Wide host overrides retain the pointer fallback when offsets cannot fit.
 enum RelayBlock<'a> {
-    Borrowed(&'a [SentEvent]),
+    Borrowed {
+        events: &'a [SentEvent],
+        start: usize,
+    },
+    Compact {
+        events: &'a [SentEvent],
+        positions: Vec<u32>,
+    },
     Indexed(Vec<&'a SentEvent>),
 }
 
 impl<'a> RelayBlock<'a> {
+    #[cfg(test)]
+    fn retained_index_bytes(&self) -> usize {
+        match self {
+            Self::Borrowed { .. } => 0,
+            Self::Compact { positions, .. } => positions.capacity() * std::mem::size_of::<u32>(),
+            Self::Indexed(events) => events.capacity() * std::mem::size_of::<&SentEvent>(),
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
-            Self::Borrowed(events) => events.len(),
+            Self::Borrowed { events, .. } => events.len(),
+            Self::Compact { positions, .. } => positions.len(),
             Self::Indexed(events) => events.len(),
         }
     }
 
     fn get(&self, index: usize) -> Option<&'a SentEvent> {
         match self {
-            Self::Borrowed(events) => events.get(index),
+            Self::Borrowed { events, .. } => events.get(index),
+            Self::Compact { events, positions } => events.get(*positions.get(index)? as usize),
             Self::Indexed(events) => events.get(index).copied(),
         }
     }
 
     fn completed_by(&self, at_us: u64) -> usize {
         match self {
-            Self::Borrowed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
+            Self::Borrowed { events, .. } => {
+                events.iter().filter(|event| event.sent_us <= at_us).count()
+            }
+            Self::Compact { events, positions } => positions
+                .iter()
+                .filter(|&&position| events[position as usize].sent_us <= at_us)
+                .count(),
             Self::Indexed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
         }
     }
 }
 
 fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
+    // Every compact position is below sent.len(); this check proves each
+    // usize-to-u32 conversion below is lossless, including range endpoints.
+    let compact = u32::try_from(sent.len()).is_ok();
+    let offsets = |start, end| {
+        u32::try_from(start).expect("compact ledger start fits u32")
+            ..u32::try_from(end).expect("compact ledger end fits u32")
+    };
     let mut blocks = BTreeMap::new();
     let mut start = 0;
     while start < sent.len() {
@@ -810,27 +842,48 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
         match blocks.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(if chunk.is_sorted_by_key(|event| event.seq) {
-                    RelayBlock::Borrowed(chunk)
+                    RelayBlock::Borrowed {
+                        events: chunk,
+                        start,
+                    }
+                } else if compact {
+                    RelayBlock::Compact {
+                        events: sent,
+                        positions: offsets(start, end).collect(),
+                    }
                 } else {
                     RelayBlock::Indexed(chunk.iter().collect())
                 });
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let block = entry.get_mut();
-                if let RelayBlock::Borrowed(events) = block {
-                    *block = RelayBlock::Indexed(events.iter().collect());
+                if let RelayBlock::Borrowed { events, start } = block {
+                    *block = if compact {
+                        RelayBlock::Compact {
+                            events: sent,
+                            positions: offsets(*start, *start + events.len()).collect(),
+                        }
+                    } else {
+                        RelayBlock::Indexed(events.iter().collect())
+                    };
                 }
-                if let RelayBlock::Indexed(events) = block {
-                    events.extend(chunk);
+                match block {
+                    RelayBlock::Compact { positions, .. } => positions.extend(offsets(start, end)),
+                    RelayBlock::Indexed(events) => events.extend(chunk),
+                    RelayBlock::Borrowed { .. } => {}
                 }
             }
         }
         start = end;
     }
     for block in blocks.values_mut() {
-        if let RelayBlock::Indexed(events) = block {
+        match block {
+            // Raw offsets break duplicate ties exactly as the stable pointer sort did.
+            RelayBlock::Compact { events, positions } => positions
+                .sort_unstable_by_key(|&position| (events[position as usize].seq, position)),
             // Stable order preserves original evidence for duplicate keys.
-            events.sort_by_key(|event| event.seq);
+            RelayBlock::Indexed(events) => events.sort_by_key(|event| event.seq),
+            RelayBlock::Borrowed { .. } => {}
         }
     }
     blocks
@@ -3928,7 +3981,7 @@ mod coverage_tests {
         for records in [&records, &collected, &replayed] {
             let blocks = relay_blocks(&records.sent);
             for block in blocks.values() {
-                assert!(matches!(block, RelayBlock::Borrowed(_)));
+                assert!(matches!(block, RelayBlock::Borrowed { .. }));
                 for index in 0..block.len() {
                     assert!(records
                         .sent
@@ -3940,6 +3993,23 @@ mod coverage_tests {
             }
         }
         assert!(relay_blocks(&[]).is_empty());
+    }
+
+    // #775: arbitrary artifact order must not retain a wide pointer per send.
+    #[test]
+    fn reordered_relay_block_retains_compact_offsets() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let sender = records.sent[0].sender.clone();
+        records.sent.retain(|event| event.sender == sender);
+        records.sent.reverse();
+        let blocks = relay_blocks(&records.sent);
+        let retained: usize = blocks.values().map(RelayBlock::retained_index_bytes).sum();
+        assert!(
+            retained <= records.sent.len() * 4,
+            "relay index retains {retained} bytes for {} sends",
+            records.sent.len()
+        );
     }
 
     #[test]
@@ -3973,21 +4043,25 @@ mod coverage_tests {
             let actual = relay_blocks(&sent);
             assert_eq!(actual.len(), expected.len());
             for (key, events) in expected {
-                let block = &actual[&key];
-                assert_eq!(block.len(), events.len());
-                for (index, event) in events.iter().enumerate() {
-                    assert!(std::ptr::eq(block.get(index).unwrap(), *event));
+                // The wide-host fallback retains these same pointer-ledger semantics.
+                let wide = RelayBlock::Indexed(events.clone());
+                for block in [&actual[&key], &wide] {
+                    assert_eq!(block.len(), events.len());
+                    for (index, event) in events.iter().enumerate() {
+                        assert!(std::ptr::eq(block.get(index).unwrap(), *event));
+                    }
+                    for cutoff in [0, 9, 10, u64::MAX] {
+                        assert_eq!(
+                            block.completed_by(cutoff),
+                            events
+                                .iter()
+                                .filter(|event| event.sent_us <= cutoff)
+                                .count()
+                        );
+                    }
+                    assert!(block.get(events.len()).is_none());
+                    assert!(block.get(usize::MAX).is_none());
                 }
-                for cutoff in [0, 9, 10, u64::MAX] {
-                    assert_eq!(
-                        block.completed_by(cutoff),
-                        events
-                            .iter()
-                            .filter(|event| event.sent_us <= cutoff)
-                            .count()
-                    );
-                }
-                assert!(block.get(events.len()).is_none());
             }
         }
     }
@@ -4179,15 +4253,7 @@ mod coverage_tests {
         }
         // During latency evaluation the relay ledger remains alive beside SendIndex.
         let blocks = relay_blocks(&events);
-        let relay_index_bytes: usize = blocks
-            .values()
-            .map(|block| match block {
-                RelayBlock::Borrowed(_) => 0,
-                RelayBlock::Indexed(events) => {
-                    events.capacity() * std::mem::size_of::<&SentEvent>()
-                }
-            })
-            .sum();
+        let relay_index_bytes: usize = blocks.values().map(RelayBlock::retained_index_bytes).sum();
         let before_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
         let started = std::time::Instant::now();
         let index = if kind == "legacy" {

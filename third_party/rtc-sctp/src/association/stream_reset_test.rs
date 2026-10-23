@@ -2290,7 +2290,13 @@ fn graceful_shutdown_allows_stopping_an_unread_closed_tail() -> Result<()> {
 // Issue #1145: terminal close must retain DATA held across a stream reset.
 #[test]
 fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
-    for disposition in ["read", "stop", "abort", "transport close"] {
+    for disposition in [
+        "read",
+        "stop",
+        "stop while draining",
+        "abort",
+        "transport close",
+    ] {
         let (a, mut b) = reset_pair();
         let now = Instant::now();
         let old = ChunkPayloadData {
@@ -2325,6 +2331,22 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
             ..old
         })?;
         assert!(b.deferred_reset_reassembly.get(&1).unwrap().is_readable());
+        if disposition == "stop while draining" {
+            b.set_state(AssociationState::ShutdownPending);
+            b.stream(1)?.stop(now)?;
+            assert!(b.deferred_reset_reassembly.is_empty());
+            assert_eq!(
+                b.streams
+                    .get(&1)
+                    .unwrap()
+                    .get_num_bytes_in_reassembly_queue(),
+                21
+            );
+            assert!(
+                b.stream(1)?.is_readable(),
+                "the saved generation keeps its reader"
+            );
+        }
         b.close(AssociationError::AssociationClosed)?;
         b.endpoint_events.push_back(EndpointEventInner::Drained);
         assert!(b.poll_endpoint_event().is_none());
@@ -2352,7 +2374,7 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
             );
             continue;
         }
-        {
+        if disposition != "stop while draining" {
             let mut old_stream = b.stream(1)?;
             if disposition == "stop" {
                 old_stream.stop(now)?;
@@ -2451,6 +2473,138 @@ fn graceful_shutdown_does_not_revive_stopped_receivers() -> Result<()> {
         );
         assert!(local.poll_endpoint_event().is_none());
         assert!(local.poll_timeout().is_none());
+    }
+    Ok(())
+}
+
+// Issue #1145: stopping reads during graceful drain must release receive pressure.
+#[test]
+fn graceful_shutdown_stop_drains_peer_tail_without_reopening_reads() -> Result<()> {
+    for (peer_shutdown, stop_before_shutdown) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.ack_mode = AckMode::NoDelay;
+        remote.ack_mode = AckMode::NoDelay;
+        local.max_receive_buffer_size = 3;
+        remote.rwnd = 3;
+        remote.stream(1)?.write(now, b"old")?;
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(local.get_my_receiver_window_credit(), 0);
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(remote.inflight_queue.is_empty());
+        let expected = Bytes::from_static(b"local admitted tail");
+        local
+            .stream(1)?
+            .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+        if stop_before_shutdown {
+            local.stream(1)?.stop(now)?;
+            assert_eq!(
+                local.get_my_receiver_window_credit(),
+                0,
+                "established reset pressure stays unchanged"
+            );
+        }
+        if peer_shutdown {
+            remote.shutdown()?;
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert_eq!(local.state(), AssociationState::ShutdownReceived);
+        } else {
+            for payload in [b"tail".as_slice(), b"last"] {
+                remote.stream(1)?.write(now, payload)?;
+            }
+            assert!(!remote.pending_queue.is_empty());
+            local.shutdown()?;
+            assert_eq!(local.state(), AssociationState::ShutdownPending);
+        }
+        local.stream(1)?.stop(now)?;
+        local.stream(1)?.stop(now)?;
+        assert!(!local.stream(1)?.is_readable());
+        assert!(local.stream(1)?.read_sctp().is_err());
+        assert_eq!(local.get_my_receiver_window_credit(), 3);
+        let mut received = vec![];
+        for _ in 0..20 {
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                if remote.streams.contains_key(&1) {
+                    while let Some(message) = remote.stream(1)?.read_sctp()? {
+                        received.push(message.to_payload(100)?.freeze());
+                    }
+                }
+            }
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            if local.state() == AssociationState::Closed
+                && remote.state() == AssociationState::Closed
+            {
+                break;
+            }
+        }
+        assert_eq!(received, vec![expected]);
+        assert_eq!(
+            local.peer_last_tsn,
+            remote.my_next_tsn.wrapping_sub(1),
+            "all peer DATA is received or deliberately discarded"
+        );
+        assert_eq!(
+            remote.cumulative_tsn_ack_point,
+            remote.my_next_tsn.wrapping_sub(1),
+            "the peer tail is cumulatively acknowledged"
+        );
+        for endpoint in [&mut local, &mut remote] {
+            assert_eq!(endpoint.state(), AssociationState::Closed);
+            // Terminal closure does not need a reciprocal stream-reset marker.
+            assert_eq!(endpoint.pending_queue.get_num_bytes(), 0);
+
+            assert!(endpoint.inflight_queue.is_empty());
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(endpoint.poll_endpoint_event().is_some());
+            assert!(endpoint.poll_endpoint_event().is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn graceful_shutdown_stop_accepts_every_draining_state() -> Result<()> {
+    for state in [
+        AssociationState::ShutdownPending,
+        AssociationState::ShutdownReceived,
+        AssociationState::ShutdownSent,
+        AssociationState::ShutdownAckSent,
+    ] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        remote.stream(1)?.write(now, b"unread")?;
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        local.set_state(state);
+        local.stream(1)?.stop(now)?;
+        local.stream(1)?.stop(now)?;
+        assert!(!local.stream(1)?.is_readable(), "{state:?}");
+        assert!(local.stream(1)?.read_sctp().is_err(), "{state:?}");
+        assert!(!local.has_readable_data(), "{state:?}");
+        assert!(
+            local.pending_queue.is_empty(),
+            "stop must not start a new reset in {state:?}"
+        );
+        assert_eq!(
+            local
+                .streams
+                .get(&1)
+                .unwrap()
+                .get_num_bytes_in_reassembly_queue(),
+            0
+        );
     }
     Ok(())
 }

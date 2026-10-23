@@ -7602,3 +7602,45 @@ old receipt ownership after link removal. The wrapper already rejected writes
 through its global closing state; the repair corrects retained core lifecycle
 and accounting instead of changing the wrapper getter. Published replacement
 qualification in #912 must retain these controls.
+
+### A20 — Native reset reactor outcome evidence
+
+Open [#1120](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1120)
+now records reactor poll returns and driver wake requests beside packet counts.
+The counts help distinguish an entered poll without a recorded return, a
+returned pending poll, a driver wake without another poll, and a completed
+driver. Snapshots sample live counters separately; they do not prove a stall
+or a lost wake on their own. The forwarding waker wakes the latest parent task. Fixture pause and resume requests remain
+separate from driver wake counts. These counters exist only in the reset test
+fixture and appear in its existing endpoint timeout snapshots.
+
+A deterministic control checks pending, wake forwarding, held polling, and
+completion. The original reset deadline and terminal-state assertions remain
+unchanged. These observations improve the next failure report. They do not
+reproduce or explain the historical hosted timeout, prove a scheduler cause,
+or repair a confirmed transport defect.
+
+### F146 — Stopped reads block graceful native drain
+
+Open [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145)
+advances A20 under #826 and native replacement qualification under #912.
+Stopping a read stream during graceful shutdown changes its state, then tries
+to start a reset that is allowed only during ordinary gameplay. The operation
+returns `ErrResetPacketInStateNotExist`. Its unread queue retains receive
+space that the application can no longer free. A peer can still have admitted
+DATA waiting for that space.
+
+Graceful transitions now discard unread data only for stopped current stream
+generations and advertise the freed receive space. Later DATA for those stopped
+generations is acknowledged without refilling their queues. Read-enabled streams
+and saved reset generations keep their data. Stopping reads during graceful
+shutdown does not start a new stream reset. Ordinary gameplay reset pressure
+and pre-handshake rejection behavior stay unchanged.
+
+A red paired history fails with the reset-state error before repair. Wire
+histories cover local and peer shutdown with stops before and during the
+transition, full receive pressure, exact admitted outbound delivery, and
+terminal endpoint retirement. Separate controls cover all four draining states,
+repeated stops, stopped read rejection, and saved generation ownership. The
+public WebRTC wrapper still uses ABORT; this repair concerns low-level graceful
+shutdown and does not explain the historical #1120 timeout.

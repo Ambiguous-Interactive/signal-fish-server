@@ -139,3 +139,12 @@ simultaneous close, preserve an unread tail through recovery, and cover
 malformed packets, ABORT precedence, unrelated controls, and tag/port mismatch.
 See [#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
 Replacement qualification in #912 must retain these acknowledgment controls.
+Stopping reads during graceful shutdown now discards the stopped generation's
+receive queue and advertises the released window. Later DATA for that stopped
+generation is acknowledged without retaining unreadable payloads. Admitted
+outgoing DATA still drains. Saved reset generations keep their own readers.
+The same cleanup runs when graceful shutdown starts after reads were stopped.
+Ordinary established stream reset keeps its existing receive pressure.
+Paired controls cover local and peer shutdown, stopping before and during drain,
+a full receive window, repeated stop, exact outgoing bytes, and final retirement.
+State controls cover all four shutdown states and saved next-generation reads.
