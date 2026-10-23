@@ -3823,3 +3823,64 @@ fn test_abort_closes_both_sides() -> Result<()> {
     pair.client_conn_mut(client_ch).abort()?;
     Ok(())
 }
+
+// Issue #1145: the endpoint must keep routing the final DATA ACK and shutdown.
+#[test]
+fn test_graceful_shutdown_keeps_endpoint_registered_until_final_packet() -> Result<()> {
+    for with_data in [false, true] {
+        let (mut pair, client_ch, server_ch) = create_association_pair(AckMode::NoDelay, 1500)?;
+        establish_session_pair(&mut pair, client_ch, server_ch, 1)?;
+        let expected = if with_data {
+            vec![
+                Bytes::from(vec![1; 1500]),
+                Bytes::from(vec![2; 1500]),
+                Bytes::from_static(b"tail"),
+            ]
+        } else {
+            vec![]
+        };
+        for payload in &expected {
+            let now = pair.time;
+            pair.client_stream(client_ch, 1)?.write_sctp(
+                now,
+                payload,
+                PayloadProtocolIdentifier::Binary,
+            )?;
+        }
+        pair.client_conn_mut(client_ch).shutdown()?;
+        assert_eq!(pair.client.endpoint.associations.len(), 1);
+        let mut received = vec![];
+        for _ in 0..20 {
+            pair.drive_client();
+            pair.drive_server();
+            if pair.server_conn_mut(server_ch).state() != AssociationState::Closed {
+                while let Some(message) = pair.server_stream(server_ch, 1)?.read_sctp()? {
+                    received.push(message.to_payload(4096)?.freeze());
+                }
+            }
+            if pair.client_conn_mut(client_ch).state() == AssociationState::Closed
+                && pair.server_conn_mut(server_ch).state() == AssociationState::Closed
+            {
+                // The test harness polls endpoint events before transmits.
+                // Collect any retirement event emitted by the final transmit.
+                pair.drive_client();
+                pair.drive_server();
+                break;
+            }
+        }
+        assert_eq!(received, expected);
+        assert_eq!(
+            pair.client_conn_mut(client_ch).state(),
+            AssociationState::Closed
+        );
+        assert_eq!(
+            pair.server_conn_mut(server_ch).state(),
+            AssociationState::Closed
+        );
+        assert!(pair.client.endpoint.associations.is_empty());
+        assert!(pair.server.endpoint.associations.is_empty());
+        assert!(pair.client.endpoint.association_ids.is_empty());
+        assert!(pair.server.endpoint.association_ids.is_empty());
+    }
+    Ok(())
+}

@@ -341,7 +341,19 @@ consumer returns, so a diagnostic called inside that consumer can see one raw
 callback still in progress. These counts do not prove application-level receipt
 or SCTP packet delivery. An `error` object records the browser's `errorDetail`
 and `sctpCauseCode` when a channel error supplies them; otherwise it is `null`.
-Counters saturate at the largest safe integer. A replacement channel starts fresh.
+`dataChannelStats` reports separate browser-stack message and byte totals from
+`getStats()`. Each row names the required label, SCTP stream ID, and state.
+The client samples unpaid exchange pairs every five seconds, on formation,
+and once one second before the run cutoff. Queries never delay the run.
+`ageMs` measures from query start, including query duration. `pendingAgeMs`
+reports an outstanding query's age. A refresh failure retains the previous
+sample with status `failed`; `unavailable` means no usable channel report.
+`not_requested` means no query started. An absent label has no measured totals.
+A pending or old sample cannot prove
+what the stack received at failure. Stack totals do not prove application
+admission, packet delivery, or the historical missing-exchange cause.
+
+Callback counters saturate at the largest safe integer. A replacement channel starts fresh.
 A replacement link starts a new history. The history contains no SDP, candidate
 addresses, or message payloads. Browser events can combine state changes, so
 these observations do not prove a failure cause. Retain both endpoint logs and

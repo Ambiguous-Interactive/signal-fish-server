@@ -678,9 +678,10 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
 
     // Stop every evidence producer before either snapshot or error propagation.
-    let peer_result = await_peers(handles, hard_deadline).await;
+    let peer_result =
+        await_peers_or_stop(handles, hard_deadline, log.wait_record_budget_exhausted()).await;
     let auxiliary_result = abort_and_join(auxiliary_handles).await;
-    if !peer_result? {
+    if !peer_result? && !log.record_budget_exhausted() {
         log.push_fault(InvalidReason::RunnerDeadlineExceeded {
             detail: "generator or receiver tasks outlived the quiescence margin".to_string(),
         });
@@ -1200,7 +1201,9 @@ fn decode_server_frame(
 
 /// Count canonical JSON bytes without retaining a second encoded payload.
 /// This uses the same serializer as frames and replay byte validation.
-fn json_byte_count(value: &(impl serde::Serialize + ?Sized)) -> Result<usize, serde_json::Error> {
+pub(super) fn json_byte_count(
+    value: &(impl serde::Serialize + ?Sized),
+) -> Result<usize, serde_json::Error> {
     #[derive(Default)]
     struct ByteCount(usize);
 
@@ -1791,7 +1794,7 @@ pub(crate) async fn handle_inbound(
                                 detail: "ledger sender disagrees with the registered player"
                                     .to_string(),
                             });
-                            return true;
+                            return !log.record_budget_exhausted();
                         }
                         let Some(server_seq) = seq.or_else(|| ledger_seq.checked_add(1)) else {
                             log.push_fault(InvalidReason::UnidentifiedGameData {
@@ -1802,7 +1805,7 @@ pub(crate) async fn handle_inbound(
                                 detail: "ledger sequence cannot produce a v2 stream sequence"
                                     .to_string(),
                             });
-                            return true;
+                            return !log.record_budget_exhausted();
                         };
                         log.push_receipt(ReceiptEvent {
                             recipient: recipient.clone(),
@@ -1890,7 +1893,7 @@ pub(crate) async fn handle_inbound(
                         recipient: recipient.to_string(),
                         at_us: micros(epoch.elapsed()),
                     });
-                    return true;
+                    return !log.record_budget_exhausted();
                 }
                 // A mid-run server rejection (bad class, payload cap, rate
                 // limit) must not decay into an unexplained delivery
@@ -1945,7 +1948,7 @@ pub(crate) async fn handle_inbound(
             return false;
         }
     }
-    true
+    !log.record_budget_exhausted()
 }
 
 /// Periodic server resource sampling until `until`. A failed scrape is
@@ -2250,15 +2253,24 @@ async fn arm_tasks(
     result
 }
 
+#[cfg(test)]
 async fn await_peers(
     handles: Vec<tokio::task::JoinHandle<()>>,
     deadline: Instant,
+) -> Result<bool, String> {
+    await_peers_or_stop(handles, deadline, std::future::pending()).await
+}
+
+async fn await_peers_or_stop(
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    deadline: Instant,
+    stop: impl std::future::Future<Output = ()>,
 ) -> Result<bool, String> {
     // Remove completed handles as they finish; a JoinHandle cannot be polled
     // again after yielding its result, including during deadline cleanup.
     let mut pending: futures_util::stream::FuturesUnordered<_> = handles.into_iter().collect();
     let mut failure = None;
-    let completed = tokio::time::timeout_at(deadline, async {
+    let completion = tokio::time::timeout_at(deadline, async {
         while let Some(result) = pending.next().await {
             if let Err(error) = result {
                 failure = Some(format!("capacity peer task failed: {error}"));
@@ -2266,9 +2278,11 @@ async fn await_peers(
             }
         }
         true
-    })
-    .await
-    .unwrap_or(false);
+    });
+    let completed = tokio::select! {
+        result = completion => result.unwrap_or(false),
+        () = stop => false,
+    };
     if !completed {
         for handle in pending.iter() {
             handle.abort();
@@ -2305,6 +2319,39 @@ async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(),
 #[cfg(test)]
 mod session_poll_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn record_budget_stop_cancels_and_joins_peers_before_the_deadline() {
+        let context = crate::unit_context_with_class(DeliveryClass::Reliable);
+        let log = Arc::new(EventLog::for_plans(&context.plans, false).unwrap());
+        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let peer = tokio::spawn(async move {
+            let _keep_until_cancelled = sender;
+            std::future::pending::<()>().await;
+        });
+        let stop = log.wait_record_budget_exhausted();
+        for index in 0..10_000 {
+            log.push_unsupported_notice(UnsupportedNoticeEvent {
+                recipient: "r0p1".into(),
+                at_us: index,
+            });
+        }
+        assert!(log.record_budget_exhausted());
+        let completed = tokio::time::timeout(
+            Duration::from_secs(1),
+            await_peers_or_stop(vec![peer], Instant::now() + Duration::from_secs(60), stop),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!completed);
+        assert!(receiver.await.is_err(), "the peer was cancelled and joined");
+        assert!(log
+            .take_records()
+            .faults
+            .iter()
+            .any(|reason| matches!(reason, InvalidReason::GeneratorRecordBudgetExceeded { .. })));
+    }
 
     #[tokio::test]
     async fn sampler_timing_separates_late_wake_headers_body_and_resource_reads() {

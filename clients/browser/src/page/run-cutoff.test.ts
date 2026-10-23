@@ -107,6 +107,12 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
   let holdOutput = false;
   let outputHeld = false;
   let releaseOutput!: () => void;
+  let holdReceiptOutput = false;
+  let receiptOutputHeld = false;
+  let releaseReceiptOutput!: () => void;
+  const receiptOutputReady = new Promise<void>((resolve) => {
+    releaseReceiptOutput = resolve;
+  });
   const outputReady = new Promise<void>((resolve) => {
     releaseOutput = resolve;
   });
@@ -259,6 +265,10 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
         __sf_emit: (line: string) => {
           const event = JSON.parse(line);
           events.push(event);
+          if (holdReceiptOutput && event['event'] === 'channel_message') {
+            receiptOutputHeld = true;
+            return receiptOutputReady;
+          }
           if (holdOutput && event['event'] === 'channel_message') {
             outputHeld = true;
             return outputReady;
@@ -449,9 +459,23 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
       if (scenario.startsWith('linger-queued-')) {
         now = 1451;
         holdOutput = false;
+        holdReceiptOutput = cutoff < 1450;
         releaseOutput();
       }
       await turn();
+      if (holdReceiptOutput) {
+        assert(
+          receiptOutputHeld && result === undefined,
+          `${scenario}: timely receipt remains admitted across the linger cutoff`,
+        );
+        assert(
+          ![...timers.values()].some((timer) => timer.at <= now),
+          `${scenario}: linger admission drain must not arm an expired diagnostic wake`,
+        );
+        holdReceiptOutput = false;
+        releaseReceiptOutput();
+        await turn();
+      }
       if (cutoff < 1450 && !scenario.startsWith('linger-queued-')) {
         assert(result === undefined, 'timely exchange keeps the original linger');
         now = 1450;
@@ -547,8 +571,24 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
         );
       }
       holdOutput = false;
+      holdReceiptOutput = scenario.startsWith('queued-received-');
       releaseOutput();
       await turn();
+      if (holdReceiptOutput) {
+        /* The earlier handler finalizes after cutoff with a timely receipt still
+         * queued. Its wake must stay parked while that receipt awaits output. */
+        assert(
+          receiptOutputHeld && result === undefined,
+          `${scenario}: timely admitted receipt still waits for its output acknowledgment`,
+        );
+        assert(
+          ![...timers.values()].some((timer) => timer.at <= now),
+          `${scenario}: deferred terminal processing must not arm a zero-delay wake`,
+        );
+        holdReceiptOutput = false;
+        releaseReceiptOutput();
+        await turn();
+      }
       if (scenario.startsWith('recovered-')) {
         now = 1500;
         socket.deliver('Pong');
@@ -758,6 +798,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
     await turn();
     assert(events.length === eventCount, `${scenario}: late completion cannot change cutoff`);
   } finally {
+    releaseReceiptOutput();
     releaseOutput();
     release();
     socket?.onclose?.();

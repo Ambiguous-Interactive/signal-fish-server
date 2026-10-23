@@ -305,13 +305,14 @@ fn test_assoc_create_new_stream() -> Result<()> {
     let mut a = Association::default();
 
     for i in 0..ACCEPT_CH_SIZE {
-        let stream_identifier =
-            if let Some(s) = a.create_stream(i as u16, true, PayloadProtocolIdentifier::Unknown) {
-                s.stream_identifier
-            } else {
-                assert!(false, "{} should success", i);
-                0
-            };
+        let stream_identifier = if let Some(s) =
+            a.create_stream(i as u16, true, PayloadProtocolIdentifier::Unknown, false)
+        {
+            s.stream_identifier
+        } else {
+            assert!(false, "{} should success", i);
+            0
+        };
         let result = a.streams.get(&stream_identifier);
         assert!(result.is_some(), "should be in a.streams map");
     }
@@ -486,7 +487,7 @@ fn test_assoc_max_message_size_default() -> Result<()> {
     assert_eq!(65536, a.max_message_size, "should match");
 
     let ppi = PayloadProtocolIdentifier::Unknown;
-    let stream = a.create_stream(1, false, ppi);
+    let stream = a.create_stream(1, false, ppi, false);
     assert!(stream.is_some(), "should succeed");
 
     if let Some(mut s) = stream {
@@ -523,7 +524,7 @@ fn test_assoc_max_message_size_explicit() -> Result<()> {
     assert_eq!(30000, a.max_message_size, "should match");
 
     let ppi = PayloadProtocolIdentifier::Unknown;
-    let stream = a.create_stream(1, false, ppi);
+    let stream = a.create_stream(1, false, ppi, false);
     assert!(stream.is_some(), "should succeed");
 
     if let Some(mut s) = stream {

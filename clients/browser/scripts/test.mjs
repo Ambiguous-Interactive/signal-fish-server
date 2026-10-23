@@ -7,6 +7,7 @@ for (const entryPoint of [
   'src/page/wire.test.ts',
   'src/page/events.test.ts',
   'src/page/engine.test.ts',
+  'src/page/transport-stats.test.ts',
   'src/page/orchestrator.test.ts',
   'src/page/retry.test.ts',
   'src/page/retry-signals.test.ts',

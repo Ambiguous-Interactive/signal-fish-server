@@ -110,6 +110,14 @@ replay the acknowledgment without releasing bytes twice. Pending unsent DATA
 prevents a premature SHUTDOWN ACK. Paired-wire controls lose the final SACK
 and first SHUTDOWN ACK for binary and text gameplay, including TSN wrap.
 See [#1143](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1143).
-The separate graceful pending-DATA and endpoint-drain work remains in
-[#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+Graceful shutdown also drains admitted pending DATA and preserves complete
+unread gameplay on read-enabled streams until the application reads or stops
+them. It never reopens stopped reads. It refuses new writes immediately.
+Both outgoing queues must clear before SHUTDOWN is sent.
+The endpoint keeps routing through terminal packet transmission and unread
+message drain. Paired controls cover fragments, small receive windows, DATA
+loss, shutdown and ACK loss, simultaneous close, and delayed application reads.
+See [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+Recovery after loss of the final SHUTDOWN COMPLETE remains separate in
+[#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
 Replacement qualification in #912 must retain these acknowledgment controls.

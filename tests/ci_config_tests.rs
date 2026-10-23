@@ -32342,6 +32342,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("webrtc", "data_channel::tests"),
         ("rtc", "statistics"),
         ("rtc", "remote_dcep_"),
+        ("rtc", "peer_connection::handler::sctp::tests"),
         ("rtc", "stream_reset_"),
         ("rtc", "transport_control_ack_preserves_pending_gameplay_accounting"),
         ("rtc", "timer_abandonment_"),
