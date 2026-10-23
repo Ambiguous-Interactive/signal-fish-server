@@ -6,6 +6,7 @@
 //! delivery counters themselves come from the scrape helper shared with the
 //! multiprocess suites.
 
+use std::io::Read;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -43,14 +44,38 @@ pub const TRACKED_COUNTERS: &[&str] = &[
 /// SHA-256 of a file, hex-encoded (server binary and config overlay hashes).
 pub fn sha256_file(path: impl AsRef<Path>) -> Result<(String, u64), String> {
     let path = path.as_ref();
-    let raw = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    Ok((sha256_bytes(&raw), raw.len() as u64))
+    let file =
+        std::fs::File::open(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    hash_reader(file).map_err(|error| format!("read {}: {error}", path.display()))
+}
+
+fn hash_reader(mut reader: impl Read) -> std::io::Result<(String, u64)> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    let mut total = 0_u64;
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        hasher.update(&buffer[..count]);
+        total = total
+            .checked_add(u64::try_from(count).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("file byte count overflows u64"))?;
+    }
+    Ok((finish_sha256(hasher), total))
 }
 
 /// SHA-256 of in-memory bytes, hex-encoded (config overlay hash).
 pub fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
+    finish_sha256(hasher)
+}
+
+fn finish_sha256(hasher: Sha256) -> String {
     hasher
         .finalize()
         .iter()
@@ -461,6 +486,90 @@ pub fn parse_labeled_counter(text: &str, name: &str, labels: &[(&str, &str)]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_digest_preserves_exact_bytes_and_reports_read_errors() {
+        let directory = tempfile::tempdir().expect("digest directory");
+        let path = directory.path().join("server");
+        for length in [0_usize, 1, 8191, 8192, 8193, 131_079] {
+            let bytes: Vec<_> = (0..length)
+                .map(|index| u8::try_from(index % 251).expect("byte"))
+                .collect();
+            std::fs::write(&path, &bytes).expect("digest fixture");
+            assert_eq!(
+                sha256_file(&path).expect("file digest"),
+                (
+                    sha256_bytes(&bytes),
+                    u64::try_from(length).expect("file size")
+                ),
+                "length={length}"
+            );
+        }
+        let missing = directory.path().join("missing");
+        let error = sha256_file(&missing).expect_err("missing file");
+        assert!(
+            error.contains("read") && error.contains("missing"),
+            "{error}"
+        );
+        assert!(
+            sha256_file(directory.path()).is_err(),
+            "directory is unreadable"
+        );
+    }
+
+    #[test]
+    fn streamed_digest_handles_short_reads_interrupts_and_partial_failure() {
+        struct Chunked {
+            remaining: usize,
+            interrupted: bool,
+            fail_after_data: bool,
+        }
+        impl std::io::Read for Chunked {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                assert!(buffer.len() <= 8192, "hashing must use bounded scratch");
+                if self.remaining == 0 && self.fail_after_data {
+                    return Err(std::io::Error::other("injected read failure"));
+                }
+                let count = self.remaining.min(13).min(buffer.len());
+                buffer[..count].fill(42);
+                self.remaining -= count;
+                Ok(count)
+            }
+        }
+        for fail_after_data in [false, true] {
+            let result = hash_reader(Chunked {
+                remaining: 32_773,
+                interrupted: false,
+                fail_after_data,
+            });
+            if fail_after_data {
+                assert_eq!(result.unwrap_err().to_string(), "injected read failure");
+            } else {
+                assert_eq!(result.unwrap(), (sha256_bytes(&vec![42; 32_773]), 32_773));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated binary digest memory profile; run in a fresh process"]
+    fn generator_binary_digest_memory_profile() {
+        let path = std::env::var_os("CAPACITY_DIGEST_PROBE_FILE").expect("probe file");
+        let before = resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        let (digest, bytes) = sha256_file(path).expect("digest probe");
+        println!(
+            "{}",
+            serde_json::json!({
+                "digest": digest, "bytes": bytes, "before_rss_bytes": before,
+                "elapsed_us": started.elapsed().as_micros(),
+                "after_rss_bytes": resident_memory_bytes(std::process::id()),
+            })
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

@@ -89,3 +89,15 @@ accounting. The new delta counts String and Binary application payloads only.
 DCEP and empty-message filler bytes receive zero application credit.
 Cumulative ACK, gap ACK, and abandonment compute both deltas from each released
 chunk's PPID. Existing generation checks still exclude retired stream data.
+
+DATA and shutdown recovery now enforce their existing configured retry limits.
+Exhaustion retires the association through the same typed terminal event as
+reset failure. It stops timers, closes streams once, and prevents local stream
+creation on a retired association. Thresholds remain unchanged. The DATA
+retry documentation now matches the existing default of five attempts.
+The deterministic controls retain limits 0, 1, and 5 and both shutdown roles.
+The public peer control drops encrypted SCTP records while keeping ICE consent,
+requires blocked binary/text/writable callers to return Closed, and then
+exchanges gameplay on fresh peers. See
+[#1140](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1140).
+Replacement qualification in #912 must retain these recovery controls.

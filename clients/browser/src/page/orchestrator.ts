@@ -792,7 +792,7 @@ class Orchestrator {
   private readonly admittedServerFrames = new WeakSet<ServerFrame>();
   private pendingAdmittedServerFrames = 0;
   private pendingAdmittedTasks = 0;
-  private readonly reportedExchangeDiagnostics = new Set<string>();
+  private readonly reportedExchangeDiagnostics = new Map<string, Set<string>>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
@@ -2472,6 +2472,23 @@ class Orchestrator {
     }
   }
 
+  /** Suppress repeats on one physical link; retirement removes all peer keys. */
+  private noteExchangeDiagnostic(
+    peer: string,
+    label: string,
+    kind: 'missing' | 'send',
+  ): boolean {
+    let reported = this.reportedExchangeDiagnostics.get(peer);
+    if (reported === undefined) {
+      reported = new Set();
+      this.reportedExchangeDiagnostics.set(peer, reported);
+    }
+    const key = `${kind}\0${label}`;
+    if (reported.has(key)) return false;
+    reported.add(key);
+    return true;
+  }
+
   private exchangeWindowOpen(now = monotonicNowMs()): boolean {
     return (
       now < this.runDeadline ||
@@ -2512,9 +2529,7 @@ class Orchestrator {
       }
       const channel = this.engine.channel(peer, label);
       if (channel === undefined) {
-        const diagnosticKey = `missing\0${peer}\0${label}`;
-        if (!this.reportedExchangeDiagnostics.has(diagnosticKey)) {
-          this.reportedExchangeDiagnostics.add(diagnosticKey);
+        if (this.noteExchangeDiagnostic(peer, label, 'missing')) {
           this.emit({
             event: 'error',
             message: `open pair with ${peer} is missing channel ${label}`,
@@ -2535,9 +2550,7 @@ class Orchestrator {
       try {
         channel.send(text);
       } catch (error) {
-        const diagnosticKey = `send\0${peer}\0${label}`;
-        if (!this.reportedExchangeDiagnostics.has(diagnosticKey)) {
-          this.reportedExchangeDiagnostics.add(diagnosticKey);
+        if (this.noteExchangeDiagnostic(peer, label, 'send')) {
           const message =
             `data-channel exchange send to ${peer} on ${label} failed while channel was open; ` +
             `bufferedAmount=${channel.bufferedAmount}; will retry: ${describe(error)}`;

@@ -484,6 +484,16 @@ fn fatal_socket_loss_retires_startup_before_any_remote_channel_exists() {
 // retires sibling gameplay handles instead of leaving a timerless Closing SID.
 #[test]
 fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
+    sctp_loss_retires_public_channels_and_blocked_senders(true);
+}
+
+// #1140: DATA retries must retire the transport while ICE consent remains live.
+#[test]
+fn sctp_data_loss_retires_public_channels_and_blocked_senders() {
+    sctp_loss_retires_public_channels_and_blocked_senders(false);
+}
+
+fn sctp_loss_retires_public_channels_and_blocked_senders(reset: bool) {
     let runtime = MockRuntime::new();
     runtime.block_on(Box::pin(async {
         let network = Arc::new(MockUDPNetwork::new());
@@ -553,7 +563,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             advance_both(&a.rt, &b.rt, Duration::from_millis(25));
         }
         assert_eq!(opened, [[true; 2]; 2]);
-        eprintln!("reset-loss: channels opened");
+        eprintln!("SCTP-loss: channels opened");
         enabled.store(true, Ordering::SeqCst);
         channels[1][1].send_text("x").await.unwrap();
         assert_eq!(channels[1][1].outstanding_bytes().await.unwrap(), 1);
@@ -565,9 +575,11 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
         assert!(text.as_mut().now_or_never().is_none());
         assert!(writable.as_mut().now_or_never().is_none());
         let retire_transport = async {
-            eprintln!("reset-loss: senders blocked, closing selected channel");
-            channels[1][0].close().await.unwrap();
-            eprintln!("reset-loss: selected channel closing");
+            eprintln!("SCTP-loss: senders blocked, starting recovery");
+            if reset {
+                channels[1][0].close().await.unwrap();
+            }
+            eprintln!("SCTP-loss: recovery started, reset={reset}");
             for _ in 0..300 {
                 if b.pc.sctp().await.unwrap().state().await.unwrap()
                     == rtc::peer_connection::transport::RTCSctpTransportState::Closed
@@ -580,7 +592,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             assert_eq!(
                 b.pc.sctp().await.unwrap().state().await.unwrap(),
                 rtc::peer_connection::transport::RTCSctpTransportState::Closed,
-                "lost RECONFIG must not leave an established transport after its retry limit"
+                "lost SCTP recovery must not leave an established transport after its retry limit: reset={reset}"
             );
             assert!(
                 !b.rec.saw_ice(RTCIceConnectionState::Failed),
@@ -588,7 +600,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             );
             assert!(
                 dropped.load(Ordering::SeqCst) >= 6,
-                "reset retries crossed the actual UDP fault"
+                "SCTP retries crossed the actual UDP fault"
             );
         };
         // A once-polled writer can be waiting for the core mutex, not capacity.
@@ -597,7 +609,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             async { futures::join!(binary, text, writable) },
             retire_transport,
         );
-        eprintln!("reset-loss: terminal writers completed");
+        eprintln!("SCTP-loss: terminal writers completed");
         for result in [binary_result, text_result, writable_result] {
             assert!(matches!(result, Err(Error::ErrDataChannelClosed)));
         }
@@ -612,7 +624,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
                 match channel.poll().now_or_never() {
                     Some(Some(crate::data_channel::DataChannelEvent::OnClose)) => closed += 1,
                     Some(Some(crate::data_channel::DataChannelEvent::OnClosing)) => closing += 1,
-                    Some(Some(event)) => panic!("unexpected event after reset loss: {event:?}"),
+                    Some(Some(event)) => panic!("unexpected event after SCTP loss: {event:?}"),
                     Some(None) => break,
                     None if closed > 0 => break,
                     None => settle(),
@@ -621,7 +633,7 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             assert_eq!(closed, 1, "each public handle closes once");
             assert_eq!(
                 closing,
-                usize::from(index == 0),
+                usize::from(reset && index == 0),
                 "only local close announces Closing"
             );
         }
@@ -634,13 +646,13 @@ fn sctp_reset_loss_retires_public_channels_and_blocked_senders() {
             rtc::data_channel::RTCDataChannelState::Open,
             "one endpoint's timeout must not invent remote receipt"
         );
-        eprintln!("reset-loss: assertions complete, closing first peer");
+        eprintln!("SCTP-loss: assertions complete, closing first peer");
         a.pc.close().await.unwrap();
-        eprintln!("reset-loss: first peer closed");
+        eprintln!("SCTP-loss: first peer closed");
         b.pc.close().await.unwrap();
-        eprintln!("reset-loss: second peer closed, checking fresh gameplay");
+        eprintln!("SCTP-loss: second peer closed, checking fresh gameplay");
         assert_fresh_gameplay(&network).await;
-        eprintln!("reset-loss: fresh gameplay complete");
+        eprintln!("SCTP-loss: fresh gameplay complete");
     }));
 }
 

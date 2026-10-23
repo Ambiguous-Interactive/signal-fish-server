@@ -50,6 +50,9 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
   ),
   ...authoritativeScenarios,
   ...([false, true] as const).map(
+    (initiate) => [initiate, false, 'diagnostic-retirement', 0, false] as const,
+  ),
+  ...([false, true] as const).map(
     (initiate) => [initiate, false, 'send-failed', 0, false] as const,
   ),
   ...([false, true] as const).flatMap((initiate) =>
@@ -75,6 +78,7 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
   let settled = false;
   let failWrites = false;
   let resendAllowed = false;
+  let diagnosticSendsAllowed = false;
   const deferredResend =
     replacementOutcome.startsWith('deferred-') || replacementOutcome.startsWith('retired-');
   let socket!: Socket;
@@ -100,6 +104,8 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
       this.maxRetransmits = this.ordered ? null : 0;
     }
     send(): void {
+      if (replacementOutcome === 'diagnostic-retirement' && !diagnosticSendsAllowed)
+        throw new Error('temporary channel send failure');
       const physicalLink = connections.findIndex((connection) =>
         connection.channels.includes(this),
       );
@@ -282,6 +288,67 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
         !events.some((e) => e['event'] === 'transport_status_sent'),
         `clock step ${clockStep} cannot expire the P2P window early`,
       );
+      if (replacementOutcome === 'diagnostic-retirement') {
+        // Regression #1141: retirement must restore each fresh link's first error.
+        // Alternate generation rebuilds and full membership retirement.
+        let epoch = 1;
+        for (let round = 0; round < 12; round += 1) {
+          const current = connections.at(-1);
+          current?.open();
+          await turn();
+          const failures = () =>
+            events.filter(
+              (event) =>
+                event['event'] === 'error' &&
+                String(event['message']).includes('temporary channel send failure'),
+            ).length;
+          assert(
+            failures() === (round + 1) * 2,
+            `round ${round}: each fresh channel reports its first send failure`,
+          );
+          now += 50;
+          socket.deliver({ type: 'Pong' });
+          await turn();
+          assert(
+            failures() === (round + 1) * 2,
+            `round ${round}: retries on the same physical link suppress duplicate errors`,
+          );
+          if (round === 11) break;
+          if (round % 2 === 0) {
+            socket.deliver({
+              type: 'PlayerLeft',
+              data: { player_id: peer, epoch, final_seq: 0 },
+            });
+            epoch += 1;
+            socket.deliver({
+              type: 'PlayerJoined',
+              data: { player: { id: peer, epoch, seq: 0 } },
+            });
+          }
+          generation = `00000000-0000-0000-0000-${String(round + 3).padStart(12, '0')}`;
+          plan();
+          await turn();
+          assert(current?.closed === true, `round ${round}: retire the old physical link`);
+        }
+        diagnosticSendsAllowed = true;
+        now += 50;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        for (const channel of connections.at(-1)?.channels ?? []) channel.receive();
+        socket.deliver({
+          type: 'PeerTransportStatus',
+          data: { peer_id: peer, transport: 'webrtc', connected: true },
+        });
+        await turn();
+        released = true;
+        now += 100;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        now += 300;
+        socket.deliver({ type: 'Pong' });
+        assert((await running) === 0, 'send recovery completes fresh-link exchange');
+        return;
+      }
       if (replacementOutcome === 'send-failed') {
         failWrites = true;
         signal(initiate ? { PairRetry: 1 } : { Offer: 'incoming-offer' });

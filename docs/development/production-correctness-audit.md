@@ -7325,3 +7325,64 @@ and [Godot #368](https://github.com/Ambiguous-Interactive/signal-fish-client-god
 Direct and WebRTC game traffic is not mirrored automatically. Applications
 must relay the viewing state and supply late viewers with an application
 snapshot. The server does not retain or replay prior gameplay for spectators.
+
+### F137 — DATA and shutdown retries leave timerless native links
+
+Issue [#1140](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1140)
+advances A20 under #826, #1120, and #912. The SCTP DATA and shutdown retry
+handlers only log exhaustion. They leave streams and send reservations alive
+after the last recovery timer stops. The DATA timer defaults to five retries;
+its former comment incorrectly described that default as unlimited.
+
+A source control fails on main with an Established association after zero DATA
+retries. A separate shutdown mutation leaves ShutdownSent after its limit.
+The controls cover configured limits of zero, one, and five, including both
+SHUTDOWN and SHUTDOWN-ACK recovery. The repair reuses the existing reset-failure
+terminal path. It clears streams, reservations, and timers, publishes one
+association failure and drained event, and rejects local stream creation and
+delayed packets after retirement. It does not change retry thresholds.
+
+A paired public wrapper history drops encrypted SCTP records while preserving
+ICE consent. On main, DATA recovery stops but the public transport remains
+Connected through 300 virtual seconds. After repair, both negotiated reliable
+channel handles close once, blocked binary, text, and writable futures return typed
+Closed errors, and a fresh peer delivers gameplay on the same network. The
+existing reset-loss history follows the same public terminal path. Graceful
+shutdown uses the lower-level SCTP API; public wrapper close uses abort.
+The shutdown controls prove the low-level terminal contract rather than a
+separate public graceful-close path.
+
+This confirmed defect does not identify the cause of the earlier hosted reset
+or browser exchange failures. The server wire and all three external SDKs are
+unchanged: Rust owns its WebRTC driver, .NET uses its own WebSocket transport,
+and Godot uses engine WebRTC. None imports this private vendored client graph.
+
+### F138 — Retired browser links suppress fresh exchange errors
+
+Issue [#1141](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1141)
+advances diagnostics for #853 and #889 under #826. The browser stores exchange
+error keys containing the error kind, peer, and channel label. Both link and
+membership retirement delete only the bare peer ID, which matches no key.
+A new physical link to that peer therefore suppresses its first exchange
+failure, and old peers retain diagnostic entries.
+
+The browser now groups diagnostic keys by peer. Existing retirement removes
+that peer's complete set; retries on one live link still suppress repeats.
+A real orchestrator regression fails on the second physical incarnation before
+repair. It covers both initiator roles across twelve incarnations, alternates
+link replacement and membership retirement, preserves duplicate suppression,
+and completes gameplay exchange after sends recover. Each retained peer has at
+most four diagnostic kinds and required-label combinations. This is a source
+bound and a lifecycle control, not a heap measurement or an explanation of
+the historical exchange failures. External SDKs do not use this reference
+orchestrator and require no migration.
+
+### A22 — Bounded generator binary identity reads
+
+The session 513 startup change advances #775 and #636 by replacing a whole
+server-binary buffer with an 8 KiB read buffer. Paired fresh-process peaks on
+1 MiB, 16 MiB, and a 51,597,736-byte debug binary preserve exact digest and byte
+counts. The largest peak falls from 60,336 to 10,300 KiB. See the bounded
+measurement and remaining limits in [ARM capacity audit](arm-capacity-audit.md).
+This removes startup scratch only; retained event bounds and past generator
+stall causes remain open.

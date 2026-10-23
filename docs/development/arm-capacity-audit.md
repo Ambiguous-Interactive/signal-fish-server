@@ -5032,3 +5032,33 @@ manifest bytes, and pre-network refusal are covered. Eight encoding, class,
 and size cells retain exact live/replay results and explicit custom budget
 values in their manifests. This does not establish a new server capacity or
 explain a historical generator stall.
+
+### Bounded binary identity reads — session 513
+
+Startup provenance for #775 reads the server binary through an 8 KiB buffer.
+The former path allocated the entire binary before hashing it. The digest and
+recorded byte count still describe the bytes read, including empty files and
+short reads. Interrupted reads retry; partial read failures remain errors.
+The run schedule, retained events, and replay contract do not change.
+
+Fresh-process probes compare the same fixed files with both implementations.
+Linux child `ru_maxrss` records peak RSS, including temporary buffers freed
+before the probe's final sample:
+
+| Input bytes | Previous peak KiB | Bounded-read peak KiB |
+| ---: | ---: | ---: |
+| 1,048,576 | 10,864 | 10,300 |
+| 16,777,216 | 26,288 | 10,300 |
+| 51,597,736 | 60,336 | 10,300 |
+
+Each pair returns the same digest and byte count. The largest input is a fixed
+copy of the debug server, digest
+`86e7f56553b8717f8b127f515a939f3f9de11d76fd5d7ab3330092735eeba257`.
+The two smaller inputs contain zero bytes. Run the ignored
+`diagnostics::tests::generator_binary_digest_memory_profile` control with
+`CAPACITY_DIGEST_PROBE_FILE` and collect child peak RSS in a fresh process.
+Raw paired logs and the launcher remain in local `progress/session-513/`.
+
+This removes a startup allocation toward #775 and #636. It does not establish
+full-run RSS bounds, bound unexpected event retention, or identify a past
+Linux or macOS generator stall. Those issue requirements remain open.
