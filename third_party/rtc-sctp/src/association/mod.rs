@@ -187,7 +187,6 @@ pub struct Association {
     retired: bool,
     handshake_completed: bool,
     max_message_size: u32,
-    inflight_queue_length: usize,
     will_send_shutdown: bool,
     bytes_received: usize,
     bytes_sent: usize,
@@ -309,7 +308,6 @@ impl Default for Association {
             retired: false,
             handshake_completed: false,
             max_message_size: 0,
-            inflight_queue_length: 0,
             will_send_shutdown: false,
             bytes_received: 0,
             bytes_sent: 0,
@@ -517,6 +515,13 @@ impl Association {
     /// Return endpoint-facing event
     #[must_use]
     pub fn poll_endpoint_event(&mut self) -> Option<EndpointEvent> {
+        /*
+         * Endpoint drivers remove their owned association on Drained. A
+         * graceful close must leave accepted messages available to readers.
+         */
+        if self.retired && self.has_readable_data() {
+            return None;
+        }
         self.endpoint_events.pop_front().map(EndpointEvent)
     }
 
@@ -753,9 +758,11 @@ impl Association {
         self.local_addr
     }
 
-    /// Shutdown initiates the shutdown sequence. The method blocks until the
-    /// shutdown sequence is completed and the association is closed, or until the
-    /// passed context is done, in which case the context's error is returned.
+    /// Start graceful shutdown after all admitted DATA has been acknowledged.
+    ///
+    /// New writes are refused immediately. Continue polling transmits, incoming
+    /// packets, and timeouts. Read or stop all readable streams, including saved
+    /// reset generations. The terminal endpoint event waits for those reads.
     pub fn shutdown(&mut self) -> Result<()> {
         debug!("[{}] closing association..", self.side);
 
@@ -767,14 +774,12 @@ impl Association {
         // Attempt a graceful shutdown.
         self.set_state(AssociationState::ShutdownPending);
 
-        if self.inflight_queue_length == 0 {
+        if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
             // No more outstanding, send shutdown.
             self.will_send_shutdown = true;
             self.awake_write_loop();
             self.set_state(AssociationState::ShutdownSent);
         }
-
-        self.endpoint_events.push_back(EndpointEventInner::Drained);
 
         Ok(())
     }
@@ -788,10 +793,10 @@ impl Association {
     ///
     /// The ABORT is sent by the next [`poll_transmit`](Self::poll_transmit). Anything not handed to
     /// `poll_transmit` before this call is discarded, so drain it first if it should still go out.
-    /// A no-op on a closed association.
+    /// On a closed association, discard retained unread messages without another packet.
     pub fn abort(&mut self) -> Result<()> {
         if self.state() == AssociationState::Closed {
-            return Ok(());
+            return self.close(AssociationError::LocallyClosed);
         }
         let abort = ChunkAbort {
             error_causes: vec![ErrorCause {
@@ -807,6 +812,17 @@ impl Association {
     /// Close ends the SCTP Association and cleans up any state
     pub fn close(&mut self, reason: AssociationError) -> Result<()> {
         self.retired = true;
+        if self.state() == AssociationState::Closed && reason != AssociationError::AssociationClosed
+        {
+            /* An abrupt teardown also discards a retained graceful read tail. */
+            self.deferred_reset_data.clear();
+            self.deferred_reset_reassembly.clear();
+            self.deferred_reset_bytes = 0;
+            self.reset_ssn_markers.clear();
+            for id in self.streams.keys().copied().collect::<Vec<_>>() {
+                self.unregister_stream(id, reason.clone());
+            }
+        }
         if self.state() != AssociationState::Closed {
             self.set_state(AssociationState::Closed);
 
@@ -814,13 +830,31 @@ impl Association {
 
             self.close_all_timers();
             self.retired_reset_tsns.clear();
-            self.deferred_reset_data.clear();
-            self.deferred_reset_reassembly.clear();
+            if reason != AssociationError::AssociationClosed {
+                self.deferred_reset_data.clear();
+                self.deferred_reset_reassembly.clear();
+                self.deferred_reset_bytes = 0;
+            }
             self.reset_ssn_markers.clear();
-            self.deferred_reset_bytes = 0;
 
             for si in self.streams.keys().cloned().collect::<Vec<u16>>() {
-                self.unregister_stream(si, reason.clone());
+                if reason == AssociationError::AssociationClosed
+                    && let Some(stream) = self.streams.get_mut(&si)
+                    && stream.reassembly_queue.is_readable()
+                {
+                    /*
+                     * Graceful transport completion acknowledges reception,
+                     * not application consumption. Keep complete messages
+                     * readable until the final read retires their stream.
+                     */
+                    stream.state = RecvSendState::Readable;
+                } else {
+                    self.unregister_stream(si, reason.clone());
+                }
+            }
+
+            if reason == AssociationError::AssociationClosed {
+                self.release_reset_data();
             }
 
             debug!("[{}] association closed", self.side);
@@ -864,7 +898,7 @@ impl Association {
             return Err(Error::ErrStreamAlreadyExist);
         }
 
-        if let Some(s) = self.create_stream(stream_identifier, false, default_payload_type) {
+        if let Some(s) = self.create_stream(stream_identifier, false, default_payload_type, false) {
             Ok(s)
         } else {
             Err(Error::ErrStreamCreateFailed)
@@ -1886,6 +1920,7 @@ impl Association {
         if state == AssociationState::ShutdownAckSent {
             self.timers.stop(Timer::T2Shutdown);
             self.close(AssociationError::AssociationClosed)?;
+            self.endpoint_events.push_back(EndpointEventInner::Drained);
         }
 
         Ok(vec![])
@@ -2037,9 +2072,10 @@ impl Association {
             };
             self.deferred_reset_data
                 .retain(|_, d| d.stream_identifier != id);
-            if queue.ordered.is_empty()
-                && queue.unordered.is_empty()
-                && queue.unordered_chunks.is_empty()
+            if (self.retired && !queue.is_readable())
+                || (queue.ordered.is_empty()
+                    && queue.unordered.is_empty()
+                    && queue.unordered_chunks.is_empty())
             {
                 // All held fragments were abandoned. Preserve ordered progress
                 // without emitting an Open event or reserving the now-free SID.
@@ -2048,9 +2084,13 @@ impl Association {
                 }
                 continue;
             }
-            if self.get_or_create_stream(id).is_some()
-                && let Some(s) = self.streams.get_mut(&id)
-            {
+            let installed = if self.retired {
+                self.create_stream(id, true, PayloadProtocolIdentifier::default(), true)
+                    .is_some()
+            } else {
+                self.get_or_create_stream(id).is_some()
+            };
+            if installed && let Some(s) = self.streams.get_mut(&id) {
                 s.reassembly_queue = queue;
                 if s.reassembly_queue.is_readable() {
                     self.events.push_back(Event::DatagramReceived);
@@ -2060,7 +2100,7 @@ impl Association {
             }
         }
         self.refresh_deferred_reset_accounting();
-        if released {
+        if released && !self.retired {
             // Removing retained metadata reopens receive credit. Advertise it
             // without waiting for the sender to probe a stale small window.
             self.ack_state = AckState::Immediate;
@@ -2591,8 +2631,9 @@ impl Association {
         stream_identifier: StreamId,
         accept: bool,
         default_payload_type: PayloadProtocolIdentifier,
+        receive_only: bool,
     ) -> Option<Stream<'_>> {
-        if self.retired {
+        if self.retired && !receive_only {
             return None;
         }
         let mut s = StreamState::new(
@@ -2602,6 +2643,9 @@ impl Association {
             default_payload_type,
         );
 
+        if receive_only {
+            s.state = RecvSendState::Readable;
+        }
         if let Some(next_ssn) = self.reset_ssn_markers.remove(&stream_identifier) {
             s.reassembly_queue.next_ssn = next_ssn;
         }
@@ -2639,6 +2683,7 @@ impl Association {
                 stream_identifier,
                 true,
                 PayloadProtocolIdentifier::default(),
+                false,
             )
         }
     }
@@ -2705,6 +2750,17 @@ impl Association {
                 raw_packets = self.gather_data_packets_to_retransmit(raw_packets, now);
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
+                }
+                if matches!(
+                    state,
+                    AssociationState::ShutdownPending | AssociationState::ShutdownReceived
+                ) {
+                    raw_packets = self.gather_outbound_data_and_reconfig_packets(raw_packets, now);
+                    if self.state() == AssociationState::Closed {
+                        return (vec![], false);
+                    }
+                    // Expired pending messages can leave no DATA to acknowledge.
+                    self.postprocess_sack(state, false, now);
                 }
                 raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
                 if self.state() == AssociationState::Closed {
@@ -3005,6 +3061,14 @@ impl Association {
                 .marshal()
             {
                 raw_packets.push(raw);
+                /*
+                 * The final packet is now owned by the caller. Only now may
+                 * the endpoint remove the association's packet routing entry.
+                 */
+                if let Err(err) = self.close(AssociationError::AssociationClosed) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
+                self.endpoint_events.push_back(EndpointEventInner::Drained);
                 ok = false;
             } else {
                 warn!(

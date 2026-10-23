@@ -105,6 +105,10 @@ echo "==> Verifying the local RTC channel-mode repair"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib remote_dcep_
 
+echo "==> Verifying RTC SCTP drain and endpoint retirement"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib peer_connection::handler::sctp::tests
+
 echo "==> Verifying RTC channel reset ordering"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib stream_reset_

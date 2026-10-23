@@ -1851,3 +1851,400 @@ fn shutdown_acknowledgment_retires_forward_tsn_and_reset_fence() -> Result<()> {
     );
     Ok(())
 }
+
+// Issue #1145: graceful close must drain both the admitted and transmitted tail.
+#[test]
+fn graceful_shutdown_drains_admitted_gameplay_in_wire_order() -> Result<()> {
+    for simultaneous in [false, true] {
+        for before_transmit in [false, true] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            local.ack_mode = AckMode::NoDelay;
+            remote.ack_mode = AckMode::NoDelay;
+            // A small window admits only part of the fragmented message.
+            local.cwnd = local.max_payload_size;
+            local.rwnd = local.max_payload_size;
+            remote.max_receive_buffer_size = local.max_payload_size;
+            let expected = vec![
+                Bytes::from_static(b"first"),
+                Bytes::from(vec![0xa5; local.max_payload_size as usize * 3 + 17]),
+                Bytes::from_static(b"last"),
+            ];
+            for payload in &expected {
+                local
+                    .stream(1)?
+                    .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+            }
+            let first = if before_transmit {
+                vec![]
+            } else {
+                local.gather_outbound(now).0
+            };
+            assert!(!local.pending_queue.is_empty());
+            local.shutdown()?;
+            assert_eq!(local.state(), AssociationState::ShutdownPending);
+            assert!(
+                local.poll_endpoint_event().is_none(),
+                "shutdown initiation must keep packet routing"
+            );
+            assert!(
+                local
+                    .stream(1)?
+                    .write_sctp(
+                        now,
+                        &Bytes::from_static(b"late"),
+                        PayloadProtocolIdentifier::Binary
+                    )
+                    .is_err()
+            );
+            if simultaneous {
+                remote.shutdown()?;
+            }
+            // Lose the first DATA packet, forcing a retry during graceful drain.
+            drop(first);
+            let mut received = vec![];
+            let mut shutdown_seen = false;
+            for step in 0..200 {
+                let at = now + Duration::from_millis(step * 100);
+                local.handle_timeout(at);
+                remote.handle_timeout(at);
+                for raw in local.gather_outbound(at).0 {
+                    let packet = Packet::unmarshal(&raw)?;
+                    if packet
+                        .chunks
+                        .iter()
+                        .any(|c| c.as_any().is::<ChunkShutdown>())
+                    {
+                        shutdown_seen = true;
+                        assert!(local.pending_queue.is_empty());
+                        assert!(
+                            local.inflight_queue.is_empty(),
+                            "SHUTDOWN must wait for the cumulative tail ACK"
+                        );
+                        assert_eq!(received, expected);
+                    }
+                    remote.handle_inbound(packet, at)?;
+                    if remote.streams.contains_key(&1) {
+                        while let Some(message) = remote.stream(1)?.read_sctp()? {
+                            received.push(message.to_payload(65536)?.freeze());
+                        }
+                    }
+                }
+                for raw in remote.gather_outbound(at).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                if local.state() == AssociationState::Closed
+                    && remote.state() == AssociationState::Closed
+                {
+                    break;
+                }
+            }
+            assert_eq!(
+                received, expected,
+                "simultaneous={simultaneous}, before_transmit={before_transmit}"
+            );
+            assert_eq!(local.state(), AssociationState::Closed);
+            assert_eq!(remote.state(), AssociationState::Closed);
+            assert!(shutdown_seen || simultaneous);
+            assert!(local.poll_timeout().is_none());
+            assert!(remote.poll_timeout().is_none());
+            assert!(local.poll_endpoint_event().is_some());
+            assert!(local.poll_endpoint_event().is_none());
+            assert!(remote.poll_endpoint_event().is_some());
+            assert!(remote.poll_endpoint_event().is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn graceful_shutdown_without_data_retires_after_final_packet() -> Result<()> {
+    let (mut local, mut remote) = reset_pair();
+    let now = Instant::now();
+    local.shutdown()?;
+    assert!(local.poll_endpoint_event().is_none());
+    for raw in local.gather_outbound(now).0 {
+        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert!(remote.poll_endpoint_event().is_none());
+    for raw in remote.gather_outbound(now).0 {
+        local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert!(
+        local.poll_endpoint_event().is_none(),
+        "the final packet has not been returned yet"
+    );
+    let final_packets = local.gather_outbound(now).0;
+    assert!(
+        final_packets
+            .iter()
+            .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            .any(|c| c.as_any().is::<ChunkShutdownComplete>())
+    );
+    assert_eq!(local.state(), AssociationState::Closed);
+    assert!(local.poll_endpoint_event().is_some());
+    for raw in final_packets {
+        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert_eq!(remote.state(), AssociationState::Closed);
+    assert!(remote.poll_endpoint_event().is_some());
+    assert!(local.gather_outbound(now).0.is_empty());
+    assert!(remote.gather_outbound(now).0.is_empty());
+    Ok(())
+}
+
+// Issue #1145: transport completion must not discard an unread accepted tail.
+#[test]
+fn graceful_shutdown_preserves_messages_until_application_reads() -> Result<()> {
+    for simultaneous in [false, true] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.ack_mode = AckMode::NoDelay;
+        remote.ack_mode = AckMode::NoDelay;
+        let expected = vec![
+            Bytes::from_static(b"one"),
+            Bytes::from(vec![0x5a; 4096]),
+            Bytes::from_static(b"tail"),
+        ];
+        for endpoint in [&mut local, &mut remote] {
+            for payload in &expected {
+                endpoint
+                    .stream(1)?
+                    .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+            }
+        }
+        local.shutdown()?;
+        if simultaneous {
+            remote.shutdown()?;
+        }
+        for step in 0..100 {
+            let at = now + Duration::from_millis(step * 100);
+            local.handle_timeout(at);
+            remote.handle_timeout(at);
+            for raw in local.gather_outbound(at).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+            }
+            for raw in remote.gather_outbound(at).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+            }
+            if local.state() == AssociationState::Closed
+                && remote.state() == AssociationState::Closed
+            {
+                break;
+            }
+        }
+        for endpoint in [&mut local, &mut remote] {
+            assert_eq!(endpoint.state(), AssociationState::Closed);
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(endpoint.poll_endpoint_event().is_none());
+            assert!(
+                !endpoint
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::AssociationLost { id: 1, .. })),
+                "stream close must follow the final read"
+            );
+            assert!(
+                endpoint
+                    .stream(1)?
+                    .write_sctp(
+                        now,
+                        &Bytes::from_static(b"late"),
+                        PayloadProtocolIdentifier::Binary
+                    )
+                    .is_err()
+            );
+            let mut received = vec![];
+            for _ in &expected {
+                assert!(endpoint.poll_endpoint_event().is_none());
+                let message = endpoint.stream(1)?.read_sctp()?.unwrap();
+                received.push(message.to_payload(65536)?.freeze());
+            }
+            assert_eq!(received, expected);
+            assert!(endpoint.poll_endpoint_event().is_some());
+            assert!(endpoint.poll_endpoint_event().is_none());
+            assert!(endpoint.streams.is_empty());
+            assert_eq!(
+                endpoint
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event, Event::AssociationLost { id: 1, .. }))
+                    .count(),
+                1
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn graceful_shutdown_retries_lost_shutdown_and_ack() -> Result<()> {
+    for (lose_shutdown, lose_ack) in [(true, false), (false, true), (true, true)] {
+        let (mut local, mut remote) = reset_pair();
+        let mut now = Instant::now();
+        local.shutdown()?;
+        let mut packets = local.gather_outbound(now).0;
+        if lose_shutdown {
+            assert!(!packets.is_empty());
+            now = local.timers.get(Timer::T2Shutdown).unwrap();
+            local.handle_timeout(now);
+            packets = local.gather_outbound(now).0;
+        }
+        assert!(local.poll_endpoint_event().is_none());
+        for raw in packets {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        let mut packets = remote.gather_outbound(now).0;
+        if lose_ack {
+            assert!(!packets.is_empty());
+            now = remote.timers.get(Timer::T2Shutdown).unwrap();
+            remote.handle_timeout(now);
+            packets = remote.gather_outbound(now).0;
+        }
+        assert!(remote.poll_endpoint_event().is_none());
+        for raw in packets {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(local.poll_endpoint_event().is_none());
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for endpoint in [&mut local, &mut remote] {
+            assert_eq!(endpoint.state(), AssociationState::Closed);
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(endpoint.poll_endpoint_event().is_some());
+            assert!(endpoint.poll_endpoint_event().is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn graceful_shutdown_allows_stopping_an_unread_closed_tail() -> Result<()> {
+    let (mut local, mut remote) = reset_pair();
+    let now = Instant::now();
+    remote.stream(1)?.write_sctp(
+        now,
+        &Bytes::from_static(b"unread"),
+        PayloadProtocolIdentifier::Binary,
+    )?;
+    for raw in remote.gather_outbound(now).0 {
+        local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    local.close(AssociationError::AssociationClosed)?;
+    assert!(local.stream(1)?.is_readable());
+    local.stream(1)?.stop(now)?;
+    assert!(local.streams.is_empty());
+    assert!(local.poll_timeout().is_none());
+    assert!(local.pending_queue.is_empty());
+    assert_eq!(
+        local
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::AssociationLost { id: 1, .. }))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+// Issue #1145: terminal close must retain DATA held across a stream reset.
+#[test]
+fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
+    for disposition in ["read", "stop", "abort", "transport close"] {
+        let (a, mut b) = reset_pair();
+        let now = Instant::now();
+        let old = ChunkPayloadData {
+            tsn: b.peer_last_tsn.wrapping_add(1),
+            stream_identifier: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"old tail"),
+            ..Default::default()
+        };
+        b.handle_data(&old)?;
+        b.send_reset_request(now, 1)?;
+        let reset = reset_requests(&mut b, now).remove(0);
+        b.handle_reconfig_param(
+            &response(
+                request(&reset).reconfig_request_sequence_number,
+                ReconfigResult::SuccessPerformed,
+            ),
+            &mut vec![],
+            now,
+        )?;
+        let peer_reset = Box::new(ParamOutgoingResetRequest {
+            reconfig_request_sequence_number: a.my_next_rsn,
+            reconfig_response_sequence_number: b.my_next_rsn.wrapping_sub(1),
+            sender_last_tsn: old.tsn,
+            stream_identifiers: vec![1],
+        }) as Box<dyn Param>;
+        b.handle_reconfig_param(&peer_reset, &mut vec![], now)?;
+        b.handle_data(&ChunkPayloadData {
+            tsn: old.tsn.wrapping_add(1),
+            user_data: Bytes::from_static(b"saved next generation"),
+            ..old
+        })?;
+        assert!(b.deferred_reset_reassembly.get(&1).unwrap().is_readable());
+        b.close(AssociationError::AssociationClosed)?;
+        b.endpoint_events.push_back(EndpointEventInner::Drained);
+        assert!(b.poll_endpoint_event().is_none());
+        if matches!(disposition, "abort" | "transport close") {
+            for _ in 0..2 {
+                if disposition == "abort" {
+                    b.abort()?;
+                } else {
+                    b.close(AssociationError::ApplicationClosed)?;
+                }
+            }
+            assert!(b.streams.is_empty());
+            assert!(b.deferred_reset_reassembly.is_empty());
+            assert!(b.deferred_reset_data.is_empty());
+            assert_eq!(b.deferred_reset_bytes, 0);
+            assert!(b.poll_endpoint_event().is_some());
+            assert!(b.poll_endpoint_event().is_none());
+            assert!(b.poll_timeout().is_none());
+            assert_eq!(
+                b.events
+                    .iter()
+                    .filter(|event| matches!(event, Event::AssociationLost { id: 1, .. }))
+                    .count(),
+                1
+            );
+            continue;
+        }
+        {
+            let mut old_stream = b.stream(1)?;
+            if disposition == "stop" {
+                old_stream.stop(now)?;
+            } else {
+                assert_eq!(
+                    old_stream.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+                    Bytes::from_static(b"old tail")
+                );
+            }
+            assert!(
+                old_stream.read_sctp()?.is_none(),
+                "old handle cannot consume the saved generation"
+            );
+        }
+        assert!(b.poll_endpoint_event().is_none());
+        let mut next = b
+            .accept_stream()
+            .expect("saved generation is accepted for reads");
+        assert!(!next.is_writable());
+        assert_eq!(
+            next.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+            Bytes::from_static(b"saved next generation")
+        );
+        assert!(next.read_sctp()?.is_none());
+        assert!(b.poll_endpoint_event().is_some());
+        assert!(b.poll_endpoint_event().is_none());
+        assert!(b.streams.is_empty());
+        assert!(b.deferred_reset_reassembly.is_empty());
+        assert!(b.deferred_reset_data.is_empty());
+        assert_eq!(b.deferred_reset_bytes, 0);
+        assert!(b.poll_timeout().is_none());
+    }
+    Ok(())
+}

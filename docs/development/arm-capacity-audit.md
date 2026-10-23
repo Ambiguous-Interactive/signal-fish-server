@@ -5104,3 +5104,65 @@ Set `CAPACITY_VIEW_PROBE_ROOMS=20`, `CAPACITY_VIEW_PROBE_PLAYERS=64`, and
 `CAPACITY_VIEW_PROBE_CHURN=1`. Fixed executable hashes, source copies, paired
 logs, child `wait4` peak RSS, and excluded trials remain local in
 `progress/session-514-capacity-views/`.
+
+### Stop runs when unexpected evidence exceeds retention limits
+
+The live collector now bounds receive and control event retention for #775.
+Its shared event limit is the planned recipient-delivery count plus 1,024
+records and 128 records per peer. Receipts, gap reports, unsupported-format
+notices, disconnects, churn actions, join failures, and retained faults share
+that limit. Deduplicated faults consume no new record. Completed sends remain
+in their separate, finite planned-send allocation.
+
+The collector also limits serialized control evidence to 16 MiB. This covers
+faults, notices, disconnects, churn actions, and join failures. Receipts and
+gaps use fixed-size records and share names from the registered roster. The
+collector retains the complete first event that crosses either limit. The
+byte limit therefore permits one additional decoded frame. This is a bound
+on retained evidence growth, not a process RSS limit. It excludes socket
+buffers, the currently decoded frame, allocator overhead, the sender registry,
+and oracle scratch space.
+
+A crossing event wakes the runner. The runner cancels and joins all peer
+tasks before taking the evidence snapshot. The current frame handler also
+stops after recording its evidence. The artifact keeps the full declared
+workload, every completed send, the retained receive prefix, and a
+`generator_record_budget_exceeded` reason. This reason records both limits,
+retained counts, the first crossing event kind, and the count of later record
+attempts that could not be retained. The first crossing event is the final
+retained nonterminal event of its kind. A reserve failure also stops collection and
+records the allocation error and unretained attempt. Missing, duplicate,
+ordering, misroute, and gap checks still evaluate the exact retained prefix.
+A partial run cannot pass. Replaying these artifacts yields the same verdict.
+
+Record vectors use fallible, exact reservations capped at the remaining
+allowance. A full 100,000-receipt allocation grows to 101,281 slots on its
+first excess receipt, instead of doubling. The fault vector keeps one spare
+slot for the terminal reason.
+
+A fresh-process synthetic probe cloned one shared receipt identity. It held
+the offered plan fixed and increased unexpected receipt attempts:
+
+| Attempts | Unbounded fixture: retained / capacity | Bounded collector: retained / capacity |
+| --- | --- | --- |
+| 1,000 | 1,000 / 1,024 | 1,000 / 1,536 |
+| 10,000 | 10,000 / 16,384 | 1,585 / 1,585 |
+| 100,000 | 100,000 / 131,072 | 1,585 / 1,585 |
+| 1,000,000 | 1,000,000 / 1,048,576 | 1,585 / 1,585 |
+
+At one million attempts, receipt capacity occupies 67,108,864 bytes in the
+unbounded fixture and 101,440 bytes in the bounded collector. These are exact
+vector-capacity measurements. Concurrent builds make the observed process
+RSS unsuitable for a whole-run memory comparison. Reproduce with the
+capacity-runner test executable and `--ignored --exact
+records::tests::runtime_event_budget_memory_profile --nocapture`. Set
+`CAPACITY_EVENT_BUDGET_PROBE_UNBOUNDED=1` for the unbounded fixture.
+
+The regression first retained all 10,000 unexpected receipts before the fix.
+Controls now cover every uncontrolled event kind, both timing modes, exact
+limit boundaries, full crossing-frame retention, concurrent producers,
+terminal notification, cancellation and joining, and exact artifact replay.
+The scoped record and cancellation checks pass. This change does not bound
+arbitrary artifact replay input or qualify the planned ten-minute cell.
+Streaming retention, replay admission, and full-cell memory qualification
+remain open in #775.

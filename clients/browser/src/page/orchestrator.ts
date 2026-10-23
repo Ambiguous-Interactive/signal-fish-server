@@ -794,6 +794,8 @@ class Orchestrator {
   private pendingAdmittedTasks = 0;
   private readonly reportedExchangeDiagnostics = new Map<string, Set<string>>();
   private exchangeRetryAt: number | null = null;
+  private nextDataChannelStatsAt = 0;
+  private finalDataChannelStatsRequested = false;
   private readonly pendingSignals = new Map<string, unknown[]>();
   private runDeadline = 0;
   private lingerUntil: number | null = null;
@@ -1445,6 +1447,12 @@ class Orchestrator {
     if (!this.successReleasePollInFlight && this.successReleasePollAt !== null) {
       wake = Math.min(wake, this.successReleasePollAt);
     }
+    if (this.config.exchange && this.exchangeLedger.unpaidPeers().length !== 0) {
+      wake = Math.min(wake, this.nextDataChannelStatsAt);
+      if (!this.finalDataChannelStatsRequested) {
+        wake = Math.min(wake, this.runDeadline - 1_000);
+      }
+    }
     wake = Math.min(wake, nextKeepaliveWake(this.nextPingAt, this.pongDeadline));
     return wake;
   }
@@ -1482,6 +1490,18 @@ class Orchestrator {
         this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
     )
       return;
+
+    /* Sample quiet exchange debt every five seconds and once near the run cutoff.
+     * No query can delay gameplay, teardown, or the run decision. */
+    const finalSampleDue =
+      !this.finalDataChannelStatsRequested && now >= this.runDeadline - 1_000;
+    if (this.config.exchange && (now >= this.nextDataChannelStatsAt || finalSampleDue)) {
+      for (const peer of this.exchangeLedger.unpaidPeers()) {
+        this.engine.sampleDataChannelStats(peer);
+      }
+      this.nextDataChannelStatsAt = now + 5_000;
+      if (finalSampleDue) this.finalDataChannelStatsRequested = true;
+    }
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
     // An unanswered ping is a broken connection or control path — fail loudly
@@ -2456,6 +2476,7 @@ class Orchestrator {
    */
   private onPairConnected(peer: string): void {
     this.assertActive();
+    this.nextDataChannelStatsAt = Math.min(this.nextDataChannelStatsAt, monotonicNowMs());
     this.pairRetryState.set(peer, {
       attempt: this.pairRetryState.get(peer)?.attempt ?? 0,
       connected: true,

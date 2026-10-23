@@ -1,5 +1,5 @@
-use crate::association::Association;
 use crate::association::state::AssociationState;
+use crate::association::{Association, AssociationError};
 use crate::chunk::chunk_payload_data::{
     ChunkPayloadData, MessageReliability, PayloadProtocolIdentifier,
 };
@@ -129,7 +129,8 @@ impl Stream<'_> {
     /// read_sctp reads a packet of len(p) bytes and returns the associated Payload
     /// Protocol Identifier.
     /// Returns EOF when the stream is reset or an error if the stream is closed
-    /// otherwise.
+    /// otherwise. Complete messages remain readable after graceful association
+    /// shutdown until the application reads them or stops the stream.
     pub fn read_sctp(&mut self) -> Result<Option<Chunks>> {
         // The final old-generation read can complete a deferred reset and
         // admit saved DATA into the same SID. This handle must report EOF
@@ -151,8 +152,16 @@ impl Stream<'_> {
         {
             let chunks = s.reassembly_queue.read();
             if !s.reassembly_queue.is_readable() {
-                self.association
-                    .retry_deferred_resets(self.stream_identifier);
+                if self.association.retired {
+                    self.association.unregister_stream(
+                        self.stream_identifier,
+                        AssociationError::AssociationClosed,
+                    );
+                    self.association.release_reset_data();
+                } else {
+                    self.association
+                        .retry_deferred_resets(self.stream_identifier);
+                }
             }
             Ok(chunks)
         } else {
@@ -320,6 +329,19 @@ impl Stream<'_> {
     /// `now` is the instant the caller is acting at: resetting the stream queues an outgoing
     /// chunk, so it is on the same write path as [`write_sctp`](Self::write_sctp).
     pub fn stop(&mut self, now: Instant) -> Result<()> {
+        if self.association.retired {
+            if self
+                .association
+                .streams
+                .get(&self.stream_identifier)
+                .is_some_and(|s| s.generation == self.generation)
+            {
+                self.association
+                    .unregister_stream(self.stream_identifier, AssociationError::AssociationClosed);
+                self.association.release_reset_data();
+            }
+            return Ok(());
+        }
         let mut reset = false;
         if let Some(s) = self
             .association

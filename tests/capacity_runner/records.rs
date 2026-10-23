@@ -344,7 +344,7 @@ impl ReceiptTimingSnapshot {
         let after = elapsed_ns(start);
         Self {
             enabled: true,
-            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per measured stage; aggregates cover every receipt. At most 70 observation rows are retained across the slow buffer, three final maxima, and three frozen prefix maxima. Observation rows retain scalar receipt positions; exact names are resolved only after collection. No TCP attribution.",
+            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per measured stage; aggregates cover every retained receipt. At most 70 observation rows are retained across the slow buffer, three final maxima, and three frozen prefix maxima. Observation rows retain scalar receipt positions; exact names are resolved only after collection. No TCP attribution.",
             wall_anchor_unix_ns: wall,
             wall_anchor_offset_before_ns: before,
             wall_anchor_offset_after_ns: after,
@@ -469,6 +469,7 @@ fn pause_receipt_timing(delay: Duration) {
 pub struct EventLog {
     state: Mutex<EventState>,
     receipt_timing_start: Option<Instant>,
+    budget_changed: tokio::sync::Notify,
     #[cfg(test)]
     receipt_timing_hooks: ReceiptTimingHooks,
 }
@@ -476,6 +477,7 @@ pub struct EventLog {
 #[derive(Default)]
 struct EventState {
     receipt_timings: Option<ReceiptTimingSnapshot>,
+    budget: Option<RecordBudget>,
     sent: Vec<SentEvent>,
     receipts: Vec<ReceiptEvent>,
     gaps: Vec<GapEvent>,
@@ -494,6 +496,23 @@ struct EventState {
     /// deterministically — never through a racy mid-run lookup.
     registry: BTreeMap<String, (String, u32)>,
 }
+
+/// Receive-side events can exceed the offered schedule. Keep one terminal
+/// event beyond these limits so the cause remains exact, then stop the run.
+/// Sends have their own finite schedule and are never discarded by this gate.
+struct RecordBudget {
+    event_limit: usize,
+    control_byte_limit: usize,
+    retained_events: usize,
+    control_bytes: usize,
+    first_excess_kind: Option<&'static str>,
+    unretained_events: u64,
+    allocation_failure: Option<String>,
+}
+
+const CONTROL_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+const EXTRA_EVENTS: usize = 1024;
+const EXTRA_EVENTS_PER_PEER: usize = 128;
 
 impl EventLog {
     pub fn new() -> Self {
@@ -536,7 +555,23 @@ impl EventLog {
                             .ok_or_else(|| "planned receipt capacity overflows".to_string())?,
                     ))
                 })?;
-        Self::with_planned_capacity(sent, receipts, receipt_timings)
+        let mut log = Self::with_planned_capacity(sent, receipts, receipt_timings)?;
+        let allowance = plans
+            .len()
+            .checked_mul(EXTRA_EVENTS_PER_PEER)
+            .and_then(|count| count.checked_add(EXTRA_EVENTS))
+            .and_then(|count| count.checked_add(receipts))
+            .ok_or_else(|| "retained event budget overflows".to_string())?;
+        log.state.get_mut().expect("new event log").budget = Some(RecordBudget {
+            event_limit: allowance,
+            control_byte_limit: CONTROL_BYTE_LIMIT,
+            retained_events: 0,
+            control_bytes: 0,
+            first_excess_kind: None,
+            unretained_events: 0,
+            allocation_failure: None,
+        });
+        Ok(log)
     }
 
     fn with_planned_capacity(
@@ -546,6 +581,11 @@ impl EventLog {
     ) -> Result<Self, String> {
         let mut log = Self::with_receipt_timings(receipt_timings);
         let state = log.state.get_mut().expect("new event log");
+        // Receive allocation failures must still have room for their terminal reason.
+        state
+            .faults
+            .try_reserve_exact(1)
+            .map_err(|error| format!("reserve terminal generator fault: {error}"))?;
         state
             .sent
             .try_reserve_exact(sent)
@@ -555,6 +595,91 @@ impl EventLog {
             .try_reserve_exact(receipts)
             .map_err(|error| format!("reserve {receipts} planned receipts: {error}"))?;
         Ok(log)
+    }
+
+    /// The first crossing event is retained. Later inbound events are counted
+    /// as unretained evidence while the runner cancels and joins its producers.
+    fn admit_event(
+        &self,
+        state: &mut EventState,
+        kind: &'static str,
+        control_bytes: usize,
+    ) -> bool {
+        let Some(budget) = &mut state.budget else {
+            return true;
+        };
+        if budget.first_excess_kind.is_some() {
+            budget.unretained_events = budget.unretained_events.saturating_add(1);
+            return false;
+        }
+        budget.retained_events = budget.retained_events.saturating_add(1);
+        budget.control_bytes = budget.control_bytes.saturating_add(control_bytes);
+        if budget.retained_events > budget.event_limit
+            || budget.control_bytes > budget.control_byte_limit
+        {
+            budget.first_excess_kind = Some(kind);
+            self.budget_changed.notify_waiters();
+        }
+        true
+    }
+
+    fn retain_event<T>(
+        &self,
+        state: &mut EventState,
+        kind: &'static str,
+        control_bytes: usize,
+        event: T,
+        select: fn(&mut EventState) -> &mut Vec<T>,
+    ) -> bool {
+        if !self.admit_event(state, kind, control_bytes) {
+            return false;
+        }
+        if let Some(budget) = &state.budget {
+            // Keep a spare fault slot for the terminal budget reason, which
+            // take_records appends after the producers have stopped.
+            let terminal_slots = usize::from(kind == "fault");
+            let capacity_limit = budget.event_limit.saturating_add(1 + terminal_slots);
+            let rows = select(state);
+            if rows.len().saturating_add(terminal_slots) >= rows.capacity() {
+                let additional = rows
+                    .capacity()
+                    .max(4)
+                    .min(capacity_limit.saturating_sub(rows.len()));
+                if let Err(error) = rows.try_reserve_exact(additional) {
+                    let budget = state.budget.as_mut().expect("bounded event log");
+                    budget.first_excess_kind = Some(kind);
+                    budget.retained_events -= 1;
+                    budget.control_bytes = budget.control_bytes.saturating_sub(control_bytes);
+                    budget.unretained_events = budget.unretained_events.saturating_add(1);
+                    budget.allocation_failure = Some(error.to_string());
+                    self.budget_changed.notify_waiters();
+                    return false;
+                }
+            }
+        }
+        select(state).push(event);
+        true
+    }
+
+    pub fn record_budget_exhausted(&self) -> bool {
+        self.state
+            .lock()
+            .expect("event log poisoned")
+            .budget
+            .as_ref()
+            .is_some_and(|budget| budget.first_excess_kind.is_some())
+    }
+
+    pub async fn wait_record_budget_exhausted(&self) {
+        loop {
+            let changed = self.budget_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.record_budget_exhausted() {
+                return;
+            }
+            changed.await;
+        }
     }
 
     pub fn set_workload_epoch(&self, epoch: Instant) {
@@ -633,7 +758,7 @@ impl EventLog {
     pub fn push_receipt(&self, event: ReceiptEvent) {
         let Some(start) = self.receipt_timing_start else {
             let mut state = self.state.lock().expect("event log poisoned");
-            state.receipts.push(event);
+            self.retain_event(&mut state, "receipt", 0, event, |state| &mut state.receipts);
             return;
         };
         let waiting = elapsed_ns(start);
@@ -648,7 +773,9 @@ impl EventLog {
         let push_started = elapsed_ns(start);
         #[cfg(test)]
         pause_receipt_timing(self.receipt_timing_hooks.push_delay);
-        state.receipts.push(event);
+        if !self.retain_event(&mut state, "receipt", 0, event, |state| &mut state.receipts) {
+            return;
+        }
         let pushed = elapsed_ns(start);
         let len_after = state.receipts.len();
         let capacity_after = state.receipts.capacity();
@@ -719,43 +846,39 @@ impl EventLog {
     }
 
     pub fn push_gap(&self, event: GapEvent) {
-        self.state
-            .lock()
-            .expect("event log poisoned")
-            .gaps
-            .push(event);
+        let bytes = 0;
+        let mut state = self.state.lock().expect("event log poisoned");
+        self.retain_event(&mut state, "gap", bytes, event, |state| &mut state.gaps);
     }
 
     pub fn push_unsupported_notice(&self, event: UnsupportedNoticeEvent) {
-        self.state
-            .lock()
-            .expect("event log poisoned")
-            .unsupported_notices
-            .push(event);
+        let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
+        let mut state = self.state.lock().expect("event log poisoned");
+        self.retain_event(&mut state, "unsupported_notice", bytes, event, |state| {
+            &mut state.unsupported_notices
+        });
     }
 
     pub fn push_disconnect(&self, event: DisconnectEvent) {
-        self.state
-            .lock()
-            .expect("event log poisoned")
-            .disconnects
-            .push(event);
+        let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
+        let mut state = self.state.lock().expect("event log poisoned");
+        self.retain_event(&mut state, "disconnect", bytes, event, |state| {
+            &mut state.disconnects
+        });
     }
 
     pub fn push_churn(&self, event: ChurnEvent) {
-        self.state
-            .lock()
-            .expect("event log poisoned")
-            .churn
-            .push(event);
+        let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
+        let mut state = self.state.lock().expect("event log poisoned");
+        self.retain_event(&mut state, "churn", bytes, event, |state| &mut state.churn);
     }
 
     pub fn push_join_failure(&self, failure: String) {
-        self.state
-            .lock()
-            .expect("event log poisoned")
-            .join_failures
-            .push(failure);
+        let bytes = crate::runner::json_byte_count(&failure).unwrap_or(usize::MAX);
+        let mut state = self.state.lock().expect("event log poisoned");
+        self.retain_event(&mut state, "join_failure", bytes, failure, |state| {
+            &mut state.join_failures
+        });
     }
 
     /// Record a runner-observed fault (hook firing, send failure, malformed
@@ -796,7 +919,10 @@ impl EventLog {
             }
             _ => {}
         }
-        state.faults.push(reason);
+        let bytes = crate::runner::json_byte_count(&reason).unwrap_or(usize::MAX);
+        self.retain_event(&mut state, "fault", bytes, reason, |state| {
+            &mut state.faults
+        });
     }
 
     /// Whether the server-termination fault has been declared (senders stop
@@ -840,6 +966,21 @@ impl EventLog {
             faults: std::mem::take(&mut state.faults),
             registry: std::mem::take(&mut state.registry),
         };
+        if let Some(budget) = state.budget.as_ref() {
+            if let Some(kind) = budget.first_excess_kind {
+                records
+                    .faults
+                    .push(InvalidReason::GeneratorRecordBudgetExceeded {
+                        event_limit: crate::config::count_u64(budget.event_limit),
+                        retained_events: crate::config::count_u64(budget.retained_events),
+                        control_byte_limit: crate::config::count_u64(budget.control_byte_limit),
+                        retained_control_bytes: crate::config::count_u64(budget.control_bytes),
+                        first_excess_kind: kind.to_string(),
+                        unretained_events: budget.unretained_events,
+                        allocation_failure: budget.allocation_failure.clone(),
+                    });
+            }
+        }
         sort_sent_events(&mut records.sent);
         records
     }
@@ -1157,6 +1298,10 @@ mod tests {
                         let state = log.state.lock().unwrap();
                         assert!(state.sent.capacity() >= expected.sent.len());
                         assert!(state.receipts.capacity() >= expected.receipts.len());
+                        assert!(
+                            state.faults.capacity() >= 1,
+                            "reserve the terminal reason before collection"
+                        );
                         assert_eq!(state.receipt_timings.is_some(), timings);
                         (state.sent.capacity(), state.receipts.capacity())
                     };
@@ -1443,6 +1588,320 @@ mod tests {
             &replayed.gaps[2].recipient.0
         ));
         assert!(std::mem::size_of::<GapEvent>() < std::mem::size_of::<GapEvent<String>>());
+    }
+
+    #[test]
+    fn unexpected_receipts_stop_growing_after_the_run_budget() {
+        let context = crate::unit_context_with_class(crate::DeliveryClass::Reliable);
+        let log = EventLog::for_plans(&context.plans, false).expect("bounded log");
+        let planned: usize = context
+            .plans
+            .iter()
+            .map(|plan| {
+                plan.sends.len()
+                    * context
+                        .plans
+                        .iter()
+                        .filter(|peer| peer.room == plan.room && peer.name != plan.name)
+                        .count()
+            })
+            .sum();
+        let limit = planned + 1024 + context.plans.len() * 128;
+        for seq in 0..10_000 {
+            log.push_receipt(timing_receipt(seq));
+        }
+        let records = log.take_records();
+        assert_eq!(
+            records.receipts.len(),
+            limit + 1,
+            "retain the crossing event"
+        );
+    }
+
+    #[test]
+    fn a_full_planned_receipt_buffer_grows_only_by_the_bounded_allowance() {
+        let mut config = crate::scenario_config(crate::Encoding::V3Json);
+        config.players_per_room = 2;
+        config.warmup = Duration::ZERO;
+        config.duration = Duration::from_secs(1);
+        config.send_rate_per_sender = 50_000.0;
+        let (plans, _) = crate::build_run_shape(&config).unwrap();
+        let log = EventLog::for_plans(&plans, false).unwrap();
+        let planned = log.state.lock().unwrap().receipts.capacity();
+        assert_eq!(planned, 100_000);
+        for seq in 0..crate::config::count_u64(planned) {
+            log.push_receipt(timing_receipt(seq));
+        }
+        log.push_receipt(timing_receipt(100_000));
+        let state = log.state.lock().unwrap();
+        let budget = state.budget.as_ref().unwrap();
+        assert_eq!(state.receipts.len(), planned + 1);
+        assert_eq!(state.receipts.capacity(), budget.event_limit + 1);
+        assert!(state.receipts.capacity() < planned * 2);
+        println!(
+            "BOUNDED_EVENT_PROFILE {}",
+            serde_json::json!({
+                "planned_receipts": planned, "retained_receipts": state.receipts.len(),
+                "receipt_capacity": state.receipts.capacity(),
+                "capacity_bytes": state.receipts.capacity() * std::mem::size_of::<ReceiptEvent>(),
+                "rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+            })
+        );
+    }
+
+    #[test]
+    #[ignore = "isolated unexpected-event memory profile; run in a fresh process"]
+    fn runtime_event_budget_memory_profile() {
+        let context = crate::unit_context_with_class(crate::DeliveryClass::Reliable);
+        let bounded = std::env::var_os("CAPACITY_EVENT_BUDGET_PROBE_UNBOUNDED").is_none();
+        let log = if bounded {
+            EventLog::for_plans(&context.plans, false).unwrap()
+        } else {
+            EventLog::new()
+        };
+        let expected_retained = log
+            .state
+            .lock()
+            .unwrap()
+            .budget
+            .as_ref()
+            .map_or(1_000_000, |budget| budget.event_limit + 1);
+        let receipt = timing_receipt(7);
+        for attempted in 1..=1_000_000 {
+            log.push_receipt(receipt.clone());
+            if [1_000, 10_000, 100_000, 1_000_000].contains(&attempted) {
+                let state = log.state.lock().unwrap();
+                println!(
+                    "UNEXPECTED_EVENT_PROFILE {}",
+                    serde_json::json!({
+                        "bounded": bounded, "attempted_receipts": attempted,
+                        "retained_receipts": state.receipts.len(),
+                        "receipt_capacity": state.receipts.capacity(),
+                        "receipt_capacity_bytes": state.receipts.capacity() * std::mem::size_of::<ReceiptEvent>(),
+                        "rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                    })
+                );
+            }
+        }
+        let records = log.take_records();
+        assert_eq!(records.receipts.len(), expected_retained);
+        assert_eq!(records.faults.len(), usize::from(bounded));
+        std::hint::black_box(records);
+    }
+
+    fn bounded_test_log(events: usize, bytes: usize, timings: bool) -> EventLog {
+        let mut log = EventLog::with_receipt_timings(timings);
+        log.state.get_mut().unwrap().budget = Some(RecordBudget {
+            event_limit: events,
+            control_byte_limit: bytes,
+            retained_events: 0,
+            control_bytes: 0,
+            first_excess_kind: None,
+            unretained_events: 0,
+            allocation_failure: None,
+        });
+        log
+    }
+
+    fn push_test_event(log: &EventLog, event: DeliveryEvent) {
+        match event {
+            DeliveryEvent::Sent(event) => log.push_sent(event),
+            DeliveryEvent::Receipt(event) => log.push_receipt(event),
+            DeliveryEvent::Gap(event) => log.push_gap(event),
+            DeliveryEvent::UnsupportedNotice(event) => log.push_unsupported_notice(event),
+            DeliveryEvent::Disconnect(event) => log.push_disconnect(event),
+            DeliveryEvent::Churn(event) => log.push_churn(event),
+            DeliveryEvent::JoinFailure { detail } => log.push_join_failure(detail),
+            DeliveryEvent::Fault(reason) => log.push_fault(reason),
+            DeliveryEvent::Registry { .. } => unreachable!("not an event producer"),
+        }
+    }
+
+    #[test]
+    fn every_unplanned_event_kind_keeps_the_crossing_event_and_exact_replay() {
+        let context = crate::unit_context_with_class(crate::DeliveryClass::Reliable);
+        let events = vec![
+            DeliveryEvent::Receipt(timing_receipt(7)),
+            DeliveryEvent::Gap(crate::gap_for(
+                "r0p1",
+                "r0p0",
+                7,
+                signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+            )),
+            DeliveryEvent::UnsupportedNotice(UnsupportedNoticeEvent {
+                recipient: "r0p1".into(),
+                at_us: 3,
+            }),
+            DeliveryEvent::Disconnect(DisconnectEvent {
+                recipient: "r0p1".into(),
+                observation: DisconnectObservation::StreamEnded,
+            }),
+            DeliveryEvent::Churn(ChurnEvent {
+                recipient: "r0p1".into(),
+                phase: ChurnPhase::Disconnect,
+                at_us: 3,
+                epoch: None,
+                tails: BTreeMap::new(),
+            }),
+            DeliveryEvent::JoinFailure {
+                detail: "join failed".into(),
+            },
+            DeliveryEvent::Fault(InvalidReason::MalformedServerFrame {
+                recipient: "r0p1".into(),
+                detail: "invalid frame".into(),
+            }),
+        ];
+        for timings in [false, true] {
+            for event in &events {
+                let log = bounded_test_log(1, usize::MAX, timings);
+                push_test_event(&log, event.clone());
+                assert!(!log.record_budget_exhausted());
+                push_test_event(&log, event.clone());
+                assert!(log.record_budget_exhausted());
+                push_test_event(&log, event.clone());
+                // Every completed send remains evidence after receive-side stop.
+                for sent in crate::complete_records(&context.plans).sent {
+                    log.push_sent(sent);
+                }
+                let records = log.take_records();
+                assert!(records.faults.iter().any(|fault| matches!(
+                    fault,
+                    InvalidReason::GeneratorRecordBudgetExceeded {
+                        event_limit: 1,
+                        retained_events: 2,
+                        unretained_events: 1,
+                        ..
+                    }
+                )));
+                let captured: Vec<_> = records
+                    .events()
+                    .filter(|row| {
+                        !matches!(
+                            row,
+                            DeliveryEvent::Sent(_)
+                                | DeliveryEvent::Registry { .. }
+                                | DeliveryEvent::Fault(
+                                    InvalidReason::GeneratorRecordBudgetExceeded { .. }
+                                )
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    serde_json::to_value(captured).unwrap(),
+                    serde_json::to_value(vec![event, event]).unwrap()
+                );
+                let output = tempfile::tempdir().unwrap();
+                crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+                let replayed = crate::artifacts::read_records(output.path()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&records).unwrap(),
+                    serde_json::to_value(&replayed).unwrap()
+                );
+                let summarize = |records: &RunRecords| {
+                    crate::oracle::summarize(
+                        &context.plans,
+                        &context.roster,
+                        records,
+                        1000,
+                        96,
+                        crate::DeliveryClass::Reliable,
+                        &crate::ChurnPlan::default(),
+                        None,
+                    )
+                };
+                let summary = summarize(&records);
+                assert!(!summary.valid);
+                assert_eq!(
+                    serde_json::to_value(summary).unwrap(),
+                    serde_json::to_value(summarize(&replayed)).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_fault_flood_keeps_a_reserved_terminal_reason_slot() {
+        let log = bounded_test_log(8, usize::MAX, false);
+        for _ in 0..100 {
+            log.push_fault(InvalidReason::MalformedServerFrame {
+                recipient: "r0p1".into(),
+                detail: "bad frame".into(),
+            });
+        }
+        let capacity = log.state.lock().unwrap().faults.capacity();
+        let records = log.take_records();
+        assert_eq!(records.faults.len(), 10);
+        assert_eq!(records.faults.capacity(), capacity);
+        assert_eq!(capacity, 10);
+    }
+
+    #[test]
+    fn control_byte_budget_retains_the_complete_crossing_frame() {
+        let event = InvalidReason::ServerRejected {
+            recipient: "r0p1".into(),
+            detail: "é\\\"".repeat(10_000),
+        };
+        let size = crate::runner::json_byte_count(&event).unwrap();
+        for limit in [size - 1, size] {
+            let log = bounded_test_log(100, limit, false);
+            log.push_fault(event.clone());
+            assert_eq!(log.record_budget_exhausted(), limit < size);
+            log.push_fault(event.clone());
+            let records = log.take_records();
+            assert_eq!(records.faults[0], event);
+            let terminal = records.faults.last().unwrap();
+            assert!(
+                matches!(terminal, InvalidReason::GeneratorRecordBudgetExceeded {
+                retained_control_bytes, unretained_events, ..
+            } if *retained_control_bytes == crate::config::count_u64(if limit < size { size } else { size * 2 })
+                && *unretained_events == u64::from(limit < size))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_budget_exhaustion_has_one_terminal_reason_and_wakes_waiters() {
+        let log = Arc::new(bounded_test_log(2, usize::MAX, false));
+        let waiter = {
+            let log = log.clone();
+            tokio::spawn(async move {
+                log.wait_record_budget_exhausted().await;
+            })
+        };
+        // Register the waiter before producers cross the limit, so this also
+        // exercises the notification path rather than only the late check.
+        tokio::task::yield_now().await;
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for seq in 0..1000 {
+                        log.push_receipt(timing_receipt(seq));
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        // A waiter registered after exhaustion must also complete.
+        tokio::time::timeout(Duration::from_secs(1), log.wait_record_budget_exhausted())
+            .await
+            .unwrap();
+        let records = log.take_records();
+        assert_eq!(records.receipts.len(), 3);
+        assert!(matches!(
+            records.faults.as_slice(),
+            [InvalidReason::GeneratorRecordBudgetExceeded {
+                retained_events: 3,
+                unretained_events: 7997,
+                ..
+            }]
+        ));
     }
 
     fn timing_receipt(seq: u64) -> ReceiptEvent {

@@ -206,3 +206,12 @@ The wrapper control loses encrypted SCTP packets only after channels open,
 fills a sibling channel, and checks blocked binary, text, and writable calls.
 See [#1133](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1133).
 Replacement qualification in #912 must retain reset exhaustion and fresh-peer recovery.
+
+Graceful SCTP shutdown keeps admitted gameplay readable after terminal wire
+closure. The handler defers association retirement while bounded application
+reads remain. Its transmit flush collects terminal endpoint events only after
+outbound packets and stream events reach their queues. The scoped SCTP handler
+controls cover a tail larger than one read budget, final-packet ownership,
+unrelated association traffic, and abrupt teardown after graceful completion.
+See [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+Replacement qualification in #912 must retain these drain controls.

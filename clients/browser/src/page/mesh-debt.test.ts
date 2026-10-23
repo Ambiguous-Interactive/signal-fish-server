@@ -8,7 +8,13 @@ function assert(condition: boolean, message: string): void {
 // Investigation #889: isolate missing inbound mesh traffic by peer and label.
 for (const unpaidInitiates of [false, true]) {
   for (const missingLabel of ['reliable', 'unreliable']) {
-    for (const recover of [false, true]) {
+    for (const { recover, statsMode } of [
+      { recover: false, statsMode: 'closed' },
+      { recover: true, statsMode: 'closed' },
+      { recover: false, statsMode: 'ready' },
+      { recover: false, statsMode: 'pending' },
+    ]) {
+      const keepOpen = statsMode !== 'closed';
       const originalSocket = globalThis.WebSocket;
       const originalPc = globalThis.RTCPeerConnection;
       const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -27,12 +33,16 @@ for (const unpaidInitiates of [false, true]) {
       const sent: Array<{ peer: string; label: string; text: string }> = [];
       const connections: Connection[] = [];
       let now = 100;
+      let nextTimerId = 0;
+      const timers = new Map<number, { at: number; callback: () => void }>();
       let socket!: Socket;
       let running: Promise<number> | undefined;
       const turn = () => new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
-      const context = `initiate=${unpaidInitiates}/${missingLabel}/recover=${recover}`;
+      const context = `initiate=${unpaidInitiates}/${missingLabel}/recover=${recover}/${statsMode}`;
       class Channel {
         readyState = 'connecting';
+        readonly id: number;
+        wireReceipts = 0;
         bufferedAmount = 0;
         maxPacketLifeTime = null;
         readonly ordered: boolean;
@@ -44,6 +54,7 @@ for (const unpaidInitiates of [false, true]) {
           readonly owner: string,
           readonly label: string,
         ) {
+          this.id = label === 'reliable' ? 1 : 3;
           this.ordered = label === 'reliable';
           this.maxRetransmits = this.ordered ? null : 0;
         }
@@ -52,6 +63,7 @@ for (const unpaidInitiates of [false, true]) {
           sent.push({ peer: this.owner, label: this.label, text });
         }
         receive(from = this.owner): void {
+          this.wireReceipts += 1;
           this.onmessage?.({ data: JSON.stringify({ from, channel: this.label, seq: 0 }) });
         }
         close(): void {
@@ -63,9 +75,33 @@ for (const unpaidInitiates of [false, true]) {
         readonly channels = new Map<string, Channel>();
         connectionState = 'new';
         closed = false;
+        statsCalls = 0;
         ondatachannel: ((event: { channel: Channel }) => void) | null = null;
         constructor() {
           connections.push(this);
+        }
+        getStats(): Promise<Map<string, object>> {
+          this.statsCalls += 1;
+          if (statsMode === 'pending') return new Promise(() => {});
+          return Promise.resolve(
+            new Map(
+              [...this.channels].map(([label, channel]) => [
+                label,
+                {
+                  type: 'data-channel',
+                  label,
+                  dataChannelIdentifier: channel.id,
+                  state: channel.readyState,
+                  messagesSent: sent.filter(
+                    (probe) => probe.peer === this.owner && probe.label === label,
+                  ).length,
+                  messagesReceived: channel.wireReceipts,
+                  bytesSent: 0,
+                  bytesReceived: 0,
+                },
+              ]),
+            ),
+          );
         }
         createDataChannel(label: string): Channel {
           const channel = new Channel(this.owner, label);
@@ -150,8 +186,13 @@ for (const unpaidInitiates of [false, true]) {
         console.error = (...items: unknown[]) =>
           transportDiagnostics.push(items.map(String).join(' '));
         performance.now = () => now;
-        globalThis.setTimeout = (() => 1) as unknown as typeof setTimeout;
-        globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+        globalThis.setTimeout = ((callback: () => void, delay: number = 0) => {
+          const id = ++nextTimerId;
+          timers.set(id, { at: now + delay, callback });
+          return id;
+        }) as unknown as typeof setTimeout;
+        globalThis.clearTimeout = ((id: number) =>
+          timers.delete(id)) as unknown as typeof clearTimeout;
         globalThis.WebSocket = Socket as unknown as typeof WebSocket;
         globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
         Object.defineProperty(globalThis, 'window', {
@@ -179,7 +220,7 @@ for (const unpaidInitiates of [false, true]) {
           crippleIce: false,
           p2pTimeoutSecs: 1,
           p2pRetryCount: 1,
-          runForSecs: 2,
+          runForSecs: keepOpen ? 8 : 2,
           successReleaseEnabled: false,
           protocolVersion: 3,
           supportedTopologies: ['mesh'],
@@ -221,17 +262,19 @@ for (const unpaidInitiates of [false, true]) {
           }
         for (const channel of healthyLink.channels.values()) channel.receive();
         for (const channel of unpaidLink.channels.values()) {
-          channel.receive(channel.label === missingLabel ? healthy : unpaid);
+          if (!keepOpen || channel.label !== missingLabel) {
+            channel.receive(channel.label === missingLabel ? healthy : unpaid);
+          }
         }
         await turn();
         assert(
           !events.some((event) => event['event'] === 'success_criteria_met'),
           `${context}: a wrong-player receipt does not complete exchange`,
         );
-        unpaidLink.channels.get(missingLabel)!.onerror?.();
+        if (!keepOpen) unpaidLink.channels.get(missingLabel)!.onerror?.();
         await turn();
         assert(
-          unpaidLink.closed && !healthyLink.closed,
+          unpaidLink.closed === !keepOpen && !healthyLink.closed,
           `${context}: retire only the unpaid pair`,
         );
         assert(
@@ -290,7 +333,52 @@ for (const unpaidInitiates of [false, true]) {
             `${context}: report one physical replacement`,
           );
         }
-        now = 2100;
+        if (keepOpen) {
+          const calls = unpaidLink.statsCalls;
+          now = 1000;
+          socket.deliver('Pong');
+          await turn();
+          assert(
+            unpaidLink.statsCalls === calls,
+            `${context}: ordinary ingress cannot resample before cadence`,
+          );
+          now = 5100;
+          let due = [...timers].filter(([, timer]) => timer.at <= now);
+          assert(due.length !== 0, `${context}: five-second sampling owns a quiet wake`);
+          for (const [id, timer] of due) {
+            timers.delete(id);
+            timer.callback();
+          }
+          await turn();
+          const afterCadence = unpaidLink.statsCalls;
+          assert(
+            afterCadence === (statsMode === 'pending' ? 1 : calls + 1),
+            `${context}: five-second refresh respects the in-flight bound`,
+          );
+          now = 6100;
+          socket.deliver('Pong');
+          await turn();
+          assert(
+            unpaidLink.statsCalls === afterCadence,
+            `${context}: ingress does not renew cadence`,
+          );
+          now = 7100;
+          due = [...timers].filter(([, timer]) => timer.at <= now);
+          assert(
+            due.length !== 0,
+            `${context}: quiet exchange debt owns a scheduled diagnostic wake`,
+          );
+          for (const [id, timer] of due) {
+            timers.delete(id);
+            timer.callback();
+          }
+          await turn();
+          assert(
+            unpaidLink.statsCalls === (statsMode === 'pending' ? 1 : afterCadence + 1),
+            `${context}: final boundary query is bounded even when getStats never completes`,
+          );
+        }
+        now = keepOpen ? 8100 : 2100;
         socket.deliver('Pong');
         const code = await running;
         assert(
@@ -306,16 +394,50 @@ for (const unpaidInitiates of [false, true]) {
             string,
             unknown
           >;
-          assert(
-            JSON.stringify(snapshot) ===
-              JSON.stringify({
-                missing_sent: [],
-                missing_received: [missingLabel],
-                connected: false,
-                link: null,
-              }),
-            `${context}: snapshot names only the unpaid receive label`,
-          );
+          if (keepOpen) {
+            const link = snapshot['link'] as {
+              dataChannelStats: {
+                status: string;
+                pending: boolean;
+                ageMs: number | null;
+                channels: Record<string, { messagesReceived: number }>;
+              };
+              channels: Record<string, { receipts: { raw: number } }>;
+            };
+            assert(
+              snapshot['connected'] === true &&
+                JSON.stringify(snapshot['missing_received']) === JSON.stringify([missingLabel]),
+              `${context}: live missing exchange keeps exact label debt`,
+            );
+            assert(
+              timeout!.length < 16000,
+              `${context}: complete snapshot fits CLI diagnostic bound`,
+            );
+            if (statsMode === 'ready') {
+              assert(
+                link.dataChannelStats.status === 'ready' &&
+                  link.dataChannelStats.ageMs === 1000 &&
+                  link.dataChannelStats.channels[missingLabel]?.messagesReceived === 0 &&
+                  link.channels[missingLabel]?.receipts.raw === 0,
+                `${context}: failure snapshot retains recent stack absence and independent raw absence`,
+              );
+            } else {
+              assert(
+                link.dataChannelStats.pending && link.dataChannelStats.ageMs === null,
+                `${context}: hung stats cannot invent evidence or delay the failure exit`,
+              );
+            }
+          } else
+            assert(
+              JSON.stringify(snapshot) ===
+                JSON.stringify({
+                  missing_sent: [],
+                  missing_received: [missingLabel],
+                  connected: false,
+                  link: null,
+                }),
+              `${context}: snapshot names only the unpaid receive label`,
+            );
           const diagnostics = events
             .filter((event) => event['event'] === 'error')
             .map((event) => String(event['message']));

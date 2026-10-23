@@ -50,6 +50,23 @@ interface ChannelDiagnostics {
   error: { errorDetail: RTCErrorDetailType; sctpCauseCode: number | null } | null;
 }
 
+interface DataChannelTotals {
+  id: number;
+  state: string;
+  messagesSent: number;
+  messagesReceived: number;
+  bytesSent: number;
+  bytesReceived: number;
+}
+
+interface DataChannelStats {
+  status: 'not_requested' | 'ready' | 'failed' | 'unavailable';
+  pending: boolean;
+  sampledAt: number | null;
+  requestedAt: number | null;
+  channels: Record<string, DataChannelTotals>;
+}
+
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
 export interface EngineCallbacks {
   onLocalCandidate(peer: string, generation: number, candidateJson: string): void;
@@ -79,6 +96,7 @@ interface PeerLink {
   pc: RTCPeerConnection;
   startedAt: number;
   transportStateHistory: TransportObservation[];
+  dataChannelStats: DataChannelStats;
   channels: Map<string, RTCDataChannel>;
   openLabels: Set<string>;
   pendingCandidates: RTCIceCandidateInit[];
@@ -152,6 +170,13 @@ export class Engine {
       pc,
       startedAt: performance.now(),
       transportStateHistory: [],
+      dataChannelStats: {
+        requestedAt: null,
+        status: 'not_requested',
+        pending: false,
+        sampledAt: null,
+        channels: {},
+      },
       channels: new Map(),
       openLabels: new Set(),
       pendingCandidates: [],
@@ -301,6 +326,70 @@ export class Engine {
       : undefined;
   }
 
+  /** Sample stack counters without delaying gameplay, teardown, or run deadlines. */
+  sampleDataChannelStats(peer: string): void {
+    const link = this.peers.get(peer);
+    if (link === undefined || link.dataChannelStats.pending) return;
+    const stats = link.dataChannelStats;
+    if (typeof link.pc.getStats !== 'function') {
+      stats.status = 'unavailable';
+      return;
+    }
+    stats.pending = true;
+    const sampledAt = monotonicNowMs();
+    stats.requestedAt = sampledAt;
+    // Bind each report to the actual retained SCTP stream, not just its label.
+    const channelIds = new Map(
+      [...link.channels].map(([label, channel]) => [label, channel.id]),
+    );
+    const failed = () => {
+      if (this.peers.get(peer) !== link) return;
+      stats.pending = false;
+      stats.status = 'failed';
+    };
+    try {
+      void link.pc
+        .getStats()
+        .then((report) => {
+          if (this.peers.get(peer) !== link) return;
+          const channels: Record<string, DataChannelTotals> = {};
+          report.forEach((row: Record<string, unknown>) => {
+            const label = row['label'];
+            const id = row['dataChannelIdentifier'];
+            if (
+              row['type'] !== 'data-channel' ||
+              (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) ||
+              typeof id !== 'number' ||
+              channelIds.get(label) !== id ||
+              typeof row['state'] !== 'string' ||
+              !['messagesSent', 'messagesReceived', 'bytesSent', 'bytesReceived'].every(
+                (field) =>
+                  typeof row[field] === 'number' &&
+                  Number.isSafeInteger(row[field]) &&
+                  row[field] >= 0,
+              )
+            )
+              return;
+            channels[label] = {
+              id,
+              state: row['state'],
+              messagesSent: row['messagesSent'] as number,
+              messagesReceived: row['messagesReceived'] as number,
+              bytesSent: row['bytesSent'] as number,
+              bytesReceived: row['bytesReceived'] as number,
+            };
+          });
+          stats.pending = false;
+          stats.status = Object.keys(channels).length === 0 ? 'unavailable' : 'ready';
+          stats.sampledAt = sampledAt;
+          stats.channels = channels;
+        })
+        .catch(failed);
+    } catch {
+      failed();
+    }
+  }
+
   /** Local transport state only; excludes signaling payloads and ICE addresses. */
   diagnosticSnapshot(peer: string): object | null {
     const link = this.peers.get(peer);
@@ -310,6 +399,24 @@ export class Engine {
     this.recordTransportState(peer, link);
     return {
       generation: link.generation,
+      dataChannelStats: {
+        status: link.dataChannelStats.status,
+        pending: link.dataChannelStats.pending,
+        pendingAgeMs:
+          link.dataChannelStats.pending && link.dataChannelStats.requestedAt !== null
+            ? Math.max(0, monotonicNowMs() - link.dataChannelStats.requestedAt)
+            : null,
+        ageMs:
+          link.dataChannelStats.sampledAt === null
+            ? null
+            : Math.max(0, monotonicNowMs() - link.dataChannelStats.sampledAt),
+        channels: Object.fromEntries(
+          Object.entries(link.dataChannelStats.channels).map(([label, totals]) => [
+            label,
+            { ...totals },
+          ]),
+        ),
+      },
       transportStateHistory: link.transportStateHistory.map((entry) => ({ ...entry })),
       connectionState: link.pc.connectionState,
       signalingState: link.pc.signalingState,

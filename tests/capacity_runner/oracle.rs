@@ -107,6 +107,17 @@ pub enum InvalidReason {
     /// Scheduled sends fell behind their intended times past the generator
     /// bound: the measurement is generator-limited, not server evidence.
     GeneratorSaturated { max_lag_us: u64, bound_us: u64 },
+    /// The generator stopped after retaining the first event beyond its
+    /// receive-side evidence budget. The verdict covers an incomplete prefix.
+    GeneratorRecordBudgetExceeded {
+        event_limit: u64,
+        retained_events: u64,
+        control_byte_limit: u64,
+        retained_control_bytes: u64,
+        first_excess_kind: String,
+        unretained_events: u64,
+        allocation_failure: Option<String>,
+    },
     /// Reliable delivery left work unsent that no declared fault explains:
     /// a sender stopped without recording why (a generator bookkeeping bug).
     UnsentWork { count: u64 },
@@ -1975,6 +1986,7 @@ pub fn summarize(
                 | InvalidReason::SendFailed { .. }
                 | InvalidReason::JoinFailed { .. }
                 | InvalidReason::RunnerDeadlineExceeded { .. }
+                | InvalidReason::GeneratorRecordBudgetExceeded { .. }
                 | InvalidReason::ReconnectFailed { .. }
         )
     });
