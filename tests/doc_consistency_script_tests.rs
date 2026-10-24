@@ -444,6 +444,50 @@ fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
 }
 
 #[test]
+fn test_markdown_discovery_excludes_only_root_session_notes() {
+    let path_dependency_doc =
+        "# Local note\n\nsignal-fish-server = { path = \"../signal-fish-server\" }\n";
+    let stale_dependency_doc = "# Example\n\nsignal-fish-server = \"0.0.9\"\n";
+    for tags in [&[][..], &["v0.1.0"][..]] {
+        let ignored_files = [
+            (".gitignore", "/progress/\n"),
+            ("progress/session notes/reproducer.md", path_dependency_doc),
+            ("progress/session notes/stale.md", stale_dependency_doc),
+        ];
+        let (exit_code, output) = run_checker_with_fixture_and_tags(&[], &ignored_files, &[], tags);
+        assert_eq!(
+            exit_code, 0,
+            "Local session notes must not enter version scanning; tags={tags:?}.\n{output}"
+        );
+
+        for path in [
+            "docs/first-party.md",
+            ".llm/skills/first-party.md",
+            "docs/progress/first-party.md",
+        ] {
+            let mut mixed_files = ignored_files.to_vec();
+            mixed_files.push((path, stale_dependency_doc));
+            let (exit_code, output) =
+                run_checker_with_fixture_and_tags(&[], &mixed_files, &[], tags);
+            assert_eq!(
+                exit_code, 1,
+                "First-party docs must retain version checks; path={path}, tags={tags:?}.\n{output}"
+            );
+            assert!(
+                output.contains(&format!(
+                    "{path} has stale signal-fish-server version '0.0.9'"
+                )),
+                "The checker must name the first-party error.\n{output}"
+            );
+            assert!(
+                !output.contains("progress/session notes/"),
+                "Ignored notes must stay outside diagnostics.\n{output}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_markdown_discovery_keeps_llm_guidance_in_version_sync_scope() {
     let stale_llm_doc =
         "# Agent Guidance\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n";

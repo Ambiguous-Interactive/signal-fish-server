@@ -3224,9 +3224,41 @@ fn reassembly_mixed_completion_order_survives_reordering_and_shutdown() -> Resul
 }
 
 #[test]
+fn shutdown_stream_admission_preserves_prehandshake_setup() -> Result<()> {
+    for state in [
+        AssociationState::Closed,
+        AssociationState::CookieWait,
+        AssociationState::CookieEchoed,
+        AssociationState::Established,
+    ] {
+        let mut endpoint = timed_test_association();
+        endpoint.set_state(state);
+        assert!(!endpoint.retired);
+        endpoint.open_stream(7, PayloadProtocolIdentifier::Binary)?;
+        assert!(endpoint.stream(7)?.is_writable(), "{state}");
+        assert!(matches!(
+            endpoint.open_stream(7, PayloadProtocolIdentifier::Binary),
+            Err(Error::ErrStreamAlreadyExist)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn graceful_shutdown_stream_readiness_matches_write_rejection() -> Result<()> {
     fn assert_write_closed(endpoint: &mut Association, state: AssociationState) -> Result<()> {
         assert_eq!(endpoint.state(), state);
+        let stream_count = endpoint.streams.len();
+        let next_generation = endpoint.next_stream_generation;
+        assert!(
+            matches!(
+                endpoint.open_stream(7, PayloadProtocolIdentifier::Binary),
+                Err(Error::ErrStreamCreateFailed)
+            ),
+            "{state}: shutdown cannot admit a new local stream"
+        );
+        assert_eq!(endpoint.streams.len(), stream_count);
+        assert_eq!(endpoint.next_stream_generation, next_generation);
         let mut stream = endpoint.stream(1)?;
         assert!(
             !stream.is_writable(),
@@ -3248,10 +3280,11 @@ fn graceful_shutdown_stream_readiness_matches_write_rejection() -> Result<()> {
     remote.ack_mode = AckMode::NoDelay;
     let local_tail = Bytes::from_static(b"local admitted gameplay");
     let remote_tail = Bytes::from_static(b"remote admitted gameplay");
-    for (endpoint, payload) in [(&mut local, &local_tail), (&mut remote, &remote_tail)] {
-        assert!(endpoint.stream(1)?.is_writable());
+    remote.open_stream(3, PayloadProtocolIdentifier::Binary)?;
+    for (endpoint, id, payload) in [(&mut local, 1, &local_tail), (&mut remote, 3, &remote_tail)] {
+        assert!(endpoint.stream(id)?.is_writable());
         endpoint
-            .stream(1)?
+            .stream(id)?
             .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
     }
     local.shutdown()?;
@@ -3283,12 +3316,16 @@ fn graceful_shutdown_stream_readiness_matches_write_rejection() -> Result<()> {
             remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
         }
     }
-    for (endpoint, expected) in [(&mut local, remote_tail), (&mut remote, local_tail)] {
+    for (endpoint, id, expected) in [(&mut local, 3, remote_tail), (&mut remote, 1, local_tail)] {
         assert_eq!(endpoint.state(), AssociationState::Closed);
-        assert!(!endpoint.stream(1)?.is_writable());
+        assert!(!endpoint.stream(id)?.is_writable());
+        assert!(matches!(
+            endpoint.open_stream(7, PayloadProtocolIdentifier::Binary),
+            Err(Error::ErrStreamCreateFailed)
+        ));
         assert_eq!(
             endpoint
-                .stream(1)?
+                .stream(id)?
                 .read_sctp()?
                 .unwrap()
                 .to_payload(100)?

@@ -7967,3 +7967,27 @@ The deterministic probe covers an active poll, Pending, a wake before the next
 poll, a held fixture, and terminal completion. Independent snapshot loads can
 race with reactor work and do not establish a causal verdict. Passing focused
 wire histories do not explain or repair the hosted timeout.
+
+### F163 — Graceful shutdown admits unusable new native streams
+
+Confirmed on `0aa407ae` under #1145. `open_stream` succeeds during graceful
+shutdown even though its returned stream rejects every write. The paired
+regression fails first in `ShutdownPending`. Refuse new local streams in all
+four shutdown states without changing stream or generation state. Preserve
+pre-handshake opens and internal receive admission. A remote stream first seen
+after local shutdown still delivers its previously admitted exact payload.
+The paired control checks both endpoints through terminal application reads.
+
+### A18 performance follow-up — Ordered fragment insertion
+
+Issue #636: a 1,024-fragment ordered message requires 10,230 serial comparisons
+on the old insertion path. Appending increasing TSNs directly reduces that to
+1,023, including wrap. Reordering keeps binary insertion; duplicates retain
+exact data. Existing exhaustive six-fragment permutations and paired gameplay
+controls qualify the changed seam. This measures insertion work only.
+
+External-client assessment: the current Rust SDK manifest has no RTC/SCTP
+implementation dependency. The .NET SDK project has no package dependencies.
+Godot constructs engine `WebRTCPeerConnection` and `WebRTCMultiplayerPeer`
+objects. None imports this private reference-client stack. These changes leave
+the signaling wire unchanged and require no external SDK migration.
