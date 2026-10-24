@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Rust callers that construct `ServerMessage::PlayerReconnected` must set its optional `player` field.
+- Reduce native gameplay fragment completeness work for delayed or reordered packets (#1168).
 - Reduce native gameplay queue work for packets received or sent in order (#1164).
 - Reduce reliable relay deadline lookup work for queued gameplay (#1160).
 - Reuse the browser binary gameplay decoder across messages (#636).
@@ -26,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore current peer metadata to room observers in reconnect notifications (#1167).
+- Acknowledge duplicate native gameplay packets immediately after lost acknowledgments (#1165).
 - Keep native gameplay acknowledgments within the transport packet size during heavy reordering (#1163).
 - Preserve native gameplay acknowledgments across packet sequence wrap and large sequence gaps (#1158).
 - Reject capacity replay sends before their schedule or outside their recorded connection lifetime (#1159, #1162).

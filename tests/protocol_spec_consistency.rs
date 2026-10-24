@@ -1469,6 +1469,7 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
             serde_json::to_value(ServerMessage::PlayerReconnected {
                 player_id,
                 epoch: None,
+                player: None,
             }),
         ),
         (
@@ -1476,6 +1477,23 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
             serde_json::to_value(ServerMessage::PlayerReconnected {
                 player_id,
                 epoch: Some(3),
+                player: None,
+            }),
+        ),
+        (
+            "PlayerReconnected",
+            serde_json::to_value(ServerMessage::PlayerReconnected {
+                player_id,
+                epoch: None,
+                player: Some(Box::new(player(false))),
+            }),
+        ),
+        (
+            "PlayerReconnected",
+            serde_json::to_value(ServerMessage::PlayerReconnected {
+                player_id,
+                epoch: Some(3),
+                player: Some(Box::new(player(true))),
             }),
         ),
         (

@@ -1769,6 +1769,7 @@ async fn only_room_uniform_control_events_are_replayable() {
         ServerMessage::PlayerReconnected {
             player_id,
             epoch: None,
+            player: None,
         },
         ServerMessage::NewSpectatorJoined {
             spectator: spectator.clone(),

@@ -4564,6 +4564,7 @@ mod tests {
                 tx.try_enqueue_control(Arc::new(ServerMessage::PlayerReconnected {
                     player_id: PlayerId::from_u128(1),
                     epoch: Some(2),
+                    player: None,
                 }))
                 .expect("lifecycle control fits before the trailing report");
             }
@@ -4597,6 +4598,7 @@ mod tests {
                             ServerMessage::PlayerReconnected {
                                 player_id,
                                 epoch: Some(2),
+                                player: None,
                             } if *player_id == PlayerId::from_u128(1)
                         )
                 ));

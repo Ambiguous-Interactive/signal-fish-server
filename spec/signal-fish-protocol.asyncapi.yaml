@@ -2189,6 +2189,7 @@ components:
           required: [player_id]
           properties:
             player_id: { $ref: '#/components/schemas/PlayerId' }
+            player: { $ref: '#/components/schemas/V2PlayerInfo' }
       required: [type, data]
     V3PlayerReconnected:
       type: object
@@ -2202,6 +2203,7 @@ components:
           required: [player_id, epoch]
           properties:
             player_id: { $ref: '#/components/schemas/PlayerId' }
+            player: { $ref: '#/components/schemas/V3PlayerInfo' }
             epoch:
               type: integer
               minimum: 1

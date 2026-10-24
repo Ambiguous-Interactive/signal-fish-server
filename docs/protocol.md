@@ -1280,6 +1280,16 @@ Reconnection failed.
 
 Another player reconnected to the room.
 
+Successful restores include optional `player` metadata for the returning member.
+Replace that roster entry before the reconnect callback. Use the current name,
+authority and readiness fields; do not emit a second join callback.
+The metadata ID matches `player_id`. In v3, its epoch matches `epoch` and its
+sequence starts at zero. In v2, the metadata omits epoch and sequence.
+Old servers and terminal repair notifications can omit `player`; do not invent
+missing metadata. The returning client still uses its full `Reconnected` baseline.
+Process replay history before that baseline, or ignore it for roster state.
+Client SDKs must add support for `player` to restore observers admitted during absence.
+
 ```json
 
 {

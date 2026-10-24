@@ -173,3 +173,21 @@ comparisons, down from 11242. Wrapped sequence and deque controls retain exact
 pop order and byte accounting. These controls are included in the existing
 shutdown and payload_queue_gap_ack selectors. Replacement qualification in
 #912 must retain them.
+
+The #1165 repair records duplicate DATA before stream and saved-generation
+admission. Duplicate-only packets trigger an immediate SACK under the normal
+ACK policy, including after the first SACK is lost. Cumulative and selective
+duplicates report their exact TSNs within the existing packet and chunk budget.
+Paired controls retain receive-window credit, exact application delivery, and
+one release of outgoing bytes across TSN wrap, graceful drain, and deferred
+reset generations. Real duplicate packets also qualify report trimming at the
+minimum and small packet budgets. Replacement qualification in #912 must retain
+the duplicate_data controls.
+
+The #1168 repair tracks nonadjacent fragment neighbors during native ordered
+message insertion. Completeness checks no longer scan the retained message
+after its ending fragment arrives early. A 1,024-fragment tail-first control
+reduces adjacency checks from 523,776 to at most 3,072. Constructor vectors,
+every six-fragment arrival permutation, duplicates, TSN wrap, and a paired
+gameplay history preserve exact payloads and release credit. Replacement
+qualification in #912 must retain the reassembly_ controls.

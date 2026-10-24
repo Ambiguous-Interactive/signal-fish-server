@@ -7764,3 +7764,74 @@ repair. Direct append uses at most one comparison per nonempty insertion.
 Reordered arrivals retain binary insertion. Exact drain order and bytes survive
 sequence wrap and wrapped deque storage. This measures queue work and does not
 establish end-to-end throughput or whole-node capacity.
+
+### F153 — Duplicate native DATA omits immediate acknowledgments
+
+Issue [#1165](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1165)
+advances A20 under #826 and #912. The inbound DATA handler checked queue
+admission before calling the queue's duplicate recorder. Cumulative duplicates
+could select delayed acknowledgment, and selective duplicates did not report
+their TSN. A lost first SACK therefore left the sender waiting for another timer.
+
+The paired control fails before repair with zero immediate SACKs instead of one.
+The saved reset-generation control fails with an empty duplicate report instead
+of TSN 1. The handler now records duplicates and requests immediate acknowledgment
+before stream admission or generation selection. It does not redeliver payloads
+or release sender bytes twice. Seventeen table histories cover cumulative and
+selective duplicates, TSN wrap, graceful sender drain, saved reset generations,
+and actual inbound duplicate reports at packet/chunk size limits.
+
+The three focused duplicate-DATA controls pass. This qualifies the private
+native SCTP stack; it does not establish the historical #1120 timeout's cause.
+The independent Rust, .NET and Godot SDKs do not import this vendored stack.
+
+### F154 — Fragment completeness rescans growing native messages
+
+Issue [#1168](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1168)
+advances #636, #826 and replacement qualification under #912. A 1,024-fragment
+history with the ending fragment present early performs 523,776 adjacency
+checks before repair. Repeated completeness scans cause this quadratic work.
+
+Each fragment set now stores its count of nonadjacent neighbors. Construction
+scans the initial vector once; insertion updates at most three neighbor pairs.
+Completeness reads that count and the endpoint flags. This adds one machine
+word per fragment set and no allocation. It does not remove sorted-vector
+insertion work or establish a whole-client throughput improvement.
+
+Twenty-one focused reassembly controls pass. An independent full-scan oracle
+checks all 720 permutations of six fragments at ordinary and wrapped TSNs.
+Constructor controls retain gap, duplicate and nonordered-vector behavior.
+A paired wire history checks exact bytes, one receive, and sender byte release
+for a reordered 1,024-fragment message. The hosted native runner includes the
+reassembly selector. The independent SDKs do not import this private stack.
+
+### F155 — Reconnect observers cannot restore current peer metadata
+
+Issue [#1167](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1167)
+advances A01 and A20 under #826. PlayerLeft removes the departed roster entry.
+The old PlayerReconnected carries only identity and epoch. A spectator admitted
+during the absence has never received the name or current flags. A departed
+metadata cache therefore cannot restore every observer's roster.
+
+The new member/spectator control fails before repair with null metadata.
+Successful restores now include optional current PlayerInfo inside the same
+PlayerReconnected frame. The publication snapshot captures coordinator readiness
+before retention. The notification uses current room authority and incarnation,
+with sequence zero. This preserves the two-frame transaction capacity and adds
+no PlayerJoined callback. Terminal repair notifications can omit metadata.
+
+Focused checks cover current readiness, authority restoration and a successor
+holding authority, publication retry with two control slots, and replay baseline
+precedence. A real WebSocket history compares observer metadata with the
+returning player's baseline in both v2 and v3. Live and replay projections omit
+nested incarnation fields for v2 and legacy snapshot fields for v3. Reference
+clients consume readiness before reporting membership. Duplicate v2 metadata
+does not re-arm StartGame; v3 retains its incarnation fence.
+
+Rust library callers must add the optional player field when constructing the
+public message variant. Independent SDK adoption remains tracked separately:
+[Rust #294](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/294),
+[.NET #145](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/145),
+and [Godot #374](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/374).
+Their current decoders accept the added field but do not apply it. SDK tests and
+the Godot runtime drill remain client work; server controls do not prove them.

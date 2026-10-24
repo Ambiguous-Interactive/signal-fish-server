@@ -977,6 +977,7 @@ fn golden_server_player_reconnected() {
         player_id: player_a(),
         // v3-only epoch: `None` is skipped, so the v2 wire stays byte-identical.
         epoch: None,
+        player: None,
     };
     assert_json(
         &msg,

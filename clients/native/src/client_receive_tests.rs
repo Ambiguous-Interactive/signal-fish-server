@@ -44,6 +44,7 @@ async fn ready_authoritative_frames_prevent_success_from_obsolete_state() {
                     ServerMessage::PlayerReconnected {
                         player_id: peer,
                         epoch: Some(2),
+                        player: None,
                     }
                 } else {
                     serde_json::from_value(json!({
@@ -421,6 +422,7 @@ async fn fresh_membership_retires_old_links_before_the_replacement_plan() {
                 ServerMessage::PlayerReconnected {
                     player_id: peer,
                     epoch: Some(epoch),
+                    player: None,
                 }
             } else {
                 serde_json::from_value::<ServerMessage>(json!({

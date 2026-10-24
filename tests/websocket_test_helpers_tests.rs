@@ -1869,6 +1869,7 @@ fn conformance_rejects_illegal_room_peer_and_v2_membership_transitions() {
         &ServerMessage::PlayerReconnected {
             player_id: sender,
             epoch: Some(7),
+            player: None,
         },
     );
     overlap.record_message("after", &game_data(sender, Some(1), Some(7)));
@@ -1881,6 +1882,7 @@ fn conformance_rejects_illegal_room_peer_and_v2_membership_transitions() {
         &ServerMessage::PlayerReconnected {
             player_id: sender,
             epoch: None,
+            player: None,
         },
     );
     v2_overlap.record_message("receiver", &game_data(sender, None, None));
@@ -1892,6 +1894,7 @@ fn conformance_rejects_illegal_room_peer_and_v2_membership_transitions() {
             ServerMessage::PlayerReconnected {
                 player_id: sender,
                 epoch: Some(7),
+                player: None,
             },
         ),
     ] {
@@ -1923,6 +1926,7 @@ fn conformance_rejects_illegal_room_peer_and_v2_membership_transitions() {
         &ServerMessage::PlayerReconnected {
             player_id: sender,
             epoch: Some(2),
+            player: None,
         },
     );
 
@@ -1938,6 +1942,7 @@ fn conformance_rejects_illegal_room_peer_and_v2_membership_transitions() {
         &ServerMessage::PlayerReconnected {
             player_id: sender,
             epoch: Some(2),
+            player: None,
         },
     );
 
@@ -1982,6 +1987,7 @@ fn conformance_player_left_terminal_bounds_churn_and_preserves_v2_shape() {
                 &ServerMessage::PlayerReconnected {
                     player_id: overtaken_sender,
                     epoch: Some(epoch),
+                    player: None,
                 },
             );
         }

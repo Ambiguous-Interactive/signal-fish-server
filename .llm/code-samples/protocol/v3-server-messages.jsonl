@@ -15,3 +15,4 @@
 {"type": "PeerTransportStatus", "data": {"peer_id": "00000000-0000-0000-0000-00000000000b", "transport": "webrtc", "connected": true}}
 {"type": "GoingAway", "data": {"deadline_ms": 1700000000000, "retry_after_secs": 30}}
 {"type": "ProtocolInfo", "data": {"capabilities": ["reconnection", "spectators", "authority", "room_operation_ids"], "game_data_formats": ["json", "message_pack", "rkyv", "protobuf"], "protocol_version": 3, "min_protocol_version": 2, "max_protocol_version": 3, "transports": ["websocket"], "max_outbound_message_size": 8388608, "implementation_version": "0.12.0"}}
+{"type": "PlayerReconnected", "data": {"player_id": "00000000-0000-0000-0000-00000000000b", "player": {"id": "00000000-0000-0000-0000-00000000000b", "name": "Bob", "is_authority": false, "is_ready": true, "epoch": 2, "seq": 0}, "epoch": 2}}

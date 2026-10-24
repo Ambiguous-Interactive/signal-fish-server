@@ -517,7 +517,9 @@ impl ConformanceAuditor {
                 epoch,
                 final_seq,
             } => self.record_player_left(receiver, *player_id, *epoch, *final_seq),
-            ServerMessage::PlayerReconnected { player_id, epoch } => {
+            ServerMessage::PlayerReconnected {
+                player_id, epoch, ..
+            } => {
                 self.record_lifecycle_epoch(
                     receiver,
                     *player_id,
@@ -1291,14 +1293,15 @@ impl ConformanceAuditor {
                     player.seq,
                     "Reconnected.missed_events.PlayerJoined",
                 ),
-                ServerMessage::PlayerReconnected { player_id, epoch } => self
-                    .validate_lifecycle_stamp_shape(
-                        receiver,
-                        *player_id,
-                        *epoch,
-                        epoch.map(|_| 0),
-                        "Reconnected.missed_events.PlayerReconnected",
-                    ),
+                ServerMessage::PlayerReconnected {
+                    player_id, epoch, ..
+                } => self.validate_lifecycle_stamp_shape(
+                    receiver,
+                    *player_id,
+                    *epoch,
+                    epoch.map(|_| 0),
+                    "Reconnected.missed_events.PlayerReconnected",
+                ),
                 _ => {}
             }
         }

@@ -245,6 +245,12 @@ they know you are back:
 }
 ```
 
+Successful restores also include optional `player` metadata in this notification.
+Observers replace that roster entry before the reconnect callback. This restores
+the current name, readiness and authority, including for spectators who joined
+during the absence. Older servers and terminal repairs can omit this field.
+See [PlayerReconnected](../protocol.md#playerreconnected).
+
 ## The Full Reconnection Timeline
 
 ```text

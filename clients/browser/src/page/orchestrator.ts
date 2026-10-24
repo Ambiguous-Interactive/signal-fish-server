@@ -675,6 +675,16 @@ export class StartGameGate {
     this.sentSinceInvalidation = false;
   }
 
+  memberRestored(player: string, ready: boolean, alreadyPresent: boolean): void {
+    if (alreadyPresent && this.readyPlayers.has(player) === ready) {
+      return;
+    }
+    this.memberJoined(player);
+    if (ready) {
+      this.readyPlayers.add(player);
+    }
+  }
+
   /** A member departed. Readiness belongs to the CURRENT membership, so a
    * departure can restore all-ready with no readiness broadcast at all; the
    * previous send's premise (that exact membership) is gone either way. */
@@ -2047,6 +2057,23 @@ class Orchestrator {
           break;
         }
         const id = String(rawId);
+        const player = data['player'];
+        if (player !== undefined && player !== null) {
+          if (typeof player !== 'object' || Array.isArray(player)) {
+            throw FatalError.protocol('PlayerReconnected.player must be a player');
+          }
+          const metadata = player as Record<string, unknown>;
+          if (
+            metadata['id'] !== id ||
+            (metadata['epoch'] ?? null) !== (data['epoch'] ?? null) ||
+            (metadata['seq'] ?? null) !==
+              (data['epoch'] === undefined || data['epoch'] === null ? null : 0) ||
+            typeof metadata['is_ready'] !== 'boolean'
+          ) {
+            throw FatalError.protocol('reconnect metadata does not match its lifecycle');
+          }
+          this.startGameGate.memberRestored(id, metadata['is_ready'], this.present.has(id));
+        }
         restoreReconnectedMember(this.present, this.membersSeen, id);
         this.resetPeerIncarnation(id);
         if (

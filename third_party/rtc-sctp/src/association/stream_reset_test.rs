@@ -2824,3 +2824,297 @@ fn shutdown_selective_ack_budget_prioritizes_gaps_and_fits_duplicate_reports() -
     }
     Ok(())
 }
+
+// Issue #1165: lost SACKs must not delay or hide duplicate-only DATA reports.
+#[test]
+fn shutdown_duplicate_data_immediately_reports_exact_tsns_without_double_credit() -> Result<()> {
+    for first_tsn in [1u32, u32::MAX] {
+        for selective in [false, true] {
+            for graceful in [false, true] {
+                let (mut local, mut remote) = reset_pair();
+                let now = Instant::now();
+                local.my_next_tsn = first_tsn;
+                local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+                local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+                remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+                remote.ack_mode = AckMode::Normal;
+                let payloads = [b"first".as_slice(), b"second".as_slice()];
+                for payload in payloads {
+                    local.stream(1)?.write(now, payload)?;
+                }
+                let sent = transmitted_data(&local.gather_outbound(now).0);
+                assert_eq!(sent.len(), 2);
+                assert!(!sent[0].immediate_sack && !sent[1].immediate_sack);
+                if graceful {
+                    local.shutdown()?;
+                }
+                let duplicate = &sent[usize::from(selective)];
+                remote
+                    .handle_inbound(local.create_packet(vec![Box::new(duplicate.clone())]), now)?;
+                let ack_at = if selective {
+                    now
+                } else {
+                    assert!(remote.gather_outbound(now).0.is_empty());
+                    let at = remote
+                        .timers
+                        .get(Timer::Ack)
+                        .expect("ordinary DATA delays ACK");
+                    remote.handle_timeout(at);
+                    at
+                };
+                let lost = remote.gather_outbound(ack_at).0;
+                assert!(lost.iter().any(|raw| {
+                    Packet::unmarshal(raw)
+                        .unwrap()
+                        .chunks
+                        .iter()
+                        .any(|chunk| chunk.as_any().is::<ChunkSelectiveAck>())
+                }));
+                let receive_credit = remote.get_my_receiver_window_credit();
+                let retained_bytes = remote
+                    .streams
+                    .get(&1)
+                    .unwrap()
+                    .get_num_bytes_in_reassembly_queue();
+                for attempt in 0..2 {
+                    remote.handle_inbound(
+                        local.create_packet(vec![Box::new(duplicate.clone())]),
+                        ack_at,
+                    )?;
+                    let replies = remote.gather_outbound(ack_at).0;
+                    let mut reports = 0;
+                    for raw in replies {
+                        assert!(raw.len() <= remote.mtu as usize);
+                        let packet = Packet::unmarshal(&raw)?;
+                        for chunk in &packet.chunks {
+                            if let Some(sack) = chunk.as_any().downcast_ref::<ChunkSelectiveAck>() {
+                                reports += 1;
+                                assert_eq!(
+                                    sack.duplicate_tsn,
+                                    vec![duplicate.tsn],
+                                    "first_tsn={first_tsn}, selective={selective}, graceful={graceful}, attempt={attempt}"
+                                );
+                                assert_eq!(
+                                    sack.cumulative_tsn_ack,
+                                    if selective {
+                                        first_tsn.wrapping_sub(1)
+                                    } else {
+                                        first_tsn
+                                    }
+                                );
+                                assert_eq!(sack.gap_ack_blocks.len(), usize::from(selective));
+                                if selective {
+                                    assert_eq!(
+                                        (sack.gap_ack_blocks[0].start, sack.gap_ack_blocks[0].end),
+                                        (2, 2)
+                                    );
+                                }
+                            }
+                        }
+                        local.handle_inbound(packet, ack_at)?;
+                    }
+                    assert_eq!(
+                        reports, 1,
+                        "duplicate-only DATA must emit a SACK without advancing time"
+                    );
+                    assert!(remote.timers.get(Timer::Ack).is_none());
+                    assert_eq!(remote.get_my_receiver_window_credit(), receive_credit);
+                    assert_eq!(
+                        remote
+                            .streams
+                            .get(&1)
+                            .unwrap()
+                            .get_num_bytes_in_reassembly_queue(),
+                        retained_bytes
+                    );
+                    assert_eq!(
+                        local.stream(1)?.buffered_amount()?,
+                        payloads[usize::from(!selective)].len()
+                    );
+                }
+                let released: usize = std::iter::from_fn(|| local.poll())
+                    .filter_map(|event| {
+                        if let Event::Stream(StreamEvent::BufferedAmountReleased {
+                            data_channel_bytes,
+                            ..
+                        }) = event
+                        {
+                            Some(data_channel_bytes)
+                        } else {
+                            None
+                        }
+                    })
+                    .sum();
+                assert_eq!(released, duplicate.user_data.len());
+                let missing = &sent[usize::from(!selective)];
+                remote
+                    .handle_inbound(local.create_packet(vec![Box::new(missing.clone())]), ack_at)?;
+                if let Some(at) = remote.timers.get(Timer::Ack) {
+                    remote.handle_timeout(at);
+                }
+                for raw in remote.gather_outbound(ack_at).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, ack_at)?;
+                }
+                for payload in payloads {
+                    assert_eq!(
+                        remote
+                            .stream(1)?
+                            .read_sctp()?
+                            .unwrap()
+                            .to_payload(100)?
+                            .as_ref(),
+                        payload
+                    );
+                }
+                assert!(remote.stream(1)?.read_sctp()?.is_none());
+                assert_eq!(local.stream(1)?.buffered_amount()?, 0);
+                if graceful {
+                    for _ in 0..3 {
+                        for raw in local.gather_outbound(ack_at).0 {
+                            remote.handle_inbound(Packet::unmarshal(&raw)?, ack_at)?;
+                        }
+                        for raw in remote.gather_outbound(ack_at).0 {
+                            local.handle_inbound(Packet::unmarshal(&raw)?, ack_at)?;
+                        }
+                    }
+                    assert_eq!(local.state(), AssociationState::Closed);
+                    assert_eq!(remote.state(), AssociationState::Closed);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_reset_duplicate_data_reports_saved_generation_without_double_delivery() -> Result<()> {
+    for first_tsn in [1u32, u32::MAX] {
+        for selective in [false, true] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            local.my_next_tsn = first_tsn;
+            local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+            remote.ack_mode = AckMode::Normal;
+            local.send_reset_request(now, 1)?;
+            let outgoing = reset_requests(&mut local, now).remove(0);
+            for packet in remote.handle_reconfig(&outgoing, now)? {
+                for chunk in packet.chunks {
+                    if let Some(chunk) = chunk.as_any().downcast_ref::<ChunkReconfig>() {
+                        local.handle_reconfig(chunk, now)?;
+                    }
+                }
+            }
+            let reciprocal = reset_requests(&mut remote, now).remove(0);
+            let final_ack = local.handle_reconfig(&reciprocal, now)?;
+            local.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+            let payloads = [b"new first".as_slice(), b"new second".as_slice()];
+            for payload in payloads {
+                local.stream(1)?.write(now, payload)?;
+            }
+            let sent = transmitted_data(&local.gather_outbound(now).0);
+            assert_eq!(sent.len(), 2);
+            let duplicate = &sent[usize::from(selective)];
+            remote.handle_inbound(local.create_packet(vec![Box::new(duplicate.clone())]), now)?;
+            assert!(!remote.gather_outbound(now).0.is_empty());
+            let receive_credit = remote.get_my_receiver_window_credit();
+            for _ in 0..2 {
+                remote
+                    .handle_inbound(local.create_packet(vec![Box::new(duplicate.clone())]), now)?;
+                let replies = remote.gather_outbound(now).0;
+                let mut reports = 0;
+                for raw in replies {
+                    assert!(raw.len() <= remote.mtu as usize);
+                    let packet = Packet::unmarshal(&raw)?;
+                    for chunk in &packet.chunks {
+                        if let Some(sack) = chunk.as_any().downcast_ref::<ChunkSelectiveAck>() {
+                            reports += 1;
+                            assert_eq!(
+                                sack.duplicate_tsn,
+                                vec![duplicate.tsn],
+                                "first_tsn={first_tsn}, selective={selective}"
+                            );
+                        }
+                    }
+                    local.handle_inbound(packet, now)?;
+                }
+                assert_eq!(reports, 1);
+                assert_eq!(remote.deferred_reset_data.len(), 1);
+                assert_eq!(remote.get_my_receiver_window_credit(), receive_credit);
+                assert!(
+                    !remote
+                        .streams
+                        .get(&1)
+                        .unwrap()
+                        .reassembly_queue
+                        .is_readable()
+                );
+            }
+            for packet in final_ack {
+                for chunk in packet.chunks {
+                    if let Some(chunk) = chunk.as_any().downcast_ref::<ChunkReconfig>() {
+                        remote.handle_reconfig(chunk, now)?;
+                    }
+                }
+            }
+            assert!(remote.deferred_reset_data.is_empty());
+            let missing = &sent[usize::from(!selective)];
+            remote.handle_inbound(local.create_packet(vec![Box::new(missing.clone())]), now)?;
+            for payload in payloads {
+                assert_eq!(
+                    remote
+                        .stream(1)?
+                        .read_sctp()?
+                        .unwrap()
+                        .to_payload(100)?
+                        .as_ref(),
+                    payload
+                );
+            }
+            assert!(remote.stream(1)?.read_sctp()?.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_duplicate_data_packet_keeps_sack_within_mtu_budget() -> Result<()> {
+    for (mtu, selective, expected_duplicates) in [
+        (28, false, 0),
+        (40, false, 3),
+        (40, true, 2),
+        (41, true, 2),
+        (48, true, 4),
+    ] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        remote.mtu = mtu;
+        for payload in [b"one".as_slice(), b"two".as_slice()] {
+            local.stream(1)?.write(now, payload)?;
+        }
+        let sent = transmitted_data(&local.gather_outbound(now).0);
+        let duplicate = &sent[usize::from(selective)];
+        remote.handle_inbound(local.create_packet(vec![Box::new(duplicate.clone())]), now)?;
+        if let Some(at) = remote.timers.get(Timer::Ack) {
+            remote.handle_timeout(at);
+        }
+        remote.gather_outbound(now);
+        let chunks: Vec<Box<dyn Chunk>> = (0..20)
+            .map(|_| Box::new(duplicate.clone()) as Box<dyn Chunk>)
+            .collect();
+        remote.handle_inbound(local.create_packet(chunks), now)?;
+        let replies = remote.gather_outbound(now).0;
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].len() <= mtu as usize);
+        let packet = Packet::unmarshal(&replies[0])?;
+        let sack = packet.chunks[0]
+            .as_any()
+            .downcast_ref::<ChunkSelectiveAck>()
+            .unwrap();
+        assert_eq!(sack.duplicate_tsn, vec![duplicate.tsn; expected_duplicates]);
+        assert_eq!(sack.gap_ack_blocks.len(), usize::from(selective));
+        assert!(remote.payload_queue.pop_duplicates().is_empty());
+    }
+    Ok(())
+}

@@ -27,6 +27,9 @@ pub struct Chunks {
     /// Arrival order, used only to decide which of two ready messages came first.
     /// A counter rather than an instant: this is sequencing, not time.
     arrival: u64,
+    discontinuities: usize,
+    #[cfg(test)]
+    pub(crate) adjacency_checks: std::cell::Cell<usize>,
 }
 
 impl Chunks {
@@ -123,6 +126,10 @@ impl Chunks {
         ppi: PayloadProtocolIdentifier,
         chunks: Vec<ChunkPayloadData>,
     ) -> Self {
+        let discontinuities = chunks
+            .windows(2)
+            .filter(|pair| pair[1].tsn != pair[0].tsn.wrapping_add(1))
+            .count();
         Chunks {
             ssn,
             ppi,
@@ -130,6 +137,9 @@ impl Chunks {
             offset: 0,
             index: 0,
             arrival,
+            discontinuities,
+            #[cfg(test)]
+            adjacency_checks: std::cell::Cell::new(0),
         }
     }
 
@@ -141,55 +151,33 @@ impl Chunks {
         if idx < self.chunks.len() && self.chunks[idx].tsn == chunk.tsn {
             return false;
         }
+        let previous = idx.checked_sub(1).and_then(|i| self.chunks.get(i));
+        let next = self.chunks.get(idx);
+        if let (Some(previous), Some(next)) = (previous, next) {
+            self.discontinuities -= usize::from(!self.adjacent(previous.tsn, next.tsn));
+        }
+        if let Some(previous) = previous {
+            self.discontinuities += usize::from(!self.adjacent(previous.tsn, chunk.tsn));
+        }
+        if let Some(next) = next {
+            self.discontinuities += usize::from(!self.adjacent(chunk.tsn, next.tsn));
+        }
         self.chunks.insert(idx, chunk);
 
         // Check if we now have a complete set
         self.is_complete()
     }
 
+    fn adjacent(&self, previous: u32, next: u32) -> bool {
+        #[cfg(test)]
+        self.adjacency_checks.set(self.adjacency_checks.get() + 1);
+        next == previous.wrapping_add(1)
+    }
+
     pub(crate) fn is_complete(&self) -> bool {
-        // Condition for complete set
-        //   0. Has at least one chunk.
-        //   1. Begins with beginningFragment set to true
-        //   2. Ends with endingFragment set to true
-        //   3. TSN monotinically increase by 1 from beginning to end
-
-        // 0.
-        let n_chunks = self.chunks.len();
-        if n_chunks == 0 {
-            return false;
-        }
-
-        // 1.
-        if !self.chunks[0].beginning_fragment {
-            return false;
-        }
-
-        // 2.
-        if !self.chunks[n_chunks - 1].ending_fragment {
-            return false;
-        }
-
-        // 3.
-        let mut last_tsn = 0u32;
-        for (i, c) in self.chunks.iter().enumerate() {
-            if i > 0 {
-                // Fragments must have contiguous TSN
-                // From RFC 4960 Section 3.3.1:
-                //   When a user message is fragmented into multiple chunks, the TSNs are
-                //   used by the receiver to reassemble the message.  This means that the
-                //   TSNs for each fragment of a fragmented user message MUST be strictly
-                //   sequential.
-                if c.tsn != last_tsn.wrapping_add(1) {
-                    // mid or end fragment is missing
-                    return false;
-                }
-            }
-
-            last_tsn = c.tsn;
-        }
-
-        true
+        self.chunks.first().is_some_and(|c| c.beginning_fragment)
+            && self.chunks.last().is_some_and(|c| c.ending_fragment)
+            && self.discontinuities == 0
     }
 }
 
