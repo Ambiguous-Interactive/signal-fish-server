@@ -191,3 +191,21 @@ reduces adjacency checks from 523,776 to at most 3,072. Constructor vectors,
 every six-fragment arrival permutation, duplicates, TSN wrap, and a paired
 gameplay history preserve exact payloads and release credit. Replacement
 qualification in #912 must retain the reassembly_ controls.
+
+The #1170 repair assigns ordered message arrival on first completion, matching
+unordered completion order when both classes are readable. Delayed ordered
+fragments no longer overtake an unordered message that completed first.
+Queue and paired-wire controls cover both completion orders, TSN wrap, exact
+payloads, credit release, and graceful shutdown. SSN order remains intact.
+The #1171 repair queues complete single-chunk unordered messages directly,
+without inserting them into or scanning the incomplete-fragment collection.
+A 1,024-message control with 1,024 retained fragments reduces fragment visits
+from 1,049,600 to zero. Retained bytes and FORWARD TSN cleanup stay exact.
+The #1172 repair applies the packet's gap-report budget during SACK generation.
+It preserves the entire last reportable contiguous range and stops before
+building later reports. A 2,048-gap control scans zero chunks at budget zero,
+and at most budget plus one chunks for positive budgets with disjoint gaps.
+Contiguous runs still require scanning through their last TSN. Controls retain
+16-bit offset limits, TSN wrap, duplicate priority, DATA retention and later
+cumulative progress. Replacement qualification in #912 must retain these
+reassembly_, shutdown_selective_ack_, and payload_queue_gap_ack_ controls.

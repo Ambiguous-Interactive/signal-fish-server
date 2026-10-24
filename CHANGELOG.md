@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce native gameplay receive work for complete unordered messages and packet-limited acknowledgments (#1171, #1172).
 - **Breaking:** Rust callers that construct `ServerMessage::PlayerReconnected` must set its optional `player` field.
 - Reduce native gameplay fragment completeness work for delayed or reordered packets (#1168).
 - Reduce native gameplay queue work for packets received or sent in order (#1164).
@@ -28,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve native message completion order when ordered fragments arrive late (#1170).
 - Restore current peer metadata to room observers in reconnect notifications (#1167).
 - Acknowledge duplicate native gameplay packets immediately after lost acknowledgments (#1165).
 - Keep native gameplay acknowledgments within the transport packet size during heavy reordering (#1163).

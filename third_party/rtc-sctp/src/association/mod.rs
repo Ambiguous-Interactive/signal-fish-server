@@ -3737,8 +3737,9 @@ impl Association {
             .min(u16::MAX as usize);
         let report_budget =
             chunk_budget.saturating_sub(CHUNK_HEADER_SIZE + SELECTIVE_ACK_HEADER_SIZE) / 4;
-        let mut gap_ack_blocks = self.payload_queue.get_gap_ack_blocks(self.peer_last_tsn);
-        gap_ack_blocks.truncate(report_budget);
+        let gap_ack_blocks = self
+            .payload_queue
+            .get_gap_ack_blocks_limited(self.peer_last_tsn, report_budget);
         let mut duplicate_tsn = self.payload_queue.pop_duplicates();
         duplicate_tsn.truncate(report_budget.saturating_sub(gap_ack_blocks.len()));
         ChunkSelectiveAck {
