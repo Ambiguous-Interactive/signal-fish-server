@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
 - Reduce native receive work when partial-reliability recovery discards fragmented gameplay (#1182).
 - Reduce native ordered gameplay fragment insertion work (#636).
 - Reduce native gameplay completion work for fragmented unordered messages (#1175).
@@ -32,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve native channel close notifications when remote admission waits until channel retirement (#1188).
 - Release browser negotiation backlog when peer links retire so repeated replacements keep gameplay active (#1183).
 - Preserve native ordered gameplay sequence progress when stream reset completes during graceful shutdown (#1184).
 - Refuse new native streams when graceful shutdown starts (#1145).

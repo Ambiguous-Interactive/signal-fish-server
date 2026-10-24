@@ -8047,3 +8047,52 @@ dependencies. The Godot README at `b7c04a86` assigns mesh transport to browser
 WebRTC or the Godot extension. None imports these private native transport or
 browser reference-engine sources. The signaling wire is unchanged; no SDK
 migration is required.
+
+### F167 — FORWARD TSN scans absent sequence numbers
+
+Confirmed on `7d63f953`; tracked in #1187 under #636/#826. A forward cumulative
+advance invokes receive-queue removal for every sequence number, including
+absent DATA. A red-first control advances 4,096 TSNs with two retained chunks
+at or below its marker. It records 4,097 removal attempts, including the next
+cumulative-progress probe. Remove the retained sorted prefix and set the
+accepted cumulative point directly. The repaired history makes three attempts.
+Established and ShutdownSent controls cover normal and wrapped TSNs, exact
+unread payloads, later queued gaps, subsequent cumulative advancement, and
+full receive-credit release. This is a queue-operation measurement; no
+end-to-end throughput or historical timeout cause is established.
+
+Endpoint qualification also fixes open #1186: process-local port counters
+collide under Nextest. The original endpoint shutdown/reset selector fails
+11 tests with `AddrInUse`. Holding OS-assigned sockets and deriving each
+endpoint address from its live socket passes the same 15 controls. Packet
+assertions and production endpoint code are unchanged.
+
+External-client assessment: the Rust SDK manifest at `da8f2d16` has no native
+RTC/SCTP dependency. The .NET project at `e467c871` has no package dependencies.
+The Godot README at `ca58e382` uses browser WebRTC or the Godot extension for
+mesh transport. These changes affect only the native reference-client graph;
+the signaling wire and SDK contracts do not change.
+
+### F168 — Delayed native channel admission suppresses its close event
+
+Confirmed on `7d63f953`; tracked in #1188 under #826/#1120/#853. Callback
+admission validates immutable delivery modes and queues a selected channel.
+If its core retires before that announcement drains, engine admission repeats
+property reads against the removed core. It returns without polling the
+channel's retained terminal event. The baseline real-wire history times out
+waiting for close after the peer acknowledges input and completes reset.
+
+Trust the previously selected channel identity, then poll its queued events.
+Unselected/direct channels still require delivery-mode validation. Four cells
+cover both required labels with held-open and production-style queued-open
+handling. They check exactly one terminal close, finished polling tasks, no
+false pair formation, and fresh-generation delivery on both labels. Held-open
+controls retain the exact queued payload. Production-style controls keep the
+existing observed-loss fence; any delivered payload must remain exact and
+unique. The repair does not promise payload delivery after observed loss.
+This is a new reproduced close-notification defect, not proof of the historical
+reset timeout or initial browser/native establishment failure.
+
+The external-client assessment for F167 also applies to F168: none of the
+three independent SDKs imports the native reference engine; no wire or SDK
+migration is required.

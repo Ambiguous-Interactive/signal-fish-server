@@ -258,3 +258,17 @@ a binary search. A 1,024-fragment control reduces ordering comparisons from
 Duplicate first, middle, and last fragments preserve exact payloads. This is an
 insertion-work result, not a measured throughput claim. Replacement qualification
 in #912 must retain the `reassembly_` and `shutdown` controls.
+
+The #1187 repair removes only retained receive-queue chunks at or below a
+FORWARD TSN marker. It no longer visits each absent TSN before advancing the
+cumulative point. A 4,096-TSN advance with two retained chunks reduces removal
+attempts from 4,097 to three, including the following cumulative-progress
+probe. Controls preserve exact complete payloads, receive credit, later gaps,
+subsequent cumulative progress, and TSN wrap in Established and ShutdownSent.
+This measures queue operations, not end-to-end throughput. Replacement
+qualification in #912 must retain the `shutdown_forward_tsn_work_` control.
+
+The #1186 endpoint fixture binds OS-assigned loopback UDP ports and keeps each
+socket alive for the test. Endpoint routing uses those bound addresses. The
+shutdown/reset selectors can run in isolated Nextest processes without
+cross-process fixed-port collisions.

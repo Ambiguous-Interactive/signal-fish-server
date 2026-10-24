@@ -22,19 +22,11 @@ use crate::packet::{CommonHeader, Packet};
 use crate::param::param_outgoing_reset_request::ParamOutgoingResetRequest;
 use crate::param::param_reconfig_response::ParamReconfigResponse;
 use assert_matches::assert_matches;
-use lazy_static::lazy_static;
 use log::{info, trace};
 use std::collections::VecDeque;
 use std::net::Ipv6Addr;
-use std::ops::RangeFrom;
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::{cmp, mem, net::UdpSocket, time::Duration};
-
-lazy_static! {
-    pub static ref SERVER_PORTS: Mutex<RangeFrom<u16>> = Mutex::new(4433..);
-    pub static ref CLIENT_PORTS: Mutex<RangeFrom<u16>> = Mutex::new(44433..);
-}
 
 fn min_opt<T: Ord>(x: Option<T>, y: Option<T>) -> Option<T> {
     match (x, y) {
@@ -85,8 +77,10 @@ struct TestEndpoint {
 }
 
 impl TestEndpoint {
-    fn new(endpoint: Endpoint, addr: SocketAddr) -> Self {
-        let socket = UdpSocket::bind(addr).expect("failed to bind UDP socket");
+    fn new(endpoint: Endpoint, socket: UdpSocket) -> Self {
+        let addr = socket
+            .local_addr()
+            .expect("bound UDP socket has an address");
         socket
             .set_read_timeout(Some(Duration::new(0, 10_000_000)))
             .unwrap();
@@ -211,14 +205,10 @@ struct Pair {
 impl Pair {
     pub fn new(endpoint_config: EndpointConfig, server_config: ServerConfig) -> Self {
         let endpoint_config = Arc::new(endpoint_config);
-        let server_addr = SocketAddr::new(
-            Ipv6Addr::LOCALHOST.into(),
-            SERVER_PORTS.lock().unwrap().next().unwrap(),
-        );
-        let client_addr = SocketAddr::new(
-            Ipv6Addr::LOCALHOST.into(),
-            CLIENT_PORTS.lock().unwrap().next().unwrap(),
-        );
+        let server_socket = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let client_socket = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let client_addr = client_socket.local_addr().unwrap();
 
         let server = Endpoint::new(
             server_addr,
@@ -228,18 +218,9 @@ impl Pair {
         );
         let client = Endpoint::new(client_addr, TransportProtocol::UDP, endpoint_config, None);
 
-        Pair::new_from_endpoint(client, server, client_addr, server_addr)
-    }
-
-    pub fn new_from_endpoint(
-        client: Endpoint,
-        server: Endpoint,
-        client_addr: SocketAddr,
-        server_addr: SocketAddr,
-    ) -> Self {
         Self {
-            server: TestEndpoint::new(server, server_addr),
-            client: TestEndpoint::new(client, client_addr),
+            server: TestEndpoint::new(server, server_socket),
+            client: TestEndpoint::new(client, client_socket),
             time: Instant::now(),
             latency: Duration::new(0, 0),
         }

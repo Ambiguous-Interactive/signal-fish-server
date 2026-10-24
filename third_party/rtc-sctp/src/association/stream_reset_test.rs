@@ -3492,3 +3492,72 @@ fn graceful_shutdown_preserves_unread_gameplay_across_full_stream_sequence_wrap(
     assert!(remote.poll_endpoint_event().is_none());
     Ok(())
 }
+
+// Issue #1187: skip absent TSNs without discarding readable gameplay.
+#[test]
+fn shutdown_forward_tsn_work_tracks_retained_data_not_abandoned_distance() -> Result<()> {
+    for base in [100, u32::MAX - 2048] {
+        for shutdown in [false, true] {
+            let (mut local, _) = reset_pair();
+            local.peer_last_tsn = base;
+            local.use_forward_tsn = true;
+            for distance in [2_u32, 4096, 4098] {
+                local.handle_data(&ChunkPayloadData {
+                    tsn: base.wrapping_add(distance),
+                    stream_identifier: 1,
+                    unordered: true,
+                    beginning_fragment: true,
+                    ending_fragment: true,
+                    payload_type: PayloadProtocolIdentifier::Binary,
+                    user_data: Bytes::copy_from_slice(&distance.to_be_bytes()),
+                    ..Default::default()
+                })?;
+            }
+            if shutdown {
+                local.shutdown()?;
+            }
+            local.payload_queue.pop_attempts = 0;
+            local.handle_forward_tsn(&ChunkForwardTsn {
+                new_cumulative_tsn: base.wrapping_add(4096),
+                streams: vec![],
+            })?;
+            assert_eq!(local.peer_last_tsn, base.wrapping_add(4096));
+            assert_eq!(local.payload_queue.len(), 1);
+            assert_eq!(local.payload_queue.get_num_bytes(), 4);
+            assert!(
+                local.payload_queue.pop_attempts <= 3,
+                "base={base}, shutdown={shutdown}: {} removal attempts for two retained chunks",
+                local.payload_queue.pop_attempts
+            );
+            local.handle_data(&ChunkPayloadData {
+                tsn: base.wrapping_add(4097),
+                stream_identifier: 1,
+                unordered: true,
+                beginning_fragment: true,
+                ending_fragment: true,
+                payload_type: PayloadProtocolIdentifier::Binary,
+                user_data: Bytes::copy_from_slice(&4097_u32.to_be_bytes()),
+                ..Default::default()
+            })?;
+            assert_eq!(local.peer_last_tsn, base.wrapping_add(4098));
+            assert!(local.payload_queue.is_empty());
+            for distance in [2_u32, 4096, 4098, 4097] {
+                assert_eq!(
+                    local
+                        .stream(1)?
+                        .read_sctp()?
+                        .unwrap()
+                        .to_payload(4)?
+                        .freeze(),
+                    Bytes::copy_from_slice(&distance.to_be_bytes())
+                );
+            }
+            assert_eq!(
+                local.get_my_receiver_window_credit(),
+                local.max_receive_buffer_size
+            );
+            assert!(local.stream(1)?.read_sctp()?.is_none());
+        }
+    }
+    Ok(())
+}
