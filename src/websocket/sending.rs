@@ -1055,11 +1055,31 @@ pub(super) async fn send_single_message_ref(
         }
         ServerMessage::PlayerReconnected {
             player_id: reconnected,
-            epoch: Some(_),
-        } if !recipient_supports_v3 => {
+            epoch,
+            player,
+        } if (!recipient_supports_v3
+            && (epoch.is_some()
+                || player
+                    .as_ref()
+                    .is_some_and(|player| player.epoch.is_some() || player.seq.is_some())))
+            || (recipient_supports_v3
+                && player
+                    .as_ref()
+                    .is_some_and(|player| player_has_v2_only_snapshot_metadata(player))) =>
+        {
+            let mut player = player.clone();
+            if let Some(player) = &mut player {
+                if recipient_supports_v3 {
+                    strip_player_v2_only_snapshot_metadata(player);
+                } else {
+                    player.epoch = None;
+                    player.seq = None;
+                }
+            }
             let stripped = ServerMessage::PlayerReconnected {
                 player_id: *reconnected,
-                epoch: None,
+                epoch: recipient_supports_v3.then_some(*epoch).flatten(),
+                player,
             };
             send_text_message(
                 sender,
@@ -1433,6 +1453,10 @@ fn strip_roster_v2_only_snapshot_metadata(
 fn project_replayed_event_for_v3(event: &mut ServerMessage) {
     match event {
         ServerMessage::PlayerJoined { player } => strip_player_v2_only_snapshot_metadata(player),
+        ServerMessage::PlayerReconnected {
+            player: Some(player),
+            ..
+        } => strip_player_v2_only_snapshot_metadata(player),
         ServerMessage::NewSpectatorJoined {
             spectator,
             current_spectators,
@@ -1472,6 +1496,10 @@ pub(crate) fn project_reconnect_payload_for_v3(payload: &mut crate::protocol::Re
 fn replayed_event_needs_v3_projection(event: &ServerMessage) -> bool {
     match event {
         ServerMessage::PlayerJoined { player } => player_has_v2_only_snapshot_metadata(player),
+        ServerMessage::PlayerReconnected {
+            player: Some(player),
+            ..
+        } => player_has_v2_only_snapshot_metadata(player),
         ServerMessage::NewSpectatorJoined {
             spectator,
             current_spectators,

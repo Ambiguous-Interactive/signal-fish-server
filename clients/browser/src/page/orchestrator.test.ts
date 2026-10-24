@@ -242,6 +242,21 @@ for (const direction of ['sent to', 'received from']) {
     'departure restores all-ready without a broadcast',
   );
 
+  for (const ready of [false, true]) {
+    gate.memberRestored(joiner, ready, false);
+    assert(
+      gate.shouldSend(true, false, present(creator, joiner)) === ready,
+      'reconnect uses the authoritative peer readiness before the callback',
+    );
+  }
+
+  gate.noteSent();
+  gate.memberRestored(joiner, true, true);
+  assert(
+    !gate.shouldSend(true, false, present(creator, joiner)),
+    'a duplicate v2 reconnect must preserve an admitted StartGame',
+  );
+
   // RoomLeft resets the whole baseline.
   gate.noteSent();
   gate.reset();
@@ -649,7 +664,21 @@ for (const [membershipEvent, departure, afterCutoff] of [
                 }
                 socket.deliver(
                   membershipEvent === 'PlayerReconnected'
-                    ? { type: 'PlayerReconnected', data: { player_id: peer, epoch: 2 } }
+                    ? {
+                        type: 'PlayerReconnected',
+                        data: {
+                          player_id: peer,
+                          epoch: 2,
+                          player: {
+                            id: peer,
+                            name: 'current name',
+                            is_authority: false,
+                            is_ready: true,
+                            epoch: 2,
+                            seq: 0,
+                          },
+                        },
+                      }
                     : {
                         type: 'PlayerJoined',
                         data: { player: { id: peer, epoch: 2, seq: 0 } },
@@ -763,7 +792,21 @@ for (const [membershipEvent, departure, afterCutoff] of [
         // The same epoch repeats after fresh traffic, with no new plan.
         socket.deliver(
           membershipEvent === 'PlayerReconnected'
-            ? { type: 'PlayerReconnected', data: { player_id: peer, epoch: 2 } }
+            ? {
+                type: 'PlayerReconnected',
+                data: {
+                  player_id: peer,
+                  epoch: 2,
+                  player: {
+                    id: peer,
+                    name: 'current name',
+                    is_authority: false,
+                    is_ready: true,
+                    epoch: 2,
+                    seq: 0,
+                  },
+                },
+              }
             : { type: 'PlayerJoined', data: { player: { id: peer, epoch: 2, seq: 0 } } },
         );
         await turn();

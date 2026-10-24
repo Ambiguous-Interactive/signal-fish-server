@@ -1245,3 +1245,84 @@ fn test_payload_queue_gap_ack_ordered_insert_work_and_reordering() {
         assert_eq!(queue.get_num_bytes(), 0);
     }
 }
+
+#[test]
+fn reassembly_late_fragment_work_is_bounded() {
+    const COUNT: u32 = 1024;
+    for first_tsn in [12345u32, u32::MAX - COUNT / 2] {
+        let mut chunks = Chunks::new(0, 0, PayloadProtocolIdentifier::Binary, vec![]);
+        let fragment = |index: u32| ChunkPayloadData {
+            tsn: first_tsn.wrapping_add(index),
+            beginning_fragment: index == 0,
+            ending_fragment: index == COUNT - 1,
+            user_data: Bytes::from(index.to_be_bytes().to_vec()),
+            ..Default::default()
+        };
+        assert!(!chunks.push(fragment(COUNT - 1)));
+        for index in 0..COUNT - 1 {
+            assert_eq!(chunks.push(fragment(index)), index == COUNT - 2);
+        }
+        let expected: Vec<u8> = (0..COUNT).flat_map(u32::to_be_bytes).collect();
+        assert_eq!(
+            chunks.to_payload(expected.len()).unwrap().as_ref(),
+            expected
+        );
+        assert!(
+            chunks.adjacency_checks.get() <= COUNT as usize * 3,
+            "first TSN {first_tsn}: {} adjacency checks",
+            chunks.adjacency_checks.get()
+        );
+    }
+}
+
+#[test]
+fn reassembly_completeness_matches_fragment_adjacency() {
+    fn contiguous(chunks: &Chunks) -> bool {
+        chunks.chunks.first().is_some_and(|c| c.beginning_fragment)
+            && chunks.chunks.last().is_some_and(|c| c.ending_fragment)
+            && chunks
+                .chunks
+                .windows(2)
+                .all(|pair| pair[1].tsn == pair[0].tsn.wrapping_add(1))
+    }
+    for first_tsn in [100u32, u32::MAX - 2] {
+        let fragment = |index: u32| ChunkPayloadData {
+            tsn: first_tsn.wrapping_add(index),
+            beginning_fragment: index == 0,
+            ending_fragment: index == 5,
+            user_data: Bytes::from(vec![index as u8]),
+            ..Default::default()
+        };
+        for order in [
+            vec![],
+            vec![0],
+            vec![0, 1, 5],
+            vec![0, 1, 2, 3, 4, 5],
+            vec![0, 1, 1, 3, 4, 5],
+            vec![0, 2, 1, 3, 4, 5],
+        ] {
+            let chunks = Chunks::new(
+                0,
+                0,
+                PayloadProtocolIdentifier::Binary,
+                order.into_iter().map(fragment).collect(),
+            );
+            assert_eq!(chunks.is_complete(), contiguous(&chunks));
+        }
+        for mut permutation in 0usize..720 {
+            let mut available: Vec<u32> = (0..6).collect();
+            let mut chunks = Chunks::new(0, 0, PayloadProtocolIdentifier::Binary, vec![]);
+            for remaining in (1..=6).rev() {
+                let index = available.remove(permutation % remaining);
+                permutation /= remaining;
+                assert_eq!(chunks.push(fragment(index)), contiguous(&chunks));
+                let len = chunks.chunks.len();
+                assert!(!chunks.push(fragment(index)), "duplicates stay rejected");
+                assert_eq!(chunks.chunks.len(), len);
+                assert_eq!(chunks.is_complete(), contiguous(&chunks));
+            }
+            assert!(chunks.is_complete());
+            assert_eq!(chunks.to_payload(6).unwrap().as_ref(), &[0, 1, 2, 3, 4, 5]);
+        }
+    }
+}

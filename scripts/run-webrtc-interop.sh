@@ -156,6 +156,10 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.tom
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib payload_queue_gap_ack
 
+echo "==> Verifying bounded SCTP fragment reassembly work"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib reassembly_
+
 echo "==> Verifying SCTP application byte release accounting"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib data_channel_credit_tracks_ppid

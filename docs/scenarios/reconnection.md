@@ -124,6 +124,12 @@ For v3 relay sequencing, `sender_watermarks` resets Bob's per-sender `(epoch, se
 Bob then asks the game authority or peers for the current gameplay state.
 The game resumes after that application-level resync.
 
+Successful restores also include optional `player` metadata in this notification.
+Observers replace that roster entry before the reconnect callback. This restores
+the current name, readiness and authority, including for spectators who joined
+during the absence. Older servers and terminal repairs can omit this field.
+See [PlayerReconnected](../protocol.md#playerreconnected).
+
 ## 3. v3 note — reconnecting into an active session
 
 Bob's `Reconnected` is followed by a fresh, per-recipient `SessionPlan`, and

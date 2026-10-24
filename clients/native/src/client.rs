@@ -1260,6 +1260,16 @@ impl StartGameGate {
         self.sent_since_invalidation = false;
     }
 
+    fn member_restored(&mut self, player: PlayerId, ready: bool, already_present: bool) {
+        if already_present && self.ready_players.contains(&player) == ready {
+            return;
+        }
+        self.member_joined(player);
+        if ready {
+            self.ready_players.insert(player);
+        }
+    }
+
     /// A member departed. Readiness belongs to the CURRENT membership, so a
     /// departure can restore all-ready with no readiness broadcast at all; the
     /// previous send's premise (that exact membership) is gone either way.
@@ -2799,13 +2809,32 @@ impl Orchestrator<'_> {
                     "room restore refused: {reason} ({error_code:?})"
                 )));
             }
-            ServerMessage::PlayerReconnected { player_id, epoch } => {
+            ServerMessage::PlayerReconnected {
+                player_id,
+                epoch,
+                player,
+            } => {
                 let fresh_incarnation = self
                     .accountability
                     .note_player_reconnected_incarnation(player_id, epoch)
                     .map_err(FatalError::protocol)?;
                 if self.negotiated_version >= 3 && !fresh_incarnation {
                     return Ok(());
+                }
+                if let Some(player) = &player {
+                    if player.id != player_id
+                        || player.epoch != epoch
+                        || player.seq != epoch.map(|_| 0)
+                    {
+                        return Err(FatalError::protocol(
+                            "reconnect metadata does not match its lifecycle",
+                        ));
+                    }
+                    self.start_game_gate.member_restored(
+                        player_id,
+                        player.is_ready,
+                        self.present.contains(&player_id),
+                    );
                 }
                 restore_reconnected_member(&mut self.present, &mut self.members_seen, player_id);
                 self.reset_peer_exchange_incarnation(player_id).await;
@@ -5045,6 +5074,7 @@ mod tests {
                     .handle_server_message(ServerMessage::PlayerReconnected {
                         player_id: returning,
                         epoch: Some(1),
+                        player: None,
                     })
                     .await
                     .unwrap();
@@ -5114,6 +5144,7 @@ mod tests {
                     .handle_server_message(ServerMessage::PlayerReconnected {
                         player_id: returning,
                         epoch: Some(2),
+                        player: None,
                     })
                     .await
                     .unwrap();
@@ -5146,6 +5177,7 @@ mod tests {
                     .handle_server_message(ServerMessage::PlayerReconnected {
                         player_id: returning,
                         epoch: Some(3),
+                        player: None,
                     })
                     .await
                     .unwrap();
@@ -5163,6 +5195,7 @@ mod tests {
                     .handle_server_message(ServerMessage::PlayerReconnected {
                         player_id: returning,
                         epoch: Some(4),
+                        player: None,
                     })
                     .await
                     .unwrap();
@@ -5174,6 +5207,70 @@ mod tests {
                     assert!(state.exchange_ledger.has_sent(sibling, label));
                     assert!(state.exchange_ledger.received[&sibling].contains(label));
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_metadata_restores_ready_members_before_observation() {
+        for version in [2, 3] {
+            for ready in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("ws://{}", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    tokio_tungstenite::accept_async(tcp).await.unwrap()
+                });
+                let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+                let _server_ws = server.await.unwrap();
+                let cli =
+                    Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+                let me = PlayerId::from_u128(1);
+                let returning = PlayerId::from_u128(2);
+                let mut state = fixture_orchestrator(&cli, ws, me);
+                state.negotiated_version = version;
+                state.accountability = DeliveryAccountability::new(version == 3);
+                let epoch = (version == 3).then_some(2);
+                let player = serde_json::from_value(json!({
+                    "id": returning, "name": "current name", "is_authority": true,
+                    "is_ready": ready, "epoch": epoch, "seq": epoch.map(|_| 0),
+                }))
+                .unwrap();
+                let notification = ServerMessage::PlayerReconnected {
+                    player_id: returning,
+                    epoch,
+                    player: Some(Box::new(player)),
+                };
+                state
+                    .handle_server_message(notification.clone())
+                    .await
+                    .unwrap();
+                state.start_game_gate.note_sent();
+                state.handle_server_message(notification).await.unwrap();
+                assert!(
+                    state.start_game_gate.sent_since_invalidation,
+                    "duplicate lifecycle metadata preserves an admitted StartGame"
+                );
+                assert!(state.present.contains(&returning));
+                assert_eq!(
+                    state.start_game_gate.ready_players.contains(&returning),
+                    ready
+                );
+                state
+                    .handle_server_message(ServerMessage::PlayerLeft {
+                        player_id: returning,
+                        epoch,
+                        final_seq: epoch.map(|_| 0),
+                    })
+                    .await
+                    .unwrap();
+                assert!(!state.present.contains(&returning));
+                assert!(!state.start_game_gate.ready_players.contains(&returning));
+                state
+                    .handle_server_message(ServerMessage::RoomLeft)
+                    .await
+                    .unwrap();
+                assert!(state.start_game_gate.ready_players.is_empty());
             }
         }
     }

@@ -952,13 +952,17 @@ pub enum ServerMessage {
     /// `epoch` (v3 only) is the reconnector's new incarnation epoch — the same
     /// value now stamped on that player's relayed [`ServerMessage::GameData`] —
     /// so a recipient can re-baseline the per-sender `(epoch, seq)` stream
-    /// immediately, before the first post-reconnect frame arrives. Stripped for
-    /// pre-v3 recipients, keeping their bytes byte-identical to the frozen
-    /// v2 wire.
+    /// immediately, before the first post-reconnect frame arrives. Pre-v3
+    /// recipients omit incarnation fields at both levels. The optional `player`
+    /// snapshot extends both v2 and v3 without a separate join notification.
+    /// Clients replace that peer's metadata before emitting the reconnect event.
     PlayerReconnected {
         player_id: PlayerId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u32>,
+        /// Current peer metadata. Older servers omit it; terminal repair events may omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<Box<PlayerInfo>>,
     },
     /// Successfully joined a room as spectator (boxed to reduce enum size)
     SpectatorJoined(Box<SpectatorJoinedPayload>),

@@ -448,6 +448,55 @@ async fn finalized_reconnect_spectator_gets_public_lifecycle_without_session_pla
     assert_silent(&mut spectator_rx).await;
 }
 
+// Issue #1167: observers admitted during absence have no departed metadata cache.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_notification_contains_current_metadata_for_members_and_spectators() {
+    for (finalized, ready) in [(false, false), (false, true), (true, false)] {
+        let server = create_test_server_with_session(mesh_session_config()).await;
+        let mut fixture = setup_mesh_reconnect_with_ready(&server, 2, 16, finalized, ready).await;
+        let mut spectator_rx = register_publication_spectator(&server, fixture.room_id).await;
+        server
+            .message_coordinator
+            .fail_room_transactions_with_routing_changed_for_test(1);
+        assert!(
+            server
+                .handle_reconnect(
+                    &fixture.current,
+                    &fixture.reconnecting,
+                    &fixture.room_id,
+                    &fixture.token
+                )
+                .await
+        );
+        let baseline = recv(&mut fixture.current_rx).await;
+        let ServerMessage::Reconnected(payload) = baseline.as_ref() else {
+            panic!("expected reconnect baseline, got {baseline:?}");
+        };
+        let player = payload
+            .current_players
+            .iter()
+            .find(|player| player.id == fixture.reconnecting)
+            .expect("current baseline contains returning player");
+        assert_eq!(
+            player.is_ready, ready,
+            "the coordinator readiness survives restore"
+        );
+        for receiver in [&mut fixture.existing_rx, &mut spectator_rx] {
+            let notification = recv(receiver).await;
+            let wire = serde_json::to_value(notification.as_ref()).unwrap();
+            assert_eq!(wire["type"], "PlayerReconnected");
+            let expected = serde_json::to_value(player).unwrap();
+            for field in ["id", "name", "is_authority", "is_ready", "epoch", "seq"] {
+                assert_eq!(
+                    wire["data"]["player"][field], expected[field],
+                    "observers need current {field} inside the reconnect notification"
+                );
+            }
+        }
+    }
+}
+
 async fn setup_finalized_join_publication(
     server: &Arc<EnhancedGameServer>,
 ) -> FinalizedJoinPublicationFixture {
@@ -1275,11 +1324,27 @@ async fn setup_mesh_reconnect(
     current_capacity: usize,
     finalized: bool,
 ) -> FinalizedReconnectFixture {
-    let (existing, existing_rx) =
+    setup_mesh_reconnect_with_ready(
+        server,
+        existing_capacity,
+        current_capacity,
+        finalized,
+        false,
+    )
+    .await
+}
+
+async fn setup_mesh_reconnect_with_ready(
+    server: &Arc<EnhancedGameServer>,
+    existing_capacity: usize,
+    current_capacity: usize,
+    finalized: bool,
+    ready: bool,
+) -> FinalizedReconnectFixture {
+    let (existing, mut existing_rx) =
         register_client_with_queue_capacity(server, existing_capacity).await;
-    let (reconnecting, old_rx) = register_client(server).await;
+    let (reconnecting, mut old_rx) = register_client(server).await;
     let (current, current_rx) = register_client_with_queue_capacity(server, current_capacity).await;
-    drop(old_rx);
     server.set_client_protocol(&existing, v3_webrtc());
     server.set_client_protocol(&reconnecting, v3_webrtc());
     server.set_client_protocol(&current, v3_webrtc());
@@ -1300,6 +1365,18 @@ async fn setup_mesh_reconnect(
         .connection_manager
         .assign_client_to_room(&reconnecting, room_id)
         .await;
+    if ready {
+        server.handle_player_ready(&reconnecting).await;
+        assert!(matches!(
+            recv(&mut existing_rx).await.as_ref(),
+            ServerMessage::LobbyStateChanged { .. }
+        ));
+        assert!(matches!(
+            recv(&mut old_rx).await.as_ref(),
+            ServerMessage::LobbyStateChanged { .. }
+        ));
+    }
+    drop(old_rx);
     if finalized {
         finalize_db_room(server, &room_id, &[existing, reconnecting]).await;
     }
@@ -2656,7 +2733,8 @@ async fn reconnect_authority_restore_is_live_and_replay_visible() {
     ));
     assert!(matches!(
         recv(&mut existing_rx).await.as_ref(),
-        ServerMessage::PlayerReconnected { player_id, .. } if *player_id == authority
+        ServerMessage::PlayerReconnected { player_id, player: Some(player), .. }
+            if *player_id == authority && player.id == authority && player.is_authority
     ));
     assert!(matches!(
         recv(&mut current_rx).await.as_ref(),
@@ -2792,6 +2870,20 @@ async fn assert_reconnect_replay_snapshot_contract(recipient_supports_v3: bool) 
         )
         .await;
 
+    let mut historical_reconnect_player = player_info(existing, "historical reconnect");
+    historical_reconnect_player.epoch = Some(1);
+    historical_reconnect_player.seq = Some(0);
+    manager
+        .record_room_event(
+            &room_id,
+            &ServerMessage::PlayerReconnected {
+                player_id: existing,
+                epoch: Some(1),
+                player: Some(Box::new(historical_reconnect_player)),
+            },
+        )
+        .await;
+
     // Peer metadata can change without a replayable control event. This
     // history is older than the snapshot even when no replay event was lost.
     let fresh_endpoint = ConnectionInfo::Direct {
@@ -2870,6 +2962,22 @@ async fn assert_reconnect_replay_snapshot_contract(recipient_supports_v3: bool) 
                     serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint")
                 );
             }
+            let (event_epoch, metadata) = payload
+                .missed_events
+                .iter()
+                .find_map(|event| match event {
+                    ServerMessage::PlayerReconnected {
+                        player_id,
+                        epoch,
+                        player: Some(player),
+                    } if *player_id == existing => Some((*epoch, player)),
+                    _ => None,
+                })
+                .expect("historical reconnect metadata remains informational replay");
+            assert_eq!(event_epoch, recipient_supports_v3.then_some(1));
+            assert_eq!(metadata.epoch, event_epoch);
+            assert_eq!(metadata.seq, recipient_supports_v3.then_some(0));
+            assert_eq!(metadata.connected_at.is_some(), !recipient_supports_v3);
             assert_eq!(
                 payload.replay,
                 recipient_supports_v3.then_some(crate::protocol::ReplayStatus::Complete)
@@ -2911,7 +3019,7 @@ async fn assert_reconnect_replay_snapshot_contract(recipient_supports_v3: bool) 
 async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (authority, _old_authority_rx) = register_client(&server).await;
-    let (successor, mut _successor_rx) = register_client(&server).await;
+    let (successor, mut successor_rx) = register_client(&server).await;
     let (current, _current_rx) = register_client(&server).await;
     for player in [authority, successor, current] {
         server.set_client_protocol(&player, v3_webrtc());
@@ -2986,6 +3094,9 @@ async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
             .await
     );
 
+    assert!(matches!(recv(&mut successor_rx).await.as_ref(),
+        ServerMessage::PlayerReconnected { player_id, player: Some(player), .. }
+            if *player_id == authority && !player.is_authority));
     let room = server
         .database
         .get_room_by_id(&room_id)
@@ -3372,6 +3483,7 @@ async fn missing_reconnect_publication_snapshot_preserves_open_then_terminal_ord
         ServerMessage::PlayerReconnected {
             player_id,
             epoch: Some(epoch),
+            player: None,
         } if *player_id == fixture.reconnecting => *epoch,
         other => panic!("incumbent expected PlayerReconnected, got {other:?}"),
     };

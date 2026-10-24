@@ -2089,6 +2089,44 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             "{cohort:?} replayed PlayerJoined must use the exact cohort member key set: {raw}"
         );
 
+        let raw_notification = next_matching_raw_server_message(
+            &mut observer,
+            "PlayerReconnected",
+            "observer restores current reconnect metadata",
+        )
+        .await;
+        let notification: serde_json::Value =
+            serde_json::from_str(&raw_notification).expect("PlayerReconnected is JSON");
+        let restored = notification
+            .pointer("/data/player")
+            .expect("successful reconnect includes current player metadata");
+        let baseline_player = players
+            .iter()
+            .find(|player| {
+                player.get("id").and_then(serde_json::Value::as_str)
+                    == Some(late_id.to_string().as_str())
+            })
+            .expect("reconnect baseline includes the restored player");
+        assert_eq!(restored, baseline_player,
+            "{cohort:?} observers restore the same current metadata as the returning player: {raw_notification}");
+        let restored_keys: BTreeSet<_> = restored
+            .as_object()
+            .expect("reconnect metadata is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            restored_keys, expected_player_keys,
+            "{cohort:?} reconnect metadata uses the recipient's version projection"
+        );
+        match cohort {
+            Cohort::V2 => assert!(notification.pointer("/data/epoch").is_none()),
+            Cohort::V3 => {
+                assert_eq!(notification.pointer("/data/epoch"), restored.get("epoch"));
+                assert_eq!(restored.get("seq"), Some(&json!(0)));
+            }
+        }
+
         // 7. Correlated operations (v3-only `room_operation_ids` capability)
         // nest the same snapshot payloads INSIDE the result envelope, so the
         // correlated `RoomJoined` must carry the exact v3 member shape too

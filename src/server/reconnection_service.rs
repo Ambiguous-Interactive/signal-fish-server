@@ -196,6 +196,7 @@ impl EnhancedGameServer {
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: reconnect_player_id,
             epoch: Some(stamp.epoch),
+            player: None,
         });
         if let Some(player) = player {
             self.terminate_room_generation_after_publication_failure(
@@ -1623,13 +1624,6 @@ impl EnhancedGameServer {
                                 "restored player missing from reconnect baseline"
                             ));
                         }
-                        if server.should_retain_room_publication_snapshot() {
-                            *baseline_publication_in_builder
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                Some((current_room.clone(), response_players.clone()));
-                        }
-
                         let ready_players = super::ready_state::snapshot_ready_players(
                             &current_room,
                             server.room_coordinator.as_ref(),
@@ -1639,6 +1633,13 @@ impl EnhancedGameServer {
                             player.is_ready = ready_players.contains(&player.id);
                             player.epoch = None;
                             player.seq = None;
+                        }
+
+                        if server.should_retain_room_publication_snapshot() {
+                            *baseline_publication_in_builder
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some((current_room.clone(), response_players.clone()));
                         }
 
                         // Get missed events inside the coordinator registration
@@ -1748,7 +1749,13 @@ impl EnhancedGameServer {
                                         player.epoch = None;
                                         player.seq = None;
                                     }
-                                    ServerMessage::PlayerReconnected { epoch, .. } => *epoch = None,
+                                    ServerMessage::PlayerReconnected { epoch, player, .. } => {
+                                        *epoch = None;
+                                        if let Some(player) = player {
+                                            player.epoch = None;
+                                            player.seq = None;
+                                        }
+                                    }
                                     ServerMessage::PlayerLeft {
                                         epoch, final_seq, ..
                                     } => {
@@ -1935,6 +1942,7 @@ impl EnhancedGameServer {
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: *reconnect_player_id,
             epoch: Some(stamp.epoch),
+            player: None,
         });
         let Some((publication_room, publication_players)) = baseline_publication
             .lock()
@@ -2013,16 +2021,21 @@ impl EnhancedGameServer {
         let room_id_for_publication = *room_id;
         let reconnect_player_for_publication = *reconnect_player_id;
         let authority_player = publication_room.authority_player;
-        let reconnect_player_snapshot = publication_room
-            .players
-            .get(reconnect_player_id)
+        let reconnect_player_snapshot = publication_players
+            .iter()
+            .find(|player| player.id == *reconnect_player_id)
             .cloned()
-            .or_else(|| {
-                publication_players
-                    .iter()
-                    .find(|player| player.id == *reconnect_player_id)
-                    .cloned()
+            .map(|mut player| {
+                player.is_authority = authority_player == Some(*reconnect_player_id);
+                player.epoch = Some(stamp.epoch);
+                player.seq = Some(0);
+                player
             });
+        let notification = Arc::new(ServerMessage::PlayerReconnected {
+            player_id: *reconnect_player_id,
+            epoch: Some(stamp.epoch),
+            player: reconnect_player_snapshot.clone().map(Box::new),
+        });
         let reconnect_was_authority = authority_player == Some(*reconnect_player_id);
         let finalized = publication_room.lobby_state == crate::protocol::LobbyState::Finalized;
         let server_for_publication = Arc::clone(&self);

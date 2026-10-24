@@ -493,6 +493,7 @@ fn golden_player_reconnected_with_epoch() {
     let msg = ServerMessage::PlayerReconnected {
         player_id: player_a(),
         epoch: Some(2),
+        player: None,
     };
     assert_json(
         &msg,
