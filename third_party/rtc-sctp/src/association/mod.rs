@@ -889,12 +889,21 @@ impl Association {
         Ok(())
     }
 
-    /// open_stream opens a stream
+    /// Open a local stream. New local streams are refused during graceful shutdown.
     pub fn open_stream(
         &mut self,
         stream_identifier: StreamId,
         default_payload_type: PayloadProtocolIdentifier,
     ) -> Result<Stream<'_>> {
+        if matches!(
+            self.state(),
+            AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+                | AssociationState::ShutdownSent
+                | AssociationState::ShutdownAckSent
+        ) {
+            return Err(Error::ErrStreamCreateFailed);
+        }
         if self.streams.contains_key(&stream_identifier) {
             return Err(Error::ErrStreamAlreadyExist);
         }

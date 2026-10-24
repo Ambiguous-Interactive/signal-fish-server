@@ -245,3 +245,16 @@ discards incomplete abandoned messages, and promotes newly eligible successors.
 Saved reset generations and their retained TSNs include ready ordered messages.
 Replacement qualification in #912 must retain the reassembly and paired shutdown
 sequence-wrap controls.
+
+The #1145 admission repair refuses new local streams during every graceful
+shutdown state. Pre-handshake stream creation remains available. Incoming DATA
+on a previously unseen stream still drains, and saved reset generations keep
+their readers. The paired readiness control checks refusal without stream or
+generation changes and preserves exact gameplay through terminal reads.
+
+The #636 repair appends serially increasing ordered message fragments without
+a binary search. A 1,024-fragment control reduces ordering comparisons from
+10,230 to 1,023, including TSN wrap. Reordered arrivals retain binary insertion.
+Duplicate first, middle, and last fragments preserve exact payloads. This is an
+insertion-work result, not a measured throughput claim. Replacement qualification
+in #912 must retain the `reassembly_` and `shutdown` controls.

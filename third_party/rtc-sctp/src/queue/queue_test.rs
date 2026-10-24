@@ -1252,6 +1252,40 @@ fn test_payload_queue_gap_ack_ordered_insert_work_and_reordering() {
 }
 
 #[test]
+fn reassembly_ordered_fragment_insertion_work_is_linear() {
+    const COUNT: u32 = 1024;
+    for first in [100u32, u32::MAX - COUNT / 2] {
+        let fragment = |index: u32| ChunkPayloadData {
+            tsn: first.wrapping_add(index),
+            beginning_fragment: index == 0,
+            ending_fragment: index == COUNT - 1,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from(index.to_be_bytes().to_vec()),
+            ..Default::default()
+        };
+        let mut chunks = Chunks::new(0, 0, PayloadProtocolIdentifier::Binary, vec![]);
+        for index in 0..COUNT {
+            assert_eq!(chunks.push(fragment(index)), index == COUNT - 1);
+        }
+        assert!(
+            chunks.ordering_comparisons.get() <= COUNT as usize,
+            "first TSN {first}: {} ordering comparisons for {COUNT} fragments",
+            chunks.ordering_comparisons.get()
+        );
+        for index in [0, COUNT / 2, COUNT - 1] {
+            assert!(!chunks.push(fragment(index)));
+            assert_eq!(chunks.chunks.len(), COUNT as usize);
+            assert!(chunks.is_complete());
+        }
+        let expected: Vec<u8> = (0..COUNT).flat_map(u32::to_be_bytes).collect();
+        assert_eq!(
+            chunks.to_payload(expected.len()).unwrap().as_ref(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn reassembly_late_fragment_work_is_bounded() {
     const COUNT: u32 = 1024;
     for first_tsn in [12345u32, u32::MAX - COUNT / 2] {

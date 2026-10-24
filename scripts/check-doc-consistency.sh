@@ -230,8 +230,8 @@ validate_signal_fish_dependency_versions() {
 }
 
 # All first-party Markdown docs, discovered from the filesystem (works in the
-# non-git fixture harness too) and excluding generated, vendored, and fixture
-# trees. NUL-delimited (-print0) for path-safety and identical behavior on GNU
+# non-git fixture harness too) and excluding generated, vendored, fixture, and
+# root session-note trees. NUL-delimited (-print0) for path-safety on GNU
 # and BSD/macOS find. The version filter is applied per-file in the loop with a
 # plain `grep -qE`; we deliberately avoid `grep -Z` here because BSD/macOS grep
 # treats `-Z` as zgrep (decompress), not GNU's --null -- the same portable idiom
@@ -241,7 +241,8 @@ validate_signal_fish_dependency_versions() {
 # dependency example there should drift-fail just like docs/ or README.md.
 find_markdown_docs() {
     find . \
-        \( -type d \( -name 'target' \
+        \( -type d \( -path './progress' \
+        -o -name 'target' \
         -o -name 'third_party' \
         -o -name 'node_modules' \
         -o -name 'site' \

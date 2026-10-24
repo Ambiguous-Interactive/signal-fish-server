@@ -31,6 +31,8 @@ pub struct Chunks {
     discontinuities: usize,
     #[cfg(test)]
     pub(crate) adjacency_checks: std::cell::Cell<usize>,
+    #[cfg(test)]
+    pub(crate) ordering_comparisons: std::cell::Cell<usize>,
 }
 
 impl Chunks {
@@ -141,14 +143,23 @@ impl Chunks {
             discontinuities,
             #[cfg(test)]
             adjacency_checks: std::cell::Cell::new(0),
+            #[cfg(test)]
+            ordering_comparisons: std::cell::Cell::new(0),
         }
     }
 
     pub(crate) fn push(&mut self, chunk: ChunkPayloadData) -> bool {
-        // Binary-search the insertion point (fragments are kept in TSN order),
-        // which also detects duplicates -- instead of an O(n) dup scan plus a
-        // full re-sort of every fragment on each push.
-        let idx = self.chunks.partition_point(|c| sna32lt(c.tsn, chunk.tsn));
+        let precedes = |c: &ChunkPayloadData| {
+            #[cfg(test)]
+            self.ordering_comparisons
+                .set(self.ordering_comparisons.get() + 1);
+            sna32lt(c.tsn, chunk.tsn)
+        };
+        let idx = if self.chunks.last().is_none_or(&precedes) {
+            self.chunks.len()
+        } else {
+            self.chunks.partition_point(precedes)
+        };
         if idx < self.chunks.len() && self.chunks[idx].tsn == chunk.tsn {
             return false;
         }

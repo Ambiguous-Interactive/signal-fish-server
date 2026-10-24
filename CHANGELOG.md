@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce native ordered gameplay fragment insertion work (#636).
 - Reduce native gameplay completion work for fragmented unordered messages (#1175).
 - Reduce native gameplay receive work for complete unordered messages and packet-limited acknowledgments (#1171, #1172).
 - **Breaking:** Rust callers that construct `ServerMessage::PlayerReconnected` must set its optional `player` field.
@@ -30,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refuse new native streams when graceful shutdown starts (#1145).
 - Preserve unread native ordered gameplay across stream sequence wrap (#1178).
 - Report exact remaining bytes for native chunk-array sources (#1177).
 - Report native streams as unwritable when graceful shutdown starts (#1145).
