@@ -1172,3 +1172,43 @@ fn test_message_index_survives_cumulative_prefix_and_tsn_wrap() {
     assert!(queue.message_tsns(MessageId::new(11).unwrap()).is_empty());
     assert_eq!(vec![1], queue.message_tsns(MessageId::new(12).unwrap()));
 }
+
+// Issue #1158: gap offsets are serial distances, including across TSN wrap.
+#[test]
+fn test_payload_queue_gap_ack_preserves_serial_offsets() {
+    for cumulative in [0u32, u32::MAX - 2, u32::MAX] {
+        let mut queue = PayloadQueue::new();
+        for offset in [5u32, 2, 4, 3] {
+            assert!(queue.push(make_payload(cumulative.wrapping_add(offset), 1), cumulative));
+        }
+        let gaps = queue.get_gap_ack_blocks(cumulative);
+        assert_eq!(gaps.len(), 1, "cumulative={cumulative}");
+        assert_eq!((gaps[0].start, gaps[0].end), (2, 5));
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue.get_num_bytes(), 4);
+    }
+}
+
+#[test]
+fn test_payload_queue_gap_ack_omits_unrepresentable_offsets() {
+    for cumulative in [0u32, u32::MAX - 2] {
+        let mut queue = PayloadQueue::new();
+        for offset in [65534u32, 65535, 65536, 65538] {
+            assert!(queue.push(make_payload(cumulative.wrapping_add(offset), 1), cumulative));
+        }
+        let gaps = queue.get_gap_ack_blocks(cumulative);
+        assert_eq!(gaps.len(), 1, "cumulative={cumulative}");
+        assert_eq!((gaps[0].start, gaps[0].end), (65534, 65535));
+        assert_eq!(queue.len(), 4, "unreported DATA remains retained");
+        let advanced = cumulative.wrapping_add(65533);
+        let gaps = queue.get_gap_ack_blocks(advanced);
+        assert_eq!(gaps.len(), 2);
+        assert_eq!((gaps[0].start, gaps[0].end), (1, 3));
+        assert_eq!((gaps[1].start, gaps[1].end), (5, 5));
+
+        let mut far = PayloadQueue::new();
+        assert!(far.push(make_payload(cumulative.wrapping_add(65536), 1), cumulative));
+        assert!(far.get_gap_ack_blocks(cumulative).is_empty());
+        assert_eq!(far.len(), 1);
+    }
+}

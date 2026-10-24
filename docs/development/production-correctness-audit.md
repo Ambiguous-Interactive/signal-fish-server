@@ -7673,3 +7673,51 @@ An independent cleanup task protects this close operation from caller
 cancellation. It uses a weak peer reference and exits when ordinary close
 finishes. This adds no task to an idle live peer. The wire format does not change.
 Neither finding establishes the cause of the historical #853 or #889 failures.
+
+### F149 — Native selective acknowledgments lose wrapped DATA
+
+New [#1158](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1158)
+advances A20 under #826, #912, and #1145. SACK gap offsets used absolute TSN
+subtraction and truncated the result to 16 bits. Reordered DATA across sequence
+wrap produced incorrect gaps. Grouping at offset 65,535 could overflow.
+
+Gap offsets now use wrapping distance and checked wire-width conversion.
+Unreportable DATA stays queued until cumulative progress makes it reportable.
+Three controls fail before repair. Paired histories cover ordinary and wrapped
+sequences, selective byte release, retry of only the missing first payload,
+exact ordered delivery, and graceful closure at both endpoints. All 37 scoped
+shutdown and queue controls pass. Native replacement qualification must retain
+these controls. This does not establish the cause of #1120.
+
+### F150 — Capacity sends escape their incarnation lifetime
+
+New [#1159](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1159)
+advances exact capacity evidence under #775 and #826. An announced epoch was
+enough to count a send as completed, even before rejoin or after disconnect.
+Closed-epoch completeness exemptions could then hide the missing deliveries.
+
+The oracle now checks completion time against each incarnation's active
+interval. Equal-microsecond boundaries remain legal. The runner records send
+completion and churn in the same peer task on one clock. Controls reject old,
+future, and offline sends across repeated reconnects and shuffled artifacts.
+A complete-summary control removes the impossible send's entire fan-out and
+proves rejection plus exact JSONL replay. State grows with incarnations rather
+than sends. This does not bound whole-process memory or explain generator lag.
+
+### Relay and browser receive work
+
+New [#1160](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1160)
+advances #636. Reliable rows receive timestamps under the queue lock and append
+in timestamp order. Deadline lookup now stops at each lane's first reliable
+row, then takes the minimum across lanes. A 1,024-row dense reliable drain
+needs 1,024 visits instead of 524,800. Mixed lossy rows, inherited Latest age,
+the legacy prefix, and generation barriers retain the full-scan deadline.
+Long lossy or control prefixes can still require scans.
+
+Browser binary gameplay also reuses one nonstreaming UTF-8 decoder per engine.
+The boundary control constructs 58 decoders before repair and one afterward.
+Text receipts create none. Truncated UTF-8, repeated BOMs, channel replacement,
+and the existing byte limit retain the same results. An isolated Node probe
+of 500,000 decodes takes 65.8–70.6 ms before and 40.8–53.4 ms after, with equal
+38,000,000 checksums. This measures local decoder work, not Chromium throughput
+or a repair for #853 or #889.

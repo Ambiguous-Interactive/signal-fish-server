@@ -1306,6 +1306,7 @@ console.error(
 {
   const originalPc = globalThis.RTCPeerConnection;
   const OriginalEncoder = globalThis.TextEncoder;
+  const OriginalDecoder = globalThis.TextDecoder;
   const OriginalArray = globalThis.Uint8Array;
   const encoder = new OriginalEncoder();
   const values: Array<string | ArrayBuffer> = [
@@ -1324,6 +1325,11 @@ console.error(
     'x'.repeat(65533) + '\ud800',
     'x'.repeat(65534) + '\ud800',
     Uint8Array.of(0xef, 0xbb, 0xbf, 0x61).buffer,
+    // Each message is a complete value: truncated UTF-8 must not continue in
+    // the next receipt, and a prior BOM must not affect the next message.
+    Uint8Array.of(0xc3).buffer,
+    Uint8Array.of(0xa9).buffer,
+    Uint8Array.of(0xef, 0xbb, 0xbf, 0x62).buffer,
     new Uint8Array(21845).fill(0x80).buffer,
     new Uint8Array(21846).fill(0x80).buffer,
   ];
@@ -1340,6 +1346,7 @@ console.error(
   });
   let payloadBuffers = 0;
   let encodedBytes = 0;
+  let decoders = 0;
   const scratchSizes: number[] = [];
   class CountingEncoder extends OriginalEncoder {
     override encode(input?: string): Uint8Array<ArrayBuffer> {
@@ -1347,6 +1354,12 @@ console.error(
       payloadBuffers += 1;
       encodedBytes += result.byteLength;
       return result;
+    }
+  }
+  class CountingDecoder extends OriginalDecoder {
+    constructor(label?: string, options?: TextDecoderOptions) {
+      super(label, options);
+      decoders += 1;
     }
   }
   let connection!: Connection;
@@ -1374,6 +1387,7 @@ console.error(
   }
   try {
     globalThis.TextEncoder = CountingEncoder;
+    globalThis.TextDecoder = CountingDecoder;
     globalThis.Uint8Array = new Proxy(OriginalArray, {
       construct(target, argumentsList, newTarget) {
         if (typeof argumentsList[0] === 'number') scratchSizes.push(argumentsList[0]);
@@ -1386,6 +1400,7 @@ console.error(
       let closed = 0;
       let largestBytes = 0;
       const firstScratch = scratchSizes.length;
+      const firstDecoder = decoders;
       const engine = new Engine(false, {
         onLocalCandidate: () => {},
         onPcState: () => {},
@@ -1404,9 +1419,13 @@ console.error(
         const channel = new Channel(label);
         connection.ondatachannel?.({ channel });
         const beforeScratch = scratchSizes.length;
+        const beforeDecoders = decoders;
         const repeats = fixture.accepted ? 3 : 1;
         for (let repeat = 0; repeat < repeats; repeat += 1) {
           channel.onmessage?.({ data: fixture.data });
+        }
+        if (typeof fixture.data === 'string') {
+          assert(decoders === beforeDecoders, 'text receipts do not create a binary decoder');
         }
         if (fixture.text.length === 0) {
           assert(scratchSizes.length === beforeScratch, 'empty receipts need no sizing buffer');
@@ -1439,6 +1458,10 @@ console.error(
         }
         engine.removePeer('peer');
       }
+      assert(
+        decoders - firstDecoder === 1,
+        `binary receipt decoding constructed ${decoders - firstDecoder} decoders for one engine`,
+      );
       const sizes = scratchSizes.slice(firstScratch);
       assert(sizes.length <= 9, 'sizing storage has a bounded number of growth steps');
       assert(
@@ -1454,6 +1477,7 @@ console.error(
     );
   } finally {
     globalThis.TextEncoder = OriginalEncoder;
+    globalThis.TextDecoder = OriginalDecoder;
     globalThis.Uint8Array = OriginalArray;
     globalThis.RTCPeerConnection = originalPc;
   }

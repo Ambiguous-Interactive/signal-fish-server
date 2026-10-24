@@ -2608,3 +2608,99 @@ fn graceful_shutdown_stop_accepts_every_draining_state() -> Result<()> {
     }
     Ok(())
 }
+
+// Issue #1158: reordered gameplay at TSN wrap must report the exact selective ACK.
+#[test]
+fn shutdown_reordered_wrapped_gameplay_preserves_gap_ack_and_delivery() -> Result<()> {
+    for first_tsn in [1u32, u32::MAX - 1, u32::MAX] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.my_next_tsn = first_tsn;
+        local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+        remote.ack_mode = AckMode::NoDelay;
+        let expected = [b"first".as_slice(), b"second", b"third"];
+        for payload in expected {
+            local.stream(1)?.write(now, payload)?;
+        }
+        local.shutdown()?;
+        let sent = transmitted_data(&local.gather_outbound(now).0);
+        assert_eq!(sent.len(), 3);
+        for data in &sent[1..] {
+            remote.handle_inbound(local.create_packet(vec![Box::new(data.clone())]), now)?;
+        }
+        let sacks = remote.gather_outbound(now).0;
+        let sack = sacks
+            .iter()
+            .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            .find_map(|chunk| {
+                chunk
+                    .as_any()
+                    .downcast_ref::<ChunkSelectiveAck>()
+                    .map(|sack| {
+                        sack.gap_ack_blocks
+                            .iter()
+                            .map(|gap| (gap.start, gap.end))
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .expect("out-of-order DATA emits a SACK");
+        assert_eq!(sack.len(), 1, "first_tsn={first_tsn}");
+        assert_eq!(sack[0], (2, 3));
+        for raw in sacks {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(
+            local
+                .inflight_queue
+                .get(first_tsn)
+                .unwrap()
+                .is_outstanding()
+        );
+        for data in &sent[1..] {
+            assert!(!local.inflight_queue.get(data.tsn).unwrap().is_outstanding());
+        }
+        assert_eq!(local.state(), AssociationState::ShutdownPending);
+        let retry_at = local
+            .poll_timeout()
+            .expect("missing DATA keeps recovery armed");
+        local.handle_timeout(retry_at);
+        let retry = transmitted_data(&local.gather_outbound(retry_at).0);
+        assert_eq!(
+            retry.len(),
+            1,
+            "selectively acknowledged tails must not retry"
+        );
+        assert_eq!(retry[0].tsn, first_tsn);
+        assert_eq!(retry[0].user_data.as_ref(), expected[0]);
+        remote.handle_inbound(
+            local.create_packet(vec![Box::new(retry[0].clone())]),
+            retry_at,
+        )?;
+        for payload in expected {
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(100)?
+                    .as_ref(),
+                payload
+            );
+        }
+        for _ in 0..3 {
+            for raw in remote.gather_outbound(retry_at).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+            }
+            for raw in local.gather_outbound(retry_at).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+            }
+        }
+        assert_eq!(local.state(), AssociationState::Closed);
+        assert_eq!(remote.state(), AssociationState::Closed);
+        assert!(local.poll_timeout().is_none());
+        assert!(remote.poll_timeout().is_none());
+    }
+    Ok(())
+}

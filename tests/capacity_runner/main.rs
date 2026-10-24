@@ -5797,11 +5797,13 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
     plans.retain(|plan| plan.name == "r0p1");
     let plan = &plans[0];
     let log = EventLog::new();
-    // r0p1's incarnation 2 sends ledger 2..=3 (server 1..=2) from 150 ms.
+    // The first write completes just after 100 ms, before disconnect at 125 ms.
+    let disconnect_us = 125_000;
+    // Incarnation 2 sends ledger 1..=3 (server 1..=3) after rejoin at 150 ms.
     log.push_churn(records::ChurnEvent {
         recipient: "r0p1".to_string(),
         phase: records::ChurnPhase::Disconnect,
-        at_us: 100_000,
+        at_us: disconnect_us,
         epoch: None,
         tails: BTreeMap::new(),
     });
@@ -5889,7 +5891,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         1_000,
         96,
         DeliveryClass::Reliable,
-        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000), ("r0p1", 100_000, 150_000)]),
+        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000), ("r0p1", disconnect_us, 150_000)]),
         None,
     );
     assert!(
@@ -5912,7 +5914,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         1_000,
         96,
         DeliveryClass::Reliable,
-        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000), ("r0p1", 100_000, 150_000)]),
+        &snapshot_churn_plan(&[("r0p0", 249_999, 250_000), ("r0p1", disconnect_us, 150_000)]),
         None,
     );
     assert!(
