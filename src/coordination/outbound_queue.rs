@@ -2580,15 +2580,20 @@ const fn encoding_from_tag(tag: u8) -> GameDataEncoding {
 }
 
 fn oldest_reliable_enqueued_at(state: &QueueState) -> Option<Instant> {
-    state
-        .legacy
-        .iter()
-        .chain(state.control.iter())
-        .chain(state.data.iter())
-        .chain(state.barriers.iter())
-        .filter(|queued| queued.class() == Some(DeliveryClass::Reliable))
-        .map(|queued| queued.enqueued_at)
+    [&state.legacy, &state.control, &state.data, &state.barriers]
+        .into_iter()
+        .filter_map(|lane| oldest_reliable_in_lane(lane.iter()))
         .min()
+}
+
+fn oldest_reliable_in_lane<'a>(
+    mut lane: impl Iterator<Item = &'a QueuedOutbound>,
+) -> Option<Instant> {
+    // Reliable rows are stamped and appended while holding the queue lock.
+    // Only Latest successors inherit an older stamp. Removing or superseding
+    // lossy rows cannot change reliable timestamp order within a lane.
+    lane.find(|queued| queued.class() == Some(DeliveryClass::Reliable))
+        .map(|queued| queued.enqueued_at)
 }
 
 fn scope_matches(state: &QueueState, generation: u64, room_id: Option<RoomId>) -> bool {
@@ -5548,6 +5553,84 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| panic!("protocol {protocol_version} missed reliable expiry"));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_deadline_lookup_stops_at_each_lanes_first_reliable_row() {
+        const DEPTH: usize = 1_024;
+        for version in [2, 3] {
+            let (tx, mut rx) = channel(DEPTH, 4);
+            tx.set_protocol_version(version);
+            for seq in 1..=u64::try_from(DEPTH).unwrap() {
+                tx.try_enqueue_data(data(seq, DeliveryClass::Reliable, None, seq))
+                    .unwrap();
+                tokio::time::advance(Duration::from_micros(1)).await;
+            }
+            let mut visits = 0;
+            for _ in 0..DEPTH {
+                {
+                    let state = rx.shared.state();
+                    let lane = if version == 2 {
+                        &state.legacy
+                    } else {
+                        &state.data
+                    };
+                    let expected = lane
+                        .iter()
+                        .filter(|row| row.class() == Some(DeliveryClass::Reliable))
+                        .map(|row| row.enqueued_at)
+                        .min();
+                    let actual = oldest_reliable_in_lane(lane.iter().inspect(|_| visits += 1));
+                    assert_eq!(actual, expected);
+                    assert_eq!(oldest_reliable_enqueued_at(&state), expected);
+                }
+                rx.try_recv().unwrap();
+            }
+            assert_eq!(
+                visits, DEPTH,
+                "v{version}: reliable drain must use linear lookup work"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_deadlines_match_full_scan_across_lossy_rows_and_generations() {
+        let (tx, mut rx) = channel(16, 16);
+        tx.try_enqueue_control(message(100)).unwrap();
+        tx.try_enqueue_data(data(1, DeliveryClass::Volatile, None, 1))
+            .unwrap();
+        tx.set_protocol_version(3);
+        for (seq, class, key) in [
+            (2, DeliveryClass::Latest, Some(10)),
+            (3, DeliveryClass::Volatile, None),
+            (4, DeliveryClass::Reliable, None),
+            (5, DeliveryClass::Latest, Some(10)),
+            (6, DeliveryClass::Reliable, None),
+        ] {
+            tokio::time::advance(Duration::from_micros(1)).await;
+            tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
+        }
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .unwrap();
+        tokio::time::advance(Duration::from_micros(1)).await;
+        tx.try_enqueue_data(data(7, DeliveryClass::Reliable, None, 7))
+            .unwrap();
+        loop {
+            {
+                let state = rx.shared.state();
+                let expected = [&state.legacy, &state.control, &state.data, &state.barriers]
+                    .into_iter()
+                    .flatten()
+                    .filter(|row| row.class() == Some(DeliveryClass::Reliable))
+                    .map(|row| row.enqueued_at)
+                    .min();
+                assert_eq!(oldest_reliable_enqueued_at(&state), expected);
+            }
+            if rx.try_recv().is_err() {
+                break;
+            }
+        }
+        assert_eq!(rx.len(), 0);
     }
 
     #[tokio::test(start_paused = true)]

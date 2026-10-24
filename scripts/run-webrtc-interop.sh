@@ -153,6 +153,8 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.tom
 echo "==> Verifying graceful SCTP shutdown and final packet recovery"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib shutdown
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib payload_queue_gap_ack
 
 echo "==> Verifying SCTP application byte release accounting"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \

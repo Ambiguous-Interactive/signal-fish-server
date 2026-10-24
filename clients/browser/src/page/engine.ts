@@ -116,6 +116,7 @@ export class Engine {
   private nextGeneration = 0;
   private readonly channelDiagnostics = new WeakMap<RTCDataChannel, ChannelDiagnostics>();
   private readonly receiveEncoder = new TextEncoder();
+  private receiveDecoder: TextDecoder | null = null;
   private receiveScratch: Uint8Array<ArrayBuffer> | null = null;
 
   constructor(crippled: boolean, callbacks: EngineCallbacks) {
@@ -660,10 +661,13 @@ export class Engine {
         rejectMessage('incoming data-channel message has an unsupported type');
         return;
       }
+      // Each non-streaming decode resets UTF-8 state at the message boundary.
       const text =
         typeof data === 'string'
           ? data
-          : new TextDecoder('utf-8', { ignoreBOM: true }).decode(data);
+          : (this.receiveDecoder ??= new TextDecoder('utf-8', { ignoreBOM: true })).decode(
+              data,
+            );
       /* Sizing matches normalized UTF-8, including replacement characters,
        * without allocating another payload buffer for every receipt. */
       let textBytes = 0;

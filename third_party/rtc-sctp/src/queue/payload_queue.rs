@@ -193,17 +193,19 @@ impl PayloadQueue {
 
         let mut b = GapAckBlock::default();
         let mut gap_ack_blocks = vec![];
-        for (i, tsn) in self.sorted.iter().enumerate() {
-            let diff = if *tsn >= cumulative_tsn {
-                (*tsn - cumulative_tsn) as u16
-            } else {
-                0
-            };
-
+        // SACK offsets are 16-bit serial distances, not absolute TSNs.
+        // Keep farther DATA queued until cumulative progress makes it reportable.
+        for (i, diff) in self
+            .sorted
+            .iter()
+            .filter_map(|tsn| u16::try_from(tsn.wrapping_sub(cumulative_tsn)).ok())
+            .filter(|&diff| diff != 0)
+            .enumerate()
+        {
             if i == 0 {
                 b.start = diff;
                 b.end = b.start;
-            } else if b.end + 1 == diff {
+            } else if b.end.checked_add(1) == Some(diff) {
                 b.end += 1;
             } else {
                 gap_ack_blocks.push(b);
@@ -213,7 +215,9 @@ impl PayloadQueue {
             }
         }
 
-        gap_ack_blocks.push(b);
+        if b.start != 0 {
+            gap_ack_blocks.push(b);
+        }
 
         gap_ack_blocks
     }

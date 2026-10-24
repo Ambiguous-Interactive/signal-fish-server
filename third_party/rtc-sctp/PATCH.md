@@ -148,3 +148,13 @@ Ordinary established stream reset keeps its existing receive pressure.
 Paired controls cover local and peer shutdown, stopping before and during drain,
 a full receive window, repeated stop, exact outgoing bytes, and final retirement.
 State controls cover all four shutdown states and saved next-generation reads.
+
+The #1158 repair computes selective-acknowledgment offsets with wrapping TSN distance.
+A reordered gameplay tail across TSN zero reports the exact received chunks.
+Offsets above 65535 remain queued until cumulative progress makes them
+reportable; they no longer truncate to another TSN. Gap grouping also handles
+the largest 16-bit offset without overflow. Paired-wire controls preserve exact
+ordered gameplay and graceful shutdown with a missing first chunk at TSN wrap.
+Queue controls cover wrapped offsets, the 65535 boundary, retained farther DATA,
+and later cumulative progress. Replacement qualification in #912 must retain
+these controls.

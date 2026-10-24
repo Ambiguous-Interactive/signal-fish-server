@@ -204,6 +204,7 @@ pub enum SendPlanMismatch {
     IntendedTime,
     Phase,
     UnannouncedEpoch { epoch: u32 },
+    InactiveEpoch { epoch: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -701,15 +702,37 @@ fn scheduled_send_evidence(
         .iter()
         .map(|plan| (plan.name.as_str(), plan))
         .collect();
-    let rejoined_epochs: BTreeSet<_> = records
+    // Send completion and churn share one clock in the same peer task.
+    // Keep one interval per incarnation, never one entry per scheduled send.
+    // Equal microseconds remain admissible on both sides of a boundary because
+    // the artifact clock rounds distinct operations to the same microsecond.
+    let mut epoch_times: BTreeMap<(&str, u32), (u64, Option<u64>)> = plans
+        .keys()
+        .map(|sender| ((*sender, 1), (0, None)))
+        .collect();
+    for event in &records.churn {
+        if let Some(epoch) = event.epoch.filter(|epoch| *epoch > 1) {
+            if event.phase == ChurnPhase::Rejoined {
+                epoch_times
+                    .entry((event.recipient.as_str(), epoch))
+                    .or_insert((event.at_us, None));
+            }
+        }
+    }
+    let mut disconnects: Vec<_> = records
         .churn
         .iter()
-        .filter_map(|event| {
-            let epoch = event.epoch?;
-            (event.phase == ChurnPhase::Rejoined && epoch > 1)
-                .then_some((event.recipient.as_str(), epoch))
-        })
+        .filter(|event| event.phase == ChurnPhase::Disconnect)
         .collect();
+    disconnects.sort_unstable_by_key(|event| (event.recipient.as_str(), event.at_us));
+    let mut closing_epochs: BTreeMap<&str, u32> = BTreeMap::new();
+    for event in disconnects {
+        let epoch = closing_epochs.entry(event.recipient.as_str()).or_insert(1);
+        if let Some((_, end)) = epoch_times.get_mut(&(event.recipient.as_str(), *epoch)) {
+            *end = Some(event.at_us);
+        }
+        *epoch = epoch.saturating_add(1);
+    }
     let index = SendIndex::new(&records.sent);
     let mut previous_key = None;
     let mut covered = false;
@@ -735,11 +758,17 @@ fn scheduled_send_evidence(
                     Some(SendPlanMismatch::IntendedTime)
                 }
                 Some(send) if event.phase != send.phase => Some(SendPlanMismatch::Phase),
-                Some(_)
-                    if event.epoch != 1
-                        && !rejoined_epochs.contains(&(event.sender.as_str(), event.epoch)) =>
-                {
+                Some(_) if !epoch_times.contains_key(&(event.sender.as_str(), event.epoch)) => {
                     Some(SendPlanMismatch::UnannouncedEpoch { epoch: event.epoch })
+                }
+                Some(_)
+                    if epoch_times
+                        .get(&(event.sender.as_str(), event.epoch))
+                        .is_some_and(|(start, end)| {
+                            event.sent_us < *start || end.is_some_and(|end| event.sent_us > end)
+                        }) =>
+                {
+                    Some(SendPlanMismatch::InactiveEpoch { epoch: event.epoch })
                 }
                 Some(_) => None,
             },
@@ -3273,6 +3302,125 @@ mod coverage_tests {
             4 => measure::<u32>(peers),
             8 => measure::<u64>(peers),
             _ => panic!("counter bytes must be 2, 4, or 8 for 4096 samples"),
+        }
+    }
+
+    // #1159: an announced epoch does not prove that a send occurred while live.
+    #[test]
+    fn scheduled_sends_require_an_active_incarnation_at_completion() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        for (epoch, sent_us, valid) in [
+            (1, 9, true),
+            (1, 10, true),
+            (1, 11, false),
+            (1, 21, false),
+            (2, 19, false),
+            (2, 20, true),
+            (2, 25, true),
+            (2, 30, true),
+            (2, 31, false),
+            (2, 41, false),
+            (3, 39, false),
+            (3, 40, true),
+            (3, 41, true),
+        ] {
+            let mut records = RunRecords::default();
+            records.sent.push(SentEvent {
+                epoch,
+                sent_us,
+                ..base.clone()
+            });
+            for (phase, at_us, epoch) in [
+                (ChurnPhase::Disconnect, 10, None),
+                (ChurnPhase::Rejoined, 20, Some(2)),
+                (ChurnPhase::Disconnect, 30, None),
+                (ChurnPhase::Rejoined, 40, Some(3)),
+            ] {
+                records.churn.push(crate::records::ChurnEvent {
+                    recipient: base.sender.to_string(),
+                    phase,
+                    at_us,
+                    epoch,
+                    tails: BTreeMap::new(),
+                });
+            }
+            for reverse in [false, true] {
+                if reverse {
+                    records.churn.reverse();
+                }
+                let mut reasons = Vec::new();
+                let completed = scheduled_send_evidence(&context.plans, &records, &mut reasons);
+                assert_eq!(
+                    completed,
+                    u64::from(valid),
+                    "epoch={epoch} at={sent_us}: {reasons:?}"
+                );
+                assert_eq!(
+                    reasons.is_empty(),
+                    valid,
+                    "epoch={epoch} at={sent_us}: {reasons:?}"
+                );
+            }
+        }
+    }
+
+    // #1159: closed-epoch exemptions must not hide impossible completed work.
+    #[test]
+    fn inactive_send_epochs_invalidate_the_complete_summary_and_exact_replay() {
+        let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
+        let baseline = crate::churned_records(&context, &churn);
+        let disconnect = baseline.churn[0].at_us;
+        let rejoin = baseline.churn[1].at_us;
+        for (epoch, sent_us) in [(1, disconnect + 1), (1, rejoin + 1), (2, rejoin - 1)] {
+            let mut records = baseline.clone();
+            let sent = records
+                .sent
+                .iter_mut()
+                .find(|event| event.epoch == epoch)
+                .unwrap();
+            let sender = sent.sender.to_string();
+            let seq = sent.seq;
+            sent.sent_us = sent_us;
+            if epoch == 1 {
+                // Closed epochs owe no remaining deliveries. The old oracle
+                // accepted this impossible send even with its entire fan-out absent.
+                records.receipts.retain(|receipt| receipt.seq != seq);
+            }
+            let expected = InvalidReason::InvalidScheduledSends {
+                count: 1,
+                first: ScheduledSendViolation {
+                    sender,
+                    seq,
+                    mismatch: SendPlanMismatch::InactiveEpoch { epoch },
+                },
+            };
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            let mut exact_summary = None;
+            for evidence in [&records, &replayed] {
+                let summary = summarize(
+                    &context.plans,
+                    &context.roster,
+                    evidence,
+                    u64::MAX,
+                    96,
+                    DeliveryClass::Reliable,
+                    &churn,
+                    None,
+                );
+                assert!(
+                    !summary.valid,
+                    "epoch={epoch} at={sent_us}: {:?}",
+                    summary.reasons
+                );
+                assert!(summary.reasons.contains(&expected), "{:?}", summary.reasons);
+                assert_eq!(summary.totals.unsent, 1);
+                assert_eq!(summary.totals.sent, 4);
+                let value = serde_json::to_value(summary).unwrap();
+                assert_eq!(exact_summary.get_or_insert_with(|| value.clone()), &value);
+            }
         }
     }
 
