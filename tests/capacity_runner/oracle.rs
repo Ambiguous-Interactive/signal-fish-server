@@ -205,6 +205,7 @@ pub enum SendPlanMismatch {
     Phase,
     UnannouncedEpoch { epoch: u32 },
     InactiveEpoch { epoch: u32 },
+    BeforeScheduledTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -769,6 +770,9 @@ fn scheduled_send_evidence(
                         }) =>
                 {
                     Some(SendPlanMismatch::InactiveEpoch { epoch: event.epoch })
+                }
+                Some(_) if event.sent_us < event.intended_us => {
+                    Some(SendPlanMismatch::BeforeScheduledTime)
                 }
                 Some(_) => None,
             },
@@ -3305,6 +3309,60 @@ mod coverage_tests {
         }
     }
 
+    #[test]
+    fn scheduled_sends_cannot_complete_before_their_offered_time() {
+        let context = crate::unit_context();
+        let baseline = crate::complete_records(&context.plans);
+        let position = baseline
+            .sent
+            .iter()
+            .position(|send| send.intended_us > 0)
+            .unwrap();
+        for offset in [-1_i64, 0, 1] {
+            let mut records = baseline.clone();
+            let send = &mut records.sent[position];
+            send.sent_us = send.intended_us.checked_add_signed(offset).unwrap();
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            let mut exact_summary = None;
+            for evidence in [&records, &replayed] {
+                let summary = summarize(
+                    &context.plans,
+                    &context.roster,
+                    evidence,
+                    u64::MAX,
+                    96,
+                    DeliveryClass::Reliable,
+                    &ChurnPlan::default(),
+                    None,
+                );
+                assert_eq!(
+                    summary.valid,
+                    offset >= 0,
+                    "{offset}: {:?}",
+                    summary.reasons
+                );
+                if offset < 0 {
+                    assert!(summary
+                        .reasons
+                        .contains(&InvalidReason::InvalidScheduledSends {
+                            count: 1,
+                            first: ScheduledSendViolation {
+                                sender: records.sent[position].sender.to_string(),
+                                seq: records.sent[position].seq,
+                                mismatch: SendPlanMismatch::BeforeScheduledTime,
+                            },
+                        }));
+                }
+                assert_eq!(summary.totals.unsent, u64::from(offset < 0));
+                assert_eq!(summary.totals.sent, baseline.sent.len() as u64);
+                let value = serde_json::to_value(summary).unwrap();
+                assert_eq!(exact_summary.get_or_insert_with(|| value.clone()), &value);
+            }
+        }
+    }
+
     // #1159: an announced epoch does not prove that a send occurred while live.
     #[test]
     fn scheduled_sends_require_an_active_incarnation_at_completion() {
@@ -3328,7 +3386,7 @@ mod coverage_tests {
             let mut records = RunRecords::default();
             records.sent.push(SentEvent {
                 epoch,
-                sent_us,
+                sent_us: base.intended_us + sent_us,
                 ..base.clone()
             });
             for (phase, at_us, epoch) in [
@@ -3340,7 +3398,7 @@ mod coverage_tests {
                 records.churn.push(crate::records::ChurnEvent {
                     recipient: base.sender.to_string(),
                     phase,
-                    at_us,
+                    at_us: base.intended_us + at_us,
                     epoch,
                     tails: BTreeMap::new(),
                 });

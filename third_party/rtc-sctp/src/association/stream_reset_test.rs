@@ -2704,3 +2704,123 @@ fn shutdown_reordered_wrapped_gameplay_preserves_gap_ack_and_delivery() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn shutdown_selective_ack_stays_within_mtu_after_reordered_gameplay() -> Result<()> {
+    for first_tsn in [1_u32, u32::MAX - 400] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.my_next_tsn = first_tsn;
+        local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+        remote.ack_mode = AckMode::NoDelay;
+        local.cwnd = 65536;
+        let expected: Vec<_> = (0_u16..800).map(|n| n.to_be_bytes()).collect();
+        for payload in &expected {
+            local.stream(1)?.write(now, payload)?;
+        }
+        local.shutdown()?;
+        let sent = transmitted_data(&local.gather_outbound(now).0);
+        assert_eq!(sent.len(), expected.len());
+        for data in sent.iter().skip(1).step_by(2) {
+            remote.handle_inbound(local.create_packet(vec![Box::new(data.clone())]), now)?;
+            remote.handle_inbound(local.create_packet(vec![Box::new(data.clone())]), now)?;
+        }
+        let receive_credit = remote.get_my_receiver_window_credit();
+        let packets = remote.gather_outbound(now).0;
+        assert!(!packets.is_empty());
+        for raw in packets {
+            assert!(
+                raw.len() <= remote.mtu as usize,
+                "SACK is {} bytes, MTU is {}",
+                raw.len(),
+                remote.mtu
+            );
+            let packet = Packet::unmarshal(&raw)?;
+            let sack = packet
+                .chunks
+                .iter()
+                .find_map(|c| c.as_any().downcast_ref::<ChunkSelectiveAck>())
+                .unwrap();
+            assert_eq!(sack.cumulative_tsn_ack, first_tsn.wrapping_sub(1));
+            assert_eq!(sack.advertised_receiver_window_credit, receive_credit);
+            assert_eq!(sack.gap_ack_blocks.len(), 350);
+            assert_eq!(raw.len(), remote.mtu as usize);
+            for (index, gap) in sack.gap_ack_blocks.iter().enumerate() {
+                assert_eq!(
+                    (gap.start, gap.end),
+                    ((index as u16 + 1) * 2, (index as u16 + 1) * 2)
+                );
+            }
+            local.handle_inbound(packet, now)?;
+        }
+        // Truncation must retain DATA, not remove the unreported receive tail.
+        for data in sent.iter().step_by(2) {
+            remote.handle_inbound(local.create_packet(vec![Box::new(data.clone())]), now)?;
+        }
+        for payload in &expected {
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(2)?
+                    .as_ref(),
+                payload
+            );
+        }
+        for _ in 0..4 {
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+        }
+        assert_eq!(local.state(), AssociationState::Closed);
+        assert_eq!(remote.state(), AssociationState::Closed);
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_selective_ack_budget_prioritizes_gaps_and_fits_duplicate_reports() -> Result<()> {
+    for (mtu, gaps, duplicates) in [
+        (28, 0, 0),
+        (40, 1, 2),
+        (41, 1, 2),
+        (44, 4, 0),
+        (48, 4, 1),
+        (65548, 16376, 3),
+    ] {
+        let mut a = timed_test_association();
+        a.mtu = mtu;
+        a.peer_last_tsn = 0;
+        for index in 1..=gaps {
+            let data = ChunkPayloadData {
+                tsn: index * 2,
+                ..Default::default()
+            };
+            assert!(a.payload_queue.push(data, 0));
+        }
+        // Queue-level duplicates exercise the optional SACK report budget.
+        for _ in 0..20 {
+            assert!(!a.payload_queue.push(ChunkPayloadData::default(), 0));
+        }
+        let sack = a.create_selective_ack_chunk();
+        assert_eq!(sack.gap_ack_blocks.len(), gaps as usize);
+        assert_eq!(sack.duplicate_tsn, vec![0; duplicates]);
+        let raw = a.marshal_control_chunk(&sack)?;
+        assert!(raw.len() <= mtu as usize);
+        let decoded = Packet::unmarshal(&raw)?;
+        let decoded = decoded.chunks[0]
+            .as_any()
+            .downcast_ref::<ChunkSelectiveAck>()
+            .unwrap();
+        assert_eq!(decoded.gap_ack_blocks.len(), gaps as usize);
+        assert_eq!(decoded.duplicate_tsn, sack.duplicate_tsn);
+        assert!(a.payload_queue.pop_duplicates().is_empty());
+    }
+    Ok(())
+}

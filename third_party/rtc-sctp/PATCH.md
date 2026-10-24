@@ -158,3 +158,18 @@ ordered gameplay and graceful shutdown with a missing first chunk at TSN wrap.
 Queue controls cover wrapped offsets, the 65535 boundary, retained farther DATA,
 and later cumulative progress. Replacement qualification in #912 must retain
 these controls.
+
+The #1163 repair fits selective acknowledgments to the association packet MTU
+and 16-bit chunk length. It reports the earliest gap blocks first and includes
+duplicate TSNs only in the remaining space. Unreported received DATA stays
+queued for later cumulative progress. Paired histories retain all 800 ordered
+gameplay messages and close gracefully after alternate DATA arrives late,
+including TSN wrap. Budget controls cover gap priority, duplicate reports,
+minimum packet size, and the largest chunk size. This follows
+[RFC 9260 section 6.2](https://www.rfc-editor.org/rfc/rfc9260.html#section-6.2).
+The #1164 repair appends serially increasing TSNs directly. Reordered arrivals
+retain binary insertion. A 1024-row ordered window requires at most 1024 serial
+comparisons, down from 11242. Wrapped sequence and deque controls retain exact
+pop order and byte accounting. These controls are included in the existing
+shutdown and payload_queue_gap_ack selectors. Replacement qualification in
+#912 must retain them.
