@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce native gameplay queue work for packets received or sent in order (#1164).
 - Reduce reliable relay deadline lookup work for queued gameplay (#1160).
 - Reuse the browser binary gameplay decoder across messages (#636).
 - Reduce browser gameplay receive allocations with reusable bounded storage (#1157).
@@ -25,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep native gameplay acknowledgments within the transport packet size during heavy reordering (#1163).
 - Preserve native gameplay acknowledgments across packet sequence wrap and large sequence gaps (#1158).
-- Reject capacity replay sends outside their recorded connection lifetime (#1159).
+- Reject capacity replay sends before their schedule or outside their recorded connection lifetime (#1159, #1162).
 - End retained native channel streams when peer close is canceled (#1156).
 - Keep native peer close responsive when its command queue is full (#1154).
 - Close reference-client gameplay links and cancel pending room sends when the client leaves a room (#1150).

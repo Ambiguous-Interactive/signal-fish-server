@@ -7721,3 +7721,46 @@ and the existing byte limit retain the same results. An isolated Node probe
 of 500,000 decodes takes 65.8–70.6 ms before and 40.8–53.4 ms after, with equal
 38,000,000 checksums. This measures local decoder work, not Chromium throughput
 or a repair for #853 or #889.
+
+### F151 — Early capacity sends count as offered work
+
+New [#1162](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1162)
+advances #775 and #826. A complete archive with a send completed one microsecond
+before its declared schedule returns a valid summary on the baseline. The lag
+calculation saturates the negative difference to zero. Incarnation checks do
+not establish scheduled timing.
+
+The oracle now rejects early completion with a typed scheduled-send mismatch.
+Raw sent count stays visible, and the invalid send does not cover offered work.
+Equal-microsecond and late sends remain legal. The control checks the full
+summary and exact JSONL replay. The earlier incarnation control now places its
+relative timeline after the planned send, so it isolates the lifetime boundary.
+This does not identify a cause of the historical generator stalls.
+
+### F152 — Native selective acknowledgments exceed the packet budget
+
+New [#1163](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1163)
+advances #1145, #912, and #826. A paired history sends 800 two-byte ordered
+messages, starts graceful shutdown, and delays alternate DATA chunks. The
+baseline emits a 1628-byte SACK with a 1428-byte association MTU.
+
+SACK generation now prioritizes the earliest gaps within the packet and chunk
+wire budgets. Duplicate reports use the remaining space. Received DATA remains
+retained even when its gap report does not fit. The paired regression covers
+TSN wrap, exact ordered bytes, later cumulative acknowledgment, and closure at
+both endpoints. Separate budget controls inject duplicate reports at queue level
+and cover minimum packet size and the largest chunk wire length. The separate
+inbound duplicate timing and reporting candidate is tracked in
+[#1165](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1165). The public wrapper still uses
+ABORT for close. This does not explain the historical #1120 reset timeout.
+
+### Native ordered queue insertion work
+
+New [#1164](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1164)
+advances #636 and replacement qualification under #912. The payload queue
+binary-searched each serially increasing TSN despite its documented append
+path. A 1024-row insertion control records 11242 serial comparisons before
+repair. Direct append uses at most one comparison per nonempty insertion.
+Reordered arrivals retain binary insertion. Exact drain order and bytes survive
+sequence wrap and wrapped deque storage. This measures queue work and does not
+establish end-to-end throughput or whole-node capacity.

@@ -1212,3 +1212,36 @@ fn test_payload_queue_gap_ack_omits_unrepresentable_offsets() {
         assert_eq!(far.len(), 1);
     }
 }
+
+#[test]
+fn test_payload_queue_gap_ack_ordered_insert_work_and_reordering() {
+    for first in [1_u32, u32::MAX - 512] {
+        let mut queue = PayloadQueue::new();
+        for offset in 0..1024 {
+            queue.push_no_check(make_payload(first.wrapping_add(offset), 1));
+        }
+        assert!(
+            queue.ordering_comparisons.get() <= 1024,
+            "ordered insertion made {} comparisons",
+            queue.ordering_comparisons.get()
+        );
+        for offset in 0..512 {
+            assert_eq!(
+                queue.pop(first.wrapping_add(offset)).unwrap().tsn,
+                first.wrapping_add(offset)
+            );
+        }
+        // Force a wrapped VecDeque and out-of-order insertion behind its tail.
+        for offset in (1024..1536).rev() {
+            queue.push_no_check(make_payload(first.wrapping_add(offset), 1));
+        }
+        for offset in 512..1536 {
+            assert_eq!(
+                queue.pop(first.wrapping_add(offset)).unwrap().tsn,
+                first.wrapping_add(offset)
+            );
+        }
+        assert!(queue.is_empty());
+        assert_eq!(queue.get_num_bytes(), 0);
+    }
+}

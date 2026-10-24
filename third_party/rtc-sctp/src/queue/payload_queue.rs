@@ -78,6 +78,8 @@ pub(crate) struct PayloadQueue {
     pub(crate) track_lookups: bool,
     #[cfg(test)]
     pub(crate) lookups: std::cell::Cell<usize>,
+    #[cfg(test)]
+    pub(crate) ordering_comparisons: std::cell::Cell<usize>,
 }
 
 impl PayloadQueue {
@@ -91,7 +93,21 @@ impl PayloadQueue {
     /// common case, since TSNs are assigned/received sequentially — land at the
     /// end in O(1) amortized.
     fn insert_sorted(&mut self, tsn: u32) {
-        let idx = self.sorted.partition_point(|&x| sna32lt(x, tsn));
+        if self.sorted.back().is_none_or(|&last| {
+            #[cfg(test)]
+            self.ordering_comparisons
+                .set(self.ordering_comparisons.get() + 1);
+            sna32lt(last, tsn)
+        }) {
+            self.sorted.push_back(tsn);
+            return;
+        }
+        let idx = self.sorted.partition_point(|&x| {
+            #[cfg(test)]
+            self.ordering_comparisons
+                .set(self.ordering_comparisons.get() + 1);
+            sna32lt(x, tsn)
+        });
         self.sorted.insert(idx, tsn);
     }
 

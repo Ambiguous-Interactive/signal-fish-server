@@ -5398,3 +5398,13 @@ The [issue](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1
 retains reproduction commands, harnesses, registration, and all 80 steady and
 24 cold rows. Byte-boundary, malformed-input, reuse, growth, and cutoff controls
 pass. These observations do not explain historical #853 or #889 failures.
+
+### Scheduled completion boundary (#1162)
+
+The oracle now rejects sends completed before their intended workload time.
+A complete baseline archive with one send moved to intended_us minus one
+microsecond previously remained valid. The new typed scheduled-send mismatch
+keeps raw counts and leaves that offered send unsent. Equal-time and late
+completions remain legal. Focused controls preserve exact archive replay.
+This strengthens workload evidence under #775. It does not explain generator
+stalls, qualify the long cell, or change the generator-lag bound.

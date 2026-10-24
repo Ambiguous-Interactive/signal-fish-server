@@ -18,7 +18,7 @@ use crate::chunk::{
     chunk_payload_data::ChunkPayloadData,
     chunk_payload_data::{MessageId, MessageReliability, PayloadProtocolIdentifier},
     chunk_reconfig::ChunkReconfig,
-    chunk_selective_ack::{ChunkSelectiveAck, GapAckBlock},
+    chunk_selective_ack::{ChunkSelectiveAck, GapAckBlock, SELECTIVE_ACK_HEADER_SIZE},
     chunk_shutdown::ChunkShutdown,
     chunk_shutdown_ack::ChunkShutdownAck,
     chunk_shutdown_complete::ChunkShutdownComplete,
@@ -3732,11 +3732,20 @@ impl Association {
     }
 
     fn create_selective_ack_chunk(&mut self) -> ChunkSelectiveAck {
+        let chunk_budget = (self.mtu as usize)
+            .saturating_sub(COMMON_HEADER_SIZE as usize)
+            .min(u16::MAX as usize);
+        let report_budget =
+            chunk_budget.saturating_sub(CHUNK_HEADER_SIZE + SELECTIVE_ACK_HEADER_SIZE) / 4;
+        let mut gap_ack_blocks = self.payload_queue.get_gap_ack_blocks(self.peer_last_tsn);
+        gap_ack_blocks.truncate(report_budget);
+        let mut duplicate_tsn = self.payload_queue.pop_duplicates();
+        duplicate_tsn.truncate(report_budget.saturating_sub(gap_ack_blocks.len()));
         ChunkSelectiveAck {
             cumulative_tsn_ack: self.peer_last_tsn,
             advertised_receiver_window_credit: self.get_my_receiver_window_credit(),
-            gap_ack_blocks: self.payload_queue.get_gap_ack_blocks(self.peer_last_tsn),
-            duplicate_tsn: self.payload_queue.pop_duplicates(),
+            gap_ack_blocks,
+            duplicate_tsn,
         }
     }
 
