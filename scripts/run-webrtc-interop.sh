@@ -163,6 +163,8 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.tom
 echo "==> Verifying SCTP application byte release accounting"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib data_channel_credit_tracks_ppid
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib bytes_array_
 
 echo "==> Running the reference-client test suite (unit + multi-process interop)"
 SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}"

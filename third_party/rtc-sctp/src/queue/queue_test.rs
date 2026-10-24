@@ -964,8 +964,13 @@ fn test_reassembly_queue_forward_tsn_for_ordered_framents() -> Result<()> {
 
     rq.forward_tsn_for_ordered(ssn_dropped);
 
-    assert_eq!(1, rq.ordered.len(), "there should be one chunk left");
     assert_eq!(3, rq.get_num_bytes(), "num bytes mismatch");
+    assert_eq!(rq.read().unwrap().to_payload(3)?.as_ref(), b"123");
+    assert_eq!(
+        0,
+        rq.get_num_bytes(),
+        "read must release the complete message"
+    );
 
     Ok(())
 }
@@ -1590,5 +1595,70 @@ fn reassembly_unordered_forward_tsn_cuts_runs_without_reviving_messages() {
                 &[6, 7, 8]
             );
         }
+    }
+}
+
+// Issue #1178: application reads must not limit ordered protocol admission.
+#[test]
+fn reassembly_ordered_unread_messages_survive_full_sequence_wrap() {
+    const COUNT: u32 = 65540;
+    let mut queue = ReassemblyQueue::new(0);
+    for sequence in 0..COUNT {
+        assert!(
+            queue.push(ChunkPayloadData {
+                tsn: sequence.wrapping_add(u32::MAX - 200),
+                stream_sequence_number: sequence as u16,
+                beginning_fragment: true,
+                ending_fragment: true,
+                payload_type: PayloadProtocolIdentifier::Binary,
+                user_data: Bytes::from(sequence.to_be_bytes().to_vec()),
+                ..Default::default()
+            }),
+            "message {sequence} must be accepted before application reads"
+        );
+    }
+    assert_eq!(queue.get_num_bytes(), COUNT as usize * 4);
+    for sequence in 0..COUNT {
+        assert_eq!(
+            queue.read().unwrap().to_payload(4).unwrap().as_ref(),
+            sequence.to_be_bytes()
+        );
+    }
+    assert!(queue.read().is_none());
+    assert_eq!(queue.get_num_bytes(), 0);
+}
+
+#[test]
+fn reassembly_ordered_forward_preserves_ready_messages_and_completion_order() {
+    for first in [10u16, u16::MAX - 1] {
+        let mut queue = ReassemblyQueue::new(0);
+        queue.next_ssn = first;
+        let fragment = |sequence, unordered, ending, value: &'static [u8]| ChunkPayloadData {
+            tsn: u32::from(sequence),
+            stream_sequence_number: sequence,
+            unordered,
+            beginning_fragment: true,
+            ending_fragment: ending,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from_static(value),
+            ..Default::default()
+        };
+        assert!(queue.push(fragment(first, false, true, b"ready")));
+        assert!(!queue.push(fragment(first.wrapping_add(1), false, false, b"abandoned")));
+        assert!(queue.push(fragment(first.wrapping_add(2), false, true, b"future")));
+        assert!(queue.push(fragment(100, true, true, b"unordered")));
+        queue.forward_tsn_for_ordered(first.wrapping_add(1));
+        assert_eq!(queue.get_num_bytes(), b"readyfutureunordered".len());
+        assert_eq!(queue.next_ssn, first.wrapping_add(3));
+        queue.forward_tsn_for_ordered(first);
+        assert_eq!(queue.next_ssn, first.wrapping_add(3));
+        for expected in [b"ready".as_slice(), b"future", b"unordered"] {
+            assert_eq!(
+                queue.read().unwrap().to_payload(32).unwrap().as_ref(),
+                expected
+            );
+        }
+        assert!(queue.read().is_none());
+        assert_eq!(queue.get_num_bytes(), 0);
     }
 }

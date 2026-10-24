@@ -113,20 +113,17 @@ pub struct BytesArray<'a> {
     chunks: &'a mut [Bytes],
     /// The amount of chunks consumed from this source
     consumed: usize,
-    length: usize,
+    remaining_bytes: usize,
 }
 
 impl<'a> BytesArray<'a> {
     pub fn from_chunks(chunks: &'a mut [Bytes]) -> Self {
-        let mut length = 0;
-        for chunk in chunks.iter() {
-            length += chunk.len();
-        }
+        let remaining_bytes = chunks.iter().map(Bytes::len).sum();
 
         Self {
             chunks,
             consumed: 0,
-            length,
+            remaining_bytes,
         }
     }
 }
@@ -142,6 +139,7 @@ impl BytesSource for BytesArray<'_> {
 
             if chunk.len() <= limit {
                 let chunk = std::mem::take(chunk);
+                self.remaining_bytes -= chunk.len();
                 self.consumed += 1;
                 chunks_consumed += 1;
                 if chunk.is_empty() {
@@ -150,6 +148,7 @@ impl BytesSource for BytesArray<'_> {
                 return (chunk, chunks_consumed);
             } else if limit > 0 {
                 let chunk = chunk.split_to(limit);
+                self.remaining_bytes -= chunk.len();
                 return (chunk, chunks_consumed);
             } else {
                 break;
@@ -160,11 +159,11 @@ impl BytesSource for BytesArray<'_> {
     }
 
     fn has_remaining(&self) -> bool {
-        self.consumed < self.length
+        self.remaining_bytes > 0
     }
 
     fn remaining(&self) -> usize {
-        self.length - self.consumed
+        self.remaining_bytes
     }
 }
 
@@ -367,6 +366,58 @@ mod test {
     }
 
     const DIV: isize = 16;
+
+    #[test]
+    fn bytes_array_preserves_remaining_bytes_across_partial_chunks() {
+        for chunks in [
+            vec![Bytes::from_static(b"abcdef")],
+            vec![
+                Bytes::new(),
+                Bytes::from_static(b"abc"),
+                Bytes::new(),
+                Bytes::from_static(b"def"),
+                Bytes::new(),
+            ],
+            vec![Bytes::new(), Bytes::new()],
+            vec![],
+        ] {
+            for limit in [0, 1, 2, 4, 8] {
+                let mut chunks = chunks.clone();
+                let expected: Vec<u8> = chunks
+                    .iter()
+                    .flat_map(|chunk| chunk.iter().copied())
+                    .collect();
+                let mut source = BytesArray::from_chunks(&mut chunks);
+                let mut actual = Vec::new();
+                let mut consumed = 0;
+                for _ in 0..8 {
+                    let (chunk, count) = source.pop_chunk(limit);
+                    consumed += count;
+                    actual.extend_from_slice(&chunk);
+                    assert_eq!(
+                        source.remaining(),
+                        expected.len() - actual.len(),
+                        "limit={limit}"
+                    );
+                    assert_eq!(
+                        source.has_remaining(),
+                        actual.len() < expected.len(),
+                        "limit={limit}"
+                    );
+                    if !source.has_remaining() || limit == 0 {
+                        break;
+                    }
+                }
+                if limit > 0 {
+                    assert_eq!(actual, expected);
+                    consumed += source.pop_chunk(limit).1;
+                    assert_eq!(consumed, source.chunks.len());
+                } else {
+                    assert!(actual.is_empty());
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_serial_number_arithmetic32bit() -> Result<()> {

@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve unread native ordered gameplay across stream sequence wrap (#1178).
+- Report exact remaining bytes for native chunk-array sources (#1177).
+- Report native streams as unwritable when graceful shutdown starts (#1145).
 - Preserve native message completion order when ordered fragments arrive late (#1170).
 - Restore current peer metadata to room observers in reconnect notifications (#1167).
 - Acknowledge duplicate native gameplay packets immediately after lost acknowledgments (#1165).

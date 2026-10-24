@@ -275,15 +275,6 @@ impl Stream<'_> {
             return Err(Error::ErrOutboundPacketTooLarge);
         }
 
-        let state: AssociationState = self.association.state();
-        match state {
-            AssociationState::ShutdownSent
-            | AssociationState::ShutdownAckSent
-            | AssociationState::ShutdownPending
-            | AssociationState::ShutdownReceived => return Err(Error::ErrStreamClosed),
-            _ => {}
-        };
-
         let id = self.association.allocate_message_id()?;
         let (p, _) = source.pop_chunk(self.association.max_message_size() as usize);
 
@@ -327,7 +318,11 @@ impl Stream<'_> {
     }
 
     /// Whether this stream can currently accept more data.
+    /// Returns false once graceful association shutdown starts.
     pub fn is_writable(&self) -> bool {
+        if self.association.is_drained() {
+            return false;
+        }
         if let Some(s) = self
             .association
             .streams

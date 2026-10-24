@@ -3222,3 +3222,144 @@ fn reassembly_mixed_completion_order_survives_reordering_and_shutdown() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn graceful_shutdown_stream_readiness_matches_write_rejection() -> Result<()> {
+    fn assert_write_closed(endpoint: &mut Association, state: AssociationState) -> Result<()> {
+        assert_eq!(endpoint.state(), state);
+        let mut stream = endpoint.stream(1)?;
+        assert!(
+            !stream.is_writable(),
+            "{state}: shutdown cannot accept writes"
+        );
+        let expected = Bytes::from_static(b"must stay with caller");
+        let mut chunks = [expected.clone()];
+        assert_eq!(
+            stream.write_chunks(Instant::now(), &mut chunks),
+            Err(Error::ErrStreamClosed)
+        );
+        assert_eq!(chunks, [expected], "{state}: refusal consumed caller data");
+        Ok(())
+    }
+
+    let (mut local, mut remote) = reset_pair();
+    let now = Instant::now();
+    local.ack_mode = AckMode::NoDelay;
+    remote.ack_mode = AckMode::NoDelay;
+    let local_tail = Bytes::from_static(b"local admitted gameplay");
+    let remote_tail = Bytes::from_static(b"remote admitted gameplay");
+    for (endpoint, payload) in [(&mut local, &local_tail), (&mut remote, &remote_tail)] {
+        assert!(endpoint.stream(1)?.is_writable());
+        endpoint
+            .stream(1)?
+            .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+    }
+    local.shutdown()?;
+    assert_write_closed(&mut local, AssociationState::ShutdownPending)?;
+    for raw in local.gather_outbound(now).0 {
+        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    // Keep the remote admitted tail pending until it receives SHUTDOWN.
+    for raw in remote.gather_outbound_sack_packets(vec![]) {
+        local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert_write_closed(&mut local, AssociationState::ShutdownSent)?;
+    for raw in local.gather_outbound(now).0 {
+        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert_write_closed(&mut remote, AssociationState::ShutdownReceived)?;
+    for raw in remote.gather_outbound(now).0 {
+        local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    for raw in local.gather_outbound(now).0 {
+        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert_write_closed(&mut remote, AssociationState::ShutdownAckSent)?;
+    for _ in 0..2 {
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+    }
+    for (endpoint, expected) in [(&mut local, remote_tail), (&mut remote, local_tail)] {
+        assert_eq!(endpoint.state(), AssociationState::Closed);
+        assert!(!endpoint.stream(1)?.is_writable());
+        assert_eq!(
+            endpoint
+                .stream(1)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(100)?
+                .freeze(),
+            expected
+        );
+        assert!(endpoint.poll_endpoint_event().is_some());
+    }
+    Ok(())
+}
+
+#[test]
+fn graceful_shutdown_preserves_unread_gameplay_across_full_stream_sequence_wrap() -> Result<()> {
+    let (mut local, mut remote) = reset_pair();
+    let now = Instant::now();
+    let message_count = usize::from(u16::MAX) + 5;
+    remote.max_receive_buffer_size = u32::try_from(message_count + 16).unwrap();
+    remote.ack_mode = AckMode::NoDelay;
+    for index in 0..message_count {
+        let payload = Bytes::from(vec![u8::try_from(index % 251).unwrap()]);
+        assert_eq!(
+            local
+                .stream(1)?
+                .write_sctp(now, &payload, PayloadProtocolIdentifier::Binary)?,
+            1
+        );
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(
+            local.inflight_queue.is_empty(),
+            "message {index} was not acknowledged"
+        );
+        assert_eq!(
+            remote
+                .streams
+                .get(&1)
+                .unwrap()
+                .get_num_bytes_in_reassembly_queue(),
+            index + 1,
+            "transport acknowledged message {index} without retaining its unread payload"
+        );
+    }
+    local.shutdown()?;
+    for _ in 0..2 {
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+    }
+    assert_eq!(local.state(), AssociationState::Closed);
+    assert_eq!(remote.state(), AssociationState::Closed);
+    assert!(remote.poll_endpoint_event().is_none());
+    for index in 0..message_count {
+        let actual = remote
+            .stream(1)?
+            .read_sctp()?
+            .expect("every acknowledged message stays readable");
+        assert_eq!(
+            actual.to_payload(1)?.freeze().as_ref(),
+            &[u8::try_from(index % 251).unwrap()],
+            "message {index}"
+        );
+    }
+    assert!(remote.streams.is_empty());
+    assert!(remote.poll_endpoint_event().is_some());
+    assert!(remote.poll_endpoint_event().is_none());
+    Ok(())
+}
