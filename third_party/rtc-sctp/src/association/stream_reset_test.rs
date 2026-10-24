@@ -853,6 +853,98 @@ fn stream_reset_held_forward_tsn_without_data_preserves_ordered_ssn() -> Result<
     Ok(())
 }
 
+// Issue #1184: a reset that completes while draining must keep future SSN progress.
+#[test]
+fn graceful_shutdown_reset_preserves_forwarded_future_sequence_without_data() -> Result<()> {
+    for state in [
+        AssociationState::ShutdownPending,
+        AssociationState::ShutdownReceived,
+        AssociationState::ShutdownSent,
+        AssociationState::ShutdownAckSent,
+    ] {
+        let (a, mut b) = reset_pair();
+        let now = Instant::now();
+        let old_tsn = b.peer_last_tsn.wrapping_add(1);
+        b.handle_data(&ChunkPayloadData {
+            tsn: old_tsn,
+            stream_identifier: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"old final message"),
+            ..Default::default()
+        })?;
+        b.streams.get_mut(&1).unwrap().outgoing_reset_complete = true;
+        let reset = Box::new(ParamOutgoingResetRequest {
+            reconfig_request_sequence_number: a.my_next_rsn,
+            reconfig_response_sequence_number: b.my_next_rsn.wrapping_sub(1),
+            sender_last_tsn: old_tsn,
+            stream_identifiers: vec![1],
+        }) as Box<dyn Param>;
+        b.handle_reconfig_param(&reset, &mut vec![], now)?;
+        b.set_state(state);
+        let skipped = old_tsn.wrapping_add(1);
+        b.handle_forward_tsn(&ChunkForwardTsn {
+            new_cumulative_tsn: skipped,
+            streams: vec![ChunkForwardTsnStream {
+                identifier: 1,
+                sequence: 0,
+            }],
+        })?;
+        assert!(b.deferred_reset_reassembly.is_empty());
+        assert_eq!(
+            b.stream(1)?.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+            Bytes::from_static(b"old final message")
+        );
+        assert!(!b.streams.contains_key(&1));
+        for sequence in 1..=2 {
+            b.handle_data(&ChunkPayloadData {
+                tsn: skipped.wrapping_add(u32::from(sequence)),
+                stream_identifier: 1,
+                stream_sequence_number: sequence,
+                beginning_fragment: true,
+                ending_fragment: true,
+                user_data: Bytes::from_static(b"admitted future tail"),
+                ..Default::default()
+            })?;
+        }
+        assert_eq!(b.peer_last_tsn, skipped.wrapping_add(2));
+        assert_eq!(
+            b.stream(1)?
+                .read_sctp()?
+                .expect("accepted SSN 1 must not wait for abandoned SSN 0")
+                .to_payload(100)?
+                .freeze(),
+            Bytes::from_static(b"admitted future tail")
+        );
+        assert!(b.reset_ssn_markers.is_empty());
+        assert!(!b.stream(1)?.is_writable());
+        assert!(matches!(
+            b.stream(1)?.write_sctp(
+                now,
+                &Bytes::from_static(b"late local write"),
+                PayloadProtocolIdentifier::Binary
+            ),
+            Err(Error::ErrStreamClosed)
+        ));
+        b.close(AssociationError::AssociationClosed)?;
+        b.endpoint_events.push_back(EndpointEventInner::Drained);
+        assert!(b.poll_endpoint_event().is_none());
+        let mut reader = b
+            .accept_stream()
+            .expect("the accepted future tail stays readable");
+        assert_eq!(
+            reader.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+            Bytes::from_static(b"admitted future tail")
+        );
+        assert!(b.poll_endpoint_event().is_some());
+        assert!(b.poll_endpoint_event().is_none());
+        assert!(b.streams.is_empty());
+        assert!(b.reset_ssn_markers.is_empty());
+        assert!(b.open_stream(1, PayloadProtocolIdentifier::Binary).is_err());
+    }
+    Ok(())
+}
+
 #[test]
 fn stream_reset_pending_old_drain_forwards_future_ordered_queue() -> Result<()> {
     for future_id in [1, 2] {

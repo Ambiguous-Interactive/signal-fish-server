@@ -824,7 +824,12 @@ class Orchestrator {
   private readonly expectedPeers = new Set<string>();
   private readonly pairRoles = new Map<string, boolean>();
   private readonly peerTasks = new Map<string, { tail: Promise<void>; token: object }>();
-  private readonly pendingPeerOperations = new Set<{ deadline: number; expire: () => void }>();
+  private readonly pendingPeerOperations = new Set<{
+    peer: string;
+    deadline: number;
+    expire: () => void;
+    cancel: () => void;
+  }>();
   private readonly pairRetryState = new Map<string, { attempt: number; connected: boolean }>();
   private readonly retryingPairs = new Set<string>();
   private readonly connectedPairs = new Set<string>();
@@ -2354,7 +2359,12 @@ class Orchestrator {
         rejectWait?.(new Error('browser peer negotiation deadline expired'));
       }
     };
-    const pending = { deadline, expire };
+    const pending = {
+      peer,
+      deadline,
+      expire,
+      cancel: () => rejectWait?.(new Error('the peer link was retired')),
+    };
     this.pendingPeerOperations.add(pending);
     const timer = scheduleDeadline(deadline, expire);
     try {
@@ -2394,6 +2404,7 @@ class Orchestrator {
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
     this.pendingSignals.delete(peer);
+    this.cancelPeerOperations(peer);
     this.engine.removePeer(peer);
   }
 
@@ -2404,7 +2415,14 @@ class Orchestrator {
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
     this.pendingSignals.delete(peer);
+    this.cancelPeerOperations(peer);
     this.engine.removePeer(peer);
+  }
+
+  private cancelPeerOperations(peer: string): void {
+    for (const pending of this.pendingPeerOperations) {
+      if (pending.peer === peer) pending.cancel();
+    }
   }
 
   /** Tear down an unusable P2P link while retaining its planned obligation. */

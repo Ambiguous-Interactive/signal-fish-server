@@ -7991,3 +7991,59 @@ implementation dependency. The .NET SDK project has no package dependencies.
 Godot constructs engine `WebRTCPeerConnection` and `WebRTCMultiplayerPeer`
 objects. None imports this private reference-client stack. These changes leave
 the signaling wire unchanged and require no external SDK migration.
+
+### F164 — Unordered abandonment repeatedly rebuilds retained fragment indexes
+
+Confirmed on `7ad88189`; tracked in #1182 under #636. Repeated unordered
+FORWARD TSN prefix discards rebuild every retained run endpoint and shift the
+retained vector. A 1,024-fragment control advances one fragment at a time.
+The baseline performs 525,823 scan/index-rebuild fragment inspections and
+523,776 retained element shifts. Incremental run trimming and deque prefix
+removal reduce the measured inspections to 2,047 and remove those shifts.
+These counts exclude byte-release loop visits and do not measure throughput.
+The control verifies byte accounting, sequence wrap, later reordered message
+completion, and exact payloads. A second control keeps later run endpoints
+intact when an earlier run loses its beginning. Existing fragment permutation
+controls continue to cover reordered completion.
+
+### F165 — Retired browser negotiation holds gameplay backlog credits
+
+Confirmed on `7ad88189`; tracked in #1183 under #853/#889/#826. A retired
+physical link fences stale SDP but its hung negotiation wait keeps task and
+queued-signal backlog credits until the deadline. Twelve authoritative
+removal/readd cycles, each with a held offer and 48 queued answers, stop the
+baseline with connection error code 3. Cancel retired-link wait wrappers when
+removing or replacing that link. The same history keeps fresh same-ID SDP,
+healthy sibling ICE, and relay gameplay active. Late stack resolve and reject
+remain fenced. The underlying browser promise cannot be canceled; this repair
+releases the orchestrator wait and its queued task credits. Existing receipt
+retirement, global teardown, deadline, and backlog refusal rules remain intact.
+This is a new reproduced recovery defect, not proof of the historical hosted
+establishment or missing-exchange failure causes. Real browser/native three-player
+mesh and reconnect exchange pass in Nextest `5342ece6` after rebuilding both
+reference clients.
+
+### F166 — Reset during graceful shutdown loses future ordered sequence progress
+
+Confirmed on `7ad88189`; tracked in #1184 under #1145/#826. Stream removal
+retains a deferred future-generation sequence marker only in Established.
+A reset held by unread old DATA can finish during graceful shutdown after
+FORWARD TSN skips future SSN 0, before future DATA arrives. Dropping its marker
+makes later admitted SSN 1 unreadable despite transport acknowledgment.
+The first red control loses the SSN 1 marker in ShutdownPending. Its final
+old-source replay also fails the application read: accepted SSN 1 waits for
+abandoned SSN 0.
+Retain markers in all four live shutdown states. The control checks exact old
+and future payloads through terminal reads and endpoint drain. Terminal close
+still clears markers and refuses reopening. Strict-peer reachability of this
+early future-generation ordering is unproven: reciprocal reset also acknowledges
+the original request in a conforming exchange. This control qualifies the
+implementation's existing accepted-DATA contract; it is not a paired-wire
+reproduction or proof of a public gameplay incident.
+
+External-client assessment for F164–F166: the Rust SDK manifest at `da8f2d16`
+has no native RTC/SCTP dependency. The .NET project at `e467c871` has no package
+dependencies. The Godot README at `b7c04a86` assigns mesh transport to browser
+WebRTC or the Godot extension. None imports these private native transport or
+browser reference-engine sources. The signaling wire is unchanged; no SDK
+migration is required.

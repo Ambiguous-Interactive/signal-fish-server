@@ -6,7 +6,15 @@ function assert(condition: boolean, message: string): void {
 }
 
 // Regression #1011: a stalled peer must not hold relay or another peer's SDP/ICE.
-const ordinaryOutcomes = ['resolve', 'reject', 'pending', 'backlog'] as const;
+// Regression #1183: retired negotiation must release queued task credits.
+const ordinaryOutcomes = [
+  'resolve',
+  'reject',
+  'pending',
+  'backlog',
+  'retired-resolve',
+  'retired-reject',
+] as const;
 // Regression #1087: failed initial offers must resolve availability before their deadline.
 // Regression #1144: rejected remote SDP and answer generation also resolve availability.
 const failedOutcomes = [
@@ -61,6 +69,8 @@ for (const { oldOutcome, healthyConnected } of [
   });
   const turn = () => new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
   let running: Promise<number> | undefined;
+  const retirementChurn = oldOutcome.startsWith('retired-');
+  let holdReplacement = retirementChurn;
   class Connection {
     readonly index = connections.length;
     closed = false;
@@ -80,7 +90,7 @@ for (const { oldOutcome, healthyConnected } of [
     }
     async createOffer() {
       calls.push(`${this.index}:offer`);
-      if (this.index === 0) {
+      if (this.index === 0 || (this.index > 1 && holdReplacement)) {
         await held;
         if (oldOutcome === 'offer-rejected') throw new Error('offer failed');
       }
@@ -222,6 +232,64 @@ for (const { oldOutcome, healthyConnected } of [
     running = run(config);
     await turn();
     assert(connections.length === 2, 'healthy peer starts while the first offer is held');
+    if (retirementChurn) {
+      let result: number | undefined;
+      void running.then((code) => {
+        result = code;
+      });
+      for (let replacement = 0; replacement < 12; replacement += 1) {
+        for (let queued = 0; queued < 48; queued += 1)
+          socket.signal(slow, { Answer: 'retired-answer' });
+        await turn();
+        socket.plan([healthy]);
+        await turn();
+        socket.plan([slow, healthy]);
+        await turn();
+        assert(
+          result === undefined,
+          'retired negotiation releases task credits before replacement',
+        );
+      }
+      holdReplacement = false;
+      socket.plan([healthy]);
+      await turn();
+      socket.plan([slow, healthy]);
+      await turn();
+      const replacement = connections.at(-1)!;
+      if (oldOutcome === 'retired-reject') rejectOld(new Error('retired stack failure'));
+      else resolveOld();
+      socket.signal(slow, { Answer: 'fresh-answer' });
+      socket.signal(healthy, { Answer: 'healthy-answer' });
+      socket.signal(healthy, { IceCandidate: 'healthy-candidate' });
+      socket.deliver('GameData', {
+        from_player: healthy,
+        epoch: 1,
+        seq: 1,
+        data: { after_retirement: true },
+      });
+      await turn();
+      assert(
+        result === undefined && !replacement.closed && !connections[1]!.closed,
+        'fresh and sibling gameplay remain active after old operations settle',
+      );
+      assert(
+        calls.includes(`${replacement.index}:remote`) && calls.includes('1:candidate'),
+        'fresh and sibling signaling continues after retirement churn',
+      );
+      assert(
+        events.some((event) => event['event'] === 'game_data_received'),
+        'relay gameplay continues after retirement churn',
+      );
+      assert(
+        !events.some((event) => event['event'] === 'error'),
+        'retired promise rejection cannot report a current-peer error',
+      );
+      assert(
+        !calls.includes('0:local') && !calls.includes('0:remote'),
+        'retired SDP and queued answers cannot resume on the replacement',
+      );
+      continue;
+    }
     if (oldOutcome === 'backlog') {
       let result: number | undefined;
       void running.then((code) => {

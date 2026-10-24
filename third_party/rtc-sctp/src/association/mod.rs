@@ -996,10 +996,20 @@ impl Association {
                 id: stream_identifier,
             });
             s.state = RecvSendState::Closed;
-            if self.state() == AssociationState::Established
-                && matches!(reason, AssociationError::Reset)
+            if matches!(
+                self.state(),
+                AssociationState::Established
+                    | AssociationState::ShutdownPending
+                    | AssociationState::ShutdownReceived
+                    | AssociationState::ShutdownSent
+                    | AssociationState::ShutdownAckSent
+            ) && matches!(reason, AssociationError::Reset)
                 && let Some(next_ssn) = s.deferred_reset_next_ssn
             {
+                /*
+                 * Graceful drain still admits the peer's previously sent DATA.
+                 * Keep ordered progress until its next generation arrives.
+                 */
                 self.reset_ssn_markers.insert(stream_identifier, next_ssn);
             }
         }
