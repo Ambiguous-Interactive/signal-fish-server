@@ -5567,7 +5567,7 @@ mod tests {
                 tokio::time::advance(Duration::from_micros(1)).await;
             }
             let mut visits = 0;
-            for _ in 0..DEPTH {
+            for seq in 1..=u64::try_from(DEPTH).unwrap() {
                 {
                     let state = rx.shared.state();
                     let lane = if version == 2 {
@@ -5584,7 +5584,8 @@ mod tests {
                     assert_eq!(actual, expected);
                     assert_eq!(oldest_reliable_enqueued_at(&state), expected);
                 }
-                rx.try_recv().unwrap();
+                let item = rx.try_recv().unwrap();
+                assert_eq!(message_id(&item), seq);
             }
             assert_eq!(
                 visits, DEPTH,
@@ -5615,7 +5616,17 @@ mod tests {
         tokio::time::advance(Duration::from_micros(1)).await;
         tx.try_enqueue_data(data(7, DeliveryClass::Reliable, None, 7))
             .unwrap();
-        loop {
+        for (kind, id) in [
+            ("message", 100),
+            ("message", 1),
+            ("report", 2),
+            ("message", 3),
+            ("message", 4),
+            ("message", 5),
+            ("message", 6),
+            ("barrier", 0),
+            ("message", 7),
+        ] {
             {
                 let state = rx.shared.state();
                 let expected = [&state.legacy, &state.control, &state.data, &state.barriers]
@@ -5626,10 +5637,18 @@ mod tests {
                     .min();
                 assert_eq!(oldest_reliable_enqueued_at(&state), expected);
             }
-            if rx.try_recv().is_err() {
-                break;
+            let item = rx.try_recv().unwrap();
+            match kind {
+                "report" => assert_eq!(report(item).gaps[0].from_seq, id),
+                "barrier" => assert!(matches!(
+                    item.payload,
+                    OutboundPayload::Message(message) if matches!(*message, ServerMessage::RoomLeft)
+                )),
+                _ => assert_eq!(message_id(&item), id),
             }
         }
+        let empty = rx.try_recv();
+        assert_eq!(empty.unwrap_err(), TryReceiveError::Empty);
         assert_eq!(rx.len(), 0);
     }
 
