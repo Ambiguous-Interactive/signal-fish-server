@@ -7835,3 +7835,54 @@ public message variant. Independent SDK adoption remains tracked separately:
 and [Godot #374](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/374).
 Their current decoders accept the added field but do not apply it. SDK tests and
 the Godot runtime drill remain client work; server controls do not prove them.
+
+### F156 — Delayed ordered fragments overtake completed unordered messages
+
+Confirmed on `b264ec73` under #826 and #912; repair tracked in #1170.
+The queue's mixed-message read contract selects the earlier completion.
+Ordered messages instead received their arrival counter on their first
+fragment. The history ordered-start, unordered-complete, ordered-end returned
+the ordered message first. The new queue control fails on that exact payload
+assertion before repair.
+
+Assign the ordered arrival counter once when the message first completes.
+Keep ordered SSN delivery and completed timestamps unchanged. Queue controls
+cover both completion orders and TSN wrap. A paired-wire history uses actual
+fragmented writes, reordered packets, mixed ordering modes, exact bytes,
+released send/receive credit and graceful shutdown. This establishes the
+low-level mixed-message contract; it does not claim a public browser incident.
+
+### F157 — Complete unordered gameplay scans unrelated retained fragments
+
+Confirmed on `b264ec73` under #636, #826 and #912; repair tracked in #1171.
+Complete single-chunk unordered messages entered the incomplete-fragment
+vector before a linear completion scan. With 1,024 retained fragments, 1,024
+complete messages performed 1,049,600 fragment visits. The red control first
+checks exact delivered bytes and retained accounting, then fails its work bound.
+
+Queue complete unordered messages directly. The same history performs zero
+fragment visits after repair, retains exactly 4,096 incomplete payload bytes,
+and releases them on FORWARD TSN across ordinary and wrapped TSNs. Fragmented
+unordered messages keep their existing reassembly path. This is a deterministic
+operation count, not a throughput measurement or a bound on fragmented traffic.
+
+### F158 — SACK construction builds reports outside its wire budget
+
+Confirmed on `b264ec73` under #636, #826 and #912; repair tracked in #1172.
+The prior packet-size repair truncated gap reports after construction.
+A 2,048-gap receive history still scanned all retained chunks with zero report
+slots. Positive small budgets also built and discarded later reports.
+
+Apply the budget while generating reports. Complete the final included range
+before stopping. The disjoint-gap control scans zero chunks with zero slots
+and at most budget plus one chunks otherwise. Contiguous runs still require
+visiting their full range. Reference-prefix controls retain long contiguous
+runs, sparse gaps, TSN wrap, offsets 65,535 and 65,536, empty queues and unlimited
+reports. Existing paired shutdown histories retain unreported DATA and later
+deliver all gameplay exactly. No receive payload is removed by report trimming.
+
+All three findings affect only the vendored native reference-client stack.
+The independent Rust SDK manifest has no RTC/SCTP dependency. The .NET SDK
+owns signaling and relay only. Godot uses browser or Godot WebRTC transports.
+No signaling schema, server relay ordering or external SDK API changes.
+Their current manifests and scope descriptions were inspected for this session.

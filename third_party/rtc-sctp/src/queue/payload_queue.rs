@@ -80,6 +80,8 @@ pub(crate) struct PayloadQueue {
     pub(crate) lookups: std::cell::Cell<usize>,
     #[cfg(test)]
     pub(crate) ordering_comparisons: std::cell::Cell<usize>,
+    #[cfg(test)]
+    pub(crate) gap_scan_steps: std::cell::Cell<usize>,
 }
 
 impl PayloadQueue {
@@ -203,7 +205,15 @@ impl PayloadQueue {
     }
 
     pub(crate) fn get_gap_ack_blocks(&self, cumulative_tsn: u32) -> Vec<GapAckBlock> {
-        if self.chunk_map.is_empty() {
+        self.get_gap_ack_blocks_limited(cumulative_tsn, usize::MAX)
+    }
+
+    pub(crate) fn get_gap_ack_blocks_limited(
+        &self,
+        cumulative_tsn: u32,
+        report_budget: usize,
+    ) -> Vec<GapAckBlock> {
+        if self.chunk_map.is_empty() || report_budget == 0 {
             return vec![];
         }
 
@@ -211,20 +221,25 @@ impl PayloadQueue {
         let mut gap_ack_blocks = vec![];
         // SACK offsets are 16-bit serial distances, not absolute TSNs.
         // Keep farther DATA queued until cumulative progress makes it reportable.
-        for (i, diff) in self
-            .sorted
-            .iter()
-            .filter_map(|tsn| u16::try_from(tsn.wrapping_sub(cumulative_tsn)).ok())
-            .filter(|&diff| diff != 0)
-            .enumerate()
-        {
-            if i == 0 {
+        for tsn in &self.sorted {
+            #[cfg(test)]
+            self.gap_scan_steps.set(self.gap_scan_steps.get() + 1);
+            let Ok(diff) = u16::try_from(tsn.wrapping_sub(cumulative_tsn)) else {
+                break;
+            };
+            if diff == 0 {
+                continue;
+            }
+            if b.start == 0 {
                 b.start = diff;
                 b.end = b.start;
             } else if b.end.checked_add(1) == Some(diff) {
                 b.end += 1;
             } else {
                 gap_ack_blocks.push(b);
+                if gap_ack_blocks.len() == report_budget {
+                    return gap_ack_blocks;
+                }
 
                 b.start = diff;
                 b.end = diff;

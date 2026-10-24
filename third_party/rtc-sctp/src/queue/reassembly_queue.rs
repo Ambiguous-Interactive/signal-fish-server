@@ -196,6 +196,8 @@ pub(crate) struct ReassemblyQueue {
     /// Monotonic counter stamped onto each reassembled message so `read` can tell which of a
     /// ready ordered and a ready unordered message arrived first.
     next_arrival: u64,
+    #[cfg(test)]
+    pub(crate) unordered_scan_steps: usize,
 }
 
 impl ReassemblyQueue {
@@ -213,6 +215,8 @@ impl ReassemblyQueue {
             unordered_chunks: vec![],
             n_bytes: 0,
             next_arrival: 0,
+            #[cfg(test)]
+            unordered_scan_steps: 0,
         }
     }
 
@@ -222,6 +226,17 @@ impl ReassemblyQueue {
         }
 
         if chunk.unordered {
+            if chunk.beginning_fragment && chunk.ending_fragment {
+                self.n_bytes += chunk.user_data.len();
+                self.unordered.push_back(Chunks::new(
+                    self.next_arrival,
+                    0,
+                    chunk.payload_type,
+                    vec![chunk],
+                ));
+                self.next_arrival += 1;
+                return true;
+            }
             // First, insert into unordered_chunks array
             //atomic.AddUint64(&r.n_bytes, uint64(len(chunk.userData)))
             self.n_bytes += chunk.user_data.len();
@@ -254,14 +269,22 @@ impl ReassemblyQueue {
             if let Some(s) = self.ordered.get_mut(idx)
                 && s.ssn == ssn
             {
-                return s.push(chunk);
+                let was_complete = s.is_complete();
+                let complete = s.push(chunk);
+                if complete && !was_complete {
+                    s.arrival = self.next_arrival;
+                    self.next_arrival += 1;
+                }
+                return complete;
             }
 
             // If not found, create a new chunkSet and insert it in SSN order
             // (this branch is only reached for ordered chunks).
             let mut cset = Chunks::new(self.next_arrival, ssn, chunk.payload_type, vec![]);
-            self.next_arrival += 1;
             let ok = cset.push(chunk);
+            if ok {
+                self.next_arrival += 1;
+            }
             self.ordered.insert(idx, cset);
 
             ok
@@ -275,6 +298,10 @@ impl ReassemblyQueue {
         let mut found = false;
 
         for (i, c) in self.unordered_chunks.iter().enumerate() {
+            #[cfg(test)]
+            {
+                self.unordered_scan_steps += 1;
+            }
             // seek beginning
             if c.beginning_fragment {
                 start_idx = i as isize;

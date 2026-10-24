@@ -1326,3 +1326,121 @@ fn reassembly_completeness_matches_fragment_adjacency() {
         }
     }
 }
+
+#[test]
+fn reassembly_fragmented_ordered_message_uses_completion_order() {
+    for first in [100u32, u32::MAX] {
+        for ordered_completes_first in [false, true] {
+            let mut queue = ReassemblyQueue::new(0);
+            let fragment = |offset: u32, unordered, beginning, ending, value: &'static [u8]| {
+                ChunkPayloadData {
+                    tsn: first.wrapping_add(offset),
+                    unordered,
+                    beginning_fragment: beginning,
+                    ending_fragment: ending,
+                    payload_type: PayloadProtocolIdentifier::Binary,
+                    user_data: Bytes::from_static(value),
+                    ..Default::default()
+                }
+            };
+            assert!(!queue.push(fragment(0, false, true, false, b"or")));
+            let ordered_end = fragment(1, false, false, true, b"dered");
+            let unordered = fragment(2, true, true, true, b"unordered");
+            if ordered_completes_first {
+                assert!(queue.push(ordered_end));
+                assert!(queue.push(unordered));
+            } else {
+                assert!(queue.push(unordered));
+                assert!(queue.push(ordered_end));
+            }
+            let expected: [&[u8]; 2] = if ordered_completes_first {
+                [b"ordered", b"unordered"]
+            } else {
+                [b"unordered", b"ordered"]
+            };
+            for bytes in expected {
+                assert_eq!(
+                    queue.read().unwrap().to_payload(32).unwrap().as_ref(),
+                    bytes
+                );
+            }
+            assert!(queue.read().is_none());
+            assert_eq!(queue.get_num_bytes(), 0);
+        }
+    }
+}
+
+#[test]
+fn reassembly_complete_unordered_messages_skip_unrelated_fragment_scan() {
+    for first in [100u32, u32::MAX - 512] {
+        let mut queue = ReassemblyQueue::new(0);
+        let fragment = |index: u32, complete| ChunkPayloadData {
+            tsn: first.wrapping_add(if complete { index + 1024 } else { index * 2 }),
+            unordered: true,
+            beginning_fragment: true,
+            ending_fragment: complete,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from(index.to_be_bytes().to_vec()),
+            ..Default::default()
+        };
+        for index in 0..1024 {
+            assert!(!queue.push(fragment(index, false)));
+        }
+        queue.unordered_scan_steps = 0;
+        for index in 1024..2048 {
+            assert!(queue.push(fragment(index, true)));
+            assert_eq!(
+                queue.read().unwrap().to_payload(4).unwrap().as_ref(),
+                index.to_be_bytes()
+            );
+        }
+        assert_eq!(queue.unordered_chunks.len(), 1024);
+        assert_eq!(queue.get_num_bytes(), 4096);
+        assert_eq!(
+            queue.unordered_scan_steps, 0,
+            "complete messages must not scan retained fragments"
+        );
+        queue.forward_tsn_for_unordered(first.wrapping_add(2047));
+        assert_eq!(queue.get_num_bytes(), 0);
+        assert!(queue.unordered_chunks.is_empty());
+    }
+}
+
+#[test]
+fn payload_queue_gap_ack_limited_matches_full_report_prefix() {
+    for cumulative in [100u32, u32::MAX - 4] {
+        for offsets in [
+            vec![],
+            vec![1, 2, 3, 5, 6, 8, 65534, 65535, 65536, 65537],
+            (1..=2048).collect(),
+        ] {
+            let mut queue = PayloadQueue::new();
+            for &offset in &offsets {
+                assert!(queue.push(make_payload(cumulative.wrapping_add(offset), 1), cumulative));
+            }
+            let mut expected: Vec<GapAckBlock> = Vec::new();
+            for offset in offsets.iter().copied().filter(|&offset| offset <= 65535) {
+                let offset = u16::try_from(offset).unwrap();
+                if let Some(last) = expected.last_mut()
+                    && last.end.checked_add(1) == Some(offset)
+                {
+                    last.end = offset;
+                } else {
+                    expected.push(GapAckBlock {
+                        start: offset,
+                        end: offset,
+                    });
+                }
+            }
+            for budget in [0, 1, 2, 3, 16, usize::MAX] {
+                let actual = queue.get_gap_ack_blocks_limited(cumulative, budget);
+                assert_eq!(actual.len(), expected.len().min(budget));
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    assert_eq!((actual.start, actual.end), (expected.start, expected.end));
+                }
+                assert_eq!(queue.len(), offsets.len());
+                assert_eq!(queue.get_num_bytes(), offsets.len());
+            }
+        }
+    }
+}

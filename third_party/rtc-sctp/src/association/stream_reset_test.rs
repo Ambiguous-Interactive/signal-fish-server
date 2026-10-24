@@ -3118,3 +3118,107 @@ fn shutdown_duplicate_data_packet_keeps_sack_within_mtu_budget() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn shutdown_selective_ack_generation_stops_at_packet_budget() {
+    for cumulative in [0u32, u32::MAX - 1000] {
+        for budget in [0usize, 1, 16, 128] {
+            let mut association = timed_test_association();
+            association.peer_last_tsn = cumulative;
+            association.mtu = 28 + 4 * budget as u32;
+            for offset in (2..=4096u32).step_by(2) {
+                association.payload_queue.push(
+                    ChunkPayloadData {
+                        tsn: cumulative.wrapping_add(offset),
+                        user_data: Bytes::from_static(b"retained"),
+                        ..Default::default()
+                    },
+                    cumulative,
+                );
+            }
+            association.payload_queue.gap_scan_steps.set(0);
+            let sack = association.create_selective_ack_chunk();
+            assert_eq!(sack.gap_ack_blocks.len(), budget);
+            for (index, block) in sack.gap_ack_blocks.iter().enumerate() {
+                assert_eq!(usize::from(block.start), 2 * (index + 1));
+                assert_eq!(block.start, block.end);
+            }
+            let steps = association.payload_queue.gap_scan_steps.get();
+            assert!(
+                steps <= budget + usize::from(budget > 0),
+                "budget {budget}: scanned {steps} chunks"
+            );
+            assert_eq!(association.payload_queue.len(), 2048);
+            assert_eq!(association.payload_queue.get_num_bytes(), 2048 * 8);
+        }
+    }
+}
+
+#[test]
+fn reassembly_mixed_completion_order_survives_reordering_and_shutdown() -> Result<()> {
+    for first_tsn in [100u32, u32::MAX] {
+        for order in [[0, 1, 2], [0, 2, 1]] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            local.my_next_tsn = first_tsn;
+            local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+            local.streams.get_mut(&1).unwrap().max_payload_size = 4;
+            local.ack_mode = AckMode::NoDelay;
+            remote.ack_mode = AckMode::NoDelay;
+            local.stream(1)?.write(now, b"ordered!")?;
+            local
+                .stream(1)?
+                .set_reliability_params(true, ReliabilityType::Reliable, 0)?;
+            local.stream(1)?.write(now, b"fast")?;
+            local.shutdown()?;
+            let mut data = transmitted_data(&local.gather_outbound(now).0);
+            assert_eq!(data.len(), 3);
+            data.sort_by_key(|chunk| (chunk.unordered, !chunk.beginning_fragment));
+            for index in order {
+                remote.handle_inbound(
+                    local.create_packet(vec![Box::new(data[index].clone())]),
+                    now,
+                )?;
+            }
+            let expected: [&[u8]; 2] = if order[1] == 1 {
+                [b"ordered!", b"fast"]
+            } else {
+                [b"fast", b"ordered!"]
+            };
+            for payload in expected {
+                assert_eq!(
+                    remote
+                        .stream(1)?
+                        .read_sctp()?
+                        .unwrap()
+                        .to_payload(8)?
+                        .as_ref(),
+                    payload
+                );
+            }
+            assert_eq!(
+                remote
+                    .streams
+                    .get(&1)
+                    .unwrap()
+                    .get_num_bytes_in_reassembly_queue(),
+                0
+            );
+            for _ in 0..4 {
+                for raw in remote.gather_outbound(now).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+                for raw in local.gather_outbound(now).0 {
+                    remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+            }
+            assert_eq!(local.state(), AssociationState::Closed);
+            assert_eq!(remote.state(), AssociationState::Closed);
+            assert!(local.inflight_queue.is_empty());
+            assert!(local.pending_queue.is_empty());
+        }
+    }
+    Ok(())
+}
