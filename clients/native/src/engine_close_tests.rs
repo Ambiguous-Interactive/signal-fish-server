@@ -261,6 +261,191 @@ async fn queued_channel_opens_do_not_connect_a_closed_pair() {
     }
 }
 
+// Regression #1188: delayed channel admission must retain its terminal callback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_remote_channel_admission_preserves_accepted_input_and_close() {
+    for (held_label, handle_queued_opens) in [
+        (RELIABLE_LABEL, false),
+        (UNRELIABLE_LABEL, false),
+        (RELIABLE_LABEL, true),
+        (UNRELIABLE_LABEL, true),
+    ] {
+        let (sender_tx, mut sender_events) = mpsc::unbounded_channel();
+        let (receiver_tx, mut receiver_events) = mpsc::unbounded_channel();
+        let settings = EngineSettings {
+            disable_mdns: true,
+            ..EngineSettings::default()
+        };
+        let mut sender = Engine::new(settings, sender_tx).unwrap();
+        let mut receiver = Engine::new(settings, receiver_tx).unwrap();
+        let sender_id = PlayerId::from_u128(0x1187);
+        let receiver_id = PlayerId::from_u128(0x1188);
+        let offer = sender
+            .pair_with(receiver_id, true, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        receiver.pair_with(sender_id, false, &[]).await.unwrap();
+        let answer = receiver.handle_offer(sender_id, offer).await.unwrap();
+        sender.handle_answer(receiver_id, answer).await.unwrap();
+        let held = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut held = None;
+            let mut sender_open = BTreeSet::new();
+            let mut sibling_open = false;
+            while held.is_none() || sender_open.len() != 2 || !sibling_open {
+                tokio::select! {
+                    event = sender_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            receiver.handle_remote_candidate(sender_id, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => { sender_open.insert(label); }
+                        _ => {}
+                    },
+                    event = receiver_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            sender.handle_remote_candidate(receiver_id, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            if label == held_label { held = Some(channel); }
+                            else { receiver.store_remote_channel(sender_id, label, channel).await; }
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            assert_ne!(label, held_label);
+                            assert!(!receiver.note_channel_open(sender_id, &label).await);
+                            sibling_open = true;
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            held.unwrap()
+        }).await.expect("both real channels open before the announcement drain");
+        let channel = sender.channel(receiver_id, held_label).unwrap();
+        channel
+            .send_text("accepted-before-delayed-admission")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while channel.outstanding_bytes().await.unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("peer acknowledges the admitted input");
+        channel.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                held.ready_state().await,
+                Err(_) | Ok(rtc::data_channel::RTCDataChannelState::Closed)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("remote channel retires while its announcement waits");
+        receiver
+            .store_remote_channel(sender_id, held_label.into(), held)
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut messages = Vec::new();
+            loop {
+                match receiver_events.recv().await.unwrap() {
+                    EngineEvent::ChannelMessage { label, text, .. } => {
+                        assert_eq!(label, held_label);
+                        assert_eq!(text, "accepted-before-delayed-admission");
+                        messages.push(text);
+                        assert_eq!(messages.len(), 1, "one accepted input cannot duplicate");
+                    }
+                    EngineEvent::ChannelClosed { label, .. } if label == held_label => {
+                        if !handle_queued_opens {
+                            assert_eq!(messages, ["accepted-before-delayed-admission"]);
+                        }
+                        break;
+                    }
+                    EngineEvent::ChannelOpen { label, .. } if handle_queued_opens => {
+                        assert!(!receiver.note_channel_open(sender_id, &label).await);
+                    }
+                    EngineEvent::ChannelReceiveRejected { .. } => {
+                        panic!("valid input must survive delayed admission")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{held_label}: queued input and close must drain: {error}"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !receiver.peers[&sender_id]
+                .channel_tasks
+                .last()
+                .unwrap()
+                .is_finished()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retired channel releases its poller");
+        assert_eq!(receiver.connected_pair_count(), 0);
+        loop {
+            match receiver_events.try_recv() {
+                Ok(event) => assert!(
+                    !matches!(event, EngineEvent::ChannelClosed { label, .. } if label == held_label),
+                    "the selected retired channel closes exactly once"
+                ),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("live engines retain their event senders");
+                }
+            }
+        }
+        let old_generation = receiver.peers[&sender_id].generation;
+        sender.remove_peer(receiver_id).await.unwrap();
+        receiver.remove_peer(sender_id).await.unwrap();
+        let mut pair = LivePair {
+            sender,
+            receiver,
+            sender_events,
+            receiver_events,
+            sender_id,
+            receiver_id,
+        };
+        pair.negotiate().await;
+        assert_ne!(pair.receiver.peers[&sender_id].generation, old_generation);
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            pair.sender
+                .channel(receiver_id, label)
+                .unwrap()
+                .send_text("fresh-after-delayed-close")
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage {
+                            label: received,
+                            text,
+                            ..
+                        } => {
+                            assert_eq!(received, label);
+                            assert_eq!(text, "fresh-after-delayed-close");
+                            break;
+                        }
+                        EngineEvent::ChannelClosed { .. }
+                        | EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("fresh generation must deliver on both required channels");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("fresh generation delivers after delayed closure");
+        }
+        pair.cleanup().await;
+    }
+}
+
 // Regression #1046: queued opens must honor an already observed terminal state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_opens_respect_observed_peer_connection_failure() {

@@ -889,7 +889,16 @@ impl Engine {
         label: String,
         channel: Arc<dyn DataChannel>,
     ) {
-        if !required_channel_delivery_mode(&label, channel.as_ref()).await {
+        let selected = match self.peers.get(&peer) {
+            Some(link) => link
+                .channel_admission
+                .lock()
+                .await
+                .is_selected(&label, &channel),
+            None => false,
+        };
+        /* Callback admission validated modes before the core could retire. */
+        if !selected && !required_channel_delivery_mode(&label, channel.as_ref()).await {
             let _ = channel.close().await;
             return;
         }
@@ -1168,6 +1177,17 @@ enum ChannelSelection {
 }
 
 impl RequiredChannelAdmission {
+    fn is_selected(&self, label: &str, channel: &Arc<dyn DataChannel>) -> bool {
+        let selected = match label {
+            RELIABLE_LABEL => &self.reliable,
+            UNRELIABLE_LABEL => &self.unreliable,
+            _ => return false,
+        };
+        selected
+            .as_ref()
+            .is_some_and(|existing| Weak::ptr_eq(existing, &Arc::downgrade(channel)))
+    }
+
     fn select(&mut self, label: &str, channel: &Arc<dyn DataChannel>) -> ChannelSelection {
         let selected = match label {
             RELIABLE_LABEL => &mut self.reliable,
@@ -1284,7 +1304,7 @@ impl PeerConnectionEventHandler for PeerHandler {
 
 // Labels do not establish ordering or reliability. Refuse invalid modes before
 // reserving a required label or publishing any application callback. A closed
-// channel's failed property read also fails admission.
+// channel's failed property read also fails initial admission.
 async fn required_channel_delivery_mode(label: &str, channel: &dyn DataChannel) -> bool {
     let (ordered, retransmits) = match label {
         RELIABLE_LABEL => (true, None),

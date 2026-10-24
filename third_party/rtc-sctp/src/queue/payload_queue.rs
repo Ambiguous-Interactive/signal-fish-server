@@ -82,6 +82,8 @@ pub(crate) struct PayloadQueue {
     pub(crate) ordering_comparisons: std::cell::Cell<usize>,
     #[cfg(test)]
     pub(crate) gap_scan_steps: std::cell::Cell<usize>,
+    #[cfg(test)]
+    pub(crate) pop_attempts: usize,
 }
 
 impl PayloadQueue {
@@ -158,6 +160,10 @@ impl PayloadQueue {
 
     /// pop pops only if the oldest chunk's TSN matches the given TSN.
     pub(crate) fn pop(&mut self, tsn: u32) -> Option<ChunkPayloadData> {
+        #[cfg(test)]
+        {
+            self.pop_attempts += 1;
+        }
         if self.sorted.front() != Some(&tsn) {
             return None;
         }

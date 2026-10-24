@@ -1884,11 +1884,12 @@ impl Association {
         //   its cumulative TSN point to the value carried in the FORWARD TSN
         //   chunk,
 
-        // Advance peer_last_tsn
-        while sna32lt(self.peer_last_tsn, c.new_cumulative_tsn) {
-            self.payload_queue.pop(self.peer_last_tsn.wrapping_add(1)); // may not exist
-            self.peer_last_tsn = self.peer_last_tsn.wrapping_add(1);
+        while let Some(&tsn) = self.payload_queue.sorted.front() {
+            if sna32gt(tsn, c.new_cumulative_tsn) || self.payload_queue.pop(tsn).is_none() {
+                break;
+            }
         }
+        self.peer_last_tsn = c.new_cumulative_tsn;
 
         for q in self.deferred_reset_reassembly.values_mut() {
             q.forward_tsn_for_unordered(c.new_cumulative_tsn);
