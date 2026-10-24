@@ -209,3 +209,16 @@ Contiguous runs still require scanning through their last TSN. Controls retain
 16-bit offset limits, TSN wrap, duplicate priority, DATA retention and later
 cumulative progress. Replacement qualification in #912 must retain these
 reassembly_, shutdown_selective_ack_, and payload_queue_gap_ack_ controls.
+
+The #1175 repair indexes the endpoints of contiguous incomplete unordered
+fragment runs. Each arrival joins at most two neighboring runs without a
+completion scan. A 1,024-fragment in-order message drops from 524,800 fragment
+visits to 2,046 endpoint probes. Reverse and alternating arrivals have the same
+probe bound. Completion still extracts and checks each message once. Reordered
+vector insertion and FORWARD TSN suffix rebuilding retain linear work; this is
+not a bound on all queue operations or a measured throughput result. The index
+uses at most two entries per incomplete run. Complete single-chunk messages
+still bypass it. Controls cover every arrival order of adjacent three-fragment
+messages, retained duplicates, partial abandonment, TSN wrap, exact payloads,
+and paired association send-credit release. Replacement qualification in #912
+must retain these reassembly_ controls.

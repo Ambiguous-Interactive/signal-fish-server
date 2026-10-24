@@ -1444,3 +1444,151 @@ fn payload_queue_gap_ack_limited_matches_full_report_prefix() {
         }
     }
 }
+
+#[test]
+fn reassembly_unordered_fragment_work_is_bounded() {
+    const COUNT: u32 = 1024;
+    for first in [100u32, u32::MAX - COUNT / 2] {
+        for order in [
+            (0..COUNT).collect::<Vec<_>>(),
+            (0..COUNT).rev().collect(),
+            (0..COUNT).step_by(2).chain((1..COUNT).step_by(2)).collect(),
+        ] {
+            let mut queue = ReassemblyQueue::new(0);
+            for (position, &index) in order.iter().enumerate() {
+                let complete = queue.push(ChunkPayloadData {
+                    tsn: first.wrapping_add(index),
+                    unordered: true,
+                    beginning_fragment: index == 0,
+                    ending_fragment: index == COUNT - 1,
+                    payload_type: PayloadProtocolIdentifier::Binary,
+                    user_data: Bytes::from(index.to_be_bytes().to_vec()),
+                    ..Default::default()
+                });
+                assert_eq!(complete, position + 1 == COUNT as usize);
+            }
+            let expected: Vec<u8> = (0..COUNT).flat_map(u32::to_be_bytes).collect();
+            assert_eq!(
+                queue
+                    .read()
+                    .unwrap()
+                    .to_payload(expected.len())
+                    .unwrap()
+                    .as_ref(),
+                expected
+            );
+            assert_eq!(queue.get_num_bytes(), 0);
+            assert!(queue.unordered_chunks.is_empty());
+            assert!(
+                queue.unordered_scan_steps <= COUNT as usize * 4,
+                "{} fragment visits for {COUNT} fragments",
+                queue.unordered_scan_steps
+            );
+        }
+    }
+}
+
+#[test]
+fn reassembly_unordered_runs_preserve_boundaries_in_every_arrival_order() {
+    for first in [100u32, u32::MAX - 2] {
+        for mut permutation in 0usize..720 {
+            let mut available: Vec<u32> = (0..6).collect();
+            let mut queue = ReassemblyQueue::new(0);
+            let mut received = [false; 6];
+            let mut delivered = [false; 2];
+            for remaining in (1..=6).rev() {
+                let index = available.remove(permutation % remaining);
+                permutation /= remaining;
+                let fragment = ChunkPayloadData {
+                    tsn: first.wrapping_add(index),
+                    unordered: true,
+                    beginning_fragment: index.is_multiple_of(3),
+                    ending_fragment: index % 3 == 2,
+                    payload_type: PayloadProtocolIdentifier::Binary,
+                    user_data: Bytes::from(vec![index as u8]),
+                    ..Default::default()
+                };
+                received[index as usize] = true;
+                let message = index as usize / 3;
+                let complete = received[message * 3..message * 3 + 3].iter().all(|v| *v);
+                assert_eq!(queue.push(fragment.clone()), complete);
+                if complete {
+                    let expected = [
+                        message as u8 * 3,
+                        message as u8 * 3 + 1,
+                        message as u8 * 3 + 2,
+                    ];
+                    assert_eq!(
+                        queue.read().unwrap().to_payload(3).unwrap().as_ref(),
+                        expected
+                    );
+                    delivered[message] = true;
+                } else {
+                    let bytes = queue.get_num_bytes();
+                    assert!(
+                        !queue.push(fragment),
+                        "retained duplicates do not complete a message"
+                    );
+                    assert_eq!(queue.get_num_bytes(), bytes);
+                }
+                assert!(queue.read().is_none());
+                assert_eq!(
+                    queue.get_num_bytes(),
+                    received.iter().filter(|v| **v).count()
+                        - delivered.iter().filter(|v| **v).count() * 3
+                );
+            }
+            assert_eq!(delivered, [true, true]);
+            assert!(queue.unordered_chunks.is_empty());
+        }
+    }
+}
+
+#[test]
+fn reassembly_unordered_forward_tsn_cuts_runs_without_reviving_messages() {
+    for first in [100u32, u32::MAX - 2] {
+        for cut in 0..4u32 {
+            let mut queue = ReassemblyQueue::new(0);
+            let fragment = |index: u32| ChunkPayloadData {
+                tsn: first.wrapping_add(index),
+                unordered: true,
+                beginning_fragment: index == 0 || index == 6,
+                ending_fragment: index == 5 || index == 8,
+                payload_type: PayloadProtocolIdentifier::Binary,
+                user_data: Bytes::from(vec![index as u8]),
+                ..Default::default()
+            };
+            for index in 0..4 {
+                assert!(!queue.push(fragment(index)));
+            }
+            queue.forward_tsn_for_unordered(first.wrapping_add(cut));
+            assert_eq!(queue.get_num_bytes(), 3 - cut as usize);
+            for index in 4..6 {
+                assert!(!queue.push(fragment(index)));
+            }
+            // The retained suffix has lost its beginning. The next message
+            // must complete separately, including when its ending arrives first.
+            assert!(!queue.push(fragment(8)));
+            assert!(!queue.push(fragment(6)));
+            assert!(queue.push(fragment(7)));
+            assert_eq!(
+                queue.read().unwrap().to_payload(3).unwrap().as_ref(),
+                &[6, 7, 8]
+            );
+            assert!(queue.read().is_none());
+            assert_eq!(queue.get_num_bytes(), 5 - cut as usize);
+            queue.forward_tsn_for_unordered(first.wrapping_add(8));
+            assert_eq!(queue.get_num_bytes(), 0);
+            assert!(queue.unordered_chunks.is_empty());
+            // Exercise the index again after every old fragment is abandoned.
+            for index in [6, 7] {
+                assert!(!queue.push(fragment(index)));
+            }
+            assert!(queue.push(fragment(8)));
+            assert_eq!(
+                queue.read().unwrap().to_payload(3).unwrap().as_ref(),
+                &[6, 7, 8]
+            );
+        }
+    }
+}

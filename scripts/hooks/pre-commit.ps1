@@ -61,6 +61,10 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     # Test-only Rust sources
     "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
     "clients/native/src/*_tests.rs", "clients/native/src/*_test.rs", "clients/native/src/*/tests.rs",
+    # Dedicated test-only sources in the vendored transport packages
+    "third_party/rtc-sctp/src/*_tests.rs", "third_party/rtc-sctp/src/*_test.rs", "third_party/rtc-sctp/src/*/tests.rs",
+    "third_party/rtc/src/*_tests.rs", "third_party/rtc/src/*_test.rs", "third_party/rtc/src/*/tests.rs",
+    "third_party/webrtc/src/*_tests.rs", "third_party/webrtc/src/*_test.rs", "third_party/webrtc/src/*/tests.rs",
     # CI/infrastructure docs
     "docs/ci-cd-*", "docs/test-*", "docs/git-hooks-*", "docs/hooks-*", "docs/pre-commit-*",
     "docs/development.md", "docs/development/*", "docs/releasing.md",

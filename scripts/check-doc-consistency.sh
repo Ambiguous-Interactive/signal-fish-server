@@ -902,6 +902,9 @@ is_internal_path() {
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs)
             return 0
             ;;
+        third_party/rtc-sctp/src/*_tests.rs|third_party/rtc-sctp/src/*_test.rs|third_party/rtc-sctp/src/*/tests.rs|third_party/rtc/src/*_tests.rs|third_party/rtc/src/*_test.rs|third_party/rtc/src/*/tests.rs|third_party/webrtc/src/*_tests.rs|third_party/webrtc/src/*_test.rs|third_party/webrtc/src/*/tests.rs)
+            return 0
+            ;;
         docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/releasing.md)
             return 0
             ;;
