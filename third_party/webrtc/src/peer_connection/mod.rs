@@ -1131,27 +1131,57 @@ impl crate::sealed::Sealed for PeerConnectionImpl {}
 impl PeerConnection for PeerConnectionImpl {
     async fn close(&self) -> Result<()> {
         let driver_handle = self.driver_handle.lock().await.take();
+        /*
+         * Cancellation still drops the owned driver handle and aborts promptly,
+         * but must not strand receivers retained by the application. Only the
+         * handle owner needs a watcher: a concurrent or repeated close leaves
+         * cleanup with that owner. Weak ownership avoids retaining the peer.
+         * Spawn before further suspension, never from a Drop handler.
+         */
+        let cleanup_done = driver_handle.as_ref().map(|_| {
+            let (cleanup_done, mut cleanup_signal) = channel::<()>(1);
+            let cleanup_inner = Arc::downgrade(&self.inner);
+            self.inner
+                .runtime
+                .spawn(Box::pin(async move {
+                    if cleanup_signal.recv().await.is_some() {
+                        return;
+                    }
+                    if let Some(inner) = cleanup_inner.upgrade() {
+                        inner.end_event_streams().await;
+                        let _ = inner.core.lock().await.close();
+                    }
+                }))
+                .detach();
+            cleanup_done
+        });
         self.inner.closing.store(true, Ordering::Release);
         self.inner.data_channel_backpressure.notify_waiters();
         {
             let mut core = self.inner.core.lock().await;
             core.close()?;
         }
-        // Best-effort wake. A send failure here is benign, not an error:
-        // `closing` already guarantees the driver terminates, and it may already
-        // have observed the flag and dropped the receiver via its independent
-        // top-of-loop exit path — in which case the channel is closed. Treating
-        // that as an error would make a perfectly clean shutdown return `Err`.
-        // overflow: awaited — `close()` is called by the application, so blocking it is
-        // correct. (The result is discarded for an unrelated reason, explained above.)
+        /*
+         * Best-effort wake. A send failure here is benign, not an error:
+         * `closing` already guarantees the driver terminates, and it may already
+         * have observed the flag and dropped the receiver via its independent
+         * top-of-loop exit path — in which case the channel is closed. Treating
+         * that as an error would make a perfectly clean shutdown return `Err`.
+         * overflow: nudge — `closing` is durable. A full queue already wakes the
+         * driver. Awaiting capacity would deadlock an in-driver callback and
+         * prevent an external close from reaching its bounded driver wait.
+         */
         let _ = self
             .inner
             .driver_event_tx
-            .send(PeerConnectionDriverEvent::Close)
-            .await;
+            .try_send(PeerConnectionDriverEvent::Close);
 
-        let driver_stopped = self.driver_stopped.lock().await.take();
         if let Some(driver_handle) = driver_handle {
+            /*
+             * Only the task-handle owner may consume completion. A concurrent
+             * closer must not discard it while this caller waits for the core.
+             */
+            let driver_stopped = self.driver_stopped.lock().await.take();
             if is_polling_driver(&self.inner) {
                 // Called from an application callback, which runs on the driver task itself.
                 // Waiting for the driver cannot succeed until this callback returns, and aborting
@@ -1182,6 +1212,9 @@ impl PeerConnection for PeerConnectionImpl {
         // The driver will deliver no more events, so end every stream an application task may
         // be blocked on. `closing` is already set above, which `end_event_streams` requires.
         self.inner.end_event_streams().await;
+        if let Some(cleanup_done) = cleanup_done {
+            let _ = cleanup_done.try_send(());
+        }
 
         Ok(())
     }
@@ -1735,6 +1768,99 @@ mod tests {
                 .expect("driver should be woken within 1s")
                 .expect("driver event channel should not be closed");
             assert!(matches!(event, PeerConnectionDriverEvent::WriteNotify));
+        }));
+    }
+
+    // #1154: a full application queue cannot be drained by its own callback.
+    #[test]
+    fn close_wake_never_waits_for_driver_queue_capacity() {
+        use futures::FutureExt;
+
+        let rt = default_runtime().unwrap();
+        rt.block_on(Box::pin(async {
+            for in_driver in [true, false] {
+                for queue_full in [true, false] {
+                    let (inner, mut events) = new_test_peer_connection().await;
+                    if queue_full {
+                        inner
+                            .driver_event_tx
+                            .try_send(PeerConnectionDriverEvent::WriteNotify)
+                            .unwrap();
+                    }
+                    let (sender, mut receiver) = channel(1);
+                    inner.data_channel_events_tx.lock().await.insert(0, sender);
+                    let pc = Arc::new(PeerConnectionImpl {
+                        inner: inner.clone(),
+                        driver_handle: Mutex::new(None),
+                        driver_stopped: Mutex::new(None),
+                    });
+                    let closing = pc.clone();
+                    let operation = async move { closing.close().await.unwrap() };
+                    let completed = if in_driver {
+                        DriverTask::new(&inner, operation).now_or_never()
+                    } else {
+                        operation.now_or_never()
+                    };
+                    assert!(
+                        completed.is_some(),
+                        "close must not wait for its own wake: in_driver={in_driver}, queue_full={queue_full}"
+                    );
+                    assert!(inner.is_closing());
+                    assert!(receiver.recv().await.is_none(), "close ends retained event streams");
+                    pc.close().await.unwrap();
+                    assert!(matches!(
+                        pc.create_data_channel("late", None).await,
+                        Err(Error::ErrConnectionClosed)
+                    ));
+                    let wake = events.recv().await.unwrap();
+                    assert!(if queue_full {
+                        matches!(wake, PeerConnectionDriverEvent::WriteNotify)
+                    } else {
+                        matches!(wake, PeerConnectionDriverEvent::Close)
+                    });
+                }
+            }
+        }));
+    }
+
+    // #1154: concurrent callers retain graceful completion with its task owner.
+    #[test]
+    fn concurrent_close_keeps_the_driver_completion_receiver_with_its_owner() {
+        use futures::FutureExt;
+
+        let rt = default_runtime().unwrap();
+        rt.block_on(Box::pin(async {
+            let (inner, _events) = new_test_peer_connection().await;
+            let (stopped_sender, stopped_receiver) = channel(1);
+            let pc = PeerConnectionImpl {
+                inner: inner.clone(),
+                driver_handle: Mutex::new(Some(DriverHandle {
+                    task: rt.spawn(Box::pin(std::future::pending())),
+                    detached: false,
+                })),
+                driver_stopped: Mutex::new(Some(stopped_receiver)),
+            };
+            let core = inner.core.lock().await;
+            let first = pc.close();
+            futures::pin_mut!(first);
+            assert!(first.as_mut().now_or_never().is_none());
+            drop(core);
+
+            /*
+             * The later caller can acquire the unfair core mutex before the
+             * original caller is scheduled again. It does not own the driver.
+             */
+            assert!(pc.close().now_or_never().is_some());
+            assert!(
+                !stopped_sender.is_closed(),
+                "a concurrent closer must not discard the owner's flush completion receiver"
+            );
+            assert!(
+                first.as_mut().now_or_never().is_none(),
+                "the driver owner must still wait for graceful exit"
+            );
+            drop(stopped_sender);
+            first.await.unwrap();
         }));
     }
 }

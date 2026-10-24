@@ -143,6 +143,13 @@ impl Stream<'_> {
         {
             return Ok(None);
         }
+        let was_full = !self.association.retired
+            && self
+                .association
+                .streams
+                .get(&self.stream_identifier)
+                .is_some_and(StreamState::has_readable_data)
+            && self.association.get_my_receiver_window_credit() == 0;
         if let Some(s) = self
             .association
             .streams
@@ -162,6 +169,16 @@ impl Stream<'_> {
                     self.association
                         .retry_deferred_resets(self.stream_identifier);
                 }
+            }
+            if chunks.is_some()
+                && was_full
+                && !self.association.retired
+                && self.association.get_my_receiver_window_credit() > 0
+            {
+                /* Reopen a zero window now; reads with remaining credit keep normal ACK policy. */
+                self.association.ack_state = super::AckState::Immediate;
+                self.association.timers.stop(super::Timer::Ack);
+                self.association.awake_write_loop();
             }
             Ok(chunks)
         } else {
@@ -325,6 +342,9 @@ impl Stream<'_> {
 
     /// stop closes the read-direction of the stream.
     /// Future calls to read are not permitted after calling stop.
+    /// During graceful association shutdown, discard this generation's unread
+    /// DATA so receive pressure cannot prevent the peer's admitted tail draining.
+    /// Saved reset generations retain their separate readers.
     ///
     /// `now` is the instant the caller is acting at: resetting the stream queues an outgoing
     /// chunk, so it is on the same write path as [`write_sctp`](Self::write_sctp).
@@ -358,14 +378,23 @@ impl Stream<'_> {
         if reset {
             // Reset the outgoing stream
             // https://tools.ietf.org/html/rfc6525
-            self.association
-                .send_reset_request(now, self.stream_identifier)?;
+            if !matches!(
+                self.association.state(),
+                AssociationState::ShutdownPending
+                    | AssociationState::ShutdownReceived
+                    | AssociationState::ShutdownSent
+                    | AssociationState::ShutdownAckSent
+            ) {
+                self.association
+                    .send_reset_request(now, self.stream_identifier)?;
+            }
             // A locally stopped reader cannot drain an already deferred
             // incoming reset. Re-evaluate it after the read direction closes.
             self.association
                 .retry_deferred_resets(self.stream_identifier);
         }
 
+        self.association.discard_stopped_read_data_during_shutdown();
         Ok(())
     }
 

@@ -1755,6 +1755,20 @@ class Orchestrator {
         this.startGameGate.snapshot(parsePlayerIds(data['ready_players']));
         break;
       case 'RoomLeft':
+        // Room membership owns physical gameplay and scheduled room writes.
+        // Keep recorded exchange debt, but fence all pending old-room work.
+        for (const peer of Array.from(this.expectedPeers)) this.removePairObligation(peer);
+        this.peerTasks.clear();
+        this.present.clear();
+        this.inLobby = false;
+        this.gameStarted = false;
+        this.readySent = false;
+        this.webrtcPlanSeen = false;
+        this.transportStatus = null;
+        this.lastIceServers = [];
+        this.p2pDeadline = null;
+        this.relaySendAt = null;
+        this.exchangeRetryAt = null;
         accountability.resetRoom();
         this.initialSessionPlanPending = false;
         this.pendingMembershipPlans.clear();

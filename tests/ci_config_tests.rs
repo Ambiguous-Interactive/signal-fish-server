@@ -32340,6 +32340,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("webrtc", "sctp_reset_loss_ --features runtime-mock"),
         ("webrtc", "fatal_socket_loss_ --features runtime-mock"),
         ("webrtc", "data_channel::tests"),
+        ("rtc", "peer_close_retires_all_channel_states"),
         ("rtc", "statistics"),
         ("rtc", "remote_dcep_"),
         ("rtc", "peer_connection::handler::sctp::tests"),

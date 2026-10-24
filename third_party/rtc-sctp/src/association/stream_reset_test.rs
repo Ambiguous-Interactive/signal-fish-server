@@ -1993,6 +1993,145 @@ fn graceful_shutdown_without_data_retires_after_final_packet() -> Result<()> {
     Ok(())
 }
 
+// Issue #1145: a reader must reopen a zero window without waiting for a DATA retry.
+#[test]
+fn application_read_reopens_full_window_during_gameplay_and_shutdown() -> Result<()> {
+    for (name, local_shutdown, remote_shutdown) in [
+        ("gameplay", false, false),
+        ("local shutdown", true, false),
+        ("peer shutdown", false, true),
+        ("simultaneous shutdown", true, true),
+    ] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.ack_mode = AckMode::NoDelay;
+        remote.ack_mode = AckMode::NoDelay;
+        local.rwnd = 3;
+        remote.max_receive_buffer_size = 3;
+        let first = Bytes::from_static(b"old");
+        let tail = [b"a".as_slice(), b"b", b"c"];
+        local
+            .stream(1)?
+            .write_sctp(now, &first, PayloadProtocolIdentifier::Binary)?;
+        for payload in tail {
+            local.stream(1)?.write(now, payload)?;
+        }
+        if local_shutdown {
+            local.shutdown()?;
+        }
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        if remote_shutdown {
+            remote.shutdown()?;
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(local.rwnd, 0);
+        assert!(local.inflight_queue.is_empty());
+        assert_eq!(local.pending_queue.len(), 3);
+        assert_eq!(remote.get_my_receiver_window_credit(), 0);
+        assert_eq!(
+            remote
+                .stream(1)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(3)?
+                .freeze(),
+            first
+        );
+        assert_eq!(remote.get_my_receiver_window_credit(), 3);
+        let updates = remote.gather_outbound(now).0;
+        assert!(
+            !updates.is_empty(),
+            "{name}: the read must advertise reopened credit"
+        );
+        for raw in updates {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(local.rwnd, 3);
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(
+            local.pending_queue.is_empty(),
+            "all admitted tail DATA must leave without a retry timer"
+        );
+        for payload in tail {
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(3)?
+                    .freeze()
+                    .as_ref(),
+                payload
+            );
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        if local_shutdown || remote_shutdown {
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert_eq!(local.state(), AssociationState::Closed);
+            assert_eq!(remote.state(), AssociationState::Closed);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_window_update_preserves_delayed_ack_and_empty_read_policy() -> Result<()> {
+    for full in [false, true] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        remote.ack_mode = AckMode::Normal;
+        remote.max_receive_buffer_size = if full { 1 } else { 2 };
+        local.stream(1)?.write(now, b"x")?;
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(remote.ack_state, AckState::Delay);
+        let ack_at = remote.timers.get(Timer::Ack).unwrap();
+        assert!(remote.stream(1)?.read_sctp()?.is_some());
+        assert_eq!(
+            remote.ack_state,
+            if full {
+                AckState::Immediate
+            } else {
+                AckState::Delay
+            }
+        );
+        assert_eq!(
+            remote.timers.get(Timer::Ack),
+            if full { None } else { Some(ack_at) }
+        );
+        let updates = remote.gather_outbound(now).0;
+        assert_eq!(!updates.is_empty(), full);
+        assert!(remote.stream(1)?.read_sctp()?.is_none());
+        assert!(
+            remote.gather_outbound(now).0.is_empty(),
+            "an empty read must not emit a window update"
+        );
+        if !full {
+            assert_eq!(remote.timers.get(Timer::Ack), Some(ack_at));
+            remote.handle_timeout(ack_at);
+            assert!(!remote.gather_outbound(ack_at).0.is_empty());
+        }
+    }
+    Ok(())
+}
+
 // Issue #1145: transport completion must not discard an unread accepted tail.
 #[test]
 fn graceful_shutdown_preserves_messages_until_application_reads() -> Result<()> {
@@ -2151,7 +2290,13 @@ fn graceful_shutdown_allows_stopping_an_unread_closed_tail() -> Result<()> {
 // Issue #1145: terminal close must retain DATA held across a stream reset.
 #[test]
 fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
-    for disposition in ["read", "stop", "abort", "transport close"] {
+    for disposition in [
+        "read",
+        "stop",
+        "stop while draining",
+        "abort",
+        "transport close",
+    ] {
         let (a, mut b) = reset_pair();
         let now = Instant::now();
         let old = ChunkPayloadData {
@@ -2186,6 +2331,22 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
             ..old
         })?;
         assert!(b.deferred_reset_reassembly.get(&1).unwrap().is_readable());
+        if disposition == "stop while draining" {
+            b.set_state(AssociationState::ShutdownPending);
+            b.stream(1)?.stop(now)?;
+            assert!(b.deferred_reset_reassembly.is_empty());
+            assert_eq!(
+                b.streams
+                    .get(&1)
+                    .unwrap()
+                    .get_num_bytes_in_reassembly_queue(),
+                21
+            );
+            assert!(
+                b.stream(1)?.is_readable(),
+                "the saved generation keeps its reader"
+            );
+        }
         b.close(AssociationError::AssociationClosed)?;
         b.endpoint_events.push_back(EndpointEventInner::Drained);
         assert!(b.poll_endpoint_event().is_none());
@@ -2213,7 +2374,7 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
             );
             continue;
         }
-        {
+        if disposition != "stop while draining" {
             let mut old_stream = b.stream(1)?;
             if disposition == "stop" {
                 old_stream.stop(now)?;
@@ -2312,6 +2473,138 @@ fn graceful_shutdown_does_not_revive_stopped_receivers() -> Result<()> {
         );
         assert!(local.poll_endpoint_event().is_none());
         assert!(local.poll_timeout().is_none());
+    }
+    Ok(())
+}
+
+// Issue #1145: stopping reads during graceful drain must release receive pressure.
+#[test]
+fn graceful_shutdown_stop_drains_peer_tail_without_reopening_reads() -> Result<()> {
+    for (peer_shutdown, stop_before_shutdown) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.ack_mode = AckMode::NoDelay;
+        remote.ack_mode = AckMode::NoDelay;
+        local.max_receive_buffer_size = 3;
+        remote.rwnd = 3;
+        remote.stream(1)?.write(now, b"old")?;
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert_eq!(local.get_my_receiver_window_credit(), 0);
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        assert!(remote.inflight_queue.is_empty());
+        let expected = Bytes::from_static(b"local admitted tail");
+        local
+            .stream(1)?
+            .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+        if stop_before_shutdown {
+            local.stream(1)?.stop(now)?;
+            assert_eq!(
+                local.get_my_receiver_window_credit(),
+                0,
+                "established reset pressure stays unchanged"
+            );
+        }
+        if peer_shutdown {
+            remote.shutdown()?;
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert_eq!(local.state(), AssociationState::ShutdownReceived);
+        } else {
+            for payload in [b"tail".as_slice(), b"last"] {
+                remote.stream(1)?.write(now, payload)?;
+            }
+            assert!(!remote.pending_queue.is_empty());
+            local.shutdown()?;
+            assert_eq!(local.state(), AssociationState::ShutdownPending);
+        }
+        local.stream(1)?.stop(now)?;
+        local.stream(1)?.stop(now)?;
+        assert!(!local.stream(1)?.is_readable());
+        assert!(local.stream(1)?.read_sctp().is_err());
+        assert_eq!(local.get_my_receiver_window_credit(), 3);
+        let mut received = vec![];
+        for _ in 0..20 {
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                if remote.streams.contains_key(&1) {
+                    while let Some(message) = remote.stream(1)?.read_sctp()? {
+                        received.push(message.to_payload(100)?.freeze());
+                    }
+                }
+            }
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            if local.state() == AssociationState::Closed
+                && remote.state() == AssociationState::Closed
+            {
+                break;
+            }
+        }
+        assert_eq!(received, vec![expected]);
+        assert_eq!(
+            local.peer_last_tsn,
+            remote.my_next_tsn.wrapping_sub(1),
+            "all peer DATA is received or deliberately discarded"
+        );
+        assert_eq!(
+            remote.cumulative_tsn_ack_point,
+            remote.my_next_tsn.wrapping_sub(1),
+            "the peer tail is cumulatively acknowledged"
+        );
+        for endpoint in [&mut local, &mut remote] {
+            assert_eq!(endpoint.state(), AssociationState::Closed);
+            // Terminal closure does not need a reciprocal stream-reset marker.
+            assert_eq!(endpoint.pending_queue.get_num_bytes(), 0);
+
+            assert!(endpoint.inflight_queue.is_empty());
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(endpoint.poll_endpoint_event().is_some());
+            assert!(endpoint.poll_endpoint_event().is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn graceful_shutdown_stop_accepts_every_draining_state() -> Result<()> {
+    for state in [
+        AssociationState::ShutdownPending,
+        AssociationState::ShutdownReceived,
+        AssociationState::ShutdownSent,
+        AssociationState::ShutdownAckSent,
+    ] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        remote.stream(1)?.write(now, b"unread")?;
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        local.set_state(state);
+        local.stream(1)?.stop(now)?;
+        local.stream(1)?.stop(now)?;
+        assert!(!local.stream(1)?.is_readable(), "{state:?}");
+        assert!(local.stream(1)?.read_sctp().is_err(), "{state:?}");
+        assert!(!local.has_readable_data(), "{state:?}");
+        assert!(
+            local.pending_queue.is_empty(),
+            "stop must not start a new reset in {state:?}"
+        );
+        assert_eq!(
+            local
+                .streams
+                .get(&1)
+                .unwrap()
+                .get_num_bytes_in_reassembly_queue(),
+            0
+        );
     }
     Ok(())
 }

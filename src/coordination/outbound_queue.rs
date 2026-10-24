@@ -951,6 +951,8 @@ impl Drop for OutboundSender {
 pub struct OutboundReceiver {
     shared: Arc<SharedQueue>,
     batch_remaining: usize,
+    #[cfg(test)]
+    batch_phase_visits: usize,
 }
 
 impl Drop for OutboundReceiver {
@@ -1005,6 +1007,8 @@ fn channel_inner(
         OutboundReceiver {
             shared,
             batch_remaining: 0,
+            #[cfg(test)]
+            batch_phase_visits: 0,
         },
     )
 }
@@ -2182,11 +2186,28 @@ impl OutboundReceiver {
             else {
                 return Err(BatchedPopState::Empty);
             };
-            let phase_len = state
-                .data
-                .iter()
-                .take_while(|item| item.generation == state.receive_generation)
-                .count();
+            /*
+             * Only a new Latest batch needs a depth threshold. Counting more
+             * than one batch, or recounting while a batch is armed, makes a
+             * full-lane drain quadratic without changing any release choice.
+             */
+            let phase_len =
+                if front_class == Some(DeliveryClass::Latest) && self.batch_remaining == 0 {
+                    state
+                        .data
+                        .iter()
+                        .take(batch_size)
+                        .inspect(|_| {
+                            #[cfg(test)]
+                            {
+                                self.batch_phase_visits = self.batch_phase_visits.saturating_add(1);
+                            }
+                        })
+                        .take_while(|item| item.generation == state.receive_generation)
+                        .count()
+                } else {
+                    0
+                };
             // Only a `Latest` front waits (and starts a batch);
             // control/Reliable/Volatile release immediately and never arm one,
             // so a trailing Latest keeps its coalesce wait (#198). The legacy
@@ -3361,6 +3382,98 @@ mod tests {
         let (gap, successor) = waiter.await.unwrap();
         assert_eq!(report(gap).gaps[0].from_seq, 1);
         assert_eq!(message_id(&successor), 2);
+    }
+
+    // #1155: draining a full lane must not rescan its tail on every pop.
+    #[tokio::test(start_paused = true)]
+    async fn batching_phase_work_is_linear_in_queued_rows() {
+        const DEPTH: usize = 1_024;
+        for (mode, fixed_class) in [
+            ("reliable", Some(DeliveryClass::Reliable)),
+            ("volatile", Some(DeliveryClass::Volatile)),
+            ("latest", Some(DeliveryClass::Latest)),
+            ("mixed", None),
+        ] {
+            let (tx, mut rx) = channel(DEPTH, 4);
+            tx.set_protocol_version(3);
+            let depth = u64::try_from(DEPTH).unwrap();
+            let class_for = |seq| {
+                fixed_class.unwrap_or_else(|| {
+                    if (seq - 1) % 32 == 0 {
+                        DeliveryClass::Latest
+                    } else if seq % 2 == 0 {
+                        DeliveryClass::Reliable
+                    } else {
+                        DeliveryClass::Volatile
+                    }
+                })
+            };
+            for seq in 1..=depth {
+                let class = class_for(seq);
+                let key = (class == DeliveryClass::Latest).then_some(u32::try_from(seq).unwrap());
+                tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
+            }
+            let started = Instant::now();
+            for seq in 1..=depth {
+                if seq % 17 == 0 {
+                    tx.try_enqueue_control(message(depth + seq)).unwrap();
+                    let control = rx.recv_batched(32, Duration::ZERO).await.unwrap().unwrap();
+                    assert!(control.is_control());
+                    assert_eq!(message_id(&control), depth + seq);
+                }
+                let item = rx.recv_batched(32, Duration::ZERO).await.unwrap().unwrap();
+                assert_eq!(message_id(&item), seq);
+                assert_eq!(item.class(), Some(class_for(seq)));
+            }
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            assert_eq!(rx.len(), 0);
+            let budget = if matches!(
+                fixed_class,
+                Some(DeliveryClass::Reliable | DeliveryClass::Volatile)
+            ) {
+                0
+            } else {
+                DEPTH
+            };
+            assert!(
+                rx.batch_phase_visits <= budget,
+                "{mode}: {} phase visits exceed {budget} for {DEPTH} rows",
+                rx.batch_phase_visits
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn batching_depth_threshold_stops_at_the_generation_barrier() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Latest, Some(1), 1))
+            .unwrap();
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .unwrap();
+        for seq in [2, 3] {
+            tx.try_enqueue_data(data(seq, DeliveryClass::Reliable, None, seq))
+                .unwrap();
+        }
+        let interval = Duration::from_millis(16);
+        let mut first = Box::pin(rx.recv_batched(2, interval));
+        assert!(
+            futures_util::poll!(first.as_mut()).is_pending(),
+            "future-generation rows cannot complete the current Latest batch"
+        );
+        tokio::time::advance(interval).await;
+        assert_eq!(message_id(&first.await.unwrap().unwrap()), 1);
+        let barrier = rx.recv_batched(2, interval).await.unwrap().unwrap();
+        assert!(matches!(barrier.payload, OutboundPayload::Message(message)
+            if matches!(message.as_ref(), ServerMessage::RoomLeft)));
+        let after_barrier = Instant::now();
+        for seq in [2, 3] {
+            assert_eq!(
+                message_id(&rx.recv_batched(2, interval).await.unwrap().unwrap()),
+                seq
+            );
+        }
+        assert_eq!(after_barrier.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]

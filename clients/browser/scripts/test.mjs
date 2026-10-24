@@ -17,6 +17,7 @@ for (const entryPoint of [
   'src/page/peer-work.test.ts',
   'src/page/queued-retry.test.ts',
   'src/page/queued-lifecycle.test.ts',
+  'src/page/room-left.test.ts',
   'src/page/partial-channel.test.ts',
   'src/page/mesh-debt.test.ts',
   'src/page/buffered-retirement.test.ts',

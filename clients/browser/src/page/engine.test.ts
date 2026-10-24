@@ -1300,3 +1300,164 @@ for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
 console.error(
   'ok - browser diagnostics distinguish raw receipt, admission, rejection, and SCTP failure',
 );
+
+/* Regression #1157: preserve normalized byte charges without allocating
+ * another payload buffer for every gameplay receipt. */
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  const OriginalEncoder = globalThis.TextEncoder;
+  const OriginalArray = globalThis.Uint8Array;
+  const encoder = new OriginalEncoder();
+  const values: Array<string | ArrayBuffer> = [
+    '',
+    'movement',
+    '\ufeff雪🌊',
+    '\ud800',
+    '\udfff',
+    ...[128, 512, 2048, 8192, 32768].map((size) => 'x'.repeat(size)),
+    'x'.repeat(65536),
+    'x'.repeat(65537),
+    'é'.repeat(32768),
+    'é'.repeat(32769),
+    'x'.repeat(65532) + '🌊',
+    'x'.repeat(65533) + '🌊',
+    'x'.repeat(65533) + '\ud800',
+    'x'.repeat(65534) + '\ud800',
+    Uint8Array.of(0xef, 0xbb, 0xbf, 0x61).buffer,
+    new Uint8Array(21845).fill(0x80).buffer,
+    new Uint8Array(21846).fill(0x80).buffer,
+  ];
+  for (const text of values.filter((value): value is string => typeof value === 'string')) {
+    values.push(encoder.encode(text).buffer);
+  }
+  const fixtures = values.map((data) => {
+    const text =
+      typeof data === 'string'
+        ? data
+        : new TextDecoder('utf-8', { ignoreBOM: true }).decode(data);
+    const bytes = encoder.encode(text).byteLength;
+    return { data, text, bytes, accepted: bytes <= 65536 };
+  });
+  let payloadBuffers = 0;
+  let encodedBytes = 0;
+  const scratchSizes: number[] = [];
+  class CountingEncoder extends OriginalEncoder {
+    override encode(input?: string): Uint8Array<ArrayBuffer> {
+      const result = super.encode(input);
+      payloadBuffers += 1;
+      encodedBytes += result.byteLength;
+      return result;
+    }
+  }
+  let connection!: Connection;
+  class Channel {
+    readyState = 'open';
+    readonly ordered: boolean;
+    readonly maxRetransmits: number | null;
+    readonly maxPacketLifeTime = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    constructor(readonly label: string) {
+      this.ordered = label === RELIABLE_LABEL;
+      this.maxRetransmits = this.ordered ? null : 0;
+    }
+    close() {
+      this.readyState = 'closed';
+    }
+  }
+  class Connection {
+    connectionState = 'connected';
+    ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+    constructor() {
+      connection = this;
+    }
+    close() {}
+  }
+  try {
+    globalThis.TextEncoder = CountingEncoder;
+    globalThis.Uint8Array = new Proxy(OriginalArray, {
+      construct(target, argumentsList, newTarget) {
+        if (typeof argumentsList[0] === 'number') scratchSizes.push(argumentsList[0]);
+        return Reflect.construct(target, argumentsList, newTarget);
+      },
+    });
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      let received: Array<{ text: string; bytes: number }> = [];
+      let closed = 0;
+      let largestBytes = 0;
+      const firstScratch = scratchSizes.length;
+      const engine = new Engine(false, {
+        onLocalCandidate: () => {},
+        onPcState: () => {},
+        onChannelOpen: () => {},
+        onChannelClosed: () => {
+          closed += 1;
+        },
+        onChannelMessage: (_peer, _generation, _label, text, bytes) => {
+          received.push({ text, bytes });
+        },
+      });
+      for (const fixture of fixtures) {
+        received = [];
+        closed = 0;
+        await engine.pairWith('peer', false, []);
+        const channel = new Channel(label);
+        connection.ondatachannel?.({ channel });
+        const beforeScratch = scratchSizes.length;
+        const repeats = fixture.accepted ? 3 : 1;
+        for (let repeat = 0; repeat < repeats; repeat += 1) {
+          channel.onmessage?.({ data: fixture.data });
+        }
+        if (fixture.text.length === 0) {
+          assert(scratchSizes.length === beforeScratch, 'empty receipts need no sizing buffer');
+        }
+        assert(
+          received.length === (fixture.accepted ? repeats : 0),
+          `${label}/${typeof fixture.data}/${fixture.bytes}: preserve admission boundary`,
+        );
+        if (fixture.accepted) {
+          assert(
+            received.every(
+              ({ text, bytes }) => text === fixture.text && bytes === fixture.bytes,
+            ),
+            `${label}/${fixture.bytes}: preserve text normalization and exact backlog charge`,
+          );
+          assert(closed === 0, 'accepted gameplay keeps its link usable');
+          assert(
+            scratchSizes.length - beforeScratch <= 1,
+            'repeated receipts reuse sizing storage',
+          );
+          largestBytes = Math.max(largestBytes, fixture.bytes);
+          const retainedCapacity =
+            scratchSizes.length === firstScratch ? 0 : scratchSizes.at(-1)!;
+          assert(
+            retainedCapacity <= Math.max(256, Math.min(65536, largestBytes * 6)),
+            'small gameplay must not reserve the maximum payload buffer',
+          );
+        } else {
+          assert(closed === 1, 'oversized normalized gameplay closes the pair once');
+        }
+        engine.removePeer('peer');
+      }
+      const sizes = scratchSizes.slice(firstScratch);
+      assert(sizes.length <= 9, 'sizing storage has a bounded number of growth steps');
+      assert(
+        sizes.every(
+          (size, index) => size <= 65536 && (index === 0 || size > sizes[index - 1]!),
+        ),
+        'sizing storage grows monotonically and remains bounded across peer replacement',
+      );
+    }
+    assert(
+      payloadBuffers === 0,
+      `receive sizing allocated ${payloadBuffers} payload buffers (${encodedBytes} bytes)`,
+    );
+  } finally {
+    globalThis.TextEncoder = OriginalEncoder;
+    globalThis.Uint8Array = OriginalArray;
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - receive sizing preserves UTF-8 boundaries without per-message payload buffers',
+);

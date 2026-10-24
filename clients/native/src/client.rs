@@ -1791,17 +1791,7 @@ impl Orchestrator<'_> {
         for peer in self.expected_peers.clone() {
             self.remove_pair_obligation(peer).await;
         }
-        // A fresh callback channel prevents old engine work from crossing the
-        // restore boundary even if an async callback finishes after closure.
-        let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-        self.engine = Engine::new(self.cli.engine_settings(), engine_tx).map_err(|error| {
-            FatalError::protocol(format!("webrtc engine init failed: {error:#}"))
-        })?;
-        self.engine_rx = engine_rx;
-        let (selected_pair_tx, selected_pair_rx) = mpsc::unbounded_channel();
-        self.selected_pair_tx = selected_pair_tx;
-        self.selected_pair_rx = selected_pair_rx;
-        self.selected_pair_evidence = SelectedPairEvidence::default();
+        self.reset_peer_engine()?;
         self.current_session_generation = None;
         self.pending_signals.clear();
         self.pending_pair_directives.clear();
@@ -2172,7 +2162,8 @@ impl Orchestrator<'_> {
     }
 
     async fn process_p2p_rebuild_gate(&mut self, now: Instant) -> Result<(), FatalError> {
-        if self.p2p_rebuild_released
+        if self.lobby_state.is_none()
+            || self.p2p_rebuild_released
             || !self.exchange_ready_reported
             || self
                 .p2p_rebuild_release_poll_at
@@ -2218,7 +2209,8 @@ impl Orchestrator<'_> {
     }
 
     async fn process_p2p_gate(&mut self, now: Instant) -> Result<(), FatalError> {
-        if self.p2p_released
+        if self.lobby_state.is_none()
+            || self.p2p_released
             || self
                 .p2p_release_poll_at
                 .is_some_and(|poll_at| now < poll_at)
@@ -2504,6 +2496,29 @@ impl Orchestrator<'_> {
                     .snapshot(payload.ready_players.iter().copied());
             }
             ServerMessage::RoomLeft => {
+                for peer in self.expected_peers.clone() {
+                    self.remove_pair_obligation(peer).await;
+                }
+                self.reset_peer_engine()?;
+                self.present.clear();
+                self.in_lobby = false;
+                self.ready_sent = false;
+                self.game_started = false;
+                self.webrtc_plan_seen = false;
+                self.transport_status = None;
+                self.last_ice_servers.clear();
+                self.p2p_deadline = None;
+                self.p2p_retry_at = None;
+                self.p2p_release_poll_at = None;
+                self.p2p_rebuild_release_poll_at = None;
+                self.deferred_exchange.clear();
+                self.exchange_release_poll_at = None;
+                self.unreliable_exchange_release_poll_at = None;
+                self.relay_send_at = None;
+                self.reconnect_poll_at = None;
+                self.reconnection_token = None;
+                self.peer_status_from.clear();
+                self.drop_ice_from = None;
                 self.accountability.reset_room();
                 self.initial_session_plan_pending = false;
                 self.pending_membership_plans.clear();
@@ -3295,6 +3310,20 @@ impl Orchestrator<'_> {
         .is_empty();
         self.p2p_retry_at = another_retry_possible
             .then(|| checked_deadline(now, p2p_retry_delay(self.cli.p2p_timeout_secs)));
+        Ok(())
+    }
+
+    fn reset_peer_engine(&mut self) -> Result<(), FatalError> {
+        /* Old callbacks must not cross room leave or restore, including retained receipts. */
+        let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+        self.engine = Engine::new(self.cli.engine_settings(), engine_tx).map_err(|error| {
+            FatalError::protocol(format!("webrtc engine init failed: {error:#}"))
+        })?;
+        self.engine_rx = engine_rx;
+        let (selected_pair_tx, selected_pair_rx) = mpsc::unbounded_channel();
+        self.selected_pair_tx = selected_pair_tx;
+        self.selected_pair_rx = selected_pair_rx;
+        self.selected_pair_evidence = SelectedPairEvidence::default();
         Ok(())
     }
 
@@ -6254,3 +6283,7 @@ mod negotiation_tests;
 #[cfg(test)]
 #[path = "peer_loss_tests.rs"]
 mod peer_loss_tests;
+
+#[cfg(test)]
+#[path = "client_room_left_tests.rs"]
+mod room_left_tests;

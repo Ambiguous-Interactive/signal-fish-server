@@ -118,6 +118,13 @@ The endpoint keeps routing through terminal packet transmission and unread
 message drain. Paired controls cover fragments, small receive windows, DATA
 loss, shutdown and ACK loss, simultaneous close, and delayed application reads.
 See [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+Reading a full receive queue now advertises its reopened window at the next
+transmit poll. Pending gameplay and graceful shutdown drain can resume without
+waiting for a zero-window probe. Reads with remaining credit keep the existing
+delayed-ACK policy. Empty and terminal reads do not send window updates.
+Paired-wire controls preserve exact admitted tail order without advancing time
+and verify delayed-ACK and empty-read behavior. Replacement qualification must
+retain these controls.
 Endpoints now answer repeated out-of-association SHUTDOWN ACK packets with a
 standalone SHUTDOWN COMPLETE. The reply reflects the received tag and sets
 its T bit. The Sans-I/O driver drains endpoint replies even without a live
@@ -132,3 +139,12 @@ simultaneous close, preserve an unread tail through recovery, and cover
 malformed packets, ABORT precedence, unrelated controls, and tag/port mismatch.
 See [#1147](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1147).
 Replacement qualification in #912 must retain these acknowledgment controls.
+Stopping reads during graceful shutdown now discards the stopped generation's
+receive queue and advertises the released window. Later DATA for that stopped
+generation is acknowledged without retaining unreadable payloads. Admitted
+outgoing DATA still drains. Saved reset generations keep their own readers.
+The same cleanup runs when graceful shutdown starts after reads were stopped.
+Ordinary established stream reset keeps its existing receive pressure.
+Paired controls cover local and peer shutdown, stopping before and during drain,
+a full receive window, repeated stop, exact outgoing bytes, and final retirement.
+State controls cover all four shutdown states and saved next-generation reads.

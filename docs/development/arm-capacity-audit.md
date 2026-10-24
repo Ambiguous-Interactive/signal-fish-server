@@ -5205,3 +5205,196 @@ Historical duplicate-key decoding and malformed-input errors stay covered.
 Run the capacity-runner target with the `artifacts::tests::replay_` and
 `artifacts::tests::jsonl_` filters. These checks do not establish server
 capacity or explain earlier generator stalls.
+
+### Compact the index for sends recorded out of order (#775)
+
+Artifact replay now indexes unordered sends with four-byte offsets when the
+send count fits `u32`. The sort key includes the original offset, so duplicate
+keys retain their raw order and lookup still selects the last recorded send.
+The sort needs no separate stable-sort buffer. Canonical sorted sends still
+borrow sender blocks. Larger explicitly admitted inputs keep the wide index.
+Neither path changes raw events, epoch attribution, or artifact order.
+
+A red control retained 136 index bytes for 17 sends before the change. It now
+fits 68 bytes. The focused oracle and replay controls pass, including duplicate
+keys with different phases and epochs, sparse and extreme sequences, unknown
+senders, latency pairing, exact byte accounting, and full replay verdicts.
+The wide fallback and canonical path retain their independent controls.
+
+Seven fresh processes use one fixed executable and one million sends. The
+fixture has 64 sender names, repeated keys, and three interleaved epochs. It
+keeps the unchanged relay ledger index alive beside the send lookup index.
+Three alternating old/new pairs produce the same order checksum:
+
+| Measurement | Previous index | Compact index |
+| --- | --- | --- |
+| Send lookup index bytes | 8,000,000 | 4,000,000 |
+| Unchanged relay index bytes | 12,582,912 | 12,582,912 |
+| Median retained process RSS bytes | 94,552,064 | 90,746,880 |
+| Median peak child RSS KiB | 99,668 | 88,164 |
+
+The lookup index uses 50% less storage. Observed median peak RSS is 11.5% lower
+in this synthetic cohort. All six unordered runs and the sorted control emit
+checksum `1809168194542782856`. The canonical control retains only 1,536 lookup
+index bytes. Its fixture first sorts raw sends, so its process peak is not a
+comparable lookup-index measurement.
+
+Reproduce with the capacity-runner test executable and `--ignored --exact
+oracle::coverage_tests::generator_reordered_send_index_memory_profile
+--nocapture`. Set `CAPACITY_SEND_INDEX_PROBE_KIND` to `legacy`, `compact`, or
+`ordered`. `CAPACITY_SEND_INDEX_PROBE_COUNT` defaults to `1000000`. On Linux,
+collect each fresh child's peak RSS with `wait4` resource usage.
+
+Native compilation and tests overlapped this session's work. The host remains
+shared; these observations do not establish a runtime bound or causal timing
+improvement. This change measures lookup-index storage and one synthetic
+process shape. It does not bound complete default-budget process memory,
+stream retained records, qualify a long live cell on this change, explain
+historical generator stalls, or establish server capacity. The broader #775
+memory requirements remain open.
+
+### Compact reordered relay ledgers (#775)
+
+Unordered relay ledgers now keep four-byte raw offsets when the admitted send
+count fits `u32`. The sort key includes the raw offset, so equal sequences keep
+their original record order within each sender and epoch. Canonical blocks still
+borrow their raw slices. Inputs above the compact range keep the wide pointer
+fallback. Independent ledger checks cover interleaved epochs, duplicate
+sequences, completion cutoffs, and the wide access path. Raw events and replay
+verdicts do not change.
+
+The red resource control retained 32 bytes for four sends against a 16-byte
+bound. That single reversed block now fits the bound. This is not a universal
+four-byte allocation bound: interleaved blocks retain vector spare capacity,
+and the block descriptor is 16 bytes larger. Measurements below report actual
+allocated index capacity, including that spare capacity.
+
+The experiment registers three alternating baseline/candidate pairs at each
+of 100,000, 1,000,000, and 4,000,000 sends. Fixed executable hashes identify the
+two cohorts. All runs keep raw events and the already compact send lookup alive
+beside the relay ledger. Local agent builds and tests pause during measurement.
+The host remains shared. Peak RSS is a process observation, not an allocator
+bound or a source-specific timing result.
+
+All 18 trials complete with equal paired send-lookup checksums. Median Linux
+peak RSS and retained relay allocation are:
+
+| Sends | Previous relay bytes | Compact relay bytes | Previous peak RSS KiB | Compact peak RSS KiB |
+| --- | --- | --- | --- | --- |
+| 100,000 | 1,572,864 | 786,432 | 19,620 | 18,420 |
+| 1,000,000 | 12,582,912 | 6,291,456 | 88,100 | 82,692 |
+| 4,000,000 | 50,331,648 | 25,165,824 | 313,260 | 296,836 |
+
+Relay index allocation falls 50% in all three cohorts. Observed median peak
+RSS falls 5.24% in the four-million-send cohort. These are debug executables
+on ARM64 Linux under WSL2 with Rust 1.94.0. The baseline executable SHA-256 is
+`ed460afd96edce3ad1faada070e251a569835099b4ccd13bd2668d53ea79a200`;
+the candidate is
+`1f2801c557c31046616b39adc9a748b998ca3796d6501e72ff9aad9105cedcd2`.
+
+Reproduce with the existing ignored
+`oracle::coverage_tests::generator_reordered_send_index_memory_profile` control
+in a fresh capacity-runner test process. Use
+`CAPACITY_SEND_INDEX_PROBE_KIND=compact` and set
+`CAPACITY_SEND_INDEX_PROBE_COUNT` to each registered count. Collect Linux peak
+RSS with `wait4`. The probe checksum covers the unchanged send lookup visits;
+it is not a full-summary replay comparison. Relay semantics are checked by the
+independent ledgers and focused artifact and real-socket replay controls.
+
+The relay allocation reduction does not bound complete default-budget process
+memory, qualify the original long live workload, explain the generator stalls,
+or establish server capacity. Those requirements remain open in #775.
+
+### Bounded batched relay queue scans (#1155)
+
+The receiver previously counted the entire current-generation data phase on
+every batched pop. Draining 1,024 Reliable items visited 524,800 queue entries.
+The receiver now scans only when it arms a Latest batch, and stops at the batch
+size. Reliable and Volatile pops do not scan. Control priority, generation
+barriers, payloads, order, and flush deadlines remain unchanged. Focused controls
+cover these invariants and count actual predicate visits.
+
+A fixed-source production receiver probe uses batch size 32, a 16 ms interval,
+and prefilled queues. Setup and enqueue time are excluded. Three alternating
+baseline/candidate pairs run for each class and depth: 72 fresh processes.
+Local builds and tests pause during capture on shared ARM64 WSL2 Linux. Every
+trial checks sequence, class, and checksum. The normal allocator is used and
+test-only visit counters are absent. Median drain times are nanoseconds/item:
+
+| Class | Depth | Previous | Bounded scan |
+| --- | --- | --- | --- |
+| Reliable | 64 | 1,067 | 883 |
+| Reliable | 1,024 | 1,173 | 900 |
+| Reliable | 4,096 | 2,530 | 842 |
+| Volatile | 64 | 1,130 | 852 |
+| Volatile | 1,024 | 1,083 | 823 |
+| Volatile | 4,096 | 2,684 | 953 |
+| Latest | 64 | 898 | 857 |
+| Latest | 1,024 | 1,133 | 819 |
+| Latest | 4,096 | 2,585 | 886 |
+| Mixed | 64 | 972 | 786 |
+| Mixed | 1,024 | 1,223 | 813 |
+| Mixed | 4,096 | 2,851 | 891 |
+
+All four 4,096-item cohorts have separated observed ranges. Small Latest and
+Volatile cohorts have overlapping ranges. These measurements describe receiver
+drain work with batching enabled; batching is disabled by default. They do not
+measure server throughput, network latency, or capacity, and do not explain
+historical gameplay stalls.
+
+The baseline source is `eab03f41c6665f130c58aafa31fa043885adb1c0`. Executable
+SHA-256 values are
+`656d3b9b8707d5215159a58e21a1138aad526b18aba4ebfe4b2716cfc059565f`
+(previous) and
+`37d4280186e3f5ad50863fe23b3a6781dbbca4f364889610539646691723ac44`
+(candidate). The probe lockfile SHA-256 is
+`1bcaf5023e9bf8599fd024f8ccdb8793dc72485f30b3a3c5374c942dd33ac76f`.
+The [issue](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1155)
+retains the exact portable probe, dependency lockfile, commands, registration,
+and all raw trials. Both relay allocation benchmark targets also pass.
+
+### Reusable browser receive sizing (#1157)
+
+The browser reference client now measures normalized UTF-8 into reusable
+storage. It previously allocated an encoded payload for every receipt. Storage
+grows geometrically from 256 to 65,536 bytes per Engine. Empty receipts allocate
+no scratch. A first 96-byte ASCII receipt retains 512 bytes instead of creating
+a transient 96-byte payload. Scratch survives peer replacement. Encoding still
+copies bytes; decoded strings and small result objects still allocate.
+
+The fixed-bundle experiment runs the actual Engine receive callback in Chromium
+156.0.8078.4 on shared ARM64 Linux. Physical channels are fake. Each cohort uses
+three baseline-first pairs, 2,000 warmup receipts, and 5,000
+measured receipts. Separate allocation runs use 1,000 receipts. Cold controls
+use one receipt. Local builds and tests pause during capture. Every callback,
+normalized byte charge, and checksum matches. Median times are milliseconds:
+
+| Cohort | Previous | Reused storage |
+| --- | --- | --- |
+| 96-byte ASCII text | 16.8 | 9.1 |
+| 96-byte ASCII binary | 18.3 | 10.6 |
+| 4,096-byte ASCII text | 35.4 | 19.2 |
+| 4,096-byte ASCII binary | 42.5 | 26.7 |
+| 65,536-byte ASCII text | 621.2 | 161.0 |
+| 65,536-byte ASCII binary | 767.5 | 197.7 |
+| 65,536-byte UTF-8 text | 353.6 | 149.7 |
+| 65,536-byte UTF-8 binary | 953.2 | 736.4 |
+| 65,536-byte astral text | 538.8 | 329.1 |
+| 65,535-byte normalized malformed binary | 581.6 | 348.3 |
+
+At 1,000 maximum-size receipts, observed encoded-payload allocation falls from
+65,536,000 transient bytes to one 65,536-byte retained scratch buffer. This
+counts sizing storage only. It does not measure total heap, network throughput,
+or end-to-end gameplay latency. Single cold-call timing is too coarse for a
+latency claim. Fixed baseline-first execution can introduce order bias.
+A JavaScript scalar-count alternative was slower and a fixed
+64 KiB cold reservation was rejected before the final registered experiment.
+
+The baseline bundle SHA-256 is
+`6781ddc4ada3302f310c51915bd9789adb990977f9fe910e8e78c81edb0bb361`;
+the candidate is
+`d28d3d2966dfb4a37bf1a09a6a399a2194e5cf83441f8841bb47b0f9a48c3e48`.
+The [issue](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1157)
+retains reproduction commands, harnesses, registration, and all 80 steady and
+24 cold rows. Byte-boundary, malformed-input, reuse, growth, and cutoff controls
+pass. These observations do not explain historical #853 or #889 failures.

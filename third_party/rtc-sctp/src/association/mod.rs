@@ -773,6 +773,7 @@ impl Association {
 
         // Attempt a graceful shutdown.
         self.set_state(AssociationState::ShutdownPending);
+        self.discard_stopped_read_data_during_shutdown();
 
         if self.inflight_queue.is_empty() && self.pending_queue.is_empty() {
             // No more outstanding, send shutdown.
@@ -1670,6 +1671,22 @@ impl Association {
             }
         }
 
+        // Graceful drain still acknowledges a stopped generation's DATA, but
+        // must not refill a queue that its application can no longer consume.
+        if matches!(
+            self.state(),
+            AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+                | AssociationState::ShutdownSent
+                | AssociationState::ShutdownAckSent
+        ) && self.streams.get(&d.stream_identifier).is_some_and(|s| {
+            !matches!(
+                s.state,
+                RecvSendState::Readable | RecvSendState::ReadWritable
+            )
+        }) {
+            stream_handle_data = false;
+        }
         let immediate_sack = d.immediate_sack;
 
         if stream_handle_data && let Some(s) = self.streams.get_mut(&d.stream_identifier) {
@@ -1958,6 +1975,7 @@ impl Association {
                 | AssociationState::ShutdownReceived
         ) {
             self.set_state(AssociationState::ShutdownReceived);
+            self.discard_stopped_read_data_during_shutdown();
             self.postprocess_sack(AssociationState::ShutdownReceived, true, now);
         } else {
             // Simultaneous or repeated SHUTDOWN must send (or replay) our ACK.
@@ -1991,6 +2009,37 @@ impl Association {
         }
 
         Ok(vec![])
+    }
+
+    /// Stopped readers cannot relieve receive pressure during graceful drain.
+    /// Discard only their current generation; saved reset generations stay owned
+    /// by their future readers. Established stream-reset behavior is unchanged.
+    pub(crate) fn discard_stopped_read_data_during_shutdown(&mut self) {
+        if !matches!(
+            self.state(),
+            AssociationState::ShutdownPending
+                | AssociationState::ShutdownReceived
+                | AssociationState::ShutdownSent
+                | AssociationState::ShutdownAckSent
+        ) {
+            return;
+        }
+        let mut released = false;
+        for (&id, stream) in &mut self.streams {
+            if !matches!(
+                stream.state,
+                RecvSendState::Readable | RecvSendState::ReadWritable
+            ) && stream.get_num_bytes_in_reassembly_queue() > 0
+            {
+                stream.reassembly_queue = ReassemblyQueue::new(id);
+                released = true;
+            }
+        }
+        if released {
+            self.ack_state = AckState::Immediate;
+            self.timers.stop(Timer::Ack);
+            self.awake_write_loop();
+        }
     }
 
     /// A common routine for handle_data and handle_forward_tsn routines

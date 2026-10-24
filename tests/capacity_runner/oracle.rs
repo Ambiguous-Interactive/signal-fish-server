@@ -446,11 +446,17 @@ impl GapViolations {
 
 /// Borrow canonical sends in sender blocks, with direct offsets for contiguous
 /// sequences and binary search for sparse or repeated keys. Arbitrary artifact order
-/// uses a stable pointer sort, preserving the former map's last-key-wins rule.
+/// uses compact offsets and explicit raw-order ties, preserving the former map's
+/// last-key-wins rule without allocating stable-sort scratch or one pointer per send.
 /// No receipt or raw send evidence is changed by this lookup index.
 enum SendIndex<'a> {
     Ordered(Vec<SenderSends<'a>>),
-    Reordered(Vec<&'a SentEvent>),
+    Reordered {
+        events: &'a [SentEvent],
+        positions: Vec<u32>,
+    },
+    // Explicit host overrides may admit more sends than a compact offset fits.
+    WideReordered(Vec<&'a SentEvent>),
 }
 
 struct SenderSends<'a> {
@@ -459,15 +465,28 @@ struct SenderSends<'a> {
 }
 
 impl<'a> SendIndex<'a> {
+    #[cfg(test)]
+    fn retained_index_bytes(&self) -> usize {
+        match self {
+            Self::Ordered(senders) => senders.capacity() * std::mem::size_of::<SenderSends<'_>>(),
+            Self::Reordered { positions, .. } => positions.capacity() * std::mem::size_of::<u32>(),
+            Self::WideReordered(events) => events.capacity() * std::mem::size_of::<&SentEvent>(),
+        }
+    }
+
     fn sorted_events(&self) -> impl Iterator<Item = &'a SentEvent> + '_ {
-        let (senders, reordered) = match self {
-            Self::Ordered(senders) => (senders.as_slice(), &[][..]),
-            Self::Reordered(events) => (&[][..], events.as_slice()),
+        let (senders, reordered, events, positions) = match self {
+            Self::Ordered(senders) => (senders.as_slice(), &[][..], &[][..], &[][..]),
+            Self::Reordered { events, positions } => {
+                (&[][..], &[][..], *events, positions.as_slice())
+            }
+            Self::WideReordered(events) => (&[][..], events.as_slice(), &[][..], &[][..]),
         };
         senders
             .iter()
             .flat_map(|sender| sender.events.iter())
             .chain(reordered.iter().copied())
+            .chain(positions.iter().map(|&position| &events[position as usize]))
     }
 
     fn new(sent: &'a [SentEvent]) -> Self {
@@ -490,9 +509,20 @@ impl<'a> SendIndex<'a> {
             }
             return Self::Ordered(senders);
         }
+        if let Ok(count) = u32::try_from(sent.len()) {
+            let mut positions: Vec<u32> = (0..count).collect();
+            positions.sort_unstable_by_key(|&position| {
+                let event = &sent[position as usize];
+                (event.sender.as_str(), event.seq, position)
+            });
+            return Self::Reordered {
+                events: sent,
+                positions,
+            };
+        }
         let mut ordered: Vec<_> = sent.iter().collect();
         ordered.sort_by_key(|event| (event.sender.as_str(), event.seq));
-        Self::Reordered(ordered)
+        Self::WideReordered(ordered)
     }
 
     fn get(&self, sender: &str, seq: u64) -> Option<&'a SentEvent> {
@@ -534,7 +564,13 @@ impl<'a> SendIndex<'a> {
                     )
                 }
             }
-            Self::Reordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
+            Self::Reordered { events, positions } => find(
+                positions.len(),
+                |index| &events[positions[index] as usize],
+                sender,
+                seq,
+            ),
+            Self::WideReordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
         }
     }
 }
@@ -732,36 +768,68 @@ fn scheduled_send_evidence(
 }
 
 /// A sender incarnation's exact ledger, in sequence order. Canonical runs
-/// borrow raw events; arbitrary artifact order retains sorted pointers.
+/// borrow raw events; arbitrary artifact order uses four-byte raw offsets.
+/// Wide host overrides retain the pointer fallback when offsets cannot fit.
 enum RelayBlock<'a> {
-    Borrowed(&'a [SentEvent]),
+    Borrowed {
+        events: &'a [SentEvent],
+        start: usize,
+    },
+    Compact {
+        events: &'a [SentEvent],
+        positions: Vec<u32>,
+    },
     Indexed(Vec<&'a SentEvent>),
 }
 
 impl<'a> RelayBlock<'a> {
+    #[cfg(test)]
+    fn retained_index_bytes(&self) -> usize {
+        match self {
+            Self::Borrowed { .. } => 0,
+            Self::Compact { positions, .. } => positions.capacity() * std::mem::size_of::<u32>(),
+            Self::Indexed(events) => events.capacity() * std::mem::size_of::<&SentEvent>(),
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
-            Self::Borrowed(events) => events.len(),
+            Self::Borrowed { events, .. } => events.len(),
+            Self::Compact { positions, .. } => positions.len(),
             Self::Indexed(events) => events.len(),
         }
     }
 
     fn get(&self, index: usize) -> Option<&'a SentEvent> {
         match self {
-            Self::Borrowed(events) => events.get(index),
+            Self::Borrowed { events, .. } => events.get(index),
+            Self::Compact { events, positions } => events.get(*positions.get(index)? as usize),
             Self::Indexed(events) => events.get(index).copied(),
         }
     }
 
     fn completed_by(&self, at_us: u64) -> usize {
         match self {
-            Self::Borrowed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
+            Self::Borrowed { events, .. } => {
+                events.iter().filter(|event| event.sent_us <= at_us).count()
+            }
+            Self::Compact { events, positions } => positions
+                .iter()
+                .filter(|&&position| events[position as usize].sent_us <= at_us)
+                .count(),
             Self::Indexed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
         }
     }
 }
 
 fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
+    // Every compact position is below sent.len(); this check proves each
+    // usize-to-u32 conversion below is lossless, including range endpoints.
+    let compact = u32::try_from(sent.len()).is_ok();
+    let offsets = |start, end| {
+        u32::try_from(start).expect("compact ledger start fits u32")
+            ..u32::try_from(end).expect("compact ledger end fits u32")
+    };
     let mut blocks = BTreeMap::new();
     let mut start = 0;
     while start < sent.len() {
@@ -774,27 +842,48 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
         match blocks.entry(key) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(if chunk.is_sorted_by_key(|event| event.seq) {
-                    RelayBlock::Borrowed(chunk)
+                    RelayBlock::Borrowed {
+                        events: chunk,
+                        start,
+                    }
+                } else if compact {
+                    RelayBlock::Compact {
+                        events: sent,
+                        positions: offsets(start, end).collect(),
+                    }
                 } else {
                     RelayBlock::Indexed(chunk.iter().collect())
                 });
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
                 let block = entry.get_mut();
-                if let RelayBlock::Borrowed(events) = block {
-                    *block = RelayBlock::Indexed(events.iter().collect());
+                if let RelayBlock::Borrowed { events, start } = block {
+                    *block = if compact {
+                        RelayBlock::Compact {
+                            events: sent,
+                            positions: offsets(*start, *start + events.len()).collect(),
+                        }
+                    } else {
+                        RelayBlock::Indexed(events.iter().collect())
+                    };
                 }
-                if let RelayBlock::Indexed(events) = block {
-                    events.extend(chunk);
+                match block {
+                    RelayBlock::Compact { positions, .. } => positions.extend(offsets(start, end)),
+                    RelayBlock::Indexed(events) => events.extend(chunk),
+                    RelayBlock::Borrowed { .. } => {}
                 }
             }
         }
         start = end;
     }
     for block in blocks.values_mut() {
-        if let RelayBlock::Indexed(events) = block {
+        match block {
+            // Raw offsets break duplicate ties exactly as the stable pointer sort did.
+            RelayBlock::Compact { events, positions } => positions
+                .sort_unstable_by_key(|&position| (events[position as usize].seq, position)),
             // Stable order preserves original evidence for duplicate keys.
-            events.sort_by_key(|event| event.seq);
+            RelayBlock::Indexed(events) => events.sort_by_key(|event| event.seq),
+            RelayBlock::Borrowed { .. } => {}
         }
     }
     blocks
@@ -3892,7 +3981,7 @@ mod coverage_tests {
         for records in [&records, &collected, &replayed] {
             let blocks = relay_blocks(&records.sent);
             for block in blocks.values() {
-                assert!(matches!(block, RelayBlock::Borrowed(_)));
+                assert!(matches!(block, RelayBlock::Borrowed { .. }));
                 for index in 0..block.len() {
                     assert!(records
                         .sent
@@ -3904,6 +3993,23 @@ mod coverage_tests {
             }
         }
         assert!(relay_blocks(&[]).is_empty());
+    }
+
+    // #775: arbitrary artifact order must not retain a wide pointer per send.
+    #[test]
+    fn reordered_relay_block_retains_compact_offsets() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let sender = records.sent[0].sender.clone();
+        records.sent.retain(|event| event.sender == sender);
+        records.sent.reverse();
+        let blocks = relay_blocks(&records.sent);
+        let retained: usize = blocks.values().map(RelayBlock::retained_index_bytes).sum();
+        assert!(
+            retained <= records.sent.len() * 4,
+            "relay index retains {retained} bytes for {} sends",
+            records.sent.len()
+        );
     }
 
     #[test]
@@ -3937,21 +4043,25 @@ mod coverage_tests {
             let actual = relay_blocks(&sent);
             assert_eq!(actual.len(), expected.len());
             for (key, events) in expected {
-                let block = &actual[&key];
-                assert_eq!(block.len(), events.len());
-                for (index, event) in events.iter().enumerate() {
-                    assert!(std::ptr::eq(block.get(index).unwrap(), *event));
+                // The wide-host fallback retains these same pointer-ledger semantics.
+                let wide = RelayBlock::Indexed(events.clone());
+                for block in [&actual[&key], &wide] {
+                    assert_eq!(block.len(), events.len());
+                    for (index, event) in events.iter().enumerate() {
+                        assert!(std::ptr::eq(block.get(index).unwrap(), *event));
+                    }
+                    for cutoff in [0, 9, 10, u64::MAX] {
+                        assert_eq!(
+                            block.completed_by(cutoff),
+                            events
+                                .iter()
+                                .filter(|event| event.sent_us <= cutoff)
+                                .count()
+                        );
+                    }
+                    assert!(block.get(events.len()).is_none());
+                    assert!(block.get(usize::MAX).is_none());
                 }
-                for cutoff in [0, 9, 10, u64::MAX] {
-                    assert_eq!(
-                        block.completed_by(cutoff),
-                        events
-                            .iter()
-                            .filter(|event| event.sent_us <= cutoff)
-                            .count()
-                    );
-                }
-                assert!(block.get(events.len()).is_none());
             }
         }
     }
@@ -4073,6 +4183,110 @@ mod coverage_tests {
         }
     }
 
+    // #775: replayed send order must fit one four-byte offset per raw send.
+    #[test]
+    fn reordered_send_index_retains_compact_offsets_and_stable_duplicate_order() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        records.sent.reverse();
+        let mut duplicate = records.sent[0].clone();
+        duplicate.sent_us = u64::MAX;
+        records.sent.push(duplicate);
+        let mut expected: Vec<_> = records.sent.iter().collect();
+        expected.sort_by_key(|event| (event.sender.as_str(), event.seq));
+        let index = SendIndex::new(&records.sent);
+        assert!(
+            index.retained_index_bytes() <= records.sent.len() * 4,
+            "replay index retains {} bytes for {} sends",
+            index.retained_index_bytes(),
+            records.sent.len(),
+        );
+        assert_eq!(
+            index
+                .sorted_events()
+                .map(std::ptr::from_ref)
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|event| std::ptr::from_ref(*event))
+                .collect::<Vec<_>>(),
+            "raw order breaks ties without changing any send",
+        );
+        let expected: BTreeMap<_, _> = records
+            .sent
+            .iter()
+            .map(|event| ((event.sender.as_str(), event.seq), event))
+            .collect();
+        for ((sender, seq), event) in expected {
+            assert!(std::ptr::eq(index.get(sender, seq).unwrap(), event));
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated replay index memory profile; run in a fresh process"]
+    fn generator_reordered_send_index_memory_profile() {
+        let count = std::env::var("CAPACITY_SEND_INDEX_PROBE_COUNT")
+            .unwrap_or_else(|_| "1000000".into())
+            .parse::<usize>()
+            .expect("send count");
+        assert!((1..=8_000_000).contains(&count));
+        let kind =
+            std::env::var("CAPACITY_SEND_INDEX_PROBE_KIND").unwrap_or_else(|_| "compact".into());
+        assert!(["legacy", "compact", "ordered"].contains(&kind.as_str()));
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans).sent.remove(0);
+        let names: Vec<ReceiptName> = (0..64).map(|peer| format!("r0p{peer}").into()).collect();
+        let mut events = Vec::with_capacity(count);
+        for position in 0..count {
+            // Deterministic scrambled keys and multiple epochs; widen before multiplying.
+            let key = usize::try_from(position as u64 * 48_271 % count as u64)
+                .expect("bounded probe key");
+            let mut event = template.clone();
+            event.sender = names[key % names.len()].clone();
+            event.seq = (key / names.len() / 2) as u64;
+            event.epoch = 1 + u32::try_from(position % 3).expect("three epochs");
+            event.sent_us = position as u64;
+            events.push(event);
+        }
+        if kind == "ordered" {
+            events.sort_by_key(|event| (event.sender.clone(), event.seq));
+        }
+        // During latency evaluation the relay ledger remains alive beside SendIndex.
+        let blocks = relay_blocks(&events);
+        let relay_index_bytes: usize = blocks.values().map(RelayBlock::retained_index_bytes).sum();
+        let before_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        let index = if kind == "legacy" {
+            let mut ordered: Vec<_> = events.iter().collect();
+            ordered.sort_by_key(|event| (event.sender.as_str(), event.seq));
+            SendIndex::WideReordered(ordered)
+        } else {
+            SendIndex::new(&events)
+        };
+        let mut checksum = 0_u64;
+        let mut visited = 0;
+        for event in index.sorted_events() {
+            checksum = checksum
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(event.sent_us)
+                .wrapping_add(event.seq.rotate_left(17));
+            visited += 1;
+        }
+        assert_eq!(visited, count);
+        println!(
+            "REORDERED_SEND_INDEX_PROFILE {}",
+            serde_json::json!({
+                "kind": kind, "sends": count, "checksum": checksum,
+                "index_bytes": index.retained_index_bytes(),
+                "relay_index_bytes": relay_index_bytes,
+                "before_rss_bytes": before_rss,
+                "retained_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                "elapsed_us": started.elapsed().as_micros(),
+            })
+        );
+        std::hint::black_box((&index, &blocks, &events));
+    }
+
     #[test]
     fn send_index_matches_map_for_arbitrary_order_and_duplicate_keys() {
         let context = crate::unit_context();
@@ -4097,14 +4311,29 @@ mod coverage_tests {
                 .map(|event| ((event.sender.as_str(), event.seq), event))
                 .collect();
             let index = SendIndex::new(&sent);
+            let mut stable: Vec<_> = sent.iter().collect();
+            stable.sort_by_key(|event| (event.sender.as_str(), event.seq));
+            let wide = SendIndex::WideReordered(stable.clone());
+            assert_eq!(
+                index
+                    .sorted_events()
+                    .map(std::ptr::from_ref)
+                    .collect::<Vec<_>>(),
+                stable
+                    .iter()
+                    .map(|event| std::ptr::from_ref(*event))
+                    .collect::<Vec<_>>(),
+            );
             if order == 2 {
                 assert!(matches!(index, SendIndex::Ordered(_)));
             }
             for ((sender, seq), event) in &expected {
-                assert!(std::ptr::eq(
-                    index.get(sender, *seq).expect("recorded key"),
-                    *event
-                ));
+                for candidate in [&index, &wide] {
+                    assert!(std::ptr::eq(
+                        candidate.get(sender, *seq).expect("recorded key"),
+                        *event
+                    ));
+                }
             }
             for sender in ["", "unknown", "r0p0", "未知"] {
                 for seq in [0, 1, u64::MAX] {

@@ -7527,3 +7527,149 @@ zero callbacks against six admitted invalid probes. Stack, raw, and admission
 totals remain visible beside the exact classifications. Cutoff controls distinguish late
 receipts from absent traffic. These diagnostics do not pay receipt debt, extend
 run deadlines, or establish the historical incident's cause.
+
+### F143 — Application reads leave native senders with a zero window
+
+Open [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145)
+advances A20 under #826 and dependency replacement qualification under #912.
+An application read frees SCTP receive space, but ordinary stream reads did
+not advertise the reopened window. A sender with queued admitted DATA could
+wait for a retransmission timer despite available receive space.
+
+A paired wire control fails before repair because the read produces no window
+update. It now delivers the exact admitted tail without advancing time during
+ordinary gameplay, local shutdown, remote shutdown, and simultaneous shutdown.
+Only a successful read that changes a full receive window to positive credit
+requests an immediate acknowledgment. Empty, stopped, stale, and retired reads
+do not request one. Reads with remaining credit keep the delayed-ACK policy.
+These histories do not establish either historical native reset timeout's cause.
+
+### F144 — Room leave keeps reference-client gameplay alive
+
+New [#1150](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1150)
+advances A20 under open #826 and the #853 lifecycle investigation. Browser and
+native `RoomLeft` handlers reset accounting and generation but leave physical
+peer links, queued gameplay, and room timers alive. Old callbacks can still
+publish gameplay and pay receipt debt after room membership ends.
+
+Both clients now retire links, cancel scheduled room sends and pairing work,
+and clear current membership and readiness. Native callback receivers are
+replaced at leave and restore. This also fences retained receipts from links
+already removed before leave. Recorded exchange debt remains unpaid; leave
+cannot convert an incomplete exchange into success. WebSocket keepalive stays
+active. Native pairing and rebuild gates do not rearm outside a room.
+
+Red-first controls cover connected browser channels, a held browser offer,
+native link and retained-receipt retirement, queued and late callbacks,
+scheduled relay and exchange work, held native gates, and fresh-generation
+recovery. This is separate from #1119's server relay admission repair and does
+not explain the original #853 or #889 histories. The server wire is unchanged.
+
+### A20 — Compact replay send lookup
+
+Open [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+now uses four-byte raw-record positions for out-of-order send lookup. An
+explicit original-position tie preserves stable duplicate order and the last
+record for each sender and sequence. Canonical ordered records still borrow
+their send blocks. Explicit host overrides above the compact position range
+keep the prior wide lookup. Raw events and replay verdicts do not change.
+
+The focused resource control fails before repair with eight retained bytes per
+send. A one-million-send cohort retains 8,000,000 bytes before and 4,000,000
+after repair, with equal record checksums and an unchanged relay index.
+Process observations and their overlap limits are recorded in the
+[capacity audit](arm-capacity-audit.md). This does not qualify the whole process
+memory envelope or explain historical generator stalls.
+
+### F145 — Parent close leaves native channel handles live
+
+New [#1151](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1151)
+advances A20 under #826 and #912. The stronger native #1150 regression retains
+a real connecting channel across room leave. It fails because the public
+handle still reports `Connecting` after its parent peer connection closes.
+The core data-channel handler's close method did not close retained channel entries.
+
+Parent close now marks all retained channels `Closed`, clears handshake
+deadlines and outstanding send bytes, and releases their internal channel
+transport. Close statistics change once. Existing SCTP ABORT and DTLS output
+flush before handler teardown. The repair adds no channel callbacks and does
+not change pending message order.
+
+A direct core matrix fails before repair and covers Connecting, Open, Closing,
+already Closed, retained send credit, deadlines, and repeated close. Native
+room-leave histories cover retained connecting and real open channels plus
+old receipt ownership after link removal. The wrapper already rejected writes
+through its global closing state; the repair corrects retained core lifecycle
+and accounting instead of changing the wrapper getter. Published replacement
+qualification in #912 must retain these controls.
+
+### A20 — Native reset reactor outcome evidence
+
+Open [#1120](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1120)
+now records reactor poll returns and driver wake requests beside packet counts.
+The counts help distinguish an entered poll without a recorded return, a
+returned pending poll, a driver wake without another poll, and a completed
+driver. Snapshots sample live counters separately; they do not prove a stall
+or a lost wake on their own. The forwarding waker wakes the latest parent task. Fixture pause and resume requests remain
+separate from driver wake counts. These counters exist only in the reset test
+fixture and appear in its existing endpoint timeout snapshots.
+
+A deterministic control checks pending, wake forwarding, held polling, and
+completion. The original reset deadline and terminal-state assertions remain
+unchanged. These observations improve the next failure report. They do not
+reproduce or explain the historical hosted timeout, prove a scheduler cause,
+or repair a confirmed transport defect.
+
+### F146 — Stopped reads block graceful native drain
+
+Open [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145)
+advances A20 under #826 and native replacement qualification under #912.
+Stopping a read stream during graceful shutdown changes its state, then tries
+to start a reset that is allowed only during ordinary gameplay. The operation
+returns `ErrResetPacketInStateNotExist`. Its unread queue retains receive
+space that the application can no longer free. A peer can still have admitted
+DATA waiting for that space.
+
+Graceful transitions now discard unread data only for stopped current stream
+generations and advertise the freed receive space. Later DATA for those stopped
+generations is acknowledged without refilling their queues. Read-enabled streams
+and saved reset generations keep their data. Stopping reads during graceful
+shutdown does not start a new stream reset. Ordinary gameplay reset pressure
+and pre-handshake rejection behavior stay unchanged.
+
+A red paired history fails with the reset-state error before repair. Wire
+histories cover local and peer shutdown with stops before and during the
+transition, full receive pressure, exact admitted outbound delivery, and
+terminal endpoint retirement. Separate controls cover all four draining states,
+repeated stops, stopped read rejection, and saved generation ownership. The
+public WebRTC wrapper still uses ABORT; this repair concerns low-level graceful
+shutdown and does not explain the historical #1120 timeout.
+
+### F147 — Full driver queues block public native close
+
+New [#1154](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1154)
+advances native lifecycle qualification under #826 and #912. Public close awaits
+space in the driver's command queue before it reaches its bounded driver wait.
+A close from a driver callback cannot free that space. An external close also
+waits indefinitely when the callback holds the driver.
+
+Close now records the durable closing flag and tries a nonblocking wake. A full
+queue already wakes the driver. Only the caller that owns the driver handle
+consumes its completion receiver. Normal driver exit retains its graceful
+cleanup window. Real public callback and external-close histories fail before
+repair and pass with both reactor modes. A separate concurrent-close control
+protects completion ownership.
+
+### F148 — Canceled native close strands channel readers
+
+New [#1156](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1156)
+extends #1151. Canceling close after it takes the driver handle aborts the driver
+but skips the async stream cleanup. A retained public channel then waits for an
+event that can never arrive. The regression holds the core lock, cancels close,
+observes driver completion, releases the lock, and requires terminal channel EOF.
+The baseline fails that requirement. Both reactor modes pass after repair.
+
+An independent cleanup task protects this close operation from caller
+cancellation. It uses a weak peer reference and exits when ordinary close
+finishes. This adds no task to an idle live peer. The wire format does not change.
+Neither finding establishes the cause of the historical #853 or #889 failures.
