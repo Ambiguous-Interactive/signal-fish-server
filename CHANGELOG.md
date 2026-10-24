@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce native gameplay completion work for fragmented unordered messages (#1175).
 - Reduce native gameplay receive work for complete unordered messages and packet-limited acknowledgments (#1171, #1172).
 - **Breaking:** Rust callers that construct `ServerMessage::PlayerReconnected` must set its optional `player` field.
 - Reduce native gameplay fragment completeness work for delayed or reordered packets (#1168).

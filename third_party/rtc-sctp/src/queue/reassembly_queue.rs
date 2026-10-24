@@ -4,6 +4,7 @@ use crate::util::*;
 use shared::error::{Error, Result};
 
 use bytes::{Bytes, BytesMut};
+use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 
 /// A chunk of data from the stream
@@ -181,6 +182,52 @@ impl Chunks {
     }
 }
 
+/// Endpoints of a contiguous incomplete unordered fragment run. Only endpoints
+/// are indexed, so each arrival joins at most two runs without scanning them.
+#[derive(Clone, Copy, Debug)]
+struct UnorderedRun {
+    first: u32,
+    last: u32,
+    beginning: bool,
+    ending: bool,
+}
+
+impl UnorderedRun {
+    fn insert(runs: &mut FxHashMap<u32, Self>, chunk: &ChunkPayloadData) -> Self {
+        let mut run = Self {
+            first: chunk.tsn,
+            last: chunk.tsn,
+            beginning: chunk.beginning_fragment,
+            ending: chunk.ending_fragment,
+        };
+        if !run.beginning
+            && let Some(left) = runs.get(&chunk.tsn.wrapping_sub(1)).copied()
+            && left.last == chunk.tsn.wrapping_sub(1)
+            && !left.ending
+        {
+            runs.remove(&left.first);
+            runs.remove(&left.last);
+            run.first = left.first;
+            run.beginning = left.beginning;
+        }
+        if !run.ending
+            && let Some(right) = runs.get(&chunk.tsn.wrapping_add(1)).copied()
+            && right.first == chunk.tsn.wrapping_add(1)
+            && !right.beginning
+        {
+            runs.remove(&right.first);
+            runs.remove(&right.last);
+            run.last = right.last;
+            run.ending = right.ending;
+        }
+        if !(run.beginning && run.ending) {
+            runs.insert(run.first, run);
+            runs.insert(run.last, run);
+        }
+        run
+    }
+}
+
 #[derive(Default, Debug)]
 pub(crate) struct ReassemblyQueue {
     pub(crate) si: StreamId,
@@ -192,6 +239,7 @@ pub(crate) struct ReassemblyQueue {
     pub(crate) ordered: VecDeque<Chunks>,
     pub(crate) unordered: VecDeque<Chunks>,
     pub(crate) unordered_chunks: Vec<ChunkPayloadData>,
+    unordered_runs: FxHashMap<u32, UnorderedRun>,
     pub(crate) n_bytes: usize,
     /// Monotonic counter stamped onto each reassembled message so `read` can tell which of a
     /// ready ordered and a ready unordered message arrived first.
@@ -213,6 +261,7 @@ impl ReassemblyQueue {
             ordered: VecDeque::new(),
             unordered: VecDeque::new(),
             unordered_chunks: vec![],
+            unordered_runs: FxHashMap::default(),
             n_bytes: 0,
             next_arrival: 0,
             #[cfg(test)]
@@ -237,18 +286,35 @@ impl ReassemblyQueue {
                 self.next_arrival += 1;
                 return true;
             }
-            // First, insert into unordered_chunks array
-            //atomic.AddUint64(&r.n_bytes, uint64(len(chunk.userData)))
-            self.n_bytes += chunk.user_data.len();
             let idx = self
                 .unordered_chunks
                 .partition_point(|c| sna32lt(c.tsn, chunk.tsn));
+            if self
+                .unordered_chunks
+                .get(idx)
+                .is_some_and(|c| c.tsn == chunk.tsn)
+            {
+                return false;
+            }
+            self.n_bytes += chunk.user_data.len();
+            #[cfg(test)]
+            {
+                // At most two neighboring endpoints are inspected per arrival.
+                self.unordered_scan_steps +=
+                    usize::from(!chunk.beginning_fragment) + usize::from(!chunk.ending_fragment);
+            }
+            let run = UnorderedRun::insert(&mut self.unordered_runs, &chunk);
             self.unordered_chunks.insert(idx, chunk);
-
-            // Scan unordered_chunks that are contiguous (in TSN)
-            // If found, append the complete set to the unordered array
-            if let Some(cset) = self.find_complete_unordered_chunk_set() {
-                self.unordered.push_back(cset);
+            if run.beginning && run.ending {
+                let start = self
+                    .unordered_chunks
+                    .partition_point(|c| sna32lt(c.tsn, run.first));
+                let count = run.last.wrapping_sub(run.first) as usize + 1;
+                let chunks: Vec<_> = self.unordered_chunks.drain(start..start + count).collect();
+                let arrival = self.next_arrival;
+                self.next_arrival += 1;
+                self.unordered
+                    .push_back(Chunks::new(arrival, 0, chunks[0].payload_type, chunks));
                 return true;
             }
 
@@ -289,63 +355,6 @@ impl ReassemblyQueue {
 
             ok
         }
-    }
-
-    pub(crate) fn find_complete_unordered_chunk_set(&mut self) -> Option<Chunks> {
-        let mut start_idx = -1isize;
-        let mut n_chunks = 0usize;
-        let mut last_tsn = 0u32;
-        let mut found = false;
-
-        for (i, c) in self.unordered_chunks.iter().enumerate() {
-            #[cfg(test)]
-            {
-                self.unordered_scan_steps += 1;
-            }
-            // seek beginning
-            if c.beginning_fragment {
-                start_idx = i as isize;
-                n_chunks = 1;
-                last_tsn = c.tsn;
-
-                if c.ending_fragment {
-                    found = true;
-                    break;
-                }
-                continue;
-            }
-
-            if start_idx < 0 {
-                continue;
-            }
-
-            // Check if contiguous in TSN
-            if c.tsn != last_tsn.wrapping_add(1) {
-                start_idx = -1;
-                continue;
-            }
-
-            last_tsn = c.tsn;
-            n_chunks += 1;
-
-            if c.ending_fragment {
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            return None;
-        }
-
-        // Extract the range of chunks
-        let chunks: Vec<ChunkPayloadData> = self
-            .unordered_chunks
-            .drain(start_idx as usize..(start_idx as usize) + n_chunks)
-            .collect();
-        let arrival = self.next_arrival;
-        self.next_arrival += 1;
-        Some(Chunks::new(arrival, 0, chunks[0].payload_type, chunks))
     }
 
     pub(crate) fn is_readable(&self) -> bool {
@@ -463,6 +472,12 @@ impl ReassemblyQueue {
                 self.subtract_num_bytes(self.unordered_chunks[i].user_data.len());
             }
             self.unordered_chunks.drain(..(last_idx + 1) as usize);
+            // FORWARD TSN can cut through a run. Rebuild endpoints for the
+            // retained suffix; it must not inherit a discarded beginning flag.
+            self.unordered_runs.clear();
+            for chunk in &self.unordered_chunks {
+                UnorderedRun::insert(&mut self.unordered_runs, chunk);
+            }
         }
     }
 

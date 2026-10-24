@@ -447,49 +447,53 @@ fn data_channel_credit_tracks_ppid_through_fragment_ack_and_abandonment() -> Res
 
 #[test]
 fn reassembly_tail_first_gameplay_preserves_exact_payload_and_release() -> Result<()> {
-    for first_tsn in [1000u32, u32::MAX - 512] {
-        let now = Instant::now();
-        let mut sender = timed_test_association();
-        let mut receiver = timed_test_association();
-        sender.my_next_tsn = first_tsn;
-        sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
-        sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
-        receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
-        sender.max_payload_size = 1;
-        sender.cwnd = u32::MAX;
-        let expected = Bytes::from(
-            (0..1024)
-                .map(|index| (index % 251) as u8)
-                .collect::<Vec<_>>(),
-        );
-        sender
-            .open_stream(1, PayloadProtocolIdentifier::Binary)?
-            .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
-        let data = transmitted_data(&sender.gather_outbound(now).0);
-        assert_eq!(data.len(), expected.len());
-        let tail = data.last().unwrap();
-        receiver.handle_data(tail)?;
-        assert!(receiver.stream(1)?.read_sctp()?.is_none());
-        for chunk in &data[..data.len() - 1] {
-            receiver.handle_data(chunk)?;
+    for unordered in [false, true] {
+        for first_tsn in [1000u32, u32::MAX - 512] {
+            let now = Instant::now();
+            let mut sender = timed_test_association();
+            let mut receiver = timed_test_association();
+            sender.my_next_tsn = first_tsn;
+            sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+            sender.max_payload_size = 1;
+            sender.cwnd = u32::MAX;
+            let expected = Bytes::from(
+                (0..1024)
+                    .map(|index| (index % 251) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let mut stream = sender.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+            stream.set_reliability_params(unordered, ReliabilityType::Reliable, 0)?;
+            stream.write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+            let data = transmitted_data(&sender.gather_outbound(now).0);
+            assert_eq!(data.len(), expected.len());
+            let tail = data.last().unwrap();
+            receiver.handle_data(tail)?;
+            assert!(receiver.stream(1)?.read_sctp()?.is_none());
+            for chunk in &data[..data.len() - 1] {
+                receiver.handle_data(chunk)?;
+            }
+            let message = receiver.stream(1)?.read_sctp()?.unwrap();
+            assert_eq!(message.to_payload(expected.len())?.freeze(), expected);
+            assert!(message.adjacency_checks.get() <= expected.len() * 3);
+            assert!(receiver.stream(1)?.read_sctp()?.is_none());
+            sender.handle_sack(&receiver.create_selective_ack_chunk(), now)?;
+            assert!(sender.inflight_queue.is_empty());
+            assert_eq!(sender.stream(1)?.buffered_amount()?, 0);
+            let released: usize = std::iter::from_fn(|| sender.poll())
+                .filter_map(|event| {
+                    if let Event::Stream(StreamEvent::BufferedAmountReleased { n_bytes, .. }) =
+                        event
+                    {
+                        Some(n_bytes)
+                    } else {
+                        None
+                    }
+                })
+                .sum();
+            assert_eq!(released, expected.len());
         }
-        let message = receiver.stream(1)?.read_sctp()?.unwrap();
-        assert_eq!(message.to_payload(expected.len())?.freeze(), expected);
-        assert!(message.adjacency_checks.get() <= expected.len() * 3);
-        assert!(receiver.stream(1)?.read_sctp()?.is_none());
-        sender.handle_sack(&receiver.create_selective_ack_chunk(), now)?;
-        assert!(sender.inflight_queue.is_empty());
-        assert_eq!(sender.stream(1)?.buffered_amount()?, 0);
-        let released: usize = std::iter::from_fn(|| sender.poll())
-            .filter_map(|event| {
-                if let Event::Stream(StreamEvent::BufferedAmountReleased { n_bytes, .. }) = event {
-                    Some(n_bytes)
-                } else {
-                    None
-                }
-            })
-            .sum();
-        assert_eq!(released, expected.len());
     }
     Ok(())
 }

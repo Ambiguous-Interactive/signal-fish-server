@@ -7886,3 +7886,32 @@ The independent Rust SDK manifest has no RTC/SCTP dependency. The .NET SDK
 owns signaling and relay only. Godot uses browser or Godot WebRTC transports.
 No signaling schema, server relay ordering or external SDK API changes.
 Their current manifests and scope descriptions were inspected for this session.
+
+### F159 — Unordered fragmented gameplay repeatedly scans retained fragments
+
+Confirmed on `7345ae76` under #636, #826 and #912; repair tracked in #1175.
+A 1,024-fragment unordered message performs 524,800 completion-scan visits.
+The red control first delivers exact payload bytes and releases receive credit,
+then fails its work bound. This is separate from the single-chunk F157 path.
+
+Index incomplete contiguous runs by their first and last TSNs. Join at most two
+runs per fragment, respecting message beginning and ending flags. The same
+message uses 2,046 endpoint probes. Reverse and alternating arrival histories
+have the same probe bound. Completed-message extraction and its one adjacency
+check remain linear. Reordered vector insertion can still move a linear suffix.
+FORWARD TSN rebuilds the retained run index after discarding a prefix. The index
+holds at most two entries per retained run. This is an operation-count result,
+not a throughput or whole-queue complexity claim.
+
+Controls cover all 720 arrival orders of two adjacent three-fragment messages,
+ordinary and wrapped TSNs, retained duplicates, partial abandonment, later
+message completion and exact byte accounting. The paired tail-first association
+control now covers both ordered and unordered messages with exact payloads,
+one send-credit release and an empty in-flight queue. The existing hosted
+`reassembly_` selector includes the new controls.
+
+External-client assessment: the Rust SDK manifest at `da8f2d16` has no RTC/SCTP
+dependency. The .NET README at `e467c871` assigns peer networking to the game.
+The Godot README at `5717e958` uses browser WebRTC or the Godot WebRTC extension.
+These clients do not use this vendored native reference-client queue. No SDK
+change or migration is required.
