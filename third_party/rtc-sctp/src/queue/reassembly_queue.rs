@@ -249,7 +249,7 @@ pub(crate) struct ReassemblyQueue {
     /// Future ordered messages awaiting their predecessors or more fragments.
     pub(crate) ordered: VecDeque<Chunks>,
     pub(crate) unordered: VecDeque<Chunks>,
-    pub(crate) unordered_chunks: Vec<ChunkPayloadData>,
+    pub(crate) unordered_chunks: VecDeque<ChunkPayloadData>,
     unordered_runs: FxHashMap<u32, UnorderedRun>,
     pub(crate) n_bytes: usize,
     /// Monotonic counter stamped onto each reassembled message so `read` can tell which of a
@@ -257,6 +257,8 @@ pub(crate) struct ReassemblyQueue {
     next_arrival: u64,
     #[cfg(test)]
     pub(crate) unordered_scan_steps: usize,
+    #[cfg(test)]
+    pub(crate) unordered_forward_steps: usize,
 }
 
 impl ReassemblyQueue {
@@ -272,12 +274,14 @@ impl ReassemblyQueue {
             ready_ordered: VecDeque::new(),
             ordered: VecDeque::new(),
             unordered: VecDeque::new(),
-            unordered_chunks: vec![],
+            unordered_chunks: VecDeque::new(),
             unordered_runs: FxHashMap::default(),
             n_bytes: 0,
             next_arrival: 0,
             #[cfg(test)]
             unordered_scan_steps: 0,
+            #[cfg(test)]
+            unordered_forward_steps: 0,
         }
     }
 
@@ -432,23 +436,28 @@ impl ReassemblyQueue {
     /// Just remove chunks that are equal to or older than new_cumulative_tsn
     /// from the unordered_chunks
     pub(crate) fn forward_tsn_for_unordered(&mut self, new_cumulative_tsn: u32) {
-        let mut last_idx: isize = -1;
-        for (i, c) in self.unordered_chunks.iter().enumerate() {
-            if sna32gt(c.tsn, new_cumulative_tsn) {
+        while let Some(chunk) = self.unordered_chunks.front() {
+            #[cfg(test)]
+            {
+                self.unordered_forward_steps += 1;
+            }
+            if sna32gt(chunk.tsn, new_cumulative_tsn) {
                 break;
             }
-            last_idx = i as isize;
-        }
-        if last_idx >= 0 {
-            for i in 0..(last_idx + 1) as usize {
-                self.subtract_num_bytes(self.unordered_chunks[i].user_data.len());
-            }
-            self.unordered_chunks.drain(..(last_idx + 1) as usize);
-            // FORWARD TSN can cut through a run. Rebuild endpoints for the
-            // retained suffix; it must not inherit a discarded beginning flag.
-            self.unordered_runs.clear();
-            for chunk in &self.unordered_chunks {
-                UnorderedRun::insert(&mut self.unordered_runs, chunk);
+            if let Some(chunk) = self.unordered_chunks.pop_front() {
+                self.subtract_num_bytes(chunk.user_data.len());
+                if let Some(mut run) = self.unordered_runs.remove(&chunk.tsn) {
+                    self.unordered_runs.remove(&run.first);
+                    self.unordered_runs.remove(&run.last);
+                    // A prefix cut can cross one retained run. Its suffix has
+                    // no beginning; all later runs keep their existing index.
+                    if sna32gt(run.last, new_cumulative_tsn) {
+                        run.first = new_cumulative_tsn.wrapping_add(1);
+                        run.beginning = false;
+                        self.unordered_runs.insert(run.first, run);
+                        self.unordered_runs.insert(run.last, run);
+                    }
+                }
             }
         }
     }

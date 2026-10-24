@@ -1696,3 +1696,76 @@ fn reassembly_ordered_forward_preserves_ready_messages_and_completion_order() {
         assert_eq!(queue.get_num_bytes(), 0);
     }
 }
+
+// Issue #1182: advancing abandonment must not rebuild every retained fragment.
+#[test]
+fn reassembly_unordered_forward_tsn_work_tracks_discarded_fragments() {
+    const COUNT: u32 = 1024;
+    for first in [100u32, u32::MAX - COUNT / 2] {
+        let mut queue = ReassemblyQueue::new(0);
+        let fragment = |index: u32, beginning, ending| ChunkPayloadData {
+            tsn: first.wrapping_add(index),
+            unordered: true,
+            beginning_fragment: beginning,
+            ending_fragment: ending,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from(index.to_be_bytes().to_vec()),
+            ..Default::default()
+        };
+        for index in 0..COUNT {
+            assert!(!queue.push(fragment(index, index == 0, false)));
+        }
+        for index in 0..COUNT {
+            queue.forward_tsn_for_unordered(first.wrapping_add(index));
+            assert_eq!(queue.get_num_bytes(), (COUNT - index - 1) as usize * 4);
+            assert!(!queue.is_readable());
+        }
+        assert!(queue.unordered_chunks.is_empty());
+        assert!(
+            queue.unordered_forward_steps <= COUNT as usize * 2,
+            "{} fragment visits for {COUNT} one-fragment advances",
+            queue.unordered_forward_steps
+        );
+        // Abandoned runs must not revive. A fresh reordered message still completes.
+        assert!(!queue.push(fragment(COUNT + 2, false, true)));
+        assert!(!queue.push(fragment(COUNT, true, false)));
+        assert!(queue.push(fragment(COUNT + 1, false, false)));
+        let expected: Vec<u8> = (COUNT..COUNT + 3).flat_map(u32::to_be_bytes).collect();
+        assert_eq!(
+            queue.read().unwrap().to_payload(12).unwrap().as_ref(),
+            expected
+        );
+        assert_eq!(queue.get_num_bytes(), 0);
+    }
+}
+
+#[test]
+fn reassembly_unordered_forward_tsn_preserves_later_run_endpoints() {
+    for first in [100u32, u32::MAX - 2] {
+        let mut queue = ReassemblyQueue::new(0);
+        let fragment = |index: u32| ChunkPayloadData {
+            tsn: first.wrapping_add(index),
+            unordered: true,
+            beginning_fragment: index == 0 || index == 4,
+            ending_fragment: index == 2 || index == 6,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from(vec![index as u8]),
+            ..Default::default()
+        };
+        for index in [0, 1, 4, 6] {
+            assert!(!queue.push(fragment(index)));
+        }
+        queue.forward_tsn_for_unordered(first);
+        assert_eq!(queue.get_num_bytes(), 3);
+        assert!(queue.push(fragment(5)));
+        assert_eq!(
+            queue.read().unwrap().to_payload(3).unwrap().as_ref(),
+            &[4, 5, 6]
+        );
+        assert!(!queue.push(fragment(2)), "the cut message has no beginning");
+        assert_eq!(queue.get_num_bytes(), 2);
+        assert!(queue.read().is_none());
+        queue.forward_tsn_for_unordered(first.wrapping_add(2));
+        assert_eq!(queue.get_num_bytes(), 0);
+    }
+}
