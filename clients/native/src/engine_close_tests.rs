@@ -346,8 +346,36 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
 
 type RuntimeFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+#[derive(Debug)]
+struct ResetReactorTiming {
+    epoch: std::time::Instant,
+    last_poll_started_ns: AtomicU64,
+    last_poll_finished_ns: AtomicU64,
+    last_wake_ns: AtomicU64,
+    longest_poll_ns: AtomicU64,
+}
+
+impl Default for ResetReactorTiming {
+    fn default() -> Self {
+        Self {
+            epoch: std::time::Instant::now(),
+            last_poll_started_ns: AtomicU64::new(0),
+            last_poll_finished_ns: AtomicU64::new(0),
+            last_wake_ns: AtomicU64::new(0),
+            longest_poll_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+impl ResetReactorTiming {
+    fn elapsed_ns(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+}
+
 #[derive(Debug, Default)]
 struct ResetPacketProgress {
+    timing: ResetReactorTiming,
     sent: AtomicU64,
     application_sent: AtomicU64,
     received: AtomicU64,
@@ -366,6 +394,11 @@ impl ResetPacketProgress {
     /* Independent loads can overlap reactor work; these are not causal verdicts. */
     fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
+            "elapsed_ns": self.timing.elapsed_ns(),
+            "last_poll_started_ns": self.timing.last_poll_started_ns.load(Ordering::SeqCst),
+            "last_poll_finished_ns": self.timing.last_poll_finished_ns.load(Ordering::SeqCst),
+            "last_wake_ns": self.timing.last_wake_ns.load(Ordering::SeqCst),
+            "longest_poll_ns": self.timing.longest_poll_ns.load(Ordering::SeqCst),
             "sent": self.sent.load(Ordering::SeqCst),
             "application_sent": self.application_sent.load(Ordering::SeqCst),
             "received": self.received.load(Ordering::SeqCst),
@@ -542,6 +575,10 @@ impl std::task::Wake for ResetReactorWake {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
+        self.progress
+            .timing
+            .last_wake_ns
+            .fetch_max(self.progress.timing.elapsed_ns(), Ordering::SeqCst);
         self.progress.reactor_wakes.fetch_add(1, Ordering::SeqCst);
         let task = self.task.lock().unwrap().clone();
         if let Some(task) = task {
@@ -598,10 +635,24 @@ impl PausableReactor {
                 progress.reactor_wakes.load(Ordering::SeqCst),
                 Ordering::SeqCst,
             );
+            let poll_started = progress.timing.elapsed_ns();
+            progress
+                .timing
+                .last_poll_started_ns
+                .store(poll_started, Ordering::SeqCst);
             progress.reactor_polls.fetch_add(1, Ordering::SeqCst);
             let result = future
                 .as_mut()
                 .poll(&mut std::task::Context::from_waker(&driver_waker));
+            let poll_finished = progress.timing.elapsed_ns();
+            progress
+                .timing
+                .last_poll_finished_ns
+                .store(poll_finished, Ordering::SeqCst);
+            progress
+                .timing
+                .longest_poll_ns
+                .fetch_max(poll_finished.saturating_sub(poll_started), Ordering::SeqCst);
             if result.is_pending() {
                 progress
                     .reactor_pending_polls
@@ -650,8 +701,19 @@ fn reset_reactor_evidence_distinguishes_pending_woken_and_finished() {
     let mut context = std::task::Context::from_waker(&task_waker);
     let child_waker = Arc::new(std::sync::Mutex::new(None));
     let captured = child_waker.clone();
+    let progress_in_poll = runtime.progress.clone();
     let mut driver = runtime.reactor_future(Box::pin(std::future::poll_fn(move |cx| {
         *captured.lock().unwrap() = Some(cx.waker().clone());
+        let during_poll = progress_in_poll.snapshot();
+        assert!(
+            during_poll["last_poll_started_ns"].as_u64().unwrap()
+                >= during_poll["last_poll_finished_ns"].as_u64().unwrap()
+        );
+        assert!(
+            during_poll["reactor_polls"].as_u64().unwrap()
+                > during_poll["reactor_pending_polls"].as_u64().unwrap()
+                    + during_poll["reactor_completions"].as_u64().unwrap()
+        );
         std::task::Poll::Pending
     })));
     assert!(driver.as_mut().poll(&mut context).is_pending());
@@ -660,6 +722,11 @@ fn reset_reactor_evidence_distinguishes_pending_woken_and_finished() {
     assert_eq!(pending["reactor_pending_polls"], 1);
     assert_eq!(pending["reactor_wakes"], 0);
     assert_eq!(pending["reactor_completions"], 0);
+    let poll_started = pending["last_poll_started_ns"].as_u64().unwrap();
+    let poll_finished = pending["last_poll_finished_ns"].as_u64().unwrap();
+    assert!(poll_finished >= poll_started);
+    assert_eq!(pending["longest_poll_ns"], poll_finished - poll_started);
+    assert_eq!(pending["last_wake_ns"], 0);
 
     let saved_child_waker = child_waker.lock().unwrap().as_ref().unwrap().clone();
     saved_child_waker.wake_by_ref();
@@ -667,6 +734,9 @@ fn reset_reactor_evidence_distinguishes_pending_woken_and_finished() {
     assert_eq!(unscheduled["reactor_polls"], pending["reactor_polls"]);
     assert_eq!(unscheduled["reactor_wakes"], 1);
     assert_eq!(unscheduled["reactor_wakes_at_last_poll"], 0);
+    assert!(unscheduled["last_wake_ns"].as_u64().unwrap() >= poll_finished);
+    assert_eq!(unscheduled["last_poll_started_ns"], poll_started);
+    assert_eq!(unscheduled["last_poll_finished_ns"], poll_finished);
     assert_eq!(
         task.0.load(Ordering::SeqCst),
         1,
@@ -679,6 +749,8 @@ fn reset_reactor_evidence_distinguishes_pending_woken_and_finished() {
     assert_eq!(held["paused_polls"], 1);
     assert_eq!(held["reactor_polls"], 1, "the held driver is not polled");
     assert_eq!(held["reactor_pending_polls"], 1);
+    assert_eq!(held["last_poll_started_ns"], poll_started);
+    assert_eq!(held["last_poll_finished_ns"], poll_finished);
     runtime.paused.store(false, Ordering::SeqCst);
     let replacement_task = Arc::new(TaskWake(AtomicU64::new(0)));
     let replacement_waker = std::task::Waker::from(replacement_task.clone());
@@ -697,6 +769,11 @@ fn reset_reactor_evidence_distinguishes_pending_woken_and_finished() {
     assert_eq!(finished["reactor_polls"], 3);
     assert_eq!(finished["reactor_pending_polls"], 2);
     assert_eq!(finished["reactor_completions"], 1);
+    assert!(
+        finished["last_poll_finished_ns"].as_u64().unwrap()
+            >= finished["last_poll_started_ns"].as_u64().unwrap()
+    );
+    assert!(finished["longest_poll_ns"].as_u64().unwrap() >= poll_finished - poll_started);
 }
 
 impl Runtime for PausableReactor {

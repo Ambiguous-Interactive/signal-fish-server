@@ -1930,6 +1930,7 @@ impl Association {
             .flat_map(|q| {
                 q.ordered
                     .iter()
+                    .chain(q.ready_ordered.iter())
                     .chain(q.unordered.iter())
                     .flat_map(|message| message.chunks.iter())
                     .chain(q.unordered_chunks.iter())
@@ -2190,6 +2191,7 @@ impl Association {
                 .retain(|_, d| d.stream_identifier != id);
             if (self.retired && !queue.is_readable())
                 || (queue.ordered.is_empty()
+                    && queue.ready_ordered.is_empty()
                     && queue.unordered.is_empty()
                     && queue.unordered_chunks.is_empty())
             {

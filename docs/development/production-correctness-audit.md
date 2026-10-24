@@ -7915,3 +7915,55 @@ dependency. The .NET README at `e467c871` assigns peer networking to the game.
 The Godot README at `5717e958` uses browser WebRTC or the Godot WebRTC extension.
 These clients do not use this vendored native reference-client queue. No SDK
 change or migration is required.
+
+### F160 — Native chunk-array sources confuse bytes and chunks
+
+Confirmed on `8bf30de2`; repair tracked in #1177 under #826 and #912.
+After one byte is split from a six-byte array entry, `remaining()` still returns
+six. Exhausted multi-byte entries still report readable bytes. Empty entries
+can make the old subtraction underflow. The red source control fails on the
+first partial read. Track remaining bytes independently from consumed positions.
+The same control passes with zero limits, empty arrays, interior and trailing
+empty entries, uneven sizes, exact payloads, and complete-chunk counts.
+The current stream writer checks remaining bytes before one source pop, so this
+is a public source-contract defect, not proof of wrapper gameplay corruption.
+The hosted native runner now includes the `bytes_array_` selector.
+
+### F161 — Graceful native shutdown leaves writable readiness set
+
+Confirmed on `8bf30de2` under #1145. Stream readiness reports writable after
+shutdown starts, while writes return `ErrStreamClosed`. The red paired control
+fails in `ShutdownPending`. Move the existing shutdown-state refusal into
+`is_writable`. Cover all four live shutdown states, unchanged caller buffers
+on refusal, and exact delivery of gameplay admitted before shutdown.
+
+### F162 — Unread native ordered messages cross the stale sequence boundary
+
+Confirmed on `8bf30de2`; repair tracked in #1178 under #826 and #912.
+The application-read cursor also controls ordered protocol admission. With no
+application reads, one-byte messages SSN 0 through 32768 enter the queue, but
+SSN 32769 is rejected as stale with only 32769 payload bytes retained.
+The same paired-wire control fails on the baseline after the sender receives
+an acknowledgment for message 32769; its receiver retains 32769 bytes instead
+of 32770. The repair retains and delivers all 65540 messages in that history.
+Advance protocol admission when contiguous complete messages become ready.
+Keep a separate ready queue until application reads release those bytes.
+Preserve stream order, mixed completion timestamps, FORWARD TSN, and saved
+reset-generation ownership. Queue and paired histories cross a complete SSN
+cycle with unread messages. This does not establish arbitrary reordering
+beyond the serial-number half-space.
+
+External-client assessment for F160–F162: the current Rust SDK manifest has no
+RTC/SCTP dependency. The .NET SDK project has no native peer transport dependency.
+Godot's mesh adapter constructs engine `WebRTCPeerConnection` objects.
+None imports these private reference-client transport sources. The signaling
+wire is unchanged; no SDK migration is required.
+
+### A18 follow-up — Native reset reactor scheduling evidence
+
+Issue #1120 remains open. The reset fixture now records monotonic poll start,
+poll end, last driver wake, and longest poll duration with existing counters.
+The deterministic probe covers an active poll, Pending, a wake before the next
+poll, a held fixture, and terminal completion. Independent snapshot loads can
+race with reactor work and do not establish a causal verdict. Passing focused
+wire histories do not explain or repair the hosted timeout.

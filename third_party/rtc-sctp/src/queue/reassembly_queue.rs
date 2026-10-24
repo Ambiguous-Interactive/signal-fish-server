@@ -231,11 +231,11 @@ impl UnorderedRun {
 #[derive(Default, Debug)]
 pub(crate) struct ReassemblyQueue {
     pub(crate) si: StreamId,
+    /// Next ordered message to admit, independent of application reads.
     pub(crate) next_ssn: u16,
-    /// expected SSN for next ordered chunk
-    ///
-    /// `ordered`/`unordered` are consumed strictly from the front by `read`;
-    /// `VecDeque` makes that O(1) instead of `Vec::remove(0)`'s full shift.
+    /// Complete ordered messages admitted in sequence, including unread SSN wraps.
+    pub(crate) ready_ordered: VecDeque<Chunks>,
+    /// Future ordered messages awaiting their predecessors or more fragments.
     pub(crate) ordered: VecDeque<Chunks>,
     pub(crate) unordered: VecDeque<Chunks>,
     pub(crate) unordered_chunks: Vec<ChunkPayloadData>,
@@ -258,6 +258,7 @@ impl ReassemblyQueue {
         ReassemblyQueue {
             si,
             next_ssn: 0, // From RFC 4960 Sec 6.5:
+            ready_ordered: VecDeque::new(),
             ordered: VecDeque::new(),
             unordered: VecDeque::new(),
             unordered_chunks: vec![],
@@ -341,6 +342,7 @@ impl ReassemblyQueue {
                     s.arrival = self.next_arrival;
                     self.next_arrival += 1;
                 }
+                self.promote_ordered();
                 return complete;
             }
 
@@ -352,106 +354,65 @@ impl ReassemblyQueue {
                 self.next_arrival += 1;
             }
             self.ordered.insert(idx, cset);
+            self.promote_ordered();
 
             ok
         }
     }
 
+    fn promote_ordered(&mut self) {
+        while self
+            .ordered
+            .front()
+            .is_some_and(|chunks| chunks.ssn == self.next_ssn && chunks.is_complete())
+        {
+            if let Some(chunks) = self.ordered.pop_front() {
+                self.ready_ordered.push_back(chunks);
+                self.next_ssn = self.next_ssn.wrapping_add(1);
+            }
+        }
+    }
+
     pub(crate) fn is_readable(&self) -> bool {
-        // Check unordered first
-        if !self.unordered.is_empty() {
-            // The chunk sets in self.unordered should all be complete.
-            return true;
-        }
-
-        // Check ordered sets
-        if !self.ordered.is_empty() {
-            let cset = &self.ordered[0];
-            if cset.is_complete() && sna16lte(cset.ssn, self.next_ssn) {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn readable_unordered_chunks(&self) -> Option<&Chunks> {
-        self.unordered.front()
-    }
-
-    fn readable_ordered_chunks(&self) -> Option<&Chunks> {
-        let ordered = self.ordered.front();
-        if let Some(chunks) = ordered {
-            if !chunks.is_complete() {
-                return None;
-            }
-            if sna16gt(chunks.ssn, self.next_ssn) {
-                return None;
-            }
-            Some(chunks)
-        } else {
-            None
-        }
+        !self.ready_ordered.is_empty() || !self.unordered.is_empty()
     }
 
     pub(crate) fn read(&mut self) -> Option<Chunks> {
-        let chunks = if let (Some(unordered_chunks), Some(ordered_chunks)) = (
-            self.readable_unordered_chunks(),
-            self.readable_ordered_chunks(),
-        ) {
-            if unordered_chunks.arrival < ordered_chunks.arrival {
-                self.unordered.pop_front().unwrap()
-            } else {
-                if ordered_chunks.ssn == self.next_ssn {
-                    self.next_ssn = self.next_ssn.wrapping_add(1);
-                }
-                self.ordered.pop_front().unwrap()
-            }
-        } else {
-            // Check unordered first
-            if !self.unordered.is_empty() {
-                self.unordered.pop_front().unwrap()
-            } else if !self.ordered.is_empty() {
-                // Now, check ordered
-                let chunks = &self.ordered[0];
-                if !chunks.is_complete() {
-                    return None;
-                }
-                if sna16gt(chunks.ssn, self.next_ssn) {
-                    return None;
-                }
-                if chunks.ssn == self.next_ssn {
-                    self.next_ssn = self.next_ssn.wrapping_add(1);
-                }
-                self.ordered.pop_front().unwrap()
-            } else {
-                return None;
-            }
+        let ordered_first = match (self.ready_ordered.front(), self.unordered.front()) {
+            (Some(ordered), Some(unordered)) => ordered.arrival <= unordered.arrival,
+            (Some(_), None) => true,
+            _ => false,
         };
-
+        let chunks = if ordered_first {
+            self.ready_ordered.pop_front()?
+        } else {
+            self.unordered.pop_front()?
+        };
         self.subtract_num_bytes(chunks.len());
-
         Some(chunks)
     }
 
     /// Use last_ssn to locate a chunkSet then remove it if the set has
     /// not been complete
     pub(crate) fn forward_tsn_for_ordered(&mut self, last_ssn: u16) {
-        let num_bytes = self
-            .ordered
-            .iter()
-            .filter(|s| sna16lte(s.ssn, last_ssn) && !s.is_complete())
-            .fold(0, |n, s| {
-                n + s.chunks.iter().fold(0, |acc, c| acc + c.user_data.len())
-            });
-        self.subtract_num_bytes(num_bytes);
-
-        self.ordered
-            .retain(|s| !sna16lte(s.ssn, last_ssn) || s.is_complete());
-
-        // Finally, forward next_ssn
-        if sna16lte(self.next_ssn, last_ssn) {
-            self.next_ssn = last_ssn.wrapping_add(1);
+        if sna16lt(last_ssn, self.next_ssn) {
+            return;
         }
+        while self
+            .ordered
+            .front()
+            .is_some_and(|chunks| sna16lte(chunks.ssn, last_ssn))
+        {
+            if let Some(chunks) = self.ordered.pop_front() {
+                if chunks.is_complete() {
+                    self.ready_ordered.push_back(chunks);
+                } else {
+                    self.subtract_num_bytes(chunks.len());
+                }
+            }
+        }
+        self.next_ssn = last_ssn.wrapping_add(1);
+        self.promote_ordered();
     }
 
     /// Remove all fragments in the unordered sets that contains chunks

@@ -32359,6 +32359,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("rtc-sctp", "payload_queue_gap_ack"),
         ("rtc-sctp", "reassembly_"),
         ("rtc-sctp", "data_channel_credit_tracks_ppid"),
+        ("rtc-sctp", "bytes_array_"),
     ]
     .into_iter()
     .map(|(package, selector)| {

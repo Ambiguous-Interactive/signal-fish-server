@@ -222,3 +222,26 @@ still bypass it. Controls cover every arrival order of adjacent three-fragment
 messages, retained duplicates, partial abandonment, TSN wrap, exact payloads,
 and paired association send-credit release. Replacement qualification in #912
 must retain these reassembly_ controls.
+
+The #1177 repair tracks remaining payload bytes separately from consumed array
+positions in public `BytesArray` sources. Partial chunks reduce the byte count;
+empty chunks only advance the position. Controls cover empty arrays and chunks,
+zero limits, uneven chunk sizes, partial reads, exact payloads, and consumed
+chunk counts. The current stream writer checks the count before its single
+source pop; this finding does not establish corruption in that wrapper path.
+Replacement qualification in #912 must retain the `bytes_array_` controls.
+
+The #1145 readiness repair reports streams as unwritable in every graceful
+shutdown state. Writes keep their existing refusal and leave caller buffers
+untouched. Paired histories cover pending, sent, received, and ACK-sent states
+while preserving admitted gameplay through terminal reads.
+
+The #1178 repair separates ordered message admission from application reads.
+Contiguous complete messages enter a ready queue and advance the protocol SSN
+immediately. Unread messages remain available across repeated 16-bit SSN cycles.
+The ready queue preserves stream order and original completion timestamps for
+selection against unordered messages. FORWARD TSN preserves complete messages,
+discards incomplete abandoned messages, and promotes newly eligible successors.
+Saved reset generations and their retained TSNs include ready ordered messages.
+Replacement qualification in #912 must retain the reassembly and paired shutdown
+sequence-wrap controls.
