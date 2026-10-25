@@ -71,6 +71,26 @@ impl Chunks {
         Ok(buf)
     }
 
+    /// Consume a complete message, reusing a uniquely owned single fragment.
+    ///
+    /// Shared and fragmented messages retain the same bounded copy behavior as
+    /// [`to_payload`](Self::to_payload). The returned buffer owns its bytes and
+    /// remains valid after the stream or association closes.
+    pub fn into_payload(mut self, max_len: usize) -> Result<BytesMut> {
+        if self.chunks.len() == 1
+            && let Some(fragment) = self.chunks.pop()
+        {
+            if fragment.user_data.len() > max_len {
+                return Err(Error::ErrShortBuffer);
+            }
+            return Ok(fragment
+                .user_data
+                .try_into_mut()
+                .unwrap_or_else(|shared| BytesMut::from(shared.as_ref())));
+        }
+        self.to_payload(max_len)
+    }
+
     /// Concatenates every fragment into `buf`, returning the number of bytes written.
     ///
     /// # Errors
@@ -98,6 +118,23 @@ impl Chunks {
     pub fn next(&mut self, max_length: usize) -> Option<Chunk> {
         if self.index >= self.chunks.len() {
             return None;
+        }
+
+        let fragment = &self.chunks[self.index].user_data;
+        let available = fragment.len() - self.offset;
+        if available > 0 && (max_length <= available || self.index + 1 == self.chunks.len()) {
+            let length = available.min(max_length);
+            let bytes = fragment.slice(self.offset..self.offset + length);
+            self.offset += length;
+            if self.offset == fragment.len() {
+                self.index += 1;
+                self.offset = 0;
+                while self.index < self.chunks.len() && self.chunks[self.index].user_data.is_empty()
+                {
+                    self.index += 1;
+                }
+            }
+            return Some(Chunk { bytes });
         }
 
         let mut capacity = 0;

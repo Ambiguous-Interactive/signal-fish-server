@@ -370,3 +370,14 @@ scans only the fragments needed for that result. The reassembly cursor control
 covers zero and partial reads, empty fragments, exact boundaries, exhaustion,
 and `usize::MAX` final reads with exact payload comparison. See
 [#1213](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1213).
+
+The #636 receive path adds `Chunks::into_payload`. It reuses a uniquely owned
+single fragment as mutable delivered storage. Shared and fragmented messages
+keep the existing one-copy fallback and message-size error. Cursor reads that
+stay within one fragment now share that fragment's bytes. Reads across fragment
+boundaries still copy only the returned bytes. Returned buffers own their
+storage after the source message, stream, or association is dropped.
+The `reassembly_owned_payload_` and `reassembly_chunk_cursor_` controls cover
+ownership, shared-buffer isolation, bounds, partial reads, and exact bytes.
+Replacement qualification in #912 must retain these controls and the RTC
+`sctp_received_payload_reuses_single_packet_storage_after_retirement` history.

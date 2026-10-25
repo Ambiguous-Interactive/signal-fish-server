@@ -1048,6 +1048,166 @@ fn test_chunk_set_empty_chunk_set() -> Result<()> {
 }
 
 #[test]
+fn reassembly_owned_payload_reuses_unique_storage_and_keeps_copy_bounds() {
+    for shared in [false, true] {
+        for fragmented in [false, true] {
+            for size in [0, 1, 64, 1200, 65536] {
+                let expected: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
+                let payload = Bytes::copy_from_slice(&expected);
+                let pointer = payload.as_ptr();
+                let held = shared.then(|| payload.clone());
+                let fragments = if fragmented {
+                    vec![payload.slice(..size / 2), payload.slice(size / 2..)]
+                } else {
+                    vec![payload]
+                };
+                let make_message = || {
+                    Chunks::new(
+                        0,
+                        0,
+                        PayloadProtocolIdentifier::Binary,
+                        fragments
+                            .iter()
+                            .cloned()
+                            .map(|user_data| ChunkPayloadData {
+                                user_data,
+                                ..Default::default()
+                            })
+                            .collect(),
+                    )
+                };
+                if size > 0 {
+                    assert!(matches!(
+                        make_message().into_payload(size - 1),
+                        Err(Error::ErrShortBuffer)
+                    ));
+                }
+                let message = make_message();
+                drop(fragments);
+                let mut output = message.into_payload(size).unwrap();
+                assert_eq!(
+                    output.as_ref(),
+                    expected,
+                    "shared={shared}, fragmented={fragmented}, size={size}"
+                );
+                if !shared && !fragmented && size > 0 {
+                    assert_eq!(
+                        output.as_ptr(),
+                        pointer,
+                        "unique fragment must retain its storage"
+                    );
+                }
+                if size > 0 {
+                    output[0] ^= 0xff;
+                }
+                if let Some(held) = held {
+                    assert_eq!(held.as_ref(), expected);
+                }
+            }
+        }
+    }
+    let empty = Chunks::new(0, 0, PayloadProtocolIdentifier::Binary, vec![]);
+    assert!(empty.into_payload(0).unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "isolated receive copy profile; run explicitly"]
+fn reassembly_owned_payload_copy_profile() {
+    for size in [64, 1200, 65536] {
+        for consume in [false, true] {
+            let start = std::time::Instant::now();
+            let mut reused = 0_u64;
+            for _ in 0..65536 {
+                let input = Bytes::from(vec![0x5a; size]);
+                let pointer = input.as_ptr();
+                let message = Chunks::new(
+                    0,
+                    0,
+                    PayloadProtocolIdentifier::Binary,
+                    vec![ChunkPayloadData {
+                        user_data: input,
+                        ..Default::default()
+                    }],
+                );
+                let output = if consume {
+                    message.into_payload(size).unwrap()
+                } else {
+                    message.to_payload(size).unwrap()
+                };
+                reused += u64::from(output.as_ptr() == pointer);
+                std::hint::black_box(output);
+            }
+            println!(
+                "OWNED_COPY_PROFILE size={size} consume={consume} messages=65536 reused={reused} elapsed_us={}",
+                start.elapsed().as_micros()
+            );
+        }
+    }
+}
+
+#[test]
+fn reassembly_chunk_cursor_shares_fragment_storage_after_message_drop() {
+    for limit in [1, 3, usize::MAX] {
+        let payload = Bytes::copy_from_slice(b"abc");
+        let mut message = Chunks::new(
+            0,
+            0,
+            PayloadProtocolIdentifier::Binary,
+            vec![ChunkPayloadData {
+                user_data: payload.clone(),
+                ..Default::default()
+            }],
+        );
+        let first = message.next(limit).unwrap().bytes;
+        assert_eq!(first.as_ref(), &b"abc"[..limit.min(3)]);
+        assert_eq!(first.as_ptr(), payload.as_ptr(), "limit={limit}");
+        let tail = message.next(usize::MAX).map(|chunk| chunk.bytes);
+        drop(message);
+        drop(payload);
+        assert_eq!(first.as_ref(), &b"abc"[..limit.min(3)]);
+        if limit < 3 {
+            assert_eq!(tail.unwrap().as_ref(), &b"abc"[limit..]);
+        } else {
+            assert!(tail.is_none());
+        }
+    }
+}
+
+#[test]
+#[ignore = "isolated cursor copy profile; run explicitly"]
+fn reassembly_chunk_cursor_copy_profile() {
+    let payload = Bytes::from(vec![0x5a; 65536]);
+    for limit in [64, 1200, 65536] {
+        let start = std::time::Instant::now();
+        let mut reads = 0_u64;
+        let mut shared = 0_u64;
+        for _ in 0..4096 {
+            let mut message = Chunks::new(
+                0,
+                0,
+                PayloadProtocolIdentifier::Binary,
+                vec![ChunkPayloadData {
+                    user_data: payload.clone(),
+                    ..Default::default()
+                }],
+            );
+            let mut offset = 0;
+            while let Some(chunk) = message.next(limit) {
+                shared += u64::from(chunk.bytes.as_ptr() == payload[offset..].as_ptr());
+                offset += chunk.bytes.len();
+                reads += 1;
+                std::hint::black_box(chunk);
+            }
+            assert_eq!(offset, payload.len());
+        }
+        println!(
+            "CURSOR_COPY_PROFILE limit={limit} reads={reads} shared={shared} elapsed_us={}",
+            start.elapsed().as_micros()
+        );
+    }
+}
+
+#[test]
 fn reassembly_chunk_cursor_large_read_limit_preserves_exact_remaining_bytes() {
     for first_limit in [0, 1, 3, 4, 6, 7, 8] {
         let mut message = Chunks::new(

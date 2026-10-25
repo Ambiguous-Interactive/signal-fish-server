@@ -1103,39 +1103,52 @@ pub enum DeliveryEvent<Name = ReceiptName> {
     },
 }
 
+/// A tagged artifact row borrowed from the retained event log.
+/// Keep the owned form above for replay; writing must not clone the registry
+/// or increment shared-name reference counts for every delivery.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "event_kind", rename_all = "snake_case")]
+pub enum DeliveryEventRef<'a> {
+    Sent(&'a SentEvent),
+    Receipt(&'a ReceiptEvent),
+    Gap(&'a GapEvent),
+    UnsupportedNotice(&'a UnsupportedNoticeEvent),
+    Disconnect(&'a DisconnectEvent),
+    Churn(&'a ChurnEvent),
+    JoinFailure {
+        detail: &'a str,
+    },
+    Fault(&'a InvalidReason),
+    Registry {
+        senders: &'a BTreeMap<String, (String, u32)>,
+    },
+}
+
 impl RunRecords {
-    /// Every event as a tagged JSONL line, in the canonical order
+    /// Every event as a borrowed tagged JSONL line, in the canonical order
     /// (sends, receipts, gaps, unsupported notices, disconnects, churn,
     /// join failures, faults, the registry).
-    pub fn events(&self) -> impl Iterator<Item = DeliveryEvent> + '_ {
+    pub fn events(&self) -> impl Iterator<Item = DeliveryEventRef<'_>> {
         self.sent
             .iter()
-            .cloned()
-            .map(DeliveryEvent::Sent)
-            .chain(self.receipts.iter().cloned().map(DeliveryEvent::Receipt))
-            .chain(self.gaps.iter().cloned().map(DeliveryEvent::Gap))
+            .map(DeliveryEventRef::Sent)
+            .chain(self.receipts.iter().map(DeliveryEventRef::Receipt))
+            .chain(self.gaps.iter().map(DeliveryEventRef::Gap))
             .chain(
                 self.unsupported_notices
                     .iter()
-                    .cloned()
-                    .map(DeliveryEvent::UnsupportedNotice),
+                    .map(DeliveryEventRef::UnsupportedNotice),
             )
-            .chain(
-                self.disconnects
-                    .iter()
-                    .cloned()
-                    .map(DeliveryEvent::Disconnect),
-            )
-            .chain(self.churn.iter().cloned().map(DeliveryEvent::Churn))
+            .chain(self.disconnects.iter().map(DeliveryEventRef::Disconnect))
+            .chain(self.churn.iter().map(DeliveryEventRef::Churn))
             .chain(
                 self.join_failures
                     .iter()
-                    .cloned()
-                    .map(|detail| DeliveryEvent::JoinFailure { detail }),
+                    .map(|detail| DeliveryEventRef::JoinFailure { detail }),
             )
-            .chain(self.faults.iter().cloned().map(DeliveryEvent::Fault))
-            .chain(std::iter::once(DeliveryEvent::Registry {
-                senders: self.registry.clone(),
+            .chain(self.faults.iter().map(DeliveryEventRef::Fault))
+            .chain(std::iter::once(DeliveryEventRef::Registry {
+                senders: &self.registry,
             }))
     }
 }
@@ -1143,6 +1156,49 @@ impl RunRecords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "isolated artifact serialization profile; run explicitly"]
+    fn generator_artifact_serialization_profile() {
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans);
+        let mut records = RunRecords::default();
+        let count = std::env::var("CAPACITY_ARTIFACT_PROBE_RECEIPTS")
+            .unwrap_or_else(|_| "500000".into())
+            .parse::<usize>()
+            .unwrap();
+        records.receipts = vec![template.receipts[0].clone(); count];
+        records.registry = (0..15984)
+            .map(|peer| {
+                (
+                    format!("00000000-0000-0000-0000-{peer:012}"),
+                    (format!("r{}p{}", peer / 16, peer % 16), 1),
+                )
+            })
+            .collect();
+        let source_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = Instant::now();
+        let mut events = records.events();
+        for _ in 0..count {
+            std::hint::black_box(events.next().unwrap());
+        }
+        let registry = events.next().unwrap();
+        let iteration_us = started.elapsed().as_micros();
+        let registry_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        std::hint::black_box(registry);
+        let output = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+        println!(
+            "ARTIFACT_SERIALIZATION_PROFILE {}",
+            serde_json::json!({
+                "receipts": count, "registry": records.registry.len(), "source_rss": source_rss,
+                "registry_rss": registry_rss, "iteration_us": iteration_us,
+                "write_us": started.elapsed().as_micros(),
+                "bytes": std::fs::metadata(output.path().join(crate::artifacts::DELIVERIES_FILE)).unwrap().len()
+            })
+        );
+    }
 
     #[test]
     fn compact_send_positions_admit_only_representable_counts() {
@@ -1897,9 +1953,9 @@ mod tests {
                     .filter(|row| {
                         !matches!(
                             row,
-                            DeliveryEvent::Sent(_)
-                                | DeliveryEvent::Registry { .. }
-                                | DeliveryEvent::Fault(
+                            DeliveryEventRef::Sent(_)
+                                | DeliveryEventRef::Registry { .. }
+                                | DeliveryEventRef::Fault(
                                     InvalidReason::GeneratorRecordBudgetExceeded { .. }
                                 )
                         )

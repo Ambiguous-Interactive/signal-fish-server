@@ -239,3 +239,14 @@ The live native control checks both channel modes and offerer roles, exact
 empty and nonempty text and binary receipts, and final statistics after reset.
 See [#1219](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1219).
 Replacement qualification in #912 must retain this control.
+
+The #636 SCTP receive handler consumes complete messages with
+`Chunks::into_payload`. A uniquely owned single packet can supply the delivered
+buffer without another payload copy. Shared and fragmented messages retain
+the bounded copy fallback. The paired handler control covers small and
+fragmented gameplay and retains exact delivered storage after transport drop.
+The #1145 graceful-tail control now keeps delivered buffers through endpoint
+retirement instead of copying them into separate vectors first.
+Replacement qualification in #912 must retain
+`sctp_received_payload_reuses_single_packet_storage_after_retirement` and
+`graceful_shutdown_retains_tail_across_bounded_application_reads`.
