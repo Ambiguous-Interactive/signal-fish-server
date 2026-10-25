@@ -280,7 +280,7 @@ impl Stream<'_> {
             .association
             .streams
             .get(&self.stream_identifier)
-            .is_some_and(|stream| stream.max_payload_size == 0)
+            .is_some_and(|stream| stream.max_payload_size < 4)
         {
             return Err(Error::ErrOutboundPacketTooLarge);
         }
@@ -700,8 +700,12 @@ impl StreamState {
 
         let mut chunks = vec![];
 
+        // DATA padding must fit the configured packet budget. The
+        // 16-bit chunk length includes the complete DATA header.
+        let fragment_budget = (self.max_payload_size as usize & !3)
+            .min(usize::from(u16::MAX) - crate::config::DATA_CHUNK_HEADER_SIZE as usize);
         while remaining != 0 {
-            let fragment_size = std::cmp::min(self.max_payload_size as usize, remaining); //self.association.max_payload_size
+            let fragment_size = fragment_budget.min(remaining);
 
             // Copy the userdata since we'll have to store it until acked
             // and the caller may re-use the buffer in the mean time

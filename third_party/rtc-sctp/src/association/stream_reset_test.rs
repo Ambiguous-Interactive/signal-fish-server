@@ -4155,3 +4155,209 @@ fn forward_tsn_recovers_opposite_ordering(unordered: bool) -> Result<()> {
     }
     Ok(())
 }
+
+// Issues #1205/#1206: every fragment must fit both DATA framing and padding.
+fn fragment_budget_shutdown_history(payload_budget: u32, size: usize) -> Result<()> {
+    let (_, mut remote) = reset_pair();
+    let now = Instant::now();
+    let mut config = crate::EndpointConfig::default();
+    config.max_payload_size(payload_budget);
+    let mut local = Association::new(
+        None,
+        Arc::new(TransportConfig::default()),
+        config.get_max_payload_size(),
+        0,
+        "127.0.0.1:5000".parse().unwrap(),
+        "127.0.0.1:5001".parse().unwrap(),
+        TransportProtocol::UDP,
+        now,
+    );
+    local.control_queue.clear();
+    local.timers.stop(Timer::T1Init);
+    local.set_state(AssociationState::Established);
+    local.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+    local.peer_last_tsn = remote.my_next_tsn.wrapping_sub(1);
+    remote.peer_last_tsn = local.my_next_tsn.wrapping_sub(1);
+    local.rwnd = 1_000_000;
+    assert_eq!(config.get_max_payload_size(), payload_budget);
+    remote.max_receive_buffer_size = 1_000_000;
+    remote.ack_mode = AckMode::NoDelay;
+    let expected = Bytes::from((0..size).map(|n| (n % 251) as u8).collect::<Vec<_>>());
+    let tail = Bytes::from_static(b"after fragmented gameplay");
+    local
+        .stream(1)?
+        .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+    local
+        .stream(1)?
+        .write_sctp(now, &tail, PayloadProtocolIdentifier::Binary)?;
+    local.shutdown()?;
+    let mut dropped = false;
+    for step in 0..100 {
+        let at = now + Duration::from_millis(step * 100);
+        local.handle_timeout(at);
+        remote.handle_timeout(at);
+        for raw in local.gather_outbound(at).0 {
+            let packet = Packet::unmarshal(&raw)?;
+            let mut data_packet = false;
+            for chunk in &packet.chunks {
+                if let Some(data) = chunk.as_any().downcast_ref::<ChunkPayloadData>() {
+                    data_packet = true;
+                    assert!(
+                        data.user_data.len() + DATA_CHUNK_HEADER_SIZE as usize
+                            <= usize::from(u16::MAX),
+                        "budget {payload_budget}"
+                    );
+                }
+            }
+            if data_packet {
+                assert!(
+                    raw.len() <= local.mtu as usize,
+                    "budget {payload_budget}: {} > {}",
+                    raw.len(),
+                    local.mtu
+                );
+                // Require recovery through the retransmission packet path too.
+                if !dropped {
+                    dropped = true;
+                    continue;
+                }
+            }
+            remote.handle_inbound(packet, at)?;
+        }
+        for raw in remote.gather_outbound(at).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+        }
+        if local.state() == AssociationState::Closed && remote.state() == AssociationState::Closed {
+            break;
+        }
+    }
+    assert!(dropped);
+    if payload_budget == u32::MAX {
+        assert!(
+            local.stats.get_num_t3timeouts() > 0,
+            "the lost complete DATA burst requires timer recovery"
+        );
+    }
+    assert_eq!(
+        local.state(),
+        AssociationState::Closed,
+        "budget {payload_budget}"
+    );
+    assert_eq!(
+        remote.state(),
+        AssociationState::Closed,
+        "budget {payload_budget}"
+    );
+    assert!(local.inflight_queue.is_empty());
+    assert!(local.pending_queue.is_empty());
+    assert!(remote.poll_endpoint_event().is_none());
+    assert_eq!(
+        remote
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(200_000)?
+            .freeze(),
+        expected,
+        "budget {payload_budget}"
+    );
+    assert_eq!(
+        remote
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(200_000)?
+            .freeze(),
+        tail
+    );
+    assert!(remote.poll_endpoint_event().is_some());
+    assert!(remote.poll_endpoint_event().is_none());
+    Ok(())
+}
+
+#[test]
+fn shutdown_large_fragment_budget_preserves_wire_lengths_and_exact_gameplay() -> Result<()> {
+    // DATA's 16-bit length includes its 16-byte header. The application
+    // message may exceed one chunk even with a large packet budget.
+    for payload_budget in [65_516u32, 65_519, 65_520, 65_535, 65_536, u32::MAX] {
+        fragment_budget_shutdown_history(payload_budget, 131_039)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_unaligned_fragment_budget_fits_every_data_packet() -> Result<()> {
+    // Include aligned budgets and the unchanged default as positive controls.
+    for payload_budget in [4u32, 5, 6, 7, 8, 9, 1156, 1159, 1160, 1161, 1162, 1163] {
+        fragment_budget_shutdown_history(payload_budget, payload_budget as usize * 3 + 1)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_full_width_congestion_growth_keeps_send_credit() -> Result<()> {
+    for (threshold, partial, acknowledged, pending, fast_recovery, window, remainder) in [
+        (200, 0, 50, true, false, 150, 0),
+        (200, 0, 50, true, true, 100, 0),
+        (200, 0, 50, false, false, 100, 0),
+        (50, 10, 20, true, false, 100, 30),
+        (50, 10, 90, true, false, 200, 0),
+        (50, 10, 100, true, false, 200, 10),
+        (50, 90, 20, false, false, 100, 110),
+    ] {
+        let mut sender = timed_test_association();
+        let now = Instant::now();
+        if pending {
+            sender
+                .open_stream(1, PayloadProtocolIdentifier::Binary)?
+                .write(now, b"queued")?;
+        }
+        sender.mtu = 100;
+        sender.cwnd = 100;
+        sender.ssthresh = threshold;
+        sender.partial_bytes_acked = partial;
+        sender.in_fast_recovery = fast_recovery;
+        sender.on_cumulative_tsn_ack_point_advanced(acknowledged, now);
+        assert_eq!(
+            (sender.cwnd, sender.partial_bytes_acked),
+            (window, remainder),
+            "threshold={threshold} partial={partial} acknowledged={acknowledged} pending={pending} recovery={fast_recovery}"
+        );
+    }
+    let mut sender = timed_test_association();
+    let now = Instant::now();
+    sender
+        .open_stream(1, PayloadProtocolIdentifier::Binary)?
+        .write(now, b"queued gameplay")?;
+    sender.mtu = u32::MAX;
+    sender.cwnd = u32::MAX - 1;
+    sender.ssthresh = u32::MAX;
+    sender.on_cumulative_tsn_ack_point_advanced(100, now);
+    assert_eq!(sender.cwnd, u32::MAX, "slow start cannot wrap send credit");
+    sender.cwnd = u32::MAX - 1;
+    sender.ssthresh = 0;
+    sender.partial_bytes_acked = u32::MAX - 2;
+    sender.on_cumulative_tsn_ack_point_advanced(100, now);
+    assert_eq!(
+        sender.cwnd,
+        u32::MAX,
+        "congestion avoidance cannot wrap credit"
+    );
+    assert_eq!(
+        sender.partial_bytes_acked, 99,
+        "retain the exact additive-increase remainder"
+    );
+    sender.gather_outbound(now);
+    let first = sender.cumulative_tsn_ack_point.wrapping_add(1);
+    sender.inflight_queue.get_mut(first).unwrap().miss_indicator = 2;
+    sender.process_fast_retransmission(
+        sender.cumulative_tsn_ack_point,
+        first.wrapping_add(1),
+        false,
+    )?;
+    assert!(sender.in_fast_recovery);
+    assert_eq!(sender.cwnd, u32::MAX);
+    assert_eq!(sender.ssthresh, u32::MAX);
+    assert_eq!(sender.partial_bytes_acked, 0);
+    Ok(())
+}

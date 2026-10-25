@@ -1,6 +1,7 @@
 import { decode, encode } from '@msgpack/msgpack';
 import { run } from './orchestrator.js';
 import {
+  EXIT_CONNECTION_ERROR,
   EXIT_CRITERIA_UNMET,
   EXIT_SUCCESS,
   GAME_DATA_FORMATS,
@@ -21,6 +22,8 @@ type Scenario = {
   delayedOutput?: boolean;
   delayedDecode?: boolean;
   staleReceipt?: boolean;
+  sendBudgetDelta?: number;
+  relayValue?: string;
 };
 const scenarios: Scenario[] = [
   { sendAt: 350 },
@@ -31,6 +34,13 @@ const scenarios: Scenario[] = [
   { sendAt: 1099, held: true },
   { sendAt: 350, preparationCrossesCutoff: true },
 ];
+// Regression #1207: include the admitted frame in the relay send ceiling.
+// Keep exact byte boundaries across text, MessagePack, and opaque encodings.
+for (const relayValue of ['probe', '雪🌊']) {
+  for (const sendBudgetDelta of [-1, 0, 1]) {
+    scenarios.push({ sendAt: 350, sendBudgetDelta, relayValue });
+  }
+}
 // Regression #1039: receipt eligibility belongs to raw arrival, before decode
 // and queued output. Accountable stale frames must never pay relay debt.
 for (const version of [2, 3]) {
@@ -56,6 +66,8 @@ for (const format of GAME_DATA_FORMATS) {
     delayedOutput = false,
     delayedDecode = false,
     staleReceipt = false,
+    sendBudgetDelta,
+    relayValue = 'probe',
   } of scenarios) {
     const receiptScenario = receiveAt !== undefined;
     const originalSocket = globalThis.WebSocket;
@@ -176,7 +188,7 @@ for (const format of GAME_DATA_FORMATS) {
         appId: 'test',
         platform: 'test',
         exchange: false,
-        relayPayload: 'probe',
+        relayPayload: relayValue,
         crippleIce: false,
         p2pTimeoutSecs: 1,
         p2pRetryCount: 0,
@@ -218,17 +230,32 @@ for (const format of GAME_DATA_FORMATS) {
           },
         });
       }
+      if (sendBudgetDelta !== undefined) {
+        const payloadBytes = new TextEncoder().encode(relayValue).byteLength;
+        const frameBytes =
+          format === 'json'
+            ? new TextEncoder().encode(
+                JSON.stringify({ type: 'GameData', data: { data: { relay_msg: relayValue } } }),
+              ).byteLength
+            : format === 'message_pack'
+              ? encode({ relay_msg: relayValue }).byteLength
+              : 21 + payloadBytes;
+        socket.bufferedAmount = 1_048_576 - frameBytes + sendBudgetDelta;
+      }
       await advance(sendAt);
-      const expectedSends = sendAt < 1100 && !preparationCrossesCutoff ? 1 : 0;
+      const budgetRejected = sendBudgetDelta !== undefined && sendBudgetDelta > 0;
+      const expectedSends =
+        sendAt < 1100 && !preparationCrossesCutoff && !budgetRejected ? 1 : 0;
       assert(
         relayFrames.length === expectedSends,
-        `${format}/${sendAt}: expired relay timer sent ${relayFrames.length} probes; expected ${expectedSends}`,
+        `${format}/${sendAt}/budgetDelta=${sendBudgetDelta}: sent ${relayFrames.length} probes; expected ${expectedSends}`,
       );
       if (expectedSends === 1) {
         const frame = relayFrames[0]!;
         if (format === 'json') {
           assert(
-            frame === '{"type":"GameData","data":{"data":{"relay_msg":"probe"}}}',
+            frame ===
+              JSON.stringify({ type: 'GameData', data: { data: { relay_msg: relayValue } } }),
             'JSON relay frame stays exact',
           );
         } else {
@@ -236,14 +263,16 @@ for (const format of GAME_DATA_FORMATS) {
           const bytes = new Uint8Array(frame as ArrayBuffer);
           if (format === 'message_pack') {
             assert(
-              JSON.stringify(decode(bytes)) === '{"relay_msg":"probe"}',
+              JSON.stringify(decode(bytes)) === JSON.stringify({ relay_msg: relayValue }),
               'MessagePack carries the relay object',
             );
           } else {
-            const expected = new Uint8Array(26);
+            const expected = new Uint8Array(
+              21 + new TextEncoder().encode(relayValue).byteLength,
+            );
             expected.set([83, 70, 82, 80, 1]);
             expected[20] = 1;
-            expected.set(new TextEncoder().encode('probe'), 21);
+            expected.set(new TextEncoder().encode(relayValue), 21);
             assert(
               JSON.stringify([...bytes]) === JSON.stringify([...expected]),
               'opaque relay preserves exact sender header and payload bytes',
@@ -356,8 +385,13 @@ for (const format of GAME_DATA_FORMATS) {
         'hold and linger expiry cannot repeat the relay probe',
       );
       assert(
-        result === (expectedSends === 1 ? EXIT_SUCCESS : EXIT_CRITERIA_UNMET),
-        `${format}/${sendAt}: unexpected exit ${result}`,
+        result ===
+          (budgetRejected
+            ? EXIT_CONNECTION_ERROR
+            : expectedSends === 1
+              ? EXIT_SUCCESS
+              : EXIT_CRITERIA_UNMET),
+        `${format}/${sendAt}/budgetDelta=${sendBudgetDelta}: unexpected exit ${result}`,
       );
       assert(
         events.filter((event) => event['event'] === 'game_data_sent').length === expectedSends,

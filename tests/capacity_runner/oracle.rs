@@ -697,6 +697,7 @@ fn churn_evidence(
 fn scheduled_send_evidence(
     plans: &[SenderPlan],
     records: &RunRecords,
+    index: &SendIndex<'_>,
     reasons: &mut Vec<InvalidReason>,
 ) -> u64 {
     let plans: BTreeMap<_, _> = plans
@@ -734,7 +735,6 @@ fn scheduled_send_evidence(
         }
         *epoch = epoch.saturating_add(1);
     }
-    let index = SendIndex::new(&records.sent);
     let mut previous_key = None;
     let mut covered = false;
     let mut completed = 0;
@@ -921,9 +921,17 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
 /// total and per recipient) and the histogram artifact, so they can never
 /// disagree.
 pub fn latency_pairs(records: &RunRecords) -> impl Iterator<Item = (&str, u64)> {
-    let sent_by_key = SendIndex::new(&records.sent);
+    indexed_latency_pairs(records, SendIndex::new(&records.sent))
+}
+
+fn indexed_latency_pairs<'a>(
+    records: &'a RunRecords,
+    sent_by_key: impl std::borrow::Borrow<SendIndex<'a>>,
+) -> impl Iterator<Item = (&'a str, u64)> {
     records.receipts.iter().filter_map(move |receipt| {
-        let sent = sent_by_key.get(receipt.sender.as_str(), receipt.seq)?;
+        let sent = sent_by_key
+            .borrow()
+            .get(receipt.sender.as_str(), receipt.seq)?;
         (sent.phase == Phase::Measured).then(|| {
             (
                 receipt.recipient.as_str(),
@@ -993,6 +1001,7 @@ fn recipient_latency_counter_bytes(receipts: u64) -> usize {
 /// the caller's proven sample limit. The aggregate still uses u64 counters.
 fn recipient_latency_statistics<T: Counter>(
     records: &RunRecords,
+    sent_by_key: &SendIndex<'_>,
     member_names: &BTreeSet<&str>,
     per_recipient: &mut [RecipientOutcome],
     maximum_recipient_receipts: u64,
@@ -1003,7 +1012,7 @@ fn recipient_latency_statistics<T: Counter>(
     );
     let mut latency = LatencyAccumulator::<u64>::default();
     let mut latency_by_recipient: BTreeMap<&str, LatencyAccumulator<T>> = BTreeMap::new();
-    for (recipient, sample) in latency_pairs(records) {
+    for (recipient, sample) in indexed_latency_pairs(records, sent_by_key) {
         latency.record(sample);
         // Misrouted receipts remain in the aggregate. Allocate recipient
         // buckets only for roster peers with measured receipts.
@@ -1322,10 +1331,10 @@ fn snapshot_tail_evidence(
 /// misroutes, warm-up records, and receipt keys absent from the send ledger.
 fn payload_size_evidence(
     records: &RunRecords,
+    sent_by_key: &SendIndex<'_>,
     expected_application_bytes: u32,
     reasons: &mut Vec<InvalidReason>,
 ) -> PayloadBytes {
-    let sent_by_key = SendIndex::new(&records.sent);
     let mut evidence = PayloadBytes::default();
     let mut mismatches = (0_u64, None);
     let mut invalid_bodies = (0_u64, None);
@@ -1478,8 +1487,16 @@ pub fn summarize(
     churn: &ChurnPlan,
     experiment: Option<Experiment>,
 ) -> OutcomeSummary {
+    // Share exact send lookups across validation and latency passes. Arbitrary
+    // replay order needs one sort and one compact offset index, not three.
+    let sent_by_key = SendIndex::new(&records.sent);
     let mut reasons = records.faults.clone();
-    let payload_bytes = payload_size_evidence(records, expected_application_bytes, &mut reasons);
+    let payload_bytes = payload_size_evidence(
+        records,
+        &sent_by_key,
+        expected_application_bytes,
+        &mut reasons,
+    );
     churn_evidence(churn, roster, records, &mut reasons);
     if !records.join_failures.is_empty() {
         reasons.push(InvalidReason::JoinFailed {
@@ -1523,7 +1540,7 @@ pub fn summarize(
 
     let total_scheduled: u64 = plans.iter().map(|plan| count_u64(plan.sends.len())).sum();
     let total_sent: u64 = count_u64(records.sent.len());
-    let completed = scheduled_send_evidence(plans, records, &mut reasons);
+    let completed = scheduled_send_evidence(plans, records, &sent_by_key, &mut reasons);
     let total_unsent = total_scheduled.saturating_sub(completed);
 
     let (max_lag, lag_p99) = generator_lag_stats(&records.sent);
@@ -1995,24 +2012,28 @@ pub fn summarize(
     let latency_us = match recipient_latency_counter_bytes(maximum_recipient_receipts) {
         1 => recipient_latency_statistics::<u8>(
             records,
+            &sent_by_key,
             &member_names,
             &mut per_recipient,
             maximum_recipient_receipts,
         ),
         2 => recipient_latency_statistics::<u16>(
             records,
+            &sent_by_key,
             &member_names,
             &mut per_recipient,
             maximum_recipient_receipts,
         ),
         4 => recipient_latency_statistics::<u32>(
             records,
+            &sent_by_key,
             &member_names,
             &mut per_recipient,
             maximum_recipient_receipts,
         ),
         _ => recipient_latency_statistics::<u64>(
             records,
+            &sent_by_key,
             &member_names,
             &mut per_recipient,
             maximum_recipient_receipts,
@@ -3088,12 +3109,14 @@ mod coverage_tests {
         let mut wide_peers = compact_peers.clone();
         let compact = recipient_latency_statistics::<u32>(
             &records,
+            &SendIndex::new(&records.sent),
             &members,
             &mut compact_peers,
             count_u64(records.receipts.len()),
         );
         let wide = recipient_latency_statistics::<u64>(
             &records,
+            &SendIndex::new(&records.sent),
             &members,
             &mut wide_peers,
             count_u64(records.receipts.len()),
@@ -3109,6 +3132,7 @@ mod coverage_tests {
         let mut legacy = baseline.clone();
         legacy.latency_us = recipient_latency_statistics::<u64>(
             &records,
+            &SendIndex::new(&records.sent),
             &members,
             &mut legacy.per_recipient,
             count_u64(records.receipts.len()),
@@ -3139,12 +3163,14 @@ mod coverage_tests {
         for records in [&records, &RunRecords::default()] {
             let compact = recipient_latency_statistics::<u32>(
                 records,
+                &SendIndex::new(&records.sent),
                 &BTreeSet::new(),
                 &mut [],
                 count_u64(records.receipts.len()),
             );
             let wide = recipient_latency_statistics::<u64>(
                 records,
+                &SendIndex::new(&records.sent),
                 &BTreeSet::new(),
                 &mut [],
                 count_u64(records.receipts.len()),
@@ -3232,6 +3258,7 @@ mod coverage_tests {
                 let mut wide_peers = summary.per_recipient.clone();
                 let wide = recipient_latency_statistics::<u64>(
                     &records,
+                    &SendIndex::new(&records.sent),
                     &members,
                     &mut wide_peers,
                     count_u64(count),
@@ -3401,7 +3428,12 @@ mod coverage_tests {
                     records.churn.reverse();
                 }
                 let mut reasons = Vec::new();
-                let completed = scheduled_send_evidence(&context.plans, &records, &mut reasons);
+                let completed = scheduled_send_evidence(
+                    &context.plans,
+                    &records,
+                    &SendIndex::new(&records.sent),
+                    &mut reasons,
+                );
                 assert_eq!(
                     completed,
                     u64::from(valid),
@@ -4338,7 +4370,12 @@ mod coverage_tests {
                         .record(receipt.application_bytes, receipt.encoded_frame_body_bytes));
                 }
                 let mut reasons = Vec::new();
-                let actual = payload_size_evidence(&records, 96, &mut reasons);
+                let actual = payload_size_evidence(
+                    &records,
+                    &SendIndex::new(&records.sent),
+                    96,
+                    &mut reasons,
+                );
                 assert!(reasons.is_empty(), "{reasons:?}");
                 for (actual, expected) in [
                     (actual.warmup.egress, warmup),

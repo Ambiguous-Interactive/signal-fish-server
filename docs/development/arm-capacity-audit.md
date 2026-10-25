@@ -5532,3 +5532,72 @@ This synthetic cohort retains raw sends, relay indexes, and send lookup indexes.
 It has no live receipts. It does not bound whole-process memory, qualify the
 planned ten-minute cell, explain historical stalls, or establish server capacity.
 Those requirements remain open in #775.
+
+### Reuse the send lookup index during capacity validation (#775, #636)
+
+The summary previously built the same send lookup index for payload byte
+accounting, scheduled-send validation, and recipient latency. Arbitrary replay
+order required three complete offset sorts. The summary now shares one immutable
+index across those passes. Standalone histogram output still builds its own
+index. Canonical input keeps borrowed sender blocks. Duplicate keys still use
+the last raw event; every raw send and receipt remains unchanged.
+
+The complete-fan-out probe now accepts `CAPACITY_MEMORY_PROBE_REORDERED=1`.
+It shuffles only the raw send vector, after collection and before summary timing,
+with a fixed-state Fisher-Yates pass. The existing 16-player probe retains all
+receipts and validates the complete summary. Each trial ran in a fresh process;
+Linux `wait4` collected peak RSS. Local agent builds and tests paused during both
+cohorts. The shared ARM64 Linux/WSL2 host remained externally uncontrolled.
+These are debug Rust 1.94.0 results, not release throughput or live server capacity.
+
+An initial candidate extracted one per-receipt helper. Three alternating pairs
+ran at every shape below, first canonical then shuffled. All 36 trials passed.
+Median summary time and process peak RSS were:
+
+| Send order | Sends per player | Receipts | Baseline seconds | Initial seconds | Baseline peak KiB | Initial peak KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| Canonical | 100 | 24,000 | 0.065597 | 0.067859 | 14,624 | 14,624 |
+| Canonical | 1,000 | 240,000 | 0.626882 | 0.653642 | 28,232 | 28,236 |
+| Canonical | 5,000 | 1,200,000 | 2.403343 | 2.704320 | 92,208 | 92,212 |
+| Shuffled | 100 | 24,000 | 0.063894 | 0.062042 | 14,624 | 14,624 |
+| Shuffled | 1,000 | 240,000 | 0.738605 | 0.738495 | 28,488 | 28,492 |
+| Shuffled | 5,000 | 1,200,000 | 4.816275 | 4.795804 | 92,848 | 92,932 |
+
+That candidate did not establish a useful runtime gain. The final candidate
+keeps the original latency iterator body and lets it own or borrow the index.
+A second cohort used three alternating pairs at the largest shape in each order.
+All 12 trials passed:
+
+| Send order | Baseline seconds | Final seconds | Baseline peak KiB | Final peak KiB |
+| --- | --- | --- | --- | --- |
+| Canonical | 3.250106 | 3.264804 | 92,204 | 92,020 |
+| Shuffled | 4.503435 | 4.262198 | 92,800 | 92,980 |
+
+The final shuffled candidate was faster in each matched pair, with a 5.36%
+lower median summary time. Canonical time changed by +0.45%. Different baseline
+times between cohorts show host variation; these observations do not isolate
+the cost of the first helper. Shuffled peak RSS rose 180 KiB in the final cohort.
+This removes repeated index construction work; it does not establish a peak
+memory reduction. The longer index lifetime spans churn and arrival validation,
+and it still overlaps the relay index during latency, as the former final index did.
+
+All 48 trials produce identical full-summary hashes within each workload size,
+including both send orders and both candidates. The largest summary SHA-256 is
+`3cd1f990305fca5542317debf462e2c168f17ef0c3c17505e28db94833f7afbb`.
+The independent-map controls retain phase, byte, latency, unmatched-receipt,
+duplicate-key, malformed-history, and exact artifact-replay checks.
+
+Baseline executable SHA-256:
+`0ed2bf949c8251a010a5de669d790034c913be4d96289ee8ac5cedf5205a94c8`.
+Initial executable SHA-256:
+`870df81530ee0bb3968e851aa8e30a361433cd5b7c23faa248579d8575ccca2b`.
+Final executable SHA-256:
+`f51a0352ed970d98ad9a9928f37e613a4c471b8a7f70ffe782bc37ef81f3e760`.
+Reproduce with `generator_memory_profile_on_complete_fanout`,
+`CAPACITY_MEMORY_PROBE_PLAYERS=16`, and `CAPACITY_MEMORY_PROBE_SENDS` set to
+100, 1000, or 5000. Compare with and without the reordered flag in fresh
+fixed-binary processes. Raw trials and reproduction scripts remain
+in the ignored session-534 progress artifacts. This synthetic cohort does not
+qualify the planned ten-minute cell, bound the complete process envelope,
+explain generator stalls, or establish a server capacity point. Those
+requirements remain open in #775 and #636.

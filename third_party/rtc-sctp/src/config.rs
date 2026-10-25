@@ -206,8 +206,10 @@ impl EndpointConfig {
 
     /// Maximum outgoing DATA fragment payload size.
     ///
-    /// Zero rejects nonempty writes before consuming caller input. A value
-    /// below eight derives a packet budget too small for stream reset;
+    /// Values below four reject nonempty writes before consuming caller input.
+    /// Fragments use a four-byte-aligned budget and cannot exceed the 16-bit
+    /// DATA chunk length. Larger messages are split without losing bytes.
+    /// A value below eight derives a packet budget too small for stream reset;
     /// stop and close return `ErrOutboundPacketTooLarge` without changing
     /// stream state. This is a DATA budget, not a limit on handshake packets.
     ///

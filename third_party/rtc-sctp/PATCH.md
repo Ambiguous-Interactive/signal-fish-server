@@ -330,3 +330,21 @@ Controls cover all six public write adapters, unconsumed chunk arrays, sequence
 and byte accounting, and a successful positive-budget write. Replacement
 qualification in #912 must retain the `zero_fragment_budget` controls as well
 as the existing reset selector.
+
+The #1205/#1206 repairs bound each DATA fragment by its 16-bit chunk length
+and the configured packet's padded payload capacity. Large admitted messages
+remain intact and use more fragments. Nonempty writes with payload budgets
+below four fail before consuming input or advancing message or stream state.
+The getter retains the configured budget. Default fragmentation is unchanged.
+Paired shutdown controls cover aligned and unaligned budgets, the 65519-byte
+DATA payload limit, full-width configuration, a lost first DATA packet,
+retransmission, exact terminal application reads, and one endpoint retirement.
+Replacement qualification in #912 must retain the shutdown fragment-budget
+controls and the zero_fragment_budget adapter controls.
+
+The #1208 repair keeps congestion arithmetic valid for full-width configured
+packet budgets. Timeout and fast-recovery thresholds saturate at the stored
+window limit. Slow start and congestion avoidance cannot wrap send credit.
+Congestion avoidance computes its acknowledgment sum in a wider type before
+subtracting the old window, so it retains the exact remainder. The full-width
+paired loss history and focused growth/recovery controls retain these bounds.
