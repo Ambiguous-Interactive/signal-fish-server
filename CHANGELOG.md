@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
-- Reduce native gameplay receive copies and retained fragment storage for small messages (#636).
+- Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
 - Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
 - Reduce native receive work when partial-reliability recovery discards fragmented gameplay (#1182).
@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release native sent gameplay storage after selective acknowledgment or abandonment (#1230).
+- Keep native receive credit correct when accepted gameplay crosses full-width limits (#1231).
 - Keep native gameplay sending after messages are abandoned at a closed receive window (#1227).
 - Keep native receive-byte accounting exact when ordered reassembly rejects duplicate fragments (#1223).
 - Count empty native data-channel messages as zero application bytes in traffic statistics (#1219).
