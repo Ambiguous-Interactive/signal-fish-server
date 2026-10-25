@@ -107,6 +107,7 @@ interface PeerLink {
     count: number;
     last: { source: 'buffered' | 'trickle'; name: string | null } | null;
   };
+  localIceCandidateErrors: { count: number; lastErrorCode: number | null };
   pairConnected: boolean;
   /** Observed failure fences queued work before the orchestrator retires this link. */
   terminal: boolean;
@@ -191,6 +192,7 @@ export class Engine {
       remoteCandidateBytes: 0,
       remoteDescriptionSet: false,
       iceCandidateFailures: { count: 0, last: null },
+      localIceCandidateErrors: { count: 0, lastErrorCode: null },
       pairConnected: false,
       terminal: false,
     };
@@ -457,6 +459,7 @@ export class Engine {
             ? null
             : { ...link.iceCandidateFailures.last },
       },
+      localIceCandidateErrors: { ...link.localIceCandidateErrors },
       remoteCandidateCount: link.remoteCandidateCount,
       pendingRemoteCandidates: link.pendingCandidates.length,
       channels: Object.fromEntries(
@@ -589,6 +592,14 @@ export class Engine {
 
   private registerPcHandlers(peer: string, link: PeerLink): void {
     const pc = link.pc;
+    pc.onicecandidateerror = (event) => {
+      if (this.peers.get(peer) !== link || link.terminal) return;
+      link.localIceCandidateErrors.count = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        link.localIceCandidateErrors.count + 1,
+      );
+      link.localIceCandidateErrors.lastErrorCode = event.errorCode;
+    };
     pc.oniceconnectionstatechange = () => this.recordTransportState(peer, link);
     pc.onicegatheringstatechange = () => this.recordTransportState(peer, link);
     pc.onsignalingstatechange = () => this.recordTransportState(peer, link);

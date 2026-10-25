@@ -66,6 +66,8 @@ output. Native library consumers must retain `EngineEvent::ChannelMessage`'s
 `queue_permit` until the message is handled or discarded, including output waits.
 Handle the new `EngineEvent::ChannelReceiveRejected` by retiring the failed link.
 
+The signaling WebSocket disables Nagle on its TCP socket for small relay frames.
+
 Before deciding success at the run cutoff or exit linger, the client checks
 ready signaling input and queued engine events. New room state can add gameplay
 work. A signaling queue that does not settle within 256 frames ends the run

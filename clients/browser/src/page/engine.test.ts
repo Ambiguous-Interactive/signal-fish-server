@@ -1507,6 +1507,7 @@ for (const failureStage of [
   class Connection {
     state = 'connecting';
     stateUnavailable = false;
+    onicecandidateerror: ((event: { errorCode: number }) => void) | null = null;
     get connectionState(): string {
       if (this.stateUnavailable) throw new Error('browser state unavailable');
       return this.state;
@@ -1523,6 +1524,7 @@ for (const failureStage of [
       return { label, readyState: 'connecting', bufferedAmount: 0, id: null };
     }
     async createOffer(): Promise<RTCSessionDescriptionInit> {
+      this.onicecandidateerror?.({ errorCode: 701 });
       if (failureStage === 'retired_offer')
         return new Promise((_resolve, reject) => {
           rejectOperation = reject;
@@ -1605,6 +1607,7 @@ for (const failureStage of [
           generation: number;
           connectionState: string;
           signalingState: string;
+          localIceCandidateErrors: { count: number; lastErrorCode: number | null };
           transportStateHistory: Array<{ connectionState: string }>;
           channels: Record<string, unknown>;
         };
@@ -1620,6 +1623,15 @@ for (const failureStage of [
       assert(
         snapshot.link.transportStateHistory.at(-1)?.connectionState === 'connecting',
         `${failureStage}: preserve pre-close transport history`,
+      );
+      assert(
+        snapshot.link.localIceCandidateErrors.count ===
+          (failureStage.startsWith('create_') && failureStage !== 'create_offer' ? 0 : 1) &&
+          snapshot.link.localIceCandidateErrors.lastErrorCode ===
+            (failureStage.startsWith('create_') && failureStage !== 'create_offer'
+              ? null
+              : 701),
+        `${failureStage}: initial failure output retains local ICE server errors`,
       );
       assert(
         snapshot.link.signalingState ===
@@ -1850,3 +1862,105 @@ for (const replace of [false, true]) {
     globalThis.RTCPeerConnection = originalPc;
   }
 }
+
+// Investigations #853/#889: local ICE server errors must survive until failure diagnostics.
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  const connections: Connection[] = [];
+  const callbacks: string[] = [];
+  class Channel {
+    readyState = 'open';
+    readonly ordered = true;
+    readonly maxRetransmits = null;
+    readonly maxPacketLifeTime = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor(readonly label: string) {}
+    close(): void {
+      this.readyState = 'closed';
+    }
+  }
+  class Connection {
+    connectionState = 'connecting';
+    onicecandidateerror:
+      ((event: { errorCode: number; errorText: string; url: string }) => void) | null = null;
+    ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+    constructor() {
+      connections.push(this);
+    }
+    close(): void {}
+  }
+  const engine = new Engine(false, {
+    onLocalCandidate: () => callbacks.push('candidate'),
+    onPcState: () => callbacks.push('state'),
+    onChannelOpen: () => callbacks.push('open'),
+    onChannelClosed: () => callbacks.push('close'),
+    onChannelMessage: (_peer, _generation, _label, text) => {
+      callbacks.push(text);
+    },
+  });
+  const snapshot = () =>
+    engine.diagnosticSnapshot('peer') as {
+      localIceCandidateErrors: { count: number; lastErrorCode: number | null };
+    };
+  const fail = (connection: Connection, errorCode: number) =>
+    connection.onicecandidateerror?.({
+      errorCode,
+      errorText: 'unretained error details',
+      url: 'stun:unretained.example:3478',
+    });
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    await engine.pairWith('peer', false, []);
+    const initial = snapshot().localIceCandidateErrors;
+    assert(
+      initial?.count === 0 && initial.lastErrorCode === null,
+      'local ICE errors start empty',
+    );
+    const first = connections[0]!;
+    fail(first, 701);
+    assert(
+      snapshot().localIceCandidateErrors.count === 1 &&
+        snapshot().localIceCandidateErrors.lastErrorCode === 701,
+      'initial ICE gathering retains its local server error code',
+    );
+    for (let index = 0; index < 100; index += 1) fail(first, 401);
+    assert(
+      JSON.stringify(snapshot().localIceCandidateErrors) ===
+        JSON.stringify({ count: 101, lastErrorCode: 401 }),
+      'repeated local ICE errors retain a constant-size summary',
+    );
+    assert(callbacks.length === 0, 'a local ICE server error does not fail a viable peer');
+    const copy = snapshot().localIceCandidateErrors;
+    copy.count = 900;
+    copy.lastErrorCode = 999;
+    assert(snapshot().localIceCandidateErrors.count === 101, 'snapshots cannot mutate errors');
+    assert(
+      !JSON.stringify(snapshot()).includes('unretained'),
+      'retain codes without error text or URLs',
+    );
+    const channel = new Channel(RELIABLE_LABEL);
+    first.ondatachannel?.({ channel });
+    await Promise.resolve();
+    channel.onmessage?.({ data: 'gameplay after ICE server error' });
+    assert(
+      callbacks.includes('gameplay after ICE server error'),
+      'other ICE paths can carry gameplay',
+    );
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    fail(first, 500);
+    assert(
+      snapshot().localIceCandidateErrors.count === 0,
+      'old errors cannot contaminate replacements',
+    );
+    fail(connections[1]!, 701);
+    assert(
+      snapshot().localIceCandidateErrors.count === 1,
+      'the replacement owns fresh gathering errors',
+    );
+  } finally {
+    engine.removePeer('peer');
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error('ok - local ICE server errors remain bounded and do not interrupt gameplay');

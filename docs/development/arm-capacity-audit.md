@@ -5659,3 +5659,49 @@ Reproduce with the existing ignored
 `CAPACITY_MEMORY_PROBE_REORDERED=1`. Each trial uses a fresh fixed-binary process
 and Linux `wait4` peak RSS. Raw results, source snapshots, and the measurement
 script remain under the ignored `progress/session-536/capacity/` directory.
+
+### Four-byte collector send-sort positions (#636/#775)
+
+The collector's temporary permutation used one eight-byte position per send
+on this 64-bit ARM host. It now uses four bytes for counts representable by
+u32. Counts above that boundary keep the full-width stable-sort fallback.
+Disordered sender groups sort by sequence and original position without
+stable-sort scratch. Equal-key evidence keeps its original order.
+The sorted-input fast path still allocates no positions.
+
+The new resource control fails on the old position vector. The boundary
+control checks representability without allocating billions of records.
+Existing differential histories compare all fields across 4,096 layouts,
+including duplicates, Unicode names, and maximum sequence values. Exact
+collector output and artifact replay remain unchanged. All 26 scoped records
+controls pass; three isolated profiling controls remain intentionally ignored.
+
+Three alternating fresh-process pairs ran at each send count. Each uses 256
+senders in interleaved order and the existing exact-event memory probe.
+Native checks overlap the initial trials. Each sender's sequence remains
+ordered in this cohort, so it measures the
+position vector and permutation, not disordered-group sorting. The measured
+Rust 1.94.0 debug-process medians on the shared ARM64 Linux host are:
+
+| Sends | Baseline peak KiB | Candidate peak KiB | Baseline sort us | Candidate sort us |
+| --- | --- | --- | --- | --- |
+| 1,000,000 | 80,612 | 76,488 | 1,687,460 | 1,959,481 |
+| 4,000,000 | 291,556 | 275,656 | 6,614,570 | 5,775,066 |
+
+Position storage falls from 8n to 4n bytes, saving 4,000,000 and 16,000,000
+bytes at these shapes. Peak RSS falls in every pair. Timing is mixed; the
+one-million-send median is slower. These shared-host debug measurements do
+not establish a speed improvement, complete generator memory bound, long
+live workload qualification, or a server capacity point. #775 and #636 remain
+open.
+
+Reproduce with `generator_send_sort_memory_profile`,
+`CAPACITY_SORT_PROBE_COMPACT=1`, and `CAPACITY_SORT_PROBE_SENDS` set to
+1000000 or 4000000. Use each source's binary in a fresh process and capture
+Linux `wait4` peak RSS. Raw trials, baseline source, and fixed binaries remain
+under ignored `progress/session-537/sort/`.
+
+Baseline executable SHA-256:
+`97aa6a1767c7ce69dbb337a291780f306dd311d7e0566453770d09e9d4291ef7`.
+Candidate executable SHA-256:
+`09e386af54e7687baed87c1d3f9123dda2289c90d4cc5df739b0e44a1fb8e0cf`.

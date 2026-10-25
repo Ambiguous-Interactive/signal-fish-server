@@ -326,7 +326,11 @@ of the current physical link before teardown. The browser reports signaling,
 ICE gathering, ICE connection, DTLS, SCTP, and required-channel states. It also
 reports whether the remote description was applied, how many remote candidates
 were admitted, and how many still wait for that description. An absent SCTP or
-DTLS transport is `null`. `transportStateHistory` retains the newest 32 observed
+DTLS transport is `null`. `localIceCandidateErrors` reports the count and latest
+code from browser `icecandidateerror` events. These events can identify local
+STUN or TURN failures while another path remains usable. The summary does not
+change transport decisions or prove the cause of a failed link.
+`transportStateHistory` retains the newest 32 observed
 changes to signaling, ICE gathering, ICE connection, and peer-connection states.
 Each entry includes `elapsedMs`, measured from creation of this physical link
 with the monotonic browser clock and rounded to milliseconds. The initial state

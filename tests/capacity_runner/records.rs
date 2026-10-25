@@ -990,7 +990,7 @@ fn sort_sent_events(events: &mut [SentEvent]) {
     if events.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)) {
         return;
     }
-    if events.len() <= 32 {
+    if events.len() <= 32 || !compact_send_positions_fit(events.len()) {
         events.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
         return;
     }
@@ -1009,25 +1009,13 @@ fn sort_sent_events(events: &mut [SentEvent]) {
         *next = offset;
         offset += *count;
     }
-    let mut source_positions = vec![0_usize; events.len()];
-    for (position, event) in events.iter().enumerate() {
-        let (next, _) = sender_ranges
-            .get_mut(event.sender.as_str())
-            .expect("every sender was counted");
-        source_positions[*next] = position;
-        *next += 1;
-    }
-    for (end, count) in sender_ranges.values() {
-        let positions = &mut source_positions[end - count..*end];
-        if !positions.is_sorted_by_key(|&position| events[position].seq) {
-            positions.sort_by_key(|&position| events[position].seq);
-        }
-    }
+    let mut source_positions = grouped_send_positions(events, &mut sender_ranges);
     for start in 0..source_positions.len() {
         let mut destination = start;
         loop {
-            let source = source_positions[destination];
-            source_positions[destination] = destination;
+            let source = source_positions[destination] as usize;
+            source_positions[destination] =
+                u32::try_from(destination).expect("validated send count");
             if source == start {
                 break;
             }
@@ -1035,6 +1023,31 @@ fn sort_sent_events(events: &mut [SentEvent]) {
             destination = source;
         }
     }
+}
+
+fn compact_send_positions_fit(count: usize) -> bool {
+    u32::try_from(count).is_ok()
+}
+
+fn grouped_send_positions(
+    events: &[SentEvent],
+    sender_ranges: &mut BTreeMap<&str, (usize, usize)>,
+) -> Vec<u32> {
+    let mut source_positions = vec![0_u32; events.len()];
+    for (position, event) in events.iter().enumerate() {
+        let (next, _) = sender_ranges
+            .get_mut(event.sender.as_str())
+            .expect("every sender was counted");
+        source_positions[*next] = u32::try_from(position).expect("validated send count");
+        *next += 1;
+    }
+    for (end, count) in sender_ranges.values() {
+        let positions = &mut source_positions[end - count..*end];
+        if !positions.is_sorted_by_key(|&position| events[position as usize].seq) {
+            positions.sort_unstable_by_key(|&position| (events[position as usize].seq, position));
+        }
+    }
+    source_positions
 }
 
 /// The replayable event set of one run (the contents of
@@ -1121,6 +1134,52 @@ impl RunRecords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_send_positions_admit_only_representable_counts() {
+        for count in [0, 1, 32, u32::MAX as usize] {
+            assert!(compact_send_positions_fit(count), "count={count}");
+        }
+        if let Some(too_many) = (u32::MAX as usize).checked_add(1) {
+            assert!(!compact_send_positions_fit(too_many));
+            assert!(!compact_send_positions_fit(usize::MAX));
+        }
+    }
+
+    #[test]
+    fn grouped_send_sort_positions_use_four_bytes_per_send() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        let mut events = Vec::new();
+        for position in 0..96_u64 {
+            let mut event = base.clone();
+            event.sender = if position % 2 == 0 {
+                "sender-a"
+            } else {
+                "sender-b"
+            }
+            .into();
+            event.seq = 96 - position;
+            event.sent_us = position;
+            events.push(event);
+        }
+        let mut ranges = BTreeMap::from([("sender-a", (0, 48)), ("sender-b", (48, 48))]);
+        let positions = grouped_send_positions(&events, &mut ranges);
+        assert_eq!(positions.len(), events.len());
+        assert!(
+            positions.capacity() * std::mem::size_of_val(&positions[0]) <= events.len() * 4,
+            "send sorting must retain at most four position bytes per send"
+        );
+        let mut expected: Vec<_> = (0..events.len()).collect();
+        expected.sort_by_key(|&position| (events[position].sender.as_str(), events[position].seq));
+        assert_eq!(
+            positions
+                .iter()
+                .map(|&position| position as usize)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 
     #[test]
     fn compact_send_sort_matches_stable_sort_with_duplicate_keys() {
