@@ -70,6 +70,18 @@ impl SendSchedule {
     }
 
     pub fn get(&self, index: usize) -> Option<ScheduledSend> {
+        let mut send = self.unshifted(index)?;
+        let shift = self
+            .shifts
+            .iter()
+            .filter(|(at, _)| send.intended_us >= *at)
+            .map(|(at, rejoin)| rejoin.saturating_sub(*at))
+            .sum::<u64>();
+        send.intended_us = send.intended_us.saturating_add(shift);
+        Some(send)
+    }
+
+    fn unshifted(&self, index: usize) -> Option<ScheduledSend> {
         if index >= self.count {
             return None;
         }
@@ -89,16 +101,9 @@ impl SendSchedule {
                 Phase::Measured,
             )
         };
-        let original_us = base + jitter;
-        let shift = self
-            .shifts
-            .iter()
-            .filter(|(at, _)| original_us >= *at)
-            .map(|(at, rejoin)| rejoin.saturating_sub(*at))
-            .sum::<u64>();
         Some(ScheduledSend {
             seq,
-            intended_us: original_us.saturating_add(shift),
+            intended_us: base + jitter,
             phase,
         })
     }
@@ -107,6 +112,11 @@ impl SendSchedule {
         ScheduleIter {
             schedule: self,
             next: 0,
+            next_shift: 0,
+            total_shift: 0,
+            ordered_shifts: self.shifts.is_sorted_by_key(|(at, _)| *at),
+            #[cfg(test)]
+            shift_checks: 0,
         }
     }
 
@@ -126,11 +136,34 @@ impl<'a> IntoIterator for &'a SendSchedule {
 pub struct ScheduleIter<'a> {
     schedule: &'a SendSchedule,
     next: usize,
+    next_shift: usize,
+    total_shift: u64,
+    ordered_shifts: bool,
+    #[cfg(test)]
+    shift_checks: usize,
 }
 impl Iterator for ScheduleIter<'_> {
     type Item = ScheduledSend;
     fn next(&mut self) -> Option<Self::Item> {
-        let send = self.schedule.get(self.next)?;
+        let mut send = if self.ordered_shifts {
+            self.schedule.unshifted(self.next)?
+        } else {
+            self.schedule.get(self.next)?
+        };
+        if self.ordered_shifts {
+            while let Some(&(at, rejoin)) = self.schedule.shifts.get(self.next_shift) {
+                #[cfg(test)]
+                {
+                    self.shift_checks += 1;
+                }
+                if at > send.intended_us {
+                    break;
+                }
+                self.total_shift += rejoin.saturating_sub(at);
+                self.next_shift += 1;
+            }
+            send.intended_us = send.intended_us.saturating_add(self.total_shift);
+        }
         self.next += 1;
         Some(send)
     }
@@ -795,6 +828,81 @@ mod tests {
                         assert_eq!(one.len(), expected.len().saturating_sub(2));
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn schedule_iterator_checks_each_churn_boundary_once_per_pass() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.warmup = Duration::from_millis(100);
+        config.duration = Duration::from_secs(1);
+        config.send_rate_per_sender = 100.0;
+        let mut plans = build_plans(&config).unwrap();
+        for instants in [
+            vec![],
+            vec![(0, 100_000)],
+            vec![
+                (100_000, 300_000),
+                (100_000, 150_000),
+                (200_000, 199_999),
+                (900_000, 950_000),
+                (u64::MAX, u64::MAX),
+            ],
+            vec![(900_000, 950_000), (100_000, 300_000)],
+        ] {
+            let schedule = &mut plans[0].sends;
+            schedule.shifts = instants;
+            let expected: Vec<_> = (0..schedule.len())
+                .map(|index| schedule.get(index).unwrap())
+                .collect();
+            let mut iter = schedule.iter();
+            assert_eq!(iter.len(), expected.len());
+            for (position, expected) in expected.iter().enumerate() {
+                assert_eq!(iter.next(), Some(*expected));
+                assert_eq!(iter.len(), schedule.len() - position - 1);
+            }
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.len(), 0);
+            if iter.ordered_shifts {
+                assert!(iter.shift_checks <= schedule.len() + schedule.shifts.len());
+            }
+            assert_eq!(schedule.iter().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated schedule iteration profile"]
+    fn generator_schedule_iteration_profile() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.warmup = Duration::from_secs(120);
+        config.duration = Duration::from_secs(600);
+        config.send_rate_per_sender = 1_000.0;
+        let mut plans = build_plans(&config).unwrap();
+        let schedule = &mut plans[0].sends;
+        schedule.shifts = (1..=26)
+            .map(|wave| (wave * 20_000_000, wave * 20_000_000 + 100_000))
+            .collect();
+        let expected_digest = (0..schedule.len()).fold(0_u64, |sum, index| {
+            sum.wrapping_add(schedule.get(index).unwrap().intended_us)
+        });
+        for attempt in 0..4 {
+            for indexed in [attempt % 2 == 0, attempt % 2 != 0] {
+                let start = std::time::Instant::now();
+                let mut digest = 0_u64;
+                if indexed {
+                    for index in 0..schedule.len() {
+                        let send = std::hint::black_box(schedule.get(index).unwrap());
+                        digest = digest.wrapping_add(send.intended_us);
+                    }
+                } else {
+                    for send in std::hint::black_box(schedule.iter()) {
+                        digest = digest.wrapping_add(std::hint::black_box(send).intended_us);
+                    }
+                }
+                assert_eq!(digest, expected_digest);
+                println!("schedule-iteration attempt={attempt} indexed={indexed} sends={} windows={} elapsed_us={} digest={digest}", schedule.len(), schedule.shifts.len(), start.elapsed().as_micros());
             }
         }
     }

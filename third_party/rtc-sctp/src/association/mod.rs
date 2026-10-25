@@ -2345,6 +2345,14 @@ impl Association {
         }
     }
 
+    fn earliest_outstanding_tsn(&self) -> Option<u32> {
+        self.inflight_queue.sorted.iter().copied().find(|tsn| {
+            self.inflight_queue
+                .get(*tsn)
+                .is_some_and(ChunkPayloadData::is_outstanding)
+        })
+    }
+
     fn process_acknowledgments(
         &mut self,
         cumulative_tsn_ack: u32,
@@ -2356,11 +2364,7 @@ impl Association {
         let mut newly_acked_data = false;
         // Abandoned DATA can precede the earliest outstanding TSN. RFC 9260
         // 6.3.2 R3 applies to that outstanding DATA, including gap acknowledgments.
-        let earliest_outstanding = self.inflight_queue.sorted.iter().copied().find(|tsn| {
-            self.inflight_queue
-                .get(*tsn)
-                .is_some_and(ChunkPayloadData::is_outstanding)
-        });
+        let earliest_outstanding = self.earliest_outstanding_tsn();
 
         // New ack point, so pop all ACKed packets from inflight_queue
         // We add 1 because the "currentAckPoint" has already been popped from the inflight queue
@@ -3271,7 +3275,9 @@ impl Association {
                     break;
                 };
 
-                if i == 0 && self.rwnd < c.user_data.len() as u32 {
+                if self.rwnd < c.user_data.len() as u32
+                    && self.earliest_outstanding_tsn() == Some(tsn)
+                {
                     // Send it as a zero window probe
                     done = true;
                     chunks_remaining = true;
@@ -3661,7 +3667,7 @@ impl Association {
             }
 
             // the data sender can always have one DATA chunk in flight to the receiver
-            if chunks.is_empty() && self.inflight_queue.is_empty() {
+            if chunks.is_empty() && self.earliest_outstanding_tsn().is_none() {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
                     let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);

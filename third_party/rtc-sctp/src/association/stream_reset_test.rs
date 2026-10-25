@@ -4371,3 +4371,261 @@ fn shutdown_full_width_congestion_growth_keeps_send_credit() -> Result<()> {
     assert_eq!(sender.partial_bytes_acked, 0);
     Ok(())
 }
+
+#[test]
+fn shutdown_zero_window_probe_delivers_fragmented_tail_after_abandonment() -> Result<()> {
+    for shutdown in [false, true] {
+        for first_tsn in [100, u32::MAX - 1] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            local.my_next_tsn = first_tsn;
+            local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+            local.use_forward_tsn = true;
+            remote.use_forward_tsn = true;
+            local.ack_mode = AckMode::NoDelay;
+            remote.ack_mode = AckMode::NoDelay;
+            local.cwnd = 10 * local.mtu;
+            remote.max_receive_buffer_size = local.max_payload_size;
+            local
+                .stream(1)?
+                .set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+            local.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+            local.stream(1)?.write(now, b"obsolete update")?;
+            let expected = Bytes::from(vec![0x5a; local.max_payload_size as usize + 17]);
+            local
+                .stream(2)?
+                .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+            let original = transmitted_data(&local.gather_outbound(now).0);
+            assert_eq!(original.len(), 3);
+            assert!(original[1].beginning_fragment);
+            let first_packet = local
+                .create_packet(vec![Box::new(original[1].clone())])
+                .marshal()?;
+            remote.handle_inbound(Packet::unmarshal(&first_packet)?, now)?;
+            assert_eq!(remote.get_my_receiver_window_credit(), 0);
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert_eq!(local.rwnd, 0);
+            assert!(
+                local
+                    .inflight_queue
+                    .get(original[1].tsn)
+                    .unwrap()
+                    .acknowledged
+            );
+            if shutdown {
+                local.shutdown()?;
+            }
+            let retry_at = local.timers.get(Timer::T3RTX).unwrap();
+            local.handle_timeout(retry_at);
+            let packets = local.gather_outbound(retry_at).0;
+            let retry = transmitted_data(&packets);
+            assert_eq!(
+                retry.len(),
+                1,
+                "shutdown={shutdown}, first_tsn={first_tsn}: a retained abandoned or gap-acked prefix must not block the live probe"
+            );
+            assert_eq!(retry[0].tsn, original[2].tsn);
+            for raw in &packets {
+                let packet = Packet::unmarshal(raw)?;
+                if packet
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.as_any().is::<ChunkForwardTsn>())
+                {
+                    remote.handle_inbound(packet, retry_at)?;
+                }
+            }
+            assert_eq!(remote.peer_last_tsn, original[1].tsn);
+            assert_eq!(remote.get_my_receiver_window_credit(), 0);
+            for raw in &packets {
+                let packet = Packet::unmarshal(raw)?;
+                if packet
+                    .chunks
+                    .iter()
+                    .any(|chunk| chunk.as_any().is::<ChunkPayloadData>())
+                {
+                    remote.handle_inbound(packet, retry_at)?;
+                }
+            }
+            assert_eq!(
+                remote
+                    .stream(2)?
+                    .read_sctp()?
+                    .unwrap()
+                    .into_payload(expected.len())?
+                    .freeze(),
+                expected
+            );
+            assert!(remote.stream(2)?.read_sctp()?.is_none());
+            assert!(
+                transmitted_data(&local.gather_outbound(retry_at).0).is_empty(),
+                "a second poll must not send another probe before its timer"
+            );
+            for step in 0..100 {
+                let at = retry_at + Duration::from_millis(step * 100);
+                local.handle_timeout(at);
+                remote.handle_timeout(at);
+                for raw in remote.gather_outbound(at).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                for raw in local.gather_outbound(at).0 {
+                    remote.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                if local.inflight_queue.is_empty()
+                    && (!shutdown
+                        || local.state() == AssociationState::Closed
+                            && remote.state() == AssociationState::Closed)
+                {
+                    break;
+                }
+            }
+            assert!(local.pending_queue.is_empty());
+            assert!(local.inflight_queue.is_empty());
+            assert_eq!(
+                local
+                    .streams
+                    .get(&2)
+                    .map_or(0, |stream| stream.buffered_amount),
+                0
+            );
+            if shutdown {
+                for endpoint in [&mut local, &mut remote] {
+                    assert_eq!(endpoint.state(), AssociationState::Closed);
+                    assert!(endpoint.poll_timeout().is_none());
+                    assert!(endpoint.poll_endpoint_event().is_some());
+                    assert!(endpoint.poll_endpoint_event().is_none());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_zero_window_pending_tail_recovers_a_lost_window_update() -> Result<()> {
+    for shutdown in [false, true] {
+        for first_tsn in [100, u32::MAX - 1] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            local.my_next_tsn = first_tsn;
+            local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+            local.ack_mode = AckMode::NoDelay;
+            remote.ack_mode = AckMode::NoDelay;
+            remote.max_receive_buffer_size = local.max_payload_size;
+            local.rwnd = local.max_payload_size;
+            let filler = Bytes::from(vec![0x11; local.max_payload_size as usize]);
+            local
+                .stream(1)?
+                .write_sctp(now, &filler, PayloadProtocolIdentifier::Binary)?;
+            for raw in local.gather_outbound(now).0 {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            for raw in remote.gather_outbound(now).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert_eq!(remote.get_my_receiver_window_credit(), 0);
+            assert_eq!(local.rwnd, 0);
+            assert!(local.inflight_queue.is_empty());
+            local
+                .open_stream(2, PayloadProtocolIdentifier::Binary)?
+                .set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+            local.open_stream(3, PayloadProtocolIdentifier::Binary)?;
+            local.stream(2)?.write(now, b"obsolete")?;
+            let expected = Bytes::from(vec![0xa5; local.max_payload_size as usize + 17]);
+            local
+                .stream(3)?
+                .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+            let lost = transmitted_data(&local.gather_outbound(now).0);
+            assert_eq!(lost.len(), 1);
+            assert_eq!(lost[0].stream_identifier, 2);
+            assert_eq!(local.pending_queue.len(), 2);
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .into_payload(filler.len())?
+                    .freeze(),
+                filler
+            );
+            let lost_window_update = remote.gather_outbound(now).0;
+            assert!(!lost_window_update.is_empty());
+            assert_eq!(
+                remote.get_my_receiver_window_credit(),
+                local.max_payload_size
+            );
+            assert_eq!(local.rwnd, 0);
+            if shutdown {
+                local.shutdown()?;
+            }
+            let retry_at = local.timers.get(Timer::T3RTX).unwrap();
+            local.handle_timeout(retry_at);
+            let packets = local.gather_outbound(retry_at).0;
+            let probe = transmitted_data(&packets);
+            assert_eq!(
+                probe.len(),
+                1,
+                "shutdown={shutdown}, first_tsn={first_tsn}: pending DATA must recover the lost window update after the old probe expires"
+            );
+            assert_eq!(probe[0].stream_identifier, 3);
+            assert!(probe[0].beginning_fragment);
+            assert_eq!(local.pending_queue.len(), 1);
+            assert!(transmitted_data(&local.gather_outbound(retry_at).0).is_empty());
+            for forward in [true, false] {
+                for raw in &packets {
+                    let packet = Packet::unmarshal(raw)?;
+                    if packet
+                        .chunks
+                        .iter()
+                        .any(|chunk| chunk.as_any().is::<ChunkForwardTsn>())
+                        == forward
+                    {
+                        remote.handle_inbound(packet, retry_at)?;
+                    }
+                }
+            }
+            let mut received = Vec::new();
+            for step in 0..100 {
+                let at = retry_at + Duration::from_millis(step * 100);
+                local.handle_timeout(at);
+                remote.handle_timeout(at);
+                for raw in remote.gather_outbound(at).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                for raw in local.gather_outbound(at).0 {
+                    remote.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                if remote.streams.contains_key(&3) {
+                    while let Some(message) = remote.stream(3)?.read_sctp()? {
+                        received.push(message.into_payload(expected.len())?.freeze());
+                    }
+                }
+                if local.inflight_queue.is_empty()
+                    && (!shutdown
+                        || local.state() == AssociationState::Closed
+                            && remote.state() == AssociationState::Closed)
+                {
+                    break;
+                }
+            }
+            assert_eq!(received, vec![expected]);
+            assert!(local.pending_queue.is_empty());
+            assert!(local.inflight_queue.is_empty());
+            if shutdown {
+                for endpoint in [&mut local, &mut remote] {
+                    assert_eq!(endpoint.state(), AssociationState::Closed);
+                    assert!(endpoint.poll_timeout().is_none());
+                    assert!(endpoint.poll_endpoint_event().is_some());
+                    assert!(endpoint.poll_endpoint_event().is_none());
+                }
+            }
+        }
+    }
+    Ok(())
+}

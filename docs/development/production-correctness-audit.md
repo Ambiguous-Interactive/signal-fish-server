@@ -8813,3 +8813,109 @@ all-target/all-feature lint and SCTP production lint pass. Markdown and doc
 consistency pass. The CI-config wrapper retains its excluded audit error.
 An extra strict vendored-test lint pass finds the same 61 existing findings on
 both main and the candidate; #1224 tracks that separate cleanup.
+
+### Native zero-window retries behind retained DATA (#1227/#1145/#912)
+
+Session 542 starts from `3c2fee74`. T3 retry selection permits a zero-window
+probe only at `cumulative_ack + 1`. An abandoned or gap-acknowledged entry can
+retain that position while later reliable DATA still needs delivery. Two new
+regressions fail with the old selection condition. The repair uses the earliest
+outstanding DATA, sharing the existing SACK timer lookup. It does not treat an
+already retried but still outstanding predecessor as permission for another
+probe.
+
+The paired serialized packet history drops an obsolete partial-reliability
+message and the ending fragment of a later reliable message. Its beginning
+fragment fills the receiver. The receiver sends a real zero-window SACK with
+a gap acknowledgment. T3 abandons the obsolete message. The old source emits
+no live retry. The repaired source emits one, and the network delivers FORWARD
+TSN before that probe while withholding newer cumulative progress. The
+receiver then accepts the ending fragment and returns the exact application
+bytes once. Established and graceful-shutdown histories cover ordinary and
+wrapped TSNs. Shutdown retires both endpoints once after acknowledgment.
+Additional controls cover a partial window, two live candidates, expiry during
+retry selection, and repeated polls. This establishes a low-level paired SCTP
+history. It does not establish the cause of #1120 or a historical public-client
+incident. The broader #1145 and #912 campaigns remain open.
+
+The final sweep reproduces the same retained-versus-outstanding mistake in
+pending-send admission. An abandoned-only flight blocks its first unsent probe.
+The pending path now shares the outstanding lookup. A new selection control
+fails before that repair. A paired serialized history fills the receive
+window, loses the window-update SACK after the application reads, and loses an
+obsolete probe. When T3 abandons that probe, the old pending condition emits
+no DATA. The repair admits one fragment of the waiting reliable message.
+FORWARD TSN and the remaining fragment preserve exact reads and graceful
+retirement. The controls cover TSN wrap, repeated polls, and both Established
+and ShutdownPending. Other retained-flight emptiness checks intentionally
+wait for peer acknowledgment before shutdown or timer retirement. Both pending
+controls fail when only the old pending condition is restored. All 54 selected
+shutdown controls and strict root/native lint pass with the complete repair.
+
+### Capacity schedule iteration (#636)
+
+Sequential schedule iteration now advances through each sorted churn boundary
+once. The live writer peeks at that iterator and advances only after a recorded
+completed send, so churn keeps the pending item. It retains constant iterator
+state and no new per-send storage. Indexed access keeps its former rule. Unsorted synthetic churn histories use that rule
+as a fallback. Every shift still uses the original intended time. Frozen eager
+timelines and indexed comparisons cover jitter, phases, independent iterators,
+repeated boundaries, and exhaustion.
+
+An alternating local debug probe visits 720,000 sends and 26 churn boundaries.
+All eight passes retain digest `260363167789419`. Indexed scans take
+465,723–580,183 microseconds. Sequential iteration takes 43,595–52,047
+microseconds. This measures generator schedule work, not server capacity or
+release throughput. It does not explain the no-churn #1009 workload or complete
+the ten-minute capacity qualification in #775.
+
+External-client assessment: the current Rust manifest declares no RTC runtime
+dependency. .NET `e467c871` has no package dependencies. Godot `c4bf6e01` uses
+engine or browser WebRTC classes. None consumes the vendored reference-client
+SCTP sources or the capacity runner. Server messages and SDK contracts are
+unchanged. All three clients are unaffected and need no tracking change.
+
+Local validation passes: 52 selected SCTP shutdown histories, eight recovery
+controls, 14 capacity schedule/replay controls, and root and native strict
+all-target/all-feature lint. The new paired control also fails when only the
+old probe-selection condition is restored. The retained dependency audit
+failure remains excluded from session delivery.
+
+The live-writer iterator connection also passes 11 selected schedule, reconnect,
+room-replacement, lag, pause, and replay controls plus strict root lint.
+
+### Retained long-cell attempt (#775/#1009)
+
+Fixed binaries from `3967a709` attempt the original one-room, 16-player cell:
+60 sends/s per sender, 96 application bytes, seed 1, v3 JSON reliable delivery,
+120 seconds of warm-up and 600 seconds of measurement, with the 250 ms lag
+bound. No local builds or tests overlap the attempt. The shared ARM64 WSL2
+host has 12 available CPUs and no cgroup CPU quota. It is not an isolated host.
+The later live-writer iterator connection is absent from this fixed binary.
+This no-churn cell does not exercise the churn-scan optimization.
+
+Run `480649b4-5e01-4cc8-9eec-3aefc487368b` is invalid. It schedules 691,232
+sends, completes 121,854, and retains 569,378 unsent. All 1,827,810 owed
+deliveries arrive; outstanding and gap-covered totals are zero. Full artifact
+replay reproduces the summary. The standalone test passes that equality;
+it does not turn this invalid workload into capacity evidence.
+
+The first recorded completed-write lag is 250,287 microseconds: intended
+126,934,706, wake 127,160,287, preparation 251, and write 24,455. Later
+before-write lag reaches 1,245,388 microseconds. The summary retains that
+fault and a separate 364,371-microsecond completed-send maximum. The largest
+sampler wake gap is 1,432,133 microseconds. Between neighboring resource
+observations at 126,755,157 and 128,212,322 microseconds, server CPU rises by
+12.4 seconds and generator CPU by 0.84 seconds. Generator RSS rises from
+149,991,424 to 150,241,280 bytes. Worker runqueue-wait deltas range from
+8.5 to 174.3 ms; the scheduler-enable setting is unavailable. These counters
+do not identify a cause. The server CPU burst warrants a matched profile;
+late fault-report work must also be distinguished from the initial overrun.
+
+The 2,889 interval samples retain a peak generator RSS of 163,950,592 bytes.
+The child-process peak is 174,156 KiB. The process finishes after 768.922
+seconds, including its original receive deadline, export, and replay.
+Artifacts remain at `/tmp/session542-live-long`; binary hashes, logs, selected
+stall intervals, and the resource report remain in `progress/session-542/`.
+This is a new partial-work memory observation. It does not bound the full
+planned workload or complete #775 and #1009.

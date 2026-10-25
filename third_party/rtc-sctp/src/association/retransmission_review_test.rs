@@ -344,3 +344,101 @@ fn invalid_pending_message_closes_without_sending_or_rearming_timers() -> Result
     }
     Ok(())
 }
+
+#[test]
+fn shutdown_zero_window_retries_live_data_after_abandoned_prefix() -> Result<()> {
+    for shutdown in [false, true] {
+        for first_tsn in [100, u32::MAX] {
+            for (policy, value) in [(ReliabilityType::Rexmit, 0), (ReliabilityType::Timed, 1500)] {
+                for credit in [0, 3, 13] {
+                    let mut sender = timed_test_association();
+                    let now = Instant::now();
+                    sender.my_next_tsn = first_tsn;
+                    sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+                    sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+                    sender.use_forward_tsn = true;
+                    sender
+                        .open_stream(1, PayloadProtocolIdentifier::Binary)?
+                        .set_reliability_params(false, policy, value)?;
+                    sender.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+                    sender.stream(1)?.write(now, b"discarded")?;
+                    sender.stream(2)?.write(now, b"live gameplay")?;
+                    sender.stream(2)?.write(now, b"next gameplay")?;
+                    let original = transmitted_data(&sender.gather_outbound(now).0);
+                    assert_eq!(original.len(), 3);
+                    if shutdown {
+                        sender.shutdown()?;
+                    }
+                    sender.rwnd = credit;
+                    let retry_at = sender.timers.get(Timer::T3RTX).unwrap();
+                    sender.handle_timeout(retry_at);
+                    let flush_at = now + Duration::from_millis(1500);
+                    let retry = transmitted_data(
+                        &sender.gather_data_packets_to_retransmit(vec![], flush_at),
+                    );
+                    assert!(sender.inflight_queue.get(first_tsn).unwrap().abandoned());
+                    assert_eq!(
+                        retry.len(),
+                        1,
+                        "shutdown={shutdown}, first_tsn={first_tsn}, policy={policy:?}, credit={credit}: only the earliest live DATA may probe a closed window"
+                    );
+                    assert_eq!(retry[0].tsn, first_tsn.wrapping_add(1));
+                    assert_eq!(retry[0].user_data, original[1].user_data);
+                    assert_eq!(sender.inflight_queue.get(retry[0].tsn).unwrap().nsent, 2);
+                    if credit < 13 {
+                        let repeated = sender.gather_data_packets_to_retransmit(vec![], flush_at);
+                        assert!(
+                            transmitted_data(&repeated).is_empty(),
+                            "an outstanding unmarked predecessor must block a later probe"
+                        );
+                        assert_eq!(sender.inflight_queue.get(original[2].tsn).unwrap().nsent, 1);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_zero_window_admits_pending_probe_after_all_sent_data_is_abandoned() -> Result<()> {
+    for shutdown in [false, true] {
+        for first_tsn in [100, u32::MAX] {
+            let mut sender = timed_test_association();
+            let now = Instant::now();
+            sender.my_next_tsn = first_tsn;
+            sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            sender
+                .open_stream(1, PayloadProtocolIdentifier::Binary)?
+                .set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+            sender.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+            sender.stream(1)?.write(now, b"discarded")?;
+            sender.stream(2)?.write(now, b"pending gameplay")?;
+            sender.stream(2)?.write(now, b"next gameplay")?;
+            sender.rwnd = 9;
+            let original = transmitted_data(&sender.gather_outbound(now).0);
+            assert_eq!(original.len(), 1);
+            assert_eq!(sender.rwnd, 0);
+            assert_eq!(sender.pending_queue.len(), 2);
+            if shutdown {
+                sender.shutdown()?;
+            }
+            let retry_at = sender.timers.get(Timer::T3RTX).unwrap();
+            sender.handle_timeout(retry_at);
+            assert!(sender.inflight_queue.get(first_tsn).unwrap().abandoned());
+            let probe = transmitted_data(&sender.gather_outbound(retry_at).0);
+            assert_eq!(
+                probe.len(),
+                1,
+                "shutdown={shutdown}, first_tsn={first_tsn}: an abandoned-only flight must not block a pending probe"
+            );
+            assert_eq!(probe[0].tsn, first_tsn.wrapping_add(1));
+            assert_eq!(probe[0].user_data.as_ref(), b"pending gameplay");
+            assert_eq!(sender.pending_queue.len(), 1);
+            assert!(transmitted_data(&sender.gather_outbound(retry_at).0).is_empty());
+            assert_eq!(sender.pending_queue.len(), 1);
+        }
+    }
+    Ok(())
+}
