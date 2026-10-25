@@ -8328,3 +8328,67 @@ this repository's private patched SCTP or browser reference engine. These
 repairs do not change signaling messages or public SDK contracts. No client
 migration or client tracking issue is required. Published replacement
 qualification in #912 remains open.
+
+### F177 — Impossible native reset budgets change stream state
+
+Confirmed on `78140b75`; tracked in #1201 under #912/#826. DATA packets
+can use a 32-byte budget, but a padded outgoing reset with one SID needs
+36 bytes. Local stop/close formerly changed stream halves before admitting
+the reset. The #1200 sender then emitted a request beyond that smaller
+budget. The red-first local control returned `Ok(())` at an effective
+28-byte budget instead of rejecting it.
+
+Admit a local reset before changing either stream half. Reject a smaller
+budget with `ErrOutboundPacketTooLarge`. Apply stop before finish so close
+also preserves both halves on failure. Deny incoming reset requests before
+changing streams when a reciprocal request cannot fit; replay that denial
+without changing the generation. This preserves DATA-only configurations;
+it does not claim that INIT/INIT ACK cookies fit a DATA-only packet budget.
+
+Controls cover direct payload settings 0, 1, and 4 through 7, both stop and
+close, queued outbound gameplay, unread inbound gameplay, sequence and byte
+state, and unchanged reset/event state. After a representable retry, paired
+endpoints deliver exact old/tail values, complete reciprocal reset, and
+release both SIDs. Incoming controls cover effective budgets 28, 29, 32,
+and 35 with duplicate requests. Existing 36-byte and larger packet controls
+retain lost-request retries and fresh-SID gameplay.
+
+### F178 — Zero native fragment capacity consumes input and cannot progress
+
+Confirmed on `78140b75`; tracked in #1203 under #912/#826. The direct
+`EndpointConfig::max_payload_size(0)` path gives each stream zero fragment
+capacity. A nonempty write allocates its message identity and consumes its
+source before packetizing. `fragment_size` remains zero, so the remaining
+byte count never decreases. A guarded-source red control fails at source
+consumption before entering that loop; no live incident is claimed.
+
+Reject nonempty writes with `ErrOutboundPacketTooLarge` before consuming
+input or identity. Empty writes keep their existing no-op contract. Controls
+cover all six public write adapters, the direct configuration constructor,
+unchanged chunk arrays, message/stream sequences, queued bytes, and successful
+positive-budget writes. Hosted replacement qualification now includes
+`zero_fragment_budget` alongside reset/shutdown controls.
+
+### A20 replay memory follow-up — Exact relay offset capacity
+
+Open #775/#636: arbitrary replay order previously grew each sender/epoch
+offset vector geometrically. The red resource control retains 5,376 offset
+bytes for 1,001 sends against a 4,004-byte bound. Count each block before
+allocating its index. Canonical contiguous sorted blocks still borrow raw
+slices, compact blocks reserve exactly four bytes per send, and wide inputs
+retain the pointer fallback. Independent ledgers cover 4,096 combinations
+of senders, epochs, duplicate/gapped sequences, completion-time order, Unicode,
+and integer limits. Raw events and exact replay semantics remain unchanged.
+
+The 18 fixed-binary debug trials and executable hashes are recorded in
+[the capacity ledger](arm-capacity-audit.md#exact-reordered-relay-offset-capacity-775).
+At four million sends, relay capacity falls from 25,165,824 to 16,000,000 bytes;
+median peak RSS falls from 297,384 to 292,348 KiB. Total debug probe time rises
+from 26.954 to 34.491 seconds. This is a memory/work tradeoff, not a throughput
+claim. The long live cell and whole-process bound remain open in #775.
+
+External-client assessment: current Rust `da8f2d16` has no RTC/SCTP dependency;
+.NET `e467c871` supplies its own peer networking; Godot `766f0fbf` uses browser
+or engine WebRTC. None imports the private patched SCTP package or capacity
+runner. These changes need no SDK migration or client issue. No signaling
+schema, room rule, or server runtime default changes.

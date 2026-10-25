@@ -5489,3 +5489,46 @@ Browser captured baseline source SHA-256:
 `19e1fc7d3e47a108c4d647f25239411bf979804e5140acc4d0aae533a5d8ecfb`.
 Browser captured candidate source SHA-256:
 `43a142d6d33e7faa27e289bf1c2ea7a8e89c2d1289dfa89286439248c251d3ae`.
+
+### Exact reordered relay offset capacity (#775)
+
+Count sender/epoch blocks before allocating their offset vectors. This removes
+geometric spare capacity from arbitrary replay order. Contiguous sorted blocks
+still borrow raw events. The compact index now reserves four bytes per indexed
+send; descriptors and allocator overhead remain separate. Wide overrides keep
+the pointer fallback. A red resource control retained 5,376 offset bytes for
+1,001 sends against a 4,004-byte budget. The repaired control passes for 3, 5,
+17, 1,001, and 50,000 sends. Independent ledgers retain 4,096 layouts and exact
+duplicate order, completion cutoffs, sequence limits, and Unicode names.
+
+Three alternating fixed-binary pairs ran at each registered size while local
+agent builds and tests paused. All 18 trials passed with equal paired send
+lookup checksums. Median process peak RSS and total probe wall time are:
+
+| Sends | Previous relay bytes | Exact relay bytes | Previous peak KiB | Exact peak KiB | Previous seconds | Exact seconds |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100,000 | 786,432 | 400,000 | 18,728 | 18,376 | 0.297 | 0.329 |
+| 1,000,000 | 6,291,456 | 4,000,000 | 83,360 | 81,596 | 4.249 | 4.687 |
+| 4,000,000 | 25,165,824 | 16,000,000 | 297,384 | 292,348 | 26.954 | 34.491 |
+
+At four million sends, allocated relay offsets fall 36.42% and observed median
+peak RSS falls 1.69%. The two-pass construction does more work. Observed total
+debug probe time rises 27.96% in that cohort. The unchanged send-index phase
+also varied, so these shared-host timings do not isolate the counting cost.
+This is a retained-memory tradeoff, not a throughput improvement.
+
+The host is ARM64 Linux under WSL2 with Rust 1.94.0. Baseline executable SHA-256:
+`bb072a5f3363113c3460937886c883bbb2c7d45bd90cf9162690b43226a7ba6a`.
+Candidate executable SHA-256:
+`2101004be93bbb936d3443e63e1ff77960240f2933280f20c365663b0cdcca3d`.
+Reproduce with the existing ignored
+`oracle::coverage_tests::generator_reordered_send_index_memory_profile` probe,
+`CAPACITY_SEND_INDEX_PROBE_KIND=compact`, and the registered counts in
+`CAPACITY_SEND_INDEX_PROBE_COUNT`. Run each trial in a fresh process and collect
+Linux peak RSS through `wait4`. The checksum covers send lookup visits; the
+independent ledger and artifact controls establish relay semantics.
+
+This synthetic cohort retains raw sends, relay indexes, and send lookup indexes.
+It has no live receipts. It does not bound whole-process memory, qualify the
+planned ten-minute cell, explain historical stalls, or establish server capacity.
+Those requirements remain open in #775.

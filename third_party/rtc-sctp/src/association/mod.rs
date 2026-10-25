@@ -2687,7 +2687,11 @@ impl Association {
         } else {
             p.stream_identifiers.clone()
         };
-        if sna32lte(p.sender_last_tsn, self.peer_last_tsn) {
+        if self.mtu < crate::config::MIN_STREAM_RESET_PACKET_MTU {
+            result = ReconfigResult::Denied;
+            self.reconfig_requests
+                .remove(&p.reconfig_request_sequence_number);
+        } else if sna32lte(p.sender_last_tsn, self.peer_last_tsn) {
             let draining = self.streams_awaiting_drain(p);
             // Do not apply a multi-stream reset partially. This keeps duplicate
             // replies and the reciprocal request stable until every stream drains.
@@ -3588,8 +3592,7 @@ impl Association {
                         + PARAM_HEADER_LENGTH
                         + PARAM_OUTGOING_RESET_REQUEST_STREAM_IDENTIFIERS_OFFSET;
                     let reset_stream_budget = chunk_budget.saturating_sub(reset_header_size) / 2;
-                    /* One ID remains the minimum progress unit for smaller DATA-only budgets. */
-                    if sis_to_reset.len() >= reset_stream_budget.max(1) {
+                    if sis_to_reset.len() >= reset_stream_budget {
                         break;
                     }
                     if let Some(reset) = self.pending_queue.pop_ready_reset() {
@@ -3981,6 +3984,9 @@ impl Association {
             return Err(Error::ErrResetPacketInStateNotExist);
         }
 
+        if self.mtu < crate::config::MIN_STREAM_RESET_PACKET_MTU {
+            return Err(Error::ErrOutboundPacketTooLarge);
+        }
         self.queue_reset_request(stream_identifier);
         Ok(())
     }
