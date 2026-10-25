@@ -258,6 +258,8 @@ pub(crate) struct ReassemblyQueue {
     #[cfg(test)]
     pub(crate) unordered_scan_steps: usize,
     #[cfg(test)]
+    pub(crate) unordered_ordering_comparisons: std::cell::Cell<usize>,
+    #[cfg(test)]
     pub(crate) unordered_forward_steps: usize,
 }
 
@@ -281,6 +283,8 @@ impl ReassemblyQueue {
             #[cfg(test)]
             unordered_scan_steps: 0,
             #[cfg(test)]
+            unordered_ordering_comparisons: std::cell::Cell::new(0),
+            #[cfg(test)]
             unordered_forward_steps: 0,
         }
     }
@@ -302,9 +306,17 @@ impl ReassemblyQueue {
                 self.next_arrival += 1;
                 return true;
             }
-            let idx = self
-                .unordered_chunks
-                .partition_point(|c| sna32lt(c.tsn, chunk.tsn));
+            let precedes = |c: &ChunkPayloadData| {
+                #[cfg(test)]
+                self.unordered_ordering_comparisons
+                    .set(self.unordered_ordering_comparisons.get() + 1);
+                sna32lt(c.tsn, chunk.tsn)
+            };
+            let idx = if self.unordered_chunks.back().is_none_or(&precedes) {
+                self.unordered_chunks.len()
+            } else {
+                self.unordered_chunks.partition_point(precedes)
+            };
             if self
                 .unordered_chunks
                 .get(idx)
