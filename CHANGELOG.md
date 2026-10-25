@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Retry live native gameplay behind abandoned messages when the receive window closes (#1227).
+- Keep native gameplay sending after messages are abandoned at a closed receive window (#1227).
 - Keep native receive-byte accounting exact when ordered reassembly rejects duplicate fragments (#1223).
 - Count empty native data-channel messages as zero application bytes in traffic statistics (#1219).
 - Disable Nagle on native reference-client sockets so small relay frames can send promptly (#1217).

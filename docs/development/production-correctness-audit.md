@@ -8838,6 +8838,20 @@ retry selection, and repeated polls. This establishes a low-level paired SCTP
 history. It does not establish the cause of #1120 or a historical public-client
 incident. The broader #1145 and #912 campaigns remain open.
 
+The final sweep reproduces the same retained-versus-outstanding mistake in
+pending-send admission. An abandoned-only flight blocks its first unsent probe.
+The pending path now shares the outstanding lookup. A new selection control
+fails before that repair. A paired serialized history fills the receive
+window, loses the window-update SACK after the application reads, and loses an
+obsolete probe. When T3 abandons that probe, the old pending condition emits
+no DATA. The repair admits one fragment of the waiting reliable message.
+FORWARD TSN and the remaining fragment preserve exact reads and graceful
+retirement. The controls cover TSN wrap, repeated polls, and both Established
+and ShutdownPending. Other retained-flight emptiness checks intentionally
+wait for peer acknowledgment before shutdown or timer retirement. Both pending
+controls fail when only the old pending condition is restored. All 54 selected
+shutdown controls and strict root/native lint pass with the complete repair.
+
 ### Capacity schedule iteration (#636)
 
 Sequential schedule iteration now advances through each sorted churn boundary

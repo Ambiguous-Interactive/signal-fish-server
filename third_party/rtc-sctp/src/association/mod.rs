@@ -3667,7 +3667,7 @@ impl Association {
             }
 
             // the data sender can always have one DATA chunk in flight to the receiver
-            if chunks.is_empty() && self.inflight_queue.is_empty() {
+            if chunks.is_empty() && self.earliest_outstanding_tsn().is_none() {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
                     let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);

@@ -399,7 +399,8 @@ through association-level duplicate filtering or explain #1120.
 T3 retries select the earliest outstanding DATA for a receive-window probe.
 Abandoned and gap-acknowledged entries can remain ahead of that DATA until a
 cumulative acknowledgment arrives. Those retained entries must not block the
-probe. An earlier live entry still blocks a later probe after repeated polls.
+probe. Pending DATA also permits one probe when only abandoned DATA remains in flight.
+An earlier live entry still blocks a later probe after repeated polls.
 The same outstanding lookup continues to own SACK timer progress.
 
 The `shutdown_zero_window_` controls cover ordinary gameplay and graceful
@@ -408,5 +409,8 @@ multiple live candidates, repeated polls, and TSN wrap. The paired packet
 history fills the receiver with a fragmented reliable message, abandons a
 lost earlier message, reorders FORWARD TSN ahead of the live probe, and
 preserves exact payloads through reads, acknowledgments, and endpoint drain.
+A second paired history loses both a full-window update and the original
+obsolete probe. It delivers fragmented pending gameplay after abandonment,
+then completes acknowledgment and graceful retirement across TSN wrap.
 These controls are retained by the interop runner's `shutdown` selector.
 See [#1227](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1227).
