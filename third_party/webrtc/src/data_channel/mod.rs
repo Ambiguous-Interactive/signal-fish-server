@@ -627,10 +627,10 @@ impl DataChannel for DataChannelImpl {
     async fn close(&self) -> Result<()> {
         {
             let mut peer_connection = self.inner.core.lock().await;
-            peer_connection
-                .data_channel(self.id)
-                .ok_or(Error::ErrDataChannelClosed)?
-                .close()?;
+            let Some(mut channel) = peer_connection.data_channel(self.id) else {
+                return Ok(());
+            };
+            channel.close()?;
         }
 
         self.inner.data_channel_backpressure.notify_waiters();

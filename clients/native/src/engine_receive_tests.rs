@@ -293,13 +293,10 @@ async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
                 ),
                 "the observed remote close has removed its sender handle"
             );
-            assert!(
-                matches!(
-                    channel.close().await,
-                    Err(webrtc::error::Error::ErrDataChannelClosed)
-                ),
-                "cleanup may encounter only the confirmed terminal closure"
-            );
+            channel
+                .close()
+                .await
+                .expect("confirmed terminal closure accepts repeated cleanup");
         } else {
             channel
                 .close()

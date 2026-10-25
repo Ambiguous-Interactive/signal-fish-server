@@ -8502,3 +8502,55 @@ the allocation-shape improvement. Reproduce with the ignored
 `packetization_allocation_profile` control in the SCTP library, in fresh
 processes. Raw observations remain in ignored `progress/session-535/`.
 The broader optimization and source-replacement campaigns remain open.
+
+### F184 — Native chunk-cursor reads allocate the requested limit
+
+Confirmed on `ecedac84`; tracked in #1213 under #826/#912. A seven-byte
+fragmented message followed by `Chunks::next(usize::MAX)` panics with
+`capacity overflow`. Partial prior reads retain the same defect. The argument
+limits the returned bytes, but the old implementation reserves that limit
+without checking the remaining message.
+
+Each read now reserves only the bytes it can return. Its sizing pass visits
+only the fragments needed for that read. Controls compare exact bytes across
+zero and partial reads, empty fragments, fragment boundaries, exhaustion, and
+full-width limits. All 29 reassembly controls pass locally. The native WebRTC
+wrapper uses `to_payload`, so this is a public low-level read contract repair,
+not evidence of a wrapper gameplay incident.
+
+### F185 — Completed native channel reset rejects repeated close
+
+Confirmed on `ecedac84`; tracked in #1214 under #826/#912. Public
+`DataChannel::close` promises successful repeated cleanup. Once reciprocal
+reset removes the core channel, the old wrapper returns `ErrDataChannelClosed`.
+The real-wire red history fails after both endpoint handles report removal.
+
+The wrapper now treats an absent core handle as already closed. Both roles
+and both required labels cover repeated close before and after core removal
+and peer cleanup. Binary/text sends and writable waits still refuse terminal
+channels. Existing remote-close and fresh-gameplay controls pass. Logical
+channel handles are allocated independently of reusable SCTP stream IDs, so
+an old wrapper cannot close a replacement channel. This does not explain the
+historical reset timeout in #1120.
+
+### F186 — Browser MessagePack strings lose leading BOM characters
+
+Confirmed on `ecedac84`; tracked in #1215 under #826. The MessagePack decoder
+switches string decoding above 200 UTF-8 bytes. Its default `TextDecoder`
+strips a leading U+FEFF, while its short-string decoder preserves it. Valid
+root, array, and nested gameplay text therefore changes with string length.
+The baseline control fails for a repeated-BOM v2 string at that boundary.
+
+The browser keeps ordinary decoding as its type oracle. Only payloads that
+contain BOM bytes receive a second supported raw-string decode. String values
+then use a BOM-preserving decoder. Binary and extension values retain their
+original types and existing rejection rules. Controls cover both protocol
+versions, values around the size boundary, repeated BOMs, nested strings, and
+multibyte text. The JSON signaling path remains unchanged.
+
+External-client assessment for F184–F186: Rust `da8f2d16` has no RTC/SCTP
+runtime dependency; .NET `e467c871` has no package dependencies and leaves peer
+networking to applications. Godot `64969b97` uses its own addon and engine or
+browser WebRTC. None imports the private native sources or browser reference
+wire decoder changed here. No signaling schema, SDK API, or migration changes;
+no client tracking issue is required for these reference-stack repairs.

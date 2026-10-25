@@ -1,5 +1,52 @@
 use super::{receive_tests::LivePair, *};
 
+// Regression #1214: completed SCTP reset must preserve idempotent cleanup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_channel_reset_keeps_public_close_idempotent() {
+    for initiator_closes in [true, false] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let pair = LivePair::connect().await;
+            let local = pair.sender.channel(pair.receiver_id, label).unwrap();
+            let remote = pair.receiver.channel(pair.sender_id, label).unwrap();
+            let closer = if initiator_closes { &local } else { &remote };
+            closer.close().await.unwrap();
+            closer.close().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let local_removed = matches!(
+                        local.ready_state().await,
+                        Err(webrtc::error::Error::ErrDataChannelClosed)
+                    );
+                    let remote_removed = matches!(
+                        remote.ready_state().await,
+                        Err(webrtc::error::Error::ErrDataChannelClosed)
+                    );
+                    if local_removed && remote_removed {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reciprocal reset removes both completed core channels");
+            for channel in [&local, &remote] {
+                channel.close().await.expect("closed handles close again");
+                channel.close().await.expect("repeated cleanup is a no-op");
+                assert_channel_closed(channel.send_text("after-reset").await);
+                assert_channel_closed(channel.send(b"after-reset".as_slice().into()).await);
+                assert_channel_closed(channel.writable().await);
+            }
+            pair.cleanup().await;
+            for channel in [&local, &remote] {
+                channel
+                    .close()
+                    .await
+                    .expect("peer cleanup keeps close idempotent");
+            }
+        }
+    }
+}
+
 // Regression #905: peer shutdown must close channels and permit a fresh link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_peer_close_retires_both_required_channels() {

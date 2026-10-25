@@ -107,3 +107,11 @@ while holding the core, confirm the real driver has stopped, and require a
 retained channel's poll to finish on both ambient and dedicated reactors. New
 channel creation remains rejected, and repeated close succeeds.
 See [#1156](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1156).
+
+A retained channel handle treats close after completed SCTP reset as a no-op.
+The core removes that channel when reciprocal reset finishes, so the missing
+core entry already proves closure. Other operations still return Closed.
+Real paired controls cover both initiating roles, reliable and zero-retry
+unordered channels, repeated close during and after reset, and peer cleanup.
+Replacement qualification in #912 must retain this idempotent close behavior.
+See [#1214](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1214).

@@ -5601,3 +5601,61 @@ in the ignored session-534 progress artifacts. This synthetic cohort does not
 qualify the planned ten-minute cell, bound the complete process envelope,
 explain generator stalls, or establish a server capacity point. Those
 requirements remain open in #775 and #636.
+
+### Sender-local lookup for reordered capacity sends (#636)
+
+Reordered send indexes previously searched every send for each recipient receipt.
+The index now records each sender's offset block. A block with exact contiguous
+ledger sequences uses direct offset lookup. Sparse or duplicate sequences use
+binary search inside that sender's block. Raw-order ties still select the last
+send for a repeated key. Raw events, receipt order, and replay output do not change.
+Canonical sends keep the existing borrowed index.
+
+This trades one 24-byte descriptor per recorded sender on this ARM64 host for
+less lookup work. Each raw send still uses one four-byte offset. The 16-player
+cohort adds 384 retained bytes: at 80,000 sends, index storage rises from 320,000
+to 320,384 bytes. This is a lookup improvement, not a memory reduction for #775.
+
+Three alternating fresh-process baseline/candidate pairs ran at each shape,
+first with canonical sends and then with shuffled sends. The existing complete
+fan-out probe retains every receipt and validates the complete summary. Local
+agent builds and tests paused during all 36 trials. The ARM64 Linux/WSL2 host
+remained externally shared. Rust 1.94.0 debug-process median observations are:
+
+| Send order | Sends per player | Receipts | Baseline seconds | Candidate seconds | Baseline peak KiB | Candidate peak KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| Canonical | 100 | 24,000 | 0.079416 | 0.081132 | 14,352 | 14,352 |
+| Canonical | 1,000 | 240,000 | 0.631369 | 0.654367 | 27,800 | 27,904 |
+| Canonical | 5,000 | 1,200,000 | 2.922613 | 2.913246 | 91,892 | 92,008 |
+| Shuffled | 100 | 24,000 | 0.086747 | 0.079364 | 14,608 | 14,608 |
+| Shuffled | 1,000 | 240,000 | 0.818966 | 0.758780 | 28,104 | 28,204 |
+| Shuffled | 5,000 | 1,200,000 | 4.875426 | 4.105722 | 92,720 | 92,704 |
+
+Shuffled median summary time falls 8.51%, 7.35%, and 15.79% across these sizes.
+At the largest shape, each candidate is faster than its paired baseline.
+Canonical median time changes by +2.16%, +3.64%, and -0.32%; that production
+branch is unchanged. Shared-host variation and these synthetic debug workloads
+limit attribution. Peak RSS does not establish a memory improvement. These
+results do not measure optimized client/server throughput, qualify a long live
+capacity cell, or explain historical generator stalls.
+
+All 36 summaries have the same SHA-256 within each workload size, across source
+and raw send order. The largest summary hash is
+`a2405768a0f5ff8fdb256df1daffe0569c0662a931b7a6c38af9a5b9710b4fc5`.
+Independent-map controls cover 1,024 shuffled sender layouts with contiguous,
+sparse, duplicate, and maximum-u64 sequences; empty and Unicode names; distinct
+epochs; missing-key lookup; exact last-key identity; and stable traversal order.
+Existing phase, payload-byte, unmatched-receipt, latency, and artifact controls
+remain in place.
+
+Baseline executable SHA-256:
+`f51a0352ed970d98ad9a9928f37e613a4c471b8a7f70ffe782bc37ef81f3e760`.
+Candidate executable SHA-256:
+`a2403ea71510a6f513010abfbf0d4514bf9ce4ba3cb353d37371bff85ea322ce`.
+Reproduce with the existing ignored
+`generator_memory_profile_on_complete_fanout` probe,
+`CAPACITY_MEMORY_PROBE_PLAYERS=16`, and `CAPACITY_MEMORY_PROBE_SENDS` set to
+100, 1000, or 5000. Compare canonical input with
+`CAPACITY_MEMORY_PROBE_REORDERED=1`. Each trial uses a fresh fixed-binary process
+and Linux `wait4` peak RSS. Raw results, source snapshots, and the measurement
+script remain under the ignored `progress/session-536/capacity/` directory.

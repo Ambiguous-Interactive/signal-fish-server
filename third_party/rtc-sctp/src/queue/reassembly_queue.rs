@@ -100,7 +100,15 @@ impl Chunks {
             return None;
         }
 
-        let mut buf = BytesMut::with_capacity(max_length);
+        let mut capacity = 0;
+        for (index, chunk) in self.chunks[self.index..].iter().enumerate() {
+            let offset = if index == 0 { self.offset } else { 0 };
+            capacity += (chunk.user_data.len() - offset).min(max_length - capacity);
+            if capacity == max_length {
+                break;
+            }
+        }
+        let mut buf = BytesMut::with_capacity(capacity);
 
         let mut n_written = 0;
         while self.index < self.chunks.len() {

@@ -450,15 +450,23 @@ impl GapViolations {
 /// sequences and binary search for sparse or repeated keys. Arbitrary artifact order
 /// uses compact offsets and explicit raw-order ties, preserving the former map's
 /// last-key-wins rule without allocating stable-sort scratch or one pointer per send.
+/// Reordered sender blocks use direct offsets only for proven contiguous sequences.
 /// No receipt or raw send evidence is changed by this lookup index.
 enum SendIndex<'a> {
     Ordered(Vec<SenderSends<'a>>),
     Reordered {
         events: &'a [SentEvent],
         positions: Vec<u32>,
+        senders: Vec<SenderOffsets>,
     },
     // Explicit host overrides may admit more sends than a compact offset fits.
     WideReordered(Vec<&'a SentEvent>),
+}
+
+struct SenderOffsets {
+    start: usize,
+    end: usize,
+    contiguous: bool,
 }
 
 struct SenderSends<'a> {
@@ -471,7 +479,12 @@ impl<'a> SendIndex<'a> {
     fn retained_index_bytes(&self) -> usize {
         match self {
             Self::Ordered(senders) => senders.capacity() * std::mem::size_of::<SenderSends<'_>>(),
-            Self::Reordered { positions, .. } => positions.capacity() * std::mem::size_of::<u32>(),
+            Self::Reordered {
+                positions, senders, ..
+            } => {
+                positions.capacity() * std::mem::size_of::<u32>()
+                    + senders.capacity() * std::mem::size_of::<SenderOffsets>()
+            }
             Self::WideReordered(events) => events.capacity() * std::mem::size_of::<&SentEvent>(),
         }
     }
@@ -479,9 +492,9 @@ impl<'a> SendIndex<'a> {
     fn sorted_events(&self) -> impl Iterator<Item = &'a SentEvent> + '_ {
         let (senders, reordered, events, positions) = match self {
             Self::Ordered(senders) => (senders.as_slice(), &[][..], &[][..], &[][..]),
-            Self::Reordered { events, positions } => {
-                (&[][..], &[][..], *events, positions.as_slice())
-            }
+            Self::Reordered {
+                events, positions, ..
+            } => (&[][..], &[][..], *events, positions.as_slice()),
             Self::WideReordered(events) => (&[][..], events.as_slice(), &[][..], &[][..]),
         };
         senders
@@ -517,9 +530,32 @@ impl<'a> SendIndex<'a> {
                 let event = &sent[position as usize];
                 (event.sender.as_str(), event.seq, position)
             });
+            let sender_count = positions
+                .windows(2)
+                .filter(|pair| sent[pair[0] as usize].sender != sent[pair[1] as usize].sender)
+                .count()
+                + usize::from(!positions.is_empty());
+            let mut senders = Vec::with_capacity(sender_count);
+            let mut start = 0;
+            while start < positions.len() {
+                let sender = &sent[positions[start] as usize].sender;
+                let length = positions[start..]
+                    .partition_point(|&position| sent[position as usize].sender == *sender);
+                let end = start + length;
+                let contiguous = positions[start..end].windows(2).all(|pair| {
+                    sent[pair[0] as usize].seq.checked_add(1) == Some(sent[pair[1] as usize].seq)
+                });
+                senders.push(SenderOffsets {
+                    start,
+                    end,
+                    contiguous,
+                });
+                start = end;
+            }
             return Self::Reordered {
                 events: sent,
                 positions,
+                senders,
             };
         }
         let mut ordered: Vec<_> = sent.iter().collect();
@@ -566,12 +602,36 @@ impl<'a> SendIndex<'a> {
                     )
                 }
             }
-            Self::Reordered { events, positions } => find(
-                positions.len(),
-                |index| &events[positions[index] as usize],
-                sender,
-                seq,
-            ),
+            Self::Reordered {
+                events,
+                positions,
+                senders,
+            } => {
+                let index = senders
+                    .binary_search_by(|block| {
+                        events[positions[block.start] as usize]
+                            .sender
+                            .as_str()
+                            .cmp(sender)
+                    })
+                    .ok()?;
+                let block = &senders[index];
+                let offsets = &positions[block.start..block.end];
+                if block.contiguous {
+                    let first = &events[offsets[0] as usize];
+                    let offset = usize::try_from(seq.checked_sub(first.seq)?).ok()?;
+                    offsets
+                        .get(offset)
+                        .map(|&position| &events[position as usize])
+                } else {
+                    find(
+                        offsets.len(),
+                        |index| &events[offsets[index] as usize],
+                        sender,
+                        seq,
+                    )
+                }
+            }
             Self::WideReordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
         }
     }
@@ -4442,7 +4502,7 @@ mod coverage_tests {
         }
     }
 
-    // #775: replayed send order must fit one four-byte offset per raw send.
+    // #775/#636: compact replay offsets add only one descriptor per sender.
     #[test]
     fn reordered_send_index_retains_compact_offsets_and_stable_duplicate_order() {
         let context = crate::unit_context();
@@ -4455,7 +4515,14 @@ mod coverage_tests {
         expected.sort_by_key(|event| (event.sender.as_str(), event.seq));
         let index = SendIndex::new(&records.sent);
         assert!(
-            index.retained_index_bytes() <= records.sent.len() * 4,
+            index.retained_index_bytes()
+                <= records.sent.len() * 4
+                    + expected
+                        .iter()
+                        .map(|event| event.sender.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        * std::mem::size_of::<SenderOffsets>(),
             "replay index retains {} bytes for {} sends",
             index.retained_index_bytes(),
             records.sent.len(),
@@ -4606,6 +4673,69 @@ mod coverage_tests {
             assert_eq!(
                 SendIndex::new(&[]).get("unknown", 0).map(|event| event.seq),
                 None
+            );
+        }
+    }
+
+    #[test]
+    fn reordered_send_lookup_matches_independent_map_across_sender_shapes() {
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans).sent.remove(0);
+        let names = ["", "alice", "βob", "未知"];
+        for layout in 0_u64..1024 {
+            let mut sent = Vec::new();
+            let mut state = layout + 1;
+            for (sender_number, sender) in names.iter().enumerate() {
+                let shape = (layout >> (sender_number * 2)) % 4;
+                for offset in 0..17 {
+                    let mut event = template.clone();
+                    event.sender = (*sender).into();
+                    event.seq = match shape {
+                        0 => offset,
+                        1 => u64::MAX - 16 + offset,
+                        2 => offset * 2,
+                        _ => offset / 2,
+                    };
+                    event.epoch = 1 + u32::try_from(offset % 3).unwrap();
+                    event.sent_us = sent.len() as u64;
+                    sent.push(event);
+                }
+            }
+            for end in (1..sent.len()).rev() {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let other = usize::try_from(state % (end + 1) as u64).unwrap();
+                sent.swap(end, other);
+            }
+            let expected: BTreeMap<_, _> = sent
+                .iter()
+                .map(|event| ((event.sender.as_str(), event.seq), event))
+                .collect();
+            let index = SendIndex::new(&sent);
+            for sender in names.into_iter().chain(["unknown"]) {
+                for sequence in (0..35).chain(u64::MAX - 18..=u64::MAX) {
+                    assert_eq!(
+                        index.get(sender, sequence).map(std::ptr::from_ref),
+                        expected
+                            .get(&(sender, sequence))
+                            .map(|event| std::ptr::from_ref(*event)),
+                        "layout={layout} sender={sender:?} sequence={sequence}",
+                    );
+                }
+            }
+            let mut expected_order: Vec<_> = sent.iter().collect();
+            expected_order.sort_by_key(|event| (event.sender.as_str(), event.seq));
+            assert_eq!(
+                index
+                    .sorted_events()
+                    .map(std::ptr::from_ref)
+                    .collect::<Vec<_>>(),
+                expected_order
+                    .into_iter()
+                    .map(std::ptr::from_ref)
+                    .collect::<Vec<_>>(),
+                "layout={layout}",
             );
         }
     }

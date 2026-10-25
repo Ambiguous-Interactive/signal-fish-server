@@ -151,33 +151,50 @@ export function decodeOpaqueRelayProbe(
   return { from, payload: bytes.subarray(OPAQUE_RELAY_PROBE_HEADER_LENGTH) };
 }
 
-const messagePackKeyTextDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const messagePackTextDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** Prefix decoded map keys until Object.fromEntries restores their exact names. */
 const messagePackObjectKeyDecoder = {
   canBeCached: (_byteLength: number): boolean => true,
   decode: (bytes: Uint8Array, offset: number, length: number): string =>
-    `\u0000${messagePackKeyTextDecoder.decode(bytes.subarray(offset, offset + length))}`,
+    `\u0000${messagePackTextDecoder.decode(bytes.subarray(offset, offset + length))}`,
 };
 
-function messagePackJsonValue(value: unknown): unknown {
+function messagePackJsonValue(value: unknown, rawValue?: unknown): unknown {
+  if (typeof value === 'string' && rawValue instanceof Uint8Array) {
+    return messagePackTextDecoder.decode(rawValue);
+  }
   if (typeof value === 'bigint') {
     const number = Number(value);
     if (!Number.isSafeInteger(number))
       throw new Error('MessagePack integer is not exactly representable');
     return number;
   }
-  if (Array.isArray(value)) return value.map(messagePackJsonValue);
+  if (Array.isArray(value)) {
+    return value.map((item, index) =>
+      messagePackJsonValue(item, Array.isArray(rawValue) ? rawValue[index] : undefined),
+    );
+  }
   if (
     value !== null &&
     typeof value === 'object' &&
     Object.getPrototypeOf(value) === Object.prototype
   ) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key.slice(1), messagePackJsonValue(item)]),
+      Object.entries(value).map(([key, item]) => [
+        key.slice(1),
+        messagePackJsonValue(item, (rawValue as Record<string, unknown> | undefined)?.[key]),
+      ]),
     );
   }
   return value;
+}
+
+function containsUtf8Bom(bytes: Uint8Array): boolean {
+  for (let index = bytes.indexOf(0xef); index !== -1; index = bytes.indexOf(0xef, index + 1)) {
+    if (bytes[index + 1] === 0xbb && bytes[index + 2] === 0xbf) return true;
+  }
+  return false;
 }
 
 /** Accept JSON fallback and the version's MessagePack relay envelope. */
@@ -193,19 +210,22 @@ export function classifyMessagePackNegotiatedServerInput(
   if (frame.data['encoding'] !== 'message_pack')
     throw new Error('expected MessagePack payload encoding');
   const payload = frame.data['payload'] as Uint8Array;
-  const value = normalizeOutgoingJsonValue(
-    messagePackJsonValue(
-      decode(payload, {
-        useBigInt64: true,
-        keyDecoder: messagePackObjectKeyDecoder,
-        mapKeyConverter: (key) => {
-          if (typeof key === 'string') return key;
-          if (typeof key === 'number') return `\u0000${key}`;
-          throw new Error('MessagePack object key must be a string or number');
-        },
-      }),
-    ),
-  );
+  const options = {
+    useBigInt64: true,
+    keyDecoder: messagePackObjectKeyDecoder,
+    mapKeyConverter: (key: unknown) => {
+      if (typeof key === 'string') return key;
+      if (typeof key === 'number') return `\u0000${key}`;
+      throw new Error('MessagePack object key must be a string or number');
+    },
+  };
+  const decoded = decode(payload, options);
+  /* The default decoder strips a leading BOM from long string values.
+   * Keep its type information: rawStrings alone cannot distinguish binary. */
+  const raw = containsUtf8Bom(payload)
+    ? decode(payload, { ...options, rawStrings: true })
+    : undefined;
+  const value = normalizeOutgoingJsonValue(messagePackJsonValue(decoded, raw));
   const { payload: _payload, encoding: _encoding, ...metadata } = frame.data;
   return {
     type: 'GameData',
