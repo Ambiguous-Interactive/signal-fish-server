@@ -419,13 +419,7 @@ impl<'a>
 
             if is_open {
                 while let Some(data_channel_message) = data_channel.poll_read() {
-                    let payload_len = data_channel_message.payload.len();
                     debug!("recv application message {:?}", msg.transport.peer_addr);
-
-                    // Track received message stats
-                    self.stats
-                        .get_or_create_data_channel(channel_id, &label, &protocol)
-                        .on_message_received(payload_len);
 
                     // https://datatracker.ietf.org/doc/html/rfc8831#section-6.6
                     // When receiving an SCTP user message with one of these [Empty]
@@ -440,6 +434,9 @@ impl<'a>
                     } else {
                         data_channel_message.payload
                     };
+                    self.stats
+                        .get_or_create_data_channel(channel_id, &label, &protocol)
+                        .on_message_received(message_data.len());
 
                     self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
                         now: msg.now,

@@ -231,3 +231,11 @@ Controls cover connecting, open, closing, and already closed channels. Native
 room-leave controls retain and query connecting and established public handles.
 See [#1151](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1151).
 Replacement qualification in #912 must retain these terminal-state controls.
+
+Data-channel receive statistics count application bytes after empty-message
+normalization. StringEmpty and BinaryEmpty SCTP padding does not increase
+`bytes_received`. Message counts still advance for empty messages.
+The live native control checks both channel modes and offerer roles, exact
+empty and nonempty text and binary receipts, and final statistics after reset.
+See [#1219](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1219).
+Replacement qualification in #912 must retain this control.

@@ -884,7 +884,7 @@ for (const healthy of [false, true]) {
   class DiagnosticConnection {
     readonly connectionState = 'connected';
     readonly iceConnectionState = 'completed';
-    readonly sctp = { state: 'connected' };
+    readonly sctp = { state: 'connected', addEventListener() {} };
     constructor() {
       connection = this;
     }

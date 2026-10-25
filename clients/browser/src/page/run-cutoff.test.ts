@@ -159,13 +159,20 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
       this.readyState = 'closed';
     }
   }
+  class Transport extends EventTarget {
+    state = 'connected';
+    transition(state: string): void {
+      this.state = state;
+      this.dispatchEvent(new Event('statechange'));
+    }
+  }
   class Connection {
     closed = false;
     connectionState = 'connected';
     signalingState = 'stable';
     iceConnectionState = 'connected';
     iceGatheringState = 'complete';
-    sctp = { state: 'connected', transport: { state: 'connected' } };
+    sctp = Object.assign(new Transport(), { transport: new Transport() });
     ondatachannel: ((event: { channel: Channel }) => void) | null = null;
     constructor() {
       connection = this;
@@ -315,6 +322,11 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
       result = code;
     });
     await turn();
+    if (scenario === 'fallback') {
+      connection.sctp.transport.transition('failed');
+      connection.sctp.transport.transition('closed');
+      connection.sctp.transition('closed');
+    }
     if (scenario !== 'fallback') {
       socket.deliver('Signal', { from: peer, generation: me, signal: { Offer: 'offer' } });
       await turn();
@@ -720,6 +732,20 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
       `${scenario}: cutoff uses logical debt, observed exit ${result}`,
     );
     assert(connection.closed, `${scenario}: cutoff retires the pending link`);
+    if (scenario === 'fallback') {
+      const timeout = diagnostics.find((line) =>
+        line.startsWith(`P2P link lost for ${peer}: `),
+      );
+      assert(timeout !== undefined, 'negotiation timeout retains pre-retirement evidence');
+      const { link } = JSON.parse(timeout!.slice(timeout!.indexOf('{')));
+      assert(
+        link.dtlsState === 'closed' &&
+          link.transportStateHistory.some(
+            (entry: { dtlsState: string }) => entry.dtlsState === 'failed',
+          ),
+        'timeout output retains DTLS failure after the live state has closed',
+      );
+    }
     const expectedStatuses = live
       ? p2pTimeoutSecs === 0
         ? [false, true]

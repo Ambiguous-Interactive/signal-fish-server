@@ -39,7 +39,10 @@ const MAX_TRANSPORT_STATE_HISTORY = 32;
 type TransportState = Pick<
   RTCPeerConnection,
   'connectionState' | 'signalingState' | 'iceConnectionState' | 'iceGatheringState'
->;
+> & {
+  dtlsState: RTCDtlsTransportState | null;
+  sctpState: RTCSctpTransportState | null;
+};
 
 interface TransportObservation extends TransportState {
   elapsedMs: number;
@@ -96,6 +99,8 @@ interface PeerLink {
   pc: RTCPeerConnection;
   startedAt: number;
   transportStateHistory: TransportObservation[];
+  observedSctp: RTCSctpTransport | null;
+  observedDtls: RTCDtlsTransport | null;
   dataChannelStats: DataChannelStats;
   channels: Map<string, RTCDataChannel>;
   openLabels: Set<string>;
@@ -178,6 +183,8 @@ export class Engine {
       pc,
       startedAt: performance.now(),
       transportStateHistory: [],
+      observedSctp: null,
+      observedDtls: null,
       dataChannelStats: {
         requestedAt: null,
         status: 'not_requested',
@@ -223,6 +230,7 @@ export class Engine {
       phase = 'set_local_description';
       await pc.setLocalDescription(offer);
       this.assertCurrentLink(peer, link);
+      this.recordTransportState(peer, link);
       phase = 'validate_offer';
       if (typeof offer.sdp !== 'string') {
         throw new Error(`createOffer for ${peer} produced no SDP`);
@@ -252,6 +260,7 @@ export class Engine {
     const link = this.linkOf(peer, 'offer');
     await link.pc.setRemoteDescription({ type: 'offer', sdp: this.remoteSdp(sdp) });
     this.assertCurrentLink(peer, link);
+    this.recordTransportState(peer, link);
     link.remoteDescriptionSet = true;
     await this.flushPendingCandidates(peer, link);
     this.assertCurrentLink(peer, link);
@@ -259,6 +268,7 @@ export class Engine {
     this.assertCurrentLink(peer, link);
     await link.pc.setLocalDescription(answer);
     this.assertCurrentLink(peer, link);
+    this.recordTransportState(peer, link);
     if (typeof answer.sdp !== 'string') {
       throw new Error(`createAnswer for ${peer} produced no SDP`);
     }
@@ -270,6 +280,7 @@ export class Engine {
     const link = this.linkOf(peer, 'answer');
     await link.pc.setRemoteDescription({ type: 'answer', sdp: this.remoteSdp(sdp) });
     this.assertCurrentLink(peer, link);
+    this.recordTransportState(peer, link);
     link.remoteDescriptionSet = true;
     await this.flushPendingCandidates(peer, link);
     this.assertCurrentLink(peer, link);
@@ -562,11 +573,23 @@ export class Engine {
   /** Record observed states only; never enqueue orchestrator work. */
   private recordTransportState(peer: string, link: PeerLink): void {
     if (this.peers.get(peer) !== link) return;
+    const sctp = link.pc.sctp;
+    const dtls = sctp?.transport;
+    if (sctp !== null && sctp !== undefined && link.observedSctp !== sctp) {
+      link.observedSctp = sctp;
+      sctp.addEventListener('statechange', () => this.recordTransportState(peer, link));
+    }
+    if (dtls !== null && dtls !== undefined && link.observedDtls !== dtls) {
+      link.observedDtls = dtls;
+      dtls.addEventListener('statechange', () => this.recordTransportState(peer, link));
+    }
     const state: TransportState = {
       connectionState: link.pc.connectionState,
       signalingState: link.pc.signalingState,
       iceConnectionState: link.pc.iceConnectionState,
       iceGatheringState: link.pc.iceGatheringState,
+      dtlsState: dtls?.state ?? null,
+      sctpState: sctp?.state ?? null,
     };
     const previous = link.transportStateHistory.at(-1);
     if (
@@ -574,7 +597,9 @@ export class Engine {
       previous.connectionState === state.connectionState &&
       previous.signalingState === state.signalingState &&
       previous.iceConnectionState === state.iceConnectionState &&
-      previous.iceGatheringState === state.iceGatheringState
+      previous.iceGatheringState === state.iceGatheringState &&
+      previous.dtlsState === state.dtlsState &&
+      previous.sctpState === state.sctpState
     ) {
       return;
     }

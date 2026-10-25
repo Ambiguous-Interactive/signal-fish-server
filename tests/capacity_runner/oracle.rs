@@ -21,7 +21,7 @@ use std::sync::Arc;
 use hdrhistogram::{Counter, Histogram};
 
 use crate::config::{count_u64, DeliveryClass, Experiment};
-use crate::records::{ChurnPhase, GapEvent, ReceiptName, RunRecords, SentEvent};
+use crate::records::{ChurnEvent, ChurnPhase, GapEvent, ReceiptName, RunRecords, SentEvent};
 use crate::schedule::{ChurnPlan, Phase, SenderPlan};
 
 /// One delivery key that violated the contract, named exactly. `epoch` and
@@ -1133,6 +1133,40 @@ struct ChurnView<'a> {
     floors: BTreeMap<(&'a str, u32), (u64, u64, bool)>,
 }
 
+fn room_churn_events<'a>(
+    events: &'a [ChurnEvent],
+    room_of: &BTreeMap<&str, u32>,
+) -> BTreeMap<u32, Vec<&'a ChurnEvent>> {
+    let mut rooms: BTreeMap<u32, Vec<&ChurnEvent>> = BTreeMap::new();
+    for event in events {
+        if let Some(room) = room_of.get(event.recipient.as_str()) {
+            rooms.entry(*room).or_default().push(event);
+        }
+    }
+    for events in rooms.values_mut() {
+        events.sort_by_key(|event| event.at_us);
+    }
+    rooms
+}
+
+fn viewer_churn_events<'a>(
+    events: &'a [&'a ChurnEvent],
+    viewer: &'a str,
+) -> impl Iterator<Item = &'a ChurnEvent> + 'a {
+    events
+        .chunk_by(|first, next| first.at_us == next.at_us)
+        .flat_map(move |tied| {
+            tied.iter()
+                .copied()
+                .filter(move |event| event.recipient == viewer)
+                .chain(
+                    tied.iter()
+                        .copied()
+                        .filter(move |event| event.recipient != viewer),
+                )
+        })
+}
+
 /// Rebuild every roster peer's [`ChurnView`] from the run's recorded churn
 /// events, per room. Each viewer applies its room's events in
 /// `(at_us, own-events-first)` order: the recorded instants come from
@@ -1180,11 +1214,7 @@ fn churn_views<'a>(
             .or_default()
             .push(member.as_str());
     }
-    let changing_rooms: BTreeSet<u32> = records
-        .churn
-        .iter()
-        .filter_map(|event| room_of.get(event.recipient.as_str()).copied())
-        .collect();
+    let events_by_room = room_churn_events(&records.churn, &room_of);
     // Ordinary rooms have the same immutable initial view at every seat.
     // Keep one per room, rather than one tree of names and epochs per peer.
     // A room with any recorded churn retains the full viewer-specific path.
@@ -1192,7 +1222,7 @@ fn churn_views<'a>(
     let mut views: BTreeMap<&'a str, Arc<ChurnView<'a>>> = BTreeMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     for (viewer, room) in roster {
-        if !changing_rooms.contains(room) {
+        let Some(events) = events_by_room.get(room) else {
             let initial = initial_views.entry(*room).or_insert_with(|| {
                 let mut view = ChurnView::default();
                 for member in &members_by_room[room] {
@@ -1202,19 +1232,13 @@ fn churn_views<'a>(
             });
             views.insert(viewer.as_str(), Arc::clone(initial));
             continue;
-        }
+        };
         let mut view = ChurnView::default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
         for member in &members_by_room[room] {
             view.adopted.entry(*member).or_default().insert(1);
         }
-        let mut events: Vec<&crate::records::ChurnEvent> = records
-            .churn
-            .iter()
-            .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
-            .collect();
-        events.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
-        for event in events {
+        for event in viewer_churn_events(events, viewer) {
             let crate::records::ChurnEvent {
                 recipient,
                 phase,
@@ -2980,6 +3004,68 @@ mod coverage_tests {
             measure::<String>(rooms);
         } else {
             measure::<ReceiptName>(rooms);
+        }
+    }
+
+    // #636: room indexing must preserve the stable per-viewer transition order.
+    #[test]
+    fn indexed_churn_events_match_independent_viewer_sorts() {
+        let room_of = BTreeMap::from([
+            ("", 0),
+            ("alice", 0),
+            ("βob", 0),
+            ("other", 1),
+            ("last", 1),
+            ("idle", 2),
+        ]);
+        let names = ["", "alice", "βob", "other", "last", "absent"];
+        let mut state = 0x2718_2818_u64;
+        for count in 0..192 {
+            let events: Vec<_> = (0..count)
+                .map(|position| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    ChurnEvent {
+                        recipient: names[usize::try_from(state % 6).unwrap()].to_string(),
+                        phase: if state & 8 == 0 {
+                            ChurnPhase::Disconnect
+                        } else {
+                            ChurnPhase::Rejoined
+                        },
+                        at_us: [0, 1, 1, 2, u64::MAX][usize::try_from((state >> 8) % 5).unwrap()],
+                        epoch: Some(position),
+                        tails: BTreeMap::new(),
+                    }
+                })
+                .collect();
+            let rooms = room_churn_events(&events, &room_of);
+            assert_eq!(
+                rooms.values().map(Vec::len).sum::<usize>(),
+                events
+                    .iter()
+                    .filter(|event| room_of.contains_key(event.recipient.as_str()))
+                    .count()
+            );
+            for (viewer, room) in &room_of {
+                let mut expected: Vec<_> = events
+                    .iter()
+                    .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
+                    .collect();
+                expected.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
+                let actual: Vec<_> =
+                    viewer_churn_events(rooms.get(room).map_or(&[], Vec::as_slice), viewer)
+                        .map(std::ptr::from_ref)
+                        .collect();
+                assert_eq!(
+                    actual,
+                    expected
+                        .into_iter()
+                        .map(std::ptr::from_ref)
+                        .collect::<Vec<_>>(),
+                    "count={count}, viewer={viewer:?}"
+                );
+            }
         }
     }
 

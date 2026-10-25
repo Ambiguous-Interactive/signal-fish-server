@@ -5705,3 +5705,47 @@ Baseline executable SHA-256:
 `97aa6a1767c7ce69dbb337a291780f306dd311d7e0566453770d09e9d4291ef7`.
 Candidate executable SHA-256:
 `09e386af54e7687baed87c1d3f9123dda2289c90d4cc5df739b0e44a1fb8e0cf`.
+
+### Shared room-change event ordering (#636)
+
+On `b8ae0549`, `churn_views` scans all recorded churn and stable-sorts one
+room's events separately for each roster viewer. The candidate groups records
+by room and sorts each room once. It visits equal-time groups with the
+viewer's own events first, preserving the old stable tie order. Unknown
+recipients remain excluded. Roster traversal and unresolved identity evidence
+keep their original order. Raw events and replay formats do not change.
+
+Nine focused controls pass. An independent old-sort oracle compares exact
+record identities across 192 histories and 1,152 viewer comparisons, including
+empty and Unicode names, unknown recipients, timestamp ties, and `u64::MAX`.
+Existing reconnect, snapshot-tail, and room-replacement controls pass.
+
+Fresh-process debug-binary observations on shared ARM64 Linux use 16 players
+per room and one simultaneous rejoin per player. All attempts are retained:
+
+| Attempt | Rooms | Baseline seconds | Candidate seconds | Peak KiB, baseline/candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Initial | 500 | 72.370885 | 0.713751 | Not collected |
+| Follow-up | 100 | 3.725227 | 0.215153 | 19,280 / 19,684 |
+| Follow-up | 500 | 88.431278 | 0.858918 | 56,344 / 56,232 |
+
+The initial pair may overlap a native build. Native builds paused during the
+follow-up pairs, but a configuration check's embedded dependency audit
+ran during the second 500-room baseline. Browser work and other host work
+were not excluded. These observations support the source-level reduction in
+repeated scans and sorts; they do not establish a general timing bound,
+memory reduction, server capacity point, or the cause of generator stalls.
+The new temporary room index retains references to all known churn events,
+instead of only one viewer's room events. The broader #775 memory work remains
+open.
+
+Reproduce with the existing ignored
+`oracle::coverage_tests::generator_churn_view_memory_profile` control,
+`CAPACITY_VIEW_PROBE_CHURN=1`, `CAPACITY_VIEW_PROBE_PLAYERS=16`, and
+`CAPACITY_VIEW_PROBE_ROOMS=100` or `500`, in separate processes.
+Baseline binary SHA-256:
+`09e386af54e7687baed87c1d3f9123dda2289c90d4cc5df739b0e44a1fb8e0cf`.
+Candidate:
+`e27d33014a58d1f47e836edd3acd91fa08cf4be2ebb39c9e62dbe4d0025d6dc4`.
+The source baseline, binaries, logs, overlap notes, and measurement script
+remain in ignored `progress/session-538/capacity/`.

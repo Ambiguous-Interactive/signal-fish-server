@@ -363,9 +363,14 @@ for (const path of ['offer', 'answer'] as const) {
     signalingState = 'stable';
     iceConnectionState = 'checking';
     iceGatheringState = 'gathering';
-    sctp: { state: string; transport: { state: string } } | null = {
+    sctp: {
+      state: string;
+      addEventListener(): void;
+      transport: { state: string; addEventListener(): void };
+    } | null = {
       state: 'connecting',
-      transport: { state: 'connecting' },
+      addEventListener() {},
+      transport: { state: 'connecting', addEventListener() {} },
     };
     constructor() {
       connection = this;
@@ -1964,3 +1969,134 @@ for (const replace of [false, true]) {
   }
 }
 console.error('ok - local ICE server errors remain bounded and do not interrupt gameplay');
+
+// Investigations #853/#889: retain DTLS/SCTP transitions between PC events.
+for (const initiate of [false, true]) {
+  const originalPc = globalThis.RTCPeerConnection;
+  const connections: Connection[] = [];
+  const callbacks: string[] = [];
+  class Transport extends EventTarget {
+    subscriptions = 0;
+    constructor(public state: string) {
+      super();
+    }
+    override addEventListener(type: string, callback: EventListenerOrEventListenerObject) {
+      this.subscriptions += 1;
+      super.addEventListener(type, callback);
+    }
+    transition(state: string): void {
+      this.state = state;
+      this.dispatchEvent(new Event('statechange'));
+    }
+  }
+  class Sctp extends Transport {
+    readonly transport = new Transport('new');
+  }
+  class Channel {
+    readyState = 'open';
+    readonly ordered: boolean;
+    readonly maxRetransmits: number | null;
+    readonly maxPacketLifeTime = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor(readonly label: string) {
+      this.ordered = label === RELIABLE_LABEL;
+      this.maxRetransmits = this.ordered ? null : 0;
+    }
+    close(): void {}
+  }
+  class Connection {
+    connectionState = 'connecting';
+    sctp: Sctp | null = null;
+    ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+    constructor() {
+      connections.push(this);
+    }
+    createDataChannel(label: string): Channel {
+      return new Channel(label);
+    }
+    async createOffer() {
+      return { type: 'offer', sdp: 'offer' };
+    }
+    async createAnswer() {
+      return { type: 'answer', sdp: 'answer' };
+    }
+    async setLocalDescription(): Promise<void> {
+      this.sctp ??= new Sctp('connecting');
+    }
+    async setRemoteDescription(): Promise<void> {
+      this.sctp ??= new Sctp('connecting');
+    }
+    close(): void {}
+  }
+  interface Snapshot {
+    dtlsState: string | null;
+    sctpState: string | null;
+    transportStateHistory: Array<{ dtlsState: string | null; sctpState: string | null }>;
+  }
+  const engine = new Engine(false, {
+    onLocalCandidate: () => callbacks.push('candidate'),
+    onPcState: () => callbacks.push('state'),
+    onChannelOpen: () => {},
+    onChannelClosed: () => callbacks.push('closed'),
+    onChannelMessage: (_peer, _generation, _label, text) => {
+      callbacks.push(text);
+    },
+  });
+  const snapshot = () => engine.diagnosticSnapshot('peer') as Snapshot;
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    await engine.pairWith('peer', initiate, []);
+    if (!initiate) await engine.handleOffer('peer', 'offer');
+    const first = connections[0]!;
+    const sctp = first.sctp!;
+    // No snapshot or PC event may be needed to install the new transport observers.
+    sctp.transport.transition('connecting');
+    sctp.transport.transition('failed');
+    sctp.transport.transition('closed');
+    sctp.transition('closed');
+    const failure = snapshot();
+    assert(
+      failure.transportStateHistory.some((entry) => entry.dtlsState === 'failed'),
+      `initiate=${initiate}: retain transient DTLS failure before the timeout snapshot`,
+    );
+    assert(
+      failure.dtlsState === 'closed' && failure.sctpState === 'closed',
+      'final states cannot replace the preceding DTLS failure',
+    );
+    assert(callbacks.length === 0, 'transport observation does not change gameplay decisions');
+    for (let index = 0; index < 70; index += 1)
+      sctp.transition(index % 2 === 0 ? 'connecting' : 'connected');
+    const bounded = snapshot();
+    assert(bounded.transportStateHistory.length === 32, 'transport churn retains 32 states');
+    assert(
+      sctp.subscriptions === 1 && sctp.transport.subscriptions === 1,
+      'repeated snapshots and state events install one listener per transport',
+    );
+    bounded.transportStateHistory[0]!.sctpState = 'mutated';
+    assert(
+      snapshot().transportStateHistory[0]!.sctpState !== 'mutated',
+      'history snapshots do not share state records',
+    );
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    sctp.transition('closed');
+    sctp.transport.transition('failed');
+    assert(
+      snapshot().transportStateHistory.length === 1 && snapshot().dtlsState === null,
+      'retired transports cannot change replacement history',
+    );
+    await engine.handleOffer('peer', 'fresh-offer');
+    const fresh = connections[1]!;
+    fresh.sctp!.transport.transition('connected');
+    fresh.sctp!.transition('connected');
+    const channel = new Channel(RELIABLE_LABEL);
+    fresh.ondatachannel?.({ channel });
+    await Promise.resolve();
+    channel.onmessage?.({ data: 'fresh gameplay' });
+    assert(callbacks.includes('fresh gameplay'), 'transport observers preserve fresh gameplay');
+  } finally {
+    engine.removePeer('peer');
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error('ok - DTLS and SCTP transitions survive between peer-connection events');
