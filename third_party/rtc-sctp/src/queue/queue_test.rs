@@ -1488,11 +1488,14 @@ fn payload_queue_gap_ack_limited_matches_full_report_prefix() {
 fn reassembly_unordered_fragment_work_is_bounded() {
     const COUNT: u32 = 1024;
     for first in [100u32, u32::MAX - COUNT / 2] {
-        for order in [
+        for (order_index, order) in [
             (0..COUNT).collect::<Vec<_>>(),
             (0..COUNT).rev().collect(),
             (0..COUNT).step_by(2).chain((1..COUNT).step_by(2)).collect(),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut queue = ReassemblyQueue::new(0);
             for (position, &index) in order.iter().enumerate() {
                 let complete = queue.push(ChunkPayloadData {
@@ -1518,6 +1521,13 @@ fn reassembly_unordered_fragment_work_is_bounded() {
             );
             assert_eq!(queue.get_num_bytes(), 0);
             assert!(queue.unordered_chunks.is_empty());
+            if order_index == 0 {
+                assert!(
+                    queue.unordered_ordering_comparisons.get() <= COUNT as usize,
+                    "first TSN {first}: {} ordering comparisons for {COUNT} in-order fragments",
+                    queue.unordered_ordering_comparisons.get()
+                );
+            }
             assert!(
                 queue.unordered_scan_steps <= COUNT as usize * 4,
                 "{} fragment visits for {COUNT} fragments",

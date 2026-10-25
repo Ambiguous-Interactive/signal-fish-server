@@ -3363,6 +3363,22 @@ fn graceful_shutdown_stream_readiness_matches_write_rejection() -> Result<()> {
             Err(Error::ErrStreamClosed)
         );
         assert_eq!(chunks, [expected], "{state}: refusal consumed caller data");
+        assert_eq!(
+            stream.write(Instant::now(), &[]),
+            Err(Error::ErrStreamClosed)
+        );
+        assert_eq!(
+            stream.write_sctp(
+                Instant::now(),
+                &Bytes::new(),
+                PayloadProtocolIdentifier::Binary
+            ),
+            Err(Error::ErrStreamClosed)
+        );
+        assert_eq!(
+            stream.write_chunks(Instant::now(), &mut [Bytes::new()]),
+            Err(Error::ErrStreamClosed)
+        );
         Ok(())
     }
 
@@ -3557,6 +3573,81 @@ fn shutdown_forward_tsn_work_tracks_retained_data_not_abandoned_distance() -> Re
                 local.max_receive_buffer_size
             );
             assert!(local.stream(1)?.read_sctp()?.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_stream_writes_preserve_following_gameplay_and_shutdown() -> Result<()> {
+    for source in ["slice", "bytes", "chunks"] {
+        for first_ssn in [0, u16::MAX] {
+            for shutdown in [false, true] {
+                let (mut local, mut remote) = reset_pair();
+                let now = Instant::now();
+                local.ack_mode = AckMode::NoDelay;
+                remote.ack_mode = AckMode::NoDelay;
+                local.streams.get_mut(&1).unwrap().sequence_number = first_ssn;
+                remote
+                    .streams
+                    .get_mut(&1)
+                    .unwrap()
+                    .reassembly_queue
+                    .next_ssn = first_ssn;
+                let next_message_id = local.next_message_id;
+                for _ in 0..3 {
+                    let mut stream = local.stream(1)?;
+                    let written = match source {
+                        "slice" => stream.write(now, &[])?,
+                        "bytes" => stream.write_sctp(
+                            now,
+                            &Bytes::new(),
+                            PayloadProtocolIdentifier::Binary,
+                        )?,
+                        "chunks" => stream.write_chunks(now, &mut [Bytes::new(), Bytes::new()])?,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(written, 0);
+                }
+                assert!(local.pending_queue.is_empty());
+                assert!(local.inflight_queue.is_empty());
+                assert!(local.gather_outbound(now).0.is_empty());
+                assert_eq!(local.next_message_id, next_message_id);
+                assert_eq!(local.streams.get(&1).unwrap().sequence_number, first_ssn);
+                let expected = [
+                    Bytes::from_static(b"first gameplay"),
+                    Bytes::from_static(b"second gameplay"),
+                ];
+                for payload in &expected {
+                    local
+                        .stream(1)?
+                        .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+                }
+                if shutdown {
+                    local.shutdown()?;
+                }
+                for _ in 0..4 {
+                    for raw in local.gather_outbound(now).0 {
+                        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                    }
+                    for raw in remote.gather_outbound(now).0 {
+                        local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                    }
+                }
+                for payload in expected {
+                    let actual = remote.stream(1)?.read_sctp()?.unwrap_or_else(|| {
+                        panic!("source={source}, first_ssn={first_ssn}, shutdown={shutdown}: empty writes blocked gameplay")
+                    });
+                    assert_eq!(actual.to_payload(100)?.freeze(), payload);
+                }
+                assert!(local.pending_queue.is_empty());
+                assert!(local.inflight_queue.is_empty());
+                if shutdown {
+                    assert_eq!(local.state(), AssociationState::Closed);
+                    assert_eq!(remote.state(), AssociationState::Closed);
+                    assert!(remote.poll_endpoint_event().is_some());
+                }
+            }
         }
     }
     Ok(())

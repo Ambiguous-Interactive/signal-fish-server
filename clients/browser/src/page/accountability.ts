@@ -404,10 +404,9 @@ export class DeliveryAccountability {
       );
     }
 
-    for (const gap of gaps) {
-      const key = senderEpochKey(gap.fromPlayer, gap.epoch);
+    for (const [key, ranges] of reportRanges) {
       const pending = this.pendingGaps.get(key) ?? [];
-      pending.push(gap);
+      pending.push(...ranges);
       pending.sort((left, right) => left.fromSeq - right.fromSeq);
       this.pendingGaps.set(key, pending);
     }
@@ -417,8 +416,9 @@ export class DeliveryAccountability {
       this.unadvisedUnsupportedGap = unsupportedGap;
     }
     this.counters = nextCounters;
-    for (const gap of gaps) {
-      this.tryRetireDeparted(gap.fromPlayer, gap.epoch);
+    for (const ranges of reportRanges.values()) {
+      const first = ranges[0];
+      if (first !== undefined) this.tryRetireDeparted(first.fromPlayer, first.epoch);
     }
   }
 

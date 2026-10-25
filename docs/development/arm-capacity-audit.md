@@ -5408,3 +5408,36 @@ keeps raw counts and leaves that offered send unsent. Equal-time and late
 completions remain legal. Focused controls preserve exact archive replay.
 This strengthens workload evidence under #775. It does not explain generator
 stalls, qualify the long cell, or change the generator-lag bound.
+
+### Reference-client delivery-report work (#1192)
+
+On `060f7d19`, both validators sort a retained sender/epoch gap list after
+each incoming gap and retry terminal retirement for each gap. A native
+256-range report visits its unchanged incomplete terminal prefix 65,536 times.
+Batching those steps per sender/epoch reduces that count to 256. Validation
+still precedes mutation. This is client work, not a server capacity result.
+
+The browser experiment runs the actual TypeScript validator bundled for Node
+on shared ARM64 Linux. One departed sender owes a final reliable message after
+all omission ranges. Singleton ranges alternate LatestSuperseded and
+VolatileDropped, so the server cannot coalesce them. Reports contain at most
+256 ranges. Only report processing is timed; the final exact tail is then
+validated as stale. Every attempt succeeds. Seven attempts per source alternate
+baseline-first and candidate-first order. Median elapsed times are milliseconds:
+
+| Retained ranges | Previous | Batched |
+| --- | --- | --- |
+| 256 | 2.300 | 2.517 |
+| 2,048 | 107.091 | 36.080 |
+| 8,192 | 993.832 | 120.430 |
+
+The smallest case is inconclusive. The larger histories show reduced local
+validator cost; they do not measure Chromium scheduling, network throughput,
+server capacity, or end-to-end gameplay latency. Baseline source SHA-256:
+`1a7711926d233d1a3c67d864c019304b0a6810e7ca3596067243f44669d2830a`.
+Candidate source SHA-256:
+`19e1fc7d3e47a108c4d647f25239411bf979804e5140acc4d0aae533a5d8ecfb`.
+The linked issue retains all attempts. Raw capture and reproduction script
+remain in the ignored session-529 progress directory. The independent Rust
+and .NET SDKs have lower retained-gap limits; these browser timings do not
+qualify those SDKs. No historical #889, #853 or #1120 cause is established.

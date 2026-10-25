@@ -8096,3 +8096,60 @@ reset timeout or initial browser/native establishment failure.
 The external-client assessment for F167 also applies to F168: none of the
 three independent SDKs imports the native reference engine; no wire or SDK
 migration is required.
+
+### F169 — Empty SCTP writes skip ordered gameplay sequences
+
+Confirmed on `060f7d19`; tracked in #1190 under #826/#1145. The public SCTP
+write API returns zero for an empty source. Packetization emits no DATA but
+advances the ordered SSN. Following complete messages receive transport ACKs
+without becoming readable. The red paired control `6b50e334` fails its exact
+application read after three empty slice writes.
+
+Treat zero remaining source bytes as a no-op after checking writability and
+before allocating a message identity. The final control covers slice, Bytes
+and chunk-array sources, SSN 0 and wrap, ordinary delivery and graceful shutdown,
+exact following payloads, unchanged message identity and sequence, and terminal
+endpoint drain. The existing four-state shutdown control also refuses empty
+writes. This qualifies the low-level API. WebRTC empty text and binary messages
+already use a one-byte filler, so this does not establish a public data-channel
+incident or explain the historical reset timeout.
+
+### F170 — In-order unordered fragments repeatedly search retained DATA
+
+Confirmed on `060f7d19`; tracked in #1191 under #636/#826. Insertion searches
+the retained incomplete unordered queue for each increasing TSN. Red control
+`92a21851` records 11,242 comparisons for 1,024 fragments. Append after a strictly
+earlier tail TSN and retain binary search for reorder and duplicate paths.
+Green control `bf69d77b` bounds the same work to 1,024 comparisons and passes
+five unordered controls. They retain exact payload, receive credit, ordinary
+and wrapped TSNs, reversed and alternating arrivals, 720 permutations, and
+partial abandonment. No throughput or historical timeout claim follows.
+
+### F171 — Delivery reports repeat sorting and terminal-tail scans
+
+Confirmed on `060f7d19`; tracked in #1192 under #636/#826. Both reference
+validators append and sort one retained gap at a time, then attempt retirement
+once per gap. A legal 256-range report repeats the same incomplete terminal
+scan 256 times. The native red control `b567942e` records 65,536 gap visits
+instead of 256. Batch append, sorting and retirement per sender/epoch using
+the existing whole-report validation groups. No validation moves past mutation.
+Controls retain reversed ranges, interleaved senders and epochs, atomic
+rejection, exact counters, terminal tail reads, and fresh-epoch delivery.
+
+A fixed Node workload with 8,192 alternating Latest/Volatile singleton gaps
+in 32 legal reports changes median report processing from 993.832 ms to
+120.430 ms across seven alternating-order attempts per source. The 256-range
+case is inconclusive. The capacity ledger records scope and measurements.
+The historical browser mesh and native reset failures remain unexplained.
+
+External-client assessment: #1190/#1191 affect the private native transport
+graph only. The current Rust manifest has no RTC/SCTP dependency; .NET uses
+its own implementation; Godot uses browser WebRTC or its engine extension.
+For #1192, current Rust and .NET validators have the same per-gap sorting
+and retirement pattern. Follow-up issues
+[Rust #295](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/295)
+and [.NET #146](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/146)
+track independent repairs within their existing retained-gap limits. The Godot
+source tree has no delivery-accountability implementation and imports neither
+reference validator. The signaling wire is unchanged; no application migration
+is required. SDK issue completion is separate from server CI.

@@ -272,3 +272,19 @@ The #1186 endpoint fixture binds OS-assigned loopback UDP ports and keeps each
 socket alive for the test. Endpoint routing uses those bound addresses. The
 shutdown/reset selectors can run in isolated Nextest processes without
 cross-process fixed-port collisions.
+
+Empty writes on writable streams now return zero without allocating a message
+identity or advancing the ordered sequence. Previously they sent no DATA but
+skipped an SSN, blocking later complete messages. Paired controls cover slice,
+Bytes and chunk-array sources, sequence wrap, graceful shutdown, and exact
+terminal reads. Empty writes remain refused after shutdown starts. The WebRTC
+layer's one-byte empty-message fillers remain nonempty SCTP writes. See
+[#1190](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1190).
+
+Increasing unordered fragment TSNs now append without searching the retained
+incomplete queue. Reordered and duplicate fragments keep binary search. The
+1,024-fragment control bounds insertion comparisons to 1,024 instead of the
+previous 11,242 while retaining exact payload and receive-credit assertions.
+Permutation, abandonment and wrap controls remain unchanged. This is an
+operation-count result, not a throughput measurement. See
+[#1191](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1191).

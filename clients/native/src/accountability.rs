@@ -48,6 +48,8 @@ pub struct DeliveryAccountability {
     unadvised_unsupported_gap: Option<DeliveryGap>,
     counters: Option<DeliveryCountersByClass>,
     last_relay_stats: Option<RelayStatsSnapshot>,
+    #[cfg(test)]
+    retirement_gap_visits: usize,
 }
 
 impl Default for DeliveryAccountability {
@@ -68,6 +70,8 @@ impl DeliveryAccountability {
             unadvised_unsupported_gap: None,
             counters: None,
             last_relay_stats: None,
+            #[cfg(test)]
+            retirement_gap_visits: 0,
         }
     }
 
@@ -559,7 +563,11 @@ impl DeliveryAccountability {
                 .entry((gap.from_player, gap.epoch))
                 .or_default();
             gaps.push(gap.clone());
-            gaps.sort_unstable_by_key(|candidate| candidate.from_seq);
+        }
+        for key in report_ranges.keys() {
+            if let Some(gaps) = self.pending_gaps.get_mut(key) {
+                gaps.sort_unstable_by_key(|candidate| candidate.from_seq);
+            }
         }
         if unsupported_gap.is_some() {
             // The advisory is authorized by an unsupported-format range having
@@ -567,8 +575,8 @@ impl DeliveryAccountability {
             self.unadvised_unsupported_gap = unsupported_gap;
         }
         self.counters = Some(report.per_class);
-        for gap in &report.gaps {
-            self.try_retire_departed(gap.from_player, gap.epoch)?;
+        for &(player_id, epoch) in report_ranges.keys() {
+            self.try_retire_departed(player_id, epoch)?;
         }
         Ok(())
     }
@@ -874,6 +882,10 @@ impl DeliveryAccountability {
             let Some(gap) = gaps.get(consumed) else {
                 return Ok(());
             };
+            #[cfg(test)]
+            {
+                self.retirement_gap_visits += 1;
+            }
             if gap.from_seq != next || gap.to_seq > terminal.final_seq {
                 return Ok(());
             }
@@ -1546,6 +1558,104 @@ mod tests {
                 gaps: Vec::new(),
             })
             .is_err());
+    }
+
+    #[test]
+    fn report_retires_each_sender_epoch_with_one_gap_scan() {
+        let sender = id(636);
+        let mut state = DeliveryAccountability::default();
+        state.note_player_joined(&player(sender, 1)).unwrap();
+        state.note_player_left(sender, Some(1), Some(257)).unwrap();
+        let mut per_class = counters_with_superseded(128);
+        per_class.volatile.dropped = 128;
+        state
+            .record_report(&DeliveryReportPayload {
+                per_class,
+                gaps: (1..=256)
+                    .map(|seq| {
+                        let mut gap = gap(sender, seq, seq);
+                        if seq % 2 == 0 {
+                            gap.reason = DeliveryGapReason::VolatileDropped;
+                        }
+                        gap
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        assert_eq!(
+            state.retirement_gap_visits, 256,
+            "one report must not rescan the same incomplete terminal tail for each gap"
+        );
+        assert_eq!(state.pending_gaps[&(sender, 1)].len(), 256);
+        assert!(state.departed_senders.contains_key(&(sender, 1)));
+        assert_eq!(
+            state
+                .record_game_data(sender, Some(257), Some(1), None, None)
+                .unwrap(),
+            GameDataDisposition::Stale
+        );
+        assert!(state.pending_gaps.is_empty());
+        assert!(state.departed_senders.is_empty());
+        assert!(state.senders.is_empty());
+    }
+
+    #[test]
+    fn report_batches_keep_sender_epochs_separate_and_reject_invalid_ranges_atomically() {
+        let senders = [id(636), id(826)];
+        let mut state = DeliveryAccountability::default();
+        for sender in senders {
+            state.note_player_joined(&player(sender, 1)).unwrap();
+            state.note_player_left(sender, Some(1), Some(2)).unwrap();
+            state.note_player_reconnected(sender, Some(2)).unwrap();
+            state.note_player_left(sender, Some(2), Some(2)).unwrap();
+        }
+        let interleaved = vec![
+            gap_at_epoch(senders[1], 2, 2, 2),
+            gap_at_epoch(senders[0], 1, 1, 1),
+            gap_at_epoch(senders[0], 2, 2, 2),
+            gap_at_epoch(senders[1], 1, 1, 1),
+            gap_at_epoch(senders[0], 2, 1, 1),
+            gap_at_epoch(senders[1], 2, 1, 1),
+        ];
+        for invalid in [
+            gap_at_epoch(senders[0], 2, 3, 3),
+            gap_at_epoch(senders[1], 3, 1, 1),
+            gap_at_epoch(senders[0], 1, 1, 1),
+        ] {
+            let mut gaps = interleaved.clone();
+            gaps.push(invalid);
+            assert!(state
+                .record_report(&DeliveryReportPayload {
+                    per_class: counters_with_superseded(gaps.len() as u64),
+                    gaps,
+                })
+                .is_err());
+            assert!(state.pending_gaps.is_empty());
+            assert!(state.counters.is_none());
+            assert_eq!(state.departed_senders.len(), 4);
+            assert_eq!(state.retirement_gap_visits, 0);
+        }
+        state
+            .record_report(&DeliveryReportPayload {
+                per_class: counters_with_superseded(interleaved.len() as u64),
+                gaps: interleaved,
+            })
+            .unwrap();
+        for sender in senders {
+            assert!(!state.departed_senders.contains_key(&(sender, 2)));
+            assert!(!state.pending_gaps.contains_key(&(sender, 2)));
+            assert!(state.departed_senders.contains_key(&(sender, 1)));
+            assert_eq!(state.pending_gaps[&(sender, 1)].len(), 1);
+            assert_eq!(
+                state
+                    .record_game_data(sender, Some(2), Some(1), None, None)
+                    .unwrap(),
+                GameDataDisposition::Stale
+            );
+        }
+        assert!(state.pending_gaps.is_empty());
+        assert!(state.departed_senders.is_empty());
+        assert!(state.senders.is_empty());
     }
 
     #[test]

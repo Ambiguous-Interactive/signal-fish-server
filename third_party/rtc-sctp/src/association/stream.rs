@@ -188,6 +188,8 @@ impl Stream<'_> {
 
     /// write_sctp writes len(p) bytes from p to the DTLS connection
     ///
+    /// An empty write is a no-op on a writable stream.
+    ///
     /// `now` is the instant the message is handed to the stack. See the note on
     /// [`Stream`] for why it is a parameter.
     pub fn write_sctp(
@@ -269,6 +271,10 @@ impl Stream<'_> {
     ) -> Result<usize> {
         if !self.is_writable() {
             return Err(Error::ErrStreamClosed);
+        }
+
+        if source.remaining() == 0 {
+            return Ok(0);
         }
 
         if source.remaining() > self.association.max_message_size() as usize {

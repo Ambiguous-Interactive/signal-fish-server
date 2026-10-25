@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce delivery-report processing work in both reference clients (#1192).
 - Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
 - Reduce native receive work when partial-reliability recovery discards fragmented gameplay (#1182).
-- Reduce native ordered gameplay fragment insertion work (#636).
+- Reduce native gameplay fragment insertion work for ordered and unordered messages (#636, #1191).
 - Reduce native gameplay completion work for fragmented unordered messages (#1175).
 - Reduce native gameplay receive work for complete unordered messages and packet-limited acknowledgments (#1171, #1172).
 - **Breaking:** Rust callers that construct `ServerMessage::PlayerReconnected` must set its optional `player` field.
@@ -33,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep empty native SCTP writes from blocking later ordered messages (#1190).
 - Preserve native channel close notifications when remote admission waits until channel retirement (#1188).
 - Release browser negotiation backlog when peer links retire so repeated replacements keep gameplay active (#1183).
 - Preserve native ordered gameplay sequence progress when stream reset completes during graceful shutdown (#1184).

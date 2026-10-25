@@ -502,6 +502,58 @@ test('PlayerLeft terminal watermark retires delivered and exactly omitted tails'
   );
 });
 
+test('batched gap reports preserve each sender and epoch through partial terminal tails', () => {
+  for (const reverse of [false, true]) {
+    const state = new DeliveryAccountability();
+    const senders = [SENDER, playerId(11)];
+    state.rebaselineSnapshot(senders.map((id) => ({ id, epoch: 1, seq: 0 })));
+    for (const sender of senders) {
+      state.notePlayerLeft(sender, 1, 258);
+      state.notePlayerReconnected(sender, 2);
+    }
+    for (const [start, omitted] of [
+      [1, 256],
+      [130, 512],
+    ] as const) {
+      const ranges = Array.from({ length: DELIVERY_REPORT_MAX_GAPS / 2 }, (_, offset) =>
+        senders.map((sender) => {
+          const seq = start + offset;
+          return {
+            ...gap(seq, seq),
+            from_player: sender,
+            reason: offset % 2 === 0 ? 'latest_superseded' : 'volatile_dropped',
+          };
+        }),
+      ).flat();
+      const perClass = countersWithSuperseded(omitted / 2);
+      (perClass['volatile'] as Record<string, unknown>)['dropped'] = omitted / 2;
+      if (start === 130) {
+        const invalid = [...ranges];
+        invalid[invalid.length - 1] = invalid[0]!;
+        expectViolation(
+          () => state.recordReport({ per_class: perClass, gaps: invalid }),
+          'overlapping/duplicate gap',
+        );
+      }
+      state.recordReport({ per_class: perClass, gaps: reverse ? ranges.reverse() : ranges });
+      for (const sender of senders) {
+        if (
+          state.recordGameData({ from_player: sender, epoch: 1, seq: start + 128 }) !== 'stale'
+        )
+          throw new Error(`sender ${sender}, reverse=${reverse}: keep partial tail stale`);
+      }
+    }
+    for (const sender of senders) {
+      if (state.recordGameData({ from_player: sender, epoch: 2, seq: 1 }) !== 'apply')
+        throw new Error(`sender ${sender}, reverse=${reverse}: preserve fresh epoch data`);
+      expectViolation(
+        () => state.recordGameData({ from_player: sender, epoch: 2, seq: 1 }),
+        'duplicate/backward GameData',
+      );
+    }
+  }
+});
+
 test('PlayerLeft terminal watermarks keep seat churn state bounded and preserve v2 shape', () => {
   const state = new DeliveryAccountability();
   for (let index = 1; index <= 1_024; index += 1) {
