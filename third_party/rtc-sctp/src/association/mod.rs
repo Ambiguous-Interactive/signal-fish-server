@@ -10,7 +10,9 @@ use crate::chunk::{
     chunk_cookie_echo::ChunkCookieEcho,
     chunk_error::ChunkError,
     chunk_forward_tsn::ChunkForwardTsn,
-    chunk_forward_tsn::ChunkForwardTsnStream,
+    chunk_forward_tsn::{
+        ChunkForwardTsnStream, FORWARD_TSN_STREAM_LENGTH, NEW_CUMULATIVE_TSN_LENGTH,
+    },
     chunk_heartbeat::ChunkHeartbeat,
     chunk_heartbeat_ack::ChunkHeartbeatAck,
     chunk_init::ChunkInit,
@@ -3842,9 +3844,20 @@ impl Association {
             new_cumulative_tsn: boundary,
             streams: Vec::with_capacity(self.fwd_tsn_stream_map.len()),
         };
-        if boundary != self.advanced_peer_tsn_ack_point {
-            // Rare reset path: the incremental maximum may include DATA above
-            // the fence, so reconstruct only the capped forward window.
+        let chunk_budget = (self.mtu as usize)
+            .saturating_sub(COMMON_HEADER_SIZE as usize)
+            .min(u16::MAX as usize);
+        let stream_budget = chunk_budget
+            .saturating_sub(CHUNK_HEADER_SIZE + NEW_CUMULATIVE_TSN_LENGTH)
+            / FORWARD_TSN_STREAM_LENGTH;
+        if boundary != self.advanced_peer_tsn_ack_point
+            || self.fwd_tsn_stream_map.len() > stream_budget
+        {
+            /*
+             * The cumulative point cannot skip a stream omitted from its report.
+             * Stop before that stream, then continue after the peer acknowledges.
+             * Reset fences also require rebuilding only the retained prefix.
+             */
             let mut streams = FxHashMap::default();
             for tsn in &self.inflight_queue.sorted {
                 if sna32lte(*tsn, self.cumulative_tsn_ack_point) || sna32gt(*tsn, boundary) {
@@ -3861,6 +3874,10 @@ impl Association {
                         .is_some_and(|floor| sna32lte(*tsn, *floor))
                 {
                     continue;
+                }
+                if streams.len() == stream_budget && !streams.contains_key(&c.stream_identifier) {
+                    fwd_tsn.new_cumulative_tsn = tsn.wrapping_sub(1);
+                    break;
                 }
                 streams
                     .entry(c.stream_identifier)

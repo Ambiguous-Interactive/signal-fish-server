@@ -3838,3 +3838,180 @@ fn simultaneous_shutdown_retries_lost_forward_tsn_before_draining_mixed_streams(
     }
     Ok(())
 }
+
+// Issue #1197: ordered stream reports cannot exceed the recovery packet budget.
+#[test]
+fn shutdown_forward_tsn_fits_mtu_across_many_ordered_streams() -> Result<()> {
+    for (mtu, first_tsn) in [
+        (64, 100),
+        (64, u32::MAX - 8),
+        (1200, 100),
+        (1200, u32::MAX - 8),
+    ] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.mtu = mtu;
+        let stream_count = u16::try_from((mtu - 20) / 4 + 5).unwrap();
+        local.my_next_tsn = first_tsn;
+        local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+        local.cwnd = 65536;
+        remote.ack_mode = AckMode::NoDelay;
+        for id in 1..=stream_count {
+            let mut stream = if id == 1 {
+                local.stream(id)?
+            } else {
+                local.open_stream(id, PayloadProtocolIdentifier::Binary)?
+            };
+            stream.set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+            stream.write(now, b"lost")?;
+        }
+        let lost = transmitted_data(&local.gather_outbound(now).0);
+        assert_eq!(lost.len(), usize::from(stream_count));
+        for id in 1..=stream_count {
+            let mut stream = local.stream(id)?;
+            stream.set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+            stream.write(now, &id.to_be_bytes())?;
+        }
+        local.shutdown()?;
+        let mut forwards = vec![];
+        for step in 0..200 {
+            let at = now + Duration::from_millis(step * 100);
+            local.handle_timeout(at);
+            remote.handle_timeout(at);
+            for raw in local.gather_outbound(at).0 {
+                assert!(
+                    raw.len() <= local.mtu as usize,
+                    "recovery packet has {} bytes for mtu {}",
+                    raw.len(),
+                    local.mtu
+                );
+                let packet = Packet::unmarshal(&raw)?;
+                if let Some(forward) = packet
+                    .chunks
+                    .iter()
+                    .find_map(|chunk| chunk.as_any().downcast_ref::<ChunkForwardTsn>())
+                {
+                    forwards.push((
+                        forward.new_cumulative_tsn,
+                        forward
+                            .streams
+                            .iter()
+                            .map(|stream| (stream.identifier, stream.sequence))
+                            .collect::<Vec<_>>(),
+                    ));
+                    if forwards.len() == 1 {
+                        assert_eq!(packet.chunks.len(), 1);
+                        continue;
+                    }
+                }
+                remote.handle_inbound(packet, at)?;
+            }
+            for raw in remote.gather_outbound(at).0 {
+                local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+            }
+            if local.state() == AssociationState::Closed
+                && remote.state() == AssociationState::Closed
+            {
+                break;
+            }
+        }
+        assert!(
+            forwards.len() >= 3,
+            "stream progress must span multiple reports and retry the lost first report"
+        );
+        assert_eq!(forwards[0], forwards[1]);
+        assert_eq!(local.state(), AssociationState::Closed);
+        assert_eq!(remote.state(), AssociationState::Closed);
+        for id in 1_u16..=stream_count {
+            assert_eq!(
+                remote
+                    .stream(id)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(2)?
+                    .freeze(),
+                Bytes::copy_from_slice(&id.to_be_bytes())
+            );
+            assert!(remote.stream(id).is_err());
+        }
+        assert!(remote.poll_endpoint_event().is_some());
+        assert!(remote.poll_endpoint_event().is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_forward_tsn_budget_preserves_fragment_and_stream_prefix() -> Result<()> {
+    for first_tsn in [100, u32::MAX - 2] {
+        let (mut local, _) = reset_pair();
+        local.mtu = 24;
+        local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        local.advanced_peer_tsn_ack_point = first_tsn.wrapping_add(4);
+        for (offset, id, unordered, sequence) in [
+            (0, 1, false, 4),
+            (1, 2, true, 0),
+            (2, 1, false, 4),
+            (3, 1, false, 5),
+            (4, 3, false, 0),
+        ] {
+            local.inflight_queue.push_no_check(ChunkPayloadData {
+                tsn: first_tsn.wrapping_add(offset),
+                stream_identifier: id,
+                stream_sequence_number: sequence,
+                unordered,
+                abandoned: true,
+                ..Default::default()
+            });
+            local.note_abandoned_for_forward_tsn(unordered, id, sequence);
+        }
+        let report = local.create_forward_tsn();
+        assert_eq!(report.new_cumulative_tsn, first_tsn.wrapping_add(3));
+        assert_eq!(report.streams.len(), 1);
+        assert_eq!(report.streams[0].identifier, 1);
+        assert_eq!(report.streams[0].sequence, 5);
+        assert_eq!(local.marshal_control_chunk(&report)?.len(), 24);
+        local.reconfigs.insert(
+            1,
+            ChunkReconfig {
+                param_a: Some(Box::new(ParamOutgoingResetRequest {
+                    sender_last_tsn: first_tsn.wrapping_add(2),
+                    stream_identifiers: vec![1],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let fenced = local.create_forward_tsn();
+        assert_eq!(fenced.new_cumulative_tsn, first_tsn.wrapping_add(2));
+        assert_eq!(fenced.streams.len(), 1);
+        assert_eq!(fenced.streams[0].identifier, 1);
+        assert_eq!(fenced.streams[0].sequence, 4);
+    }
+    for (mtu, budget) in [(20, 0), (24, 1), (28, 2), (u32::MAX, 16381)] {
+        let (mut local, _) = reset_pair();
+        local.mtu = mtu;
+        local.cumulative_tsn_ack_point = 0;
+        local.advanced_peer_tsn_ack_point = 17000;
+        for id in 1_u16..=17000 {
+            local.inflight_queue.push_no_check(ChunkPayloadData {
+                tsn: u32::from(id),
+                stream_identifier: id,
+                abandoned: true,
+                ..Default::default()
+            });
+            local.note_abandoned_for_forward_tsn(false, id, 0);
+        }
+        let report = local.create_forward_tsn();
+        assert_eq!(report.streams.len(), budget);
+        assert_eq!(report.new_cumulative_tsn as usize, budget);
+        let raw = local.marshal_control_chunk(&report)?;
+        assert!(raw.len() <= mtu as usize);
+        assert!(raw.len() - COMMON_HEADER_SIZE as usize <= u16::MAX as usize);
+        let decoded = Packet::unmarshal(&raw)?;
+        assert_eq!(decoded.chunks.len(), 1);
+        assert_eq!(decoded.chunks[0].value_length(), report.value_length());
+    }
+    Ok(())
+}

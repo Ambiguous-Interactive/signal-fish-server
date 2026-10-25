@@ -200,6 +200,68 @@ function dispatchClassifiedFrame(state: DeliveryAccountability, frame: ServerFra
   }
 }
 
+test('issue 1196 delivered sequence after exact gaps cannot also be reported missing', () => {
+  for (const lifecycle of ['live', 'new epoch', 'departed']) {
+    for (const splitReports of [false, true]) {
+      const state = joinedState();
+      const epoch = lifecycle === 'new epoch' ? 2 : 1;
+      if (epoch === 2) {
+        state.notePlayerReconnected(SENDER, epoch);
+      }
+      if (lifecycle === 'departed') {
+        state.notePlayerLeft(SENDER, epoch, 3);
+      }
+      const first: Record<string, unknown> = { ...gap(1, 1), epoch };
+      const second: Record<string, unknown> = {
+        ...gap(2, 2),
+        epoch,
+        reason: 'volatile_dropped',
+      };
+      const reports = splitReports ? [[second], [first]] : [[second, first]];
+      const perClass = counters(0);
+      for (const gaps of reports) {
+        for (const range of gaps) {
+          const target = perClass[
+            range['reason'] === 'volatile_dropped' ? 'volatile' : 'latest'
+          ] as Record<string, number>;
+          const counter = range['reason'] === 'volatile_dropped' ? 'dropped' : 'superseded';
+          target[counter] = (target[counter] ?? 0) + 1;
+        }
+        state.recordReport({ per_class: perClass, gaps });
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        expectViolation(
+          () => state.recordGameData({ from_player: SENDER, epoch, seq: 2, class: 'volatile' }),
+          'includes delivered seq 2',
+        );
+      }
+      const disposition = state.recordGameData({ from_player: SENDER, epoch, seq: 3 });
+      if (disposition !== (lifecycle === 'departed' ? 'stale' : 'apply')) {
+        throw new Error(`${lifecycle}/${splitReports}: valid recovery changed`);
+      }
+    }
+  }
+});
+
+test('issue 1196 reported range rejects delivered start interior and end', () => {
+  const state = joinedState();
+  const perClass = countersWithSuperseded(2);
+  (perClass['volatile'] as Record<string, unknown>)['dropped'] = 3;
+  state.recordReport({
+    per_class: perClass,
+    gaps: [gap(1, 2), { ...gap(3, 5), reason: 'volatile_dropped' }],
+  });
+  for (const received of [3, 4, 5]) {
+    expectViolation(
+      () => state.recordGameData({ from_player: SENDER, epoch: 1, seq: received }),
+      received === 3 ? 'includes delivered seq 3' : 'prior exact reports do not cover',
+    );
+  }
+  if (state.recordGameData({ from_player: SENDER, epoch: 1, seq: 6 }) !== 'apply') {
+    throw new Error('valid successor failed after rejected range overlaps');
+  }
+});
+
 test('only a causally prior exact range authorizes a sequence gap', () => {
   const valid = joinedState();
   valid.recordGameData({ from_player: SENDER, epoch: 1, seq: 1 });

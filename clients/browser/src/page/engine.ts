@@ -196,28 +196,40 @@ export class Engine {
     if (!initiate) {
       return null;
     }
+    let phase = 'create_reliable_channel';
     try {
       // Both channels must exist before the offer so the SDP negotiates SCTP
       // and the channels open as soon as DTLS completes.
       const reliable = pc.createDataChannel(RELIABLE_LABEL);
+      link.channels.set(reliable.label, reliable);
+      this.registerChannelHandlers(peer, link, reliable);
+      phase = 'create_unreliable_channel';
       const unreliable = pc.createDataChannel(UNRELIABLE_LABEL, {
         ordered: false,
         maxRetransmits: 0,
       });
-      for (const channel of [reliable, unreliable]) {
-        link.channels.set(channel.label, channel);
-        this.registerChannelHandlers(peer, link, channel);
-      }
+      link.channels.set(unreliable.label, unreliable);
+      this.registerChannelHandlers(peer, link, unreliable);
+      phase = 'create_offer';
       const offer = await pc.createOffer();
       this.assertCurrentLink(peer, link);
+      phase = 'set_local_description';
       await pc.setLocalDescription(offer);
       this.assertCurrentLink(peer, link);
+      phase = 'validate_offer';
       if (typeof offer.sdp !== 'string') {
         throw new Error(`createOffer for ${peer} produced no SDP`);
       }
       return offer.sdp;
     } catch (error) {
       if (this.peers.get(peer) === link) {
+        try {
+          console.error(
+            `P2P initial negotiation failed for ${peer}: ${JSON.stringify({ phase, link: this.diagnosticSnapshot(peer) })}`,
+          );
+        } catch {
+          /* Diagnostics must not replace the stack error or prevent cleanup. */
+        }
         this.peers.delete(peer);
         pc.close();
       }

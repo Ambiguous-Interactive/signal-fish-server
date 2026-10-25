@@ -1485,3 +1485,169 @@ console.error(
 console.error(
   'ok - receive sizing preserves UTF-8 boundaries without per-message payload buffers',
 );
+
+// #853/#889: capture the failed initial link before cleanup removes its history.
+for (const failureStage of [
+  'create_reliable_channel',
+  'create_unreliable_channel',
+  'create_offer',
+  'set_local_description',
+  'validate_offer',
+  'retired_offer',
+  'retired_local_description',
+  'diagnostic_failure',
+  'snapshot_failure',
+] as const) {
+  const originalPc = globalThis.RTCPeerConnection;
+  const originalError = console.error;
+  const diagnostics: string[] = [];
+  const connections: Connection[] = [];
+  const failure = new Error('original stack failure');
+  let rejectOperation!: (error: Error) => void;
+  class Connection {
+    state = 'connecting';
+    stateUnavailable = false;
+    get connectionState(): string {
+      if (this.stateUnavailable) throw new Error('browser state unavailable');
+      return this.state;
+    }
+    signalingState = 'stable';
+    iceConnectionState = 'checking';
+    iceGatheringState = 'gathering';
+    closed = false;
+    constructor() {
+      connections.push(this);
+    }
+    createDataChannel(label: string): object {
+      if (failureStage === `create_${label}_channel`) throw failure;
+      return { label, readyState: 'connecting', bufferedAmount: 0, id: null };
+    }
+    async createOffer(): Promise<RTCSessionDescriptionInit> {
+      if (failureStage === 'retired_offer')
+        return new Promise((_resolve, reject) => {
+          rejectOperation = reject;
+        });
+      if (failureStage === 'snapshot_failure') {
+        this.stateUnavailable = true;
+        throw failure;
+      }
+      if (failureStage === 'create_offer' || failureStage === 'diagnostic_failure')
+        throw failure;
+      return failureStage === 'validate_offer'
+        ? { type: 'offer' }
+        : { type: 'offer', sdp: 'private SDP' };
+    }
+    async setLocalDescription(): Promise<void> {
+      this.signalingState = 'have-local-offer';
+      if (failureStage === 'retired_local_description')
+        return new Promise((_resolve, reject) => {
+          rejectOperation = reject;
+        });
+      if (failureStage === 'set_local_description') throw failure;
+    }
+    close(): void {
+      this.closed = true;
+      this.state = 'closed';
+    }
+  }
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    console.error = (line: string) => {
+      if (failureStage === 'diagnostic_failure')
+        throw new Error('diagnostic output unavailable');
+      diagnostics.push(line);
+    };
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: () => {},
+      onChannelClosed: () => {},
+      onChannelMessage: () => {},
+    });
+    const pending = engine.pairWith('peer', true, []);
+    if (failureStage.startsWith('retired_')) {
+      await Promise.resolve();
+      engine.removePeer('peer');
+      await engine.pairWith('peer', false, []);
+      rejectOperation(failure);
+    }
+    let rejected: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      rejected = error;
+    }
+    assert(
+      failureStage === 'validate_offer'
+        ? rejected instanceof Error && rejected.message.includes('produced no SDP')
+        : rejected === failure,
+      `${failureStage}: cleanup preserves the original failure`,
+    );
+    assert(connections[0]?.closed === true, `${failureStage}: failed link closes`);
+    if (failureStage.startsWith('retired_')) {
+      await Promise.resolve();
+      assert(diagnostics.length === 0, 'late rejection cannot snapshot the replacement');
+      assert(
+        engine.isPaired('peer') && connections[1]?.closed === false,
+        'late rejection preserves replacement',
+      );
+    } else if (failureStage === 'diagnostic_failure' || failureStage === 'snapshot_failure') {
+      assert(!engine.isPaired('peer'), 'failed diagnostics still forget the failed link');
+      await engine.pairWith('peer', false, []);
+      assert(engine.isPaired('peer'), 'failed diagnostics do not block fresh pairing');
+    } else {
+      assert(!engine.isPaired('peer'), `${failureStage}: failed link is forgotten`);
+      assert(diagnostics.length === 1, `${failureStage}: retain one pre-cleanup diagnostic`);
+      const line = diagnostics[0]!;
+      const snapshot = JSON.parse(line.slice(line.indexOf('{'))) as {
+        phase: string;
+        link: {
+          generation: number;
+          connectionState: string;
+          signalingState: string;
+          transportStateHistory: Array<{ connectionState: string }>;
+          channels: Record<string, unknown>;
+        };
+      };
+      assert(
+        snapshot.phase === failureStage,
+        `${failureStage}: identify the failing browser operation`,
+      );
+      assert(
+        snapshot.link.generation === 1 && snapshot.link.connectionState === 'connecting',
+        `${failureStage}: snapshot the failed link before close`,
+      );
+      assert(
+        snapshot.link.transportStateHistory.at(-1)?.connectionState === 'connecting',
+        `${failureStage}: preserve pre-close transport history`,
+      );
+      assert(
+        snapshot.link.signalingState ===
+          (['set_local_description', 'validate_offer'].includes(failureStage)
+            ? 'have-local-offer'
+            : 'stable'),
+        `${failureStage}: retain SDP progress`,
+      );
+      assert(
+        (snapshot.link.channels['reliable'] !== null) ===
+          (failureStage !== 'create_reliable_channel'),
+        `${failureStage}: retain first-channel creation progress`,
+      );
+      assert(
+        (snapshot.link.channels['unreliable'] !== null) ===
+          !['create_reliable_channel', 'create_unreliable_channel'].includes(failureStage),
+        `${failureStage}: retain second-channel creation progress`,
+      );
+      assert(!line.includes('private SDP'), `${failureStage}: snapshot excludes SDP`);
+      await engine.pairWith('peer', false, []);
+      assert(engine.isPaired('peer'), `${failureStage}: fresh pairing remains possible`);
+    }
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+    console.error = originalError;
+  }
+}
+console.error(
+  'ok - initial browser negotiation failures retain operation and link evidence before cleanup',
+);

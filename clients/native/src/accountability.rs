@@ -847,6 +847,15 @@ impl DeliveryAccountability {
                 received.saturating_sub(1)
             ));
         }
+        if gaps
+            .get(consumed)
+            .is_some_and(|gap| gap.from_seq <= received)
+        {
+            return Err(format!(
+                "delivery accountability violation: prior gap report for {} epoch {} includes delivered seq {received}",
+                key.0, key.1
+            ));
+        }
         gaps.drain(..consumed);
         if gaps.is_empty() {
             self.pending_gaps.remove(&key);
@@ -1126,6 +1135,111 @@ mod tests {
                 "{class:?}/{key:?}"
             );
         }
+    }
+
+    #[test]
+    fn issue_1196_delivered_sequence_after_exact_gap_cannot_also_be_reported_missing() {
+        let sender = id(826);
+        for lifecycle in ["live", "new epoch", "departed"] {
+            for split_reports in [false, true] {
+                let mut state = DeliveryAccountability::default();
+                state.note_player_joined(&player(sender, 1)).unwrap();
+                let epoch = if lifecycle == "new epoch" {
+                    state.note_player_reconnected(sender, Some(2)).unwrap();
+                    2
+                } else {
+                    1
+                };
+                if lifecycle == "departed" {
+                    state
+                        .note_player_left(sender, Some(epoch), Some(3))
+                        .unwrap();
+                }
+                let first = gap_at_epoch(sender, epoch, 1, 1);
+                let mut second = gap_at_epoch(sender, epoch, 2, 2);
+                second.reason = DeliveryGapReason::VolatileDropped;
+                let reports = if split_reports {
+                    vec![vec![second], vec![first]]
+                } else {
+                    vec![vec![second, first]]
+                };
+                let mut per_class = counters(0);
+                for gaps in reports {
+                    for gap in &gaps {
+                        match gap.reason {
+                            DeliveryGapReason::LatestSuperseded => per_class.latest.superseded += 1,
+                            DeliveryGapReason::VolatileDropped => per_class.volatile.dropped += 1,
+                            _ => unreachable!("test uses two loss reasons"),
+                        }
+                    }
+                    state
+                        .record_report(&DeliveryReportPayload { per_class, gaps })
+                        .unwrap();
+                }
+                for _ in 0..2 {
+                    let error = state
+                        .record_game_data(
+                            sender,
+                            Some(2),
+                            Some(epoch),
+                            Some(DeliveryClass::Volatile),
+                            None,
+                        )
+                        .expect_err("a reported omission cannot also be delivered");
+                    assert!(
+                        error.contains("includes delivered seq 2"),
+                        "{lifecycle}/{split_reports}: {error}"
+                    );
+                    assert_eq!(state.pending_gaps[&(sender, epoch)].len(), 2);
+                    assert_eq!(state.senders[&sender].last_seq, 0);
+                }
+                assert_eq!(
+                    state
+                        .record_game_data(sender, Some(3), Some(epoch), None, None)
+                        .unwrap(),
+                    if lifecycle == "departed" {
+                        GameDataDisposition::Stale
+                    } else {
+                        GameDataDisposition::Apply
+                    }
+                );
+                assert!(state.pending_gaps.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn issue_1196_reported_range_rejects_delivered_start_interior_and_end() {
+        let sender = id(826);
+        let mut state = DeliveryAccountability::default();
+        state.note_player_joined(&player(sender, 1)).unwrap();
+        let mut second = gap(sender, 3, 5);
+        second.reason = DeliveryGapReason::VolatileDropped;
+        let mut per_class = counters_with_superseded(2);
+        per_class.volatile.dropped = 3;
+        state
+            .record_report(&DeliveryReportPayload {
+                per_class,
+                gaps: vec![gap(sender, 1, 2), second],
+            })
+            .unwrap();
+        for received in [3, 4, 5] {
+            assert!(
+                state
+                    .record_game_data(sender, Some(received), Some(1), None, None)
+                    .is_err(),
+                "reported sequence {received} cannot be delivered"
+            );
+            assert_eq!(state.pending_gaps[&(sender, 1)].len(), 2);
+            assert_eq!(state.senders[&sender].last_seq, 0);
+        }
+        assert_eq!(
+            state
+                .record_game_data(sender, Some(6), Some(1), None, None)
+                .unwrap(),
+            GameDataDisposition::Apply
+        );
+        assert!(state.pending_gaps.is_empty());
     }
 
     #[test]
