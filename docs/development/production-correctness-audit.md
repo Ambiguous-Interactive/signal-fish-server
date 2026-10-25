@@ -9056,7 +9056,10 @@ ACK replays now arm T2 only when idle. The first simultaneous shutdown
 transition clears the old deadline, so it still restarts T2 as RFC 9260
 section 9.2 requires, without clearing retry history. Controls cover ordinary
 and simultaneous shutdown, due input before timeout processing, backoff,
-configured exhaustion, and paired loss of SHUTDOWN and ACK. The paired history
+configured exhaustion, and paired loss of SHUTDOWN and ACK. A separate control
+named `shutdown_simultaneous_transition_retains_retry_history` spends retry limits
+zero, one, and five before simultaneous shutdown and verifies that the transition
+retains both backoff and exhaustion. The paired history
 loses a replayed ACK before servicing the still-due timeout, then completes
 both endpoint retirements. This is a low-level graceful association repair;
 it does not explain historical reset timeout #1120. The public WebRTC close
