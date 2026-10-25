@@ -26,11 +26,19 @@ pub(crate) const DATA_CHUNK_HEADER_SIZE: u32 = 16;
 /// a 1..=4-byte payload padded to the 4-byte chunk boundary.
 pub const MIN_DATA_PACKET_MTU: u32 = COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE + 4;
 
+/// Smallest padded outgoing stream-reset request with one stream identifier.
+/// Stream stop and close return `ErrOutboundPacketTooLarge` below this budget.
+/// DATA-only budgets remain supported; handshake and other control packets
+/// may require more space than the DATA budget.
+pub const MIN_STREAM_RESET_PACKET_MTU: u32 = 36;
+
 /// Derive an [`EndpointConfig::max_payload_size`] value from an outbound
 /// DATA-packet budget: the largest DATA packet (common header plus bundled
 /// DATA chunks) associations may emit, in bytes. Control packets (INIT,
-/// INIT ACK, SACK, RECONFIG, FORWARD TSN, shutdown) marshal without
-/// consulting this value.
+/// INIT ACK and shutdown) can require more space. SACK, RECONFIG, and
+/// FORWARD TSN use the derived packet budget. Stream reset requires at
+/// least [`MIN_STREAM_RESET_PACKET_MTU`]; smaller budgets reject local
+/// stop and close before changing stream state.
 ///
 /// This is the inverse of the default derivation: `mtu` minus the two fixed
 /// headers, rounded down to the SCTP 4-byte chunk-padding boundary, so a
@@ -196,7 +204,12 @@ impl EndpointConfig {
         self
     }
 
-    /// Maximum payload size accepted from peers.
+    /// Maximum outgoing DATA fragment payload size.
+    ///
+    /// Zero rejects nonempty writes before consuming caller input. A value
+    /// below eight derives a packet budget too small for stream reset;
+    /// stop and close return `ErrOutboundPacketTooLarge` without changing
+    /// stream state. This is a DATA budget, not a limit on handshake packets.
     ///
     /// The default is suitable for typical internet applications. Applications which expect to run
     /// on networks supporting Ethernet jumbo frames or similar should set this appropriately.

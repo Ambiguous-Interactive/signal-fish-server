@@ -806,7 +806,6 @@ fn scheduled_send_evidence(
 enum RelayBlock<'a> {
     Borrowed {
         events: &'a [SentEvent],
-        start: usize,
     },
     Compact {
         events: &'a [SentEvent],
@@ -856,14 +855,8 @@ impl<'a> RelayBlock<'a> {
 }
 
 fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
-    // Every compact position is below sent.len(); this check proves each
-    // usize-to-u32 conversion below is lossless, including range endpoints.
     let compact = u32::try_from(sent.len()).is_ok();
-    let offsets = |start, end| {
-        u32::try_from(start).expect("compact ledger start fits u32")
-            ..u32::try_from(end).expect("compact ledger end fits u32")
-    };
-    let mut blocks = BTreeMap::new();
+    let mut shapes = BTreeMap::new();
     let mut start = 0;
     while start < sent.len() {
         let key = (sent[start].sender.as_str(), sent[start].epoch);
@@ -871,41 +864,41 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
         while end < sent.len() && (sent[end].sender.as_str(), sent[end].epoch) == key {
             end += 1;
         }
-        let chunk = &sent[start..end];
-        match blocks.entry(key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(if chunk.is_sorted_by_key(|event| event.seq) {
-                    RelayBlock::Borrowed {
-                        events: chunk,
-                        start,
-                    }
-                } else if compact {
-                    RelayBlock::Compact {
-                        events: sent,
-                        positions: offsets(start, end).collect(),
-                    }
-                } else {
-                    RelayBlock::Indexed(chunk.iter().collect())
-                });
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let block = entry.get_mut();
-                if let RelayBlock::Borrowed { events, start } = block {
-                    *block = if compact {
-                        RelayBlock::Compact {
-                            events: sent,
-                            positions: offsets(*start, *start + events.len()).collect(),
-                        }
-                    } else {
-                        RelayBlock::Indexed(events.iter().collect())
-                    };
+        let shape = shapes.entry(key).or_insert((start, end, 0));
+        shape.2 += end - start;
+        start = end;
+    }
+    let mut blocks: BTreeMap<_, _> = shapes
+        .into_iter()
+        .map(|(key, (start, end, count))| {
+            let events = &sent[start..end];
+            let block = if count == events.len() && events.is_sorted_by_key(|event| event.seq) {
+                RelayBlock::Borrowed { events }
+            } else if compact {
+                RelayBlock::Compact {
+                    events: sent,
+                    positions: Vec::with_capacity(count),
                 }
-                match block {
-                    RelayBlock::Compact { positions, .. } => positions.extend(offsets(start, end)),
-                    RelayBlock::Indexed(events) => events.extend(chunk),
-                    RelayBlock::Borrowed { .. } => {}
-                }
-            }
+            } else {
+                RelayBlock::Indexed(Vec::with_capacity(count))
+            };
+            (key, block)
+        })
+        .collect();
+    let mut start = 0;
+    while start < sent.len() {
+        let key = (sent[start].sender.as_str(), sent[start].epoch);
+        let mut end = start + 1;
+        while end < sent.len() && (sent[end].sender.as_str(), sent[end].epoch) == key {
+            end += 1;
+        }
+        match blocks.get_mut(&key).expect("counted relay block") {
+            RelayBlock::Compact { positions, .. } => positions.extend(
+                u32::try_from(start).expect("compact ledger start fits u32")
+                    ..u32::try_from(end).expect("compact ledger end fits u32"),
+            ),
+            RelayBlock::Indexed(events) => events.extend(&sent[start..end]),
+            RelayBlock::Borrowed { .. } => {}
         }
         start = end;
     }
@@ -4216,6 +4209,29 @@ mod coverage_tests {
             "relay index retains {retained} bytes for {} sends",
             records.sent.len()
         );
+    }
+
+    #[test]
+    fn interleaved_relay_blocks_retain_only_required_offsets() {
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans).sent.remove(0);
+        for count in [3, 5, 17, 1001, 50_000] {
+            let mut sent = Vec::new();
+            for position in 0..count {
+                let mut event = template.clone();
+                event.sender = format!("peer{}", position % 7).into();
+                event.epoch = u32::try_from(position % 3).expect("three epochs");
+                event.seq = u64::try_from(count - position).expect("bounded sequence");
+                sent.push(event);
+            }
+            let blocks = relay_blocks(&sent);
+            let retained: usize = blocks.values().map(RelayBlock::retained_index_bytes).sum();
+            assert!(
+                retained <= count * 4,
+                "{count} sends retain {retained} offset bytes, budget {}",
+                count * 4
+            );
+        }
     }
 
     #[test]

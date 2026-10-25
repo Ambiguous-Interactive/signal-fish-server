@@ -1,4 +1,3 @@
-use crate::association::state::AssociationState;
 use crate::association::{Association, AssociationError};
 use crate::chunk::chunk_payload_data::{
     ChunkPayloadData, MessageReliability, PayloadProtocolIdentifier,
@@ -277,6 +276,15 @@ impl Stream<'_> {
             return Ok(0);
         }
 
+        if self
+            .association
+            .streams
+            .get(&self.stream_identifier)
+            .is_some_and(|stream| stream.max_payload_size == 0)
+        {
+            return Err(Error::ErrOutboundPacketTooLarge);
+        }
+
         if source.remaining() > self.association.max_message_size() as usize {
             return Err(Error::ErrOutboundPacketTooLarge);
         }
@@ -346,6 +354,8 @@ impl Stream<'_> {
     /// During graceful association shutdown, discard this generation's unread
     /// DATA so receive pressure cannot prevent the peer's admitted tail draining.
     /// Saved reset generations retain their separate readers.
+    /// Returns `ErrOutboundPacketTooLarge` without changing either half when
+    /// the DATA packet budget cannot hold a stream-reset request.
     ///
     /// `now` is the instant the caller is acting at: resetting the stream queues an outgoing
     /// chunk, so it is on the same write path as [`write_sctp`](Self::write_sctp).
@@ -363,32 +373,31 @@ impl Stream<'_> {
             }
             return Ok(());
         }
-        let mut reset = false;
+        let reset = self
+            .association
+            .streams
+            .get(&self.stream_identifier)
+            .is_some_and(|s| {
+                s.generation == self.generation
+                    && matches!(
+                        s.state,
+                        RecvSendState::Readable | RecvSendState::ReadWritable
+                    )
+            });
+        if reset && !self.association.is_drained() {
+            self.association
+                .send_reset_request(now, self.stream_identifier)?;
+        }
         if let Some(s) = self
             .association
             .streams
             .get_mut(&self.stream_identifier)
             .filter(|s| s.generation == self.generation)
         {
-            if s.state == RecvSendState::Readable || s.state == RecvSendState::ReadWritable {
-                reset = true;
-            }
             s.state = ((s.state as u8) & 0x2).into();
         }
 
         if reset {
-            // Reset the outgoing stream
-            // https://tools.ietf.org/html/rfc6525
-            if !matches!(
-                self.association.state(),
-                AssociationState::ShutdownPending
-                    | AssociationState::ShutdownReceived
-                    | AssociationState::ShutdownSent
-                    | AssociationState::ShutdownAckSent
-            ) {
-                self.association
-                    .send_reset_request(now, self.stream_identifier)?;
-            }
             // A locally stopped reader cannot drain an already deferred
             // incoming reset. Re-evaluate it after the read direction closes.
             self.association
@@ -420,8 +429,8 @@ impl Stream<'_> {
     ///
     /// Resets the stream when both halves of this stream are shutdown.
     pub fn close(&mut self, now: Instant) -> Result<()> {
-        self.finish()?;
-        self.stop(now)
+        self.stop(now)?;
+        self.finish()
     }
 
     /// stream_identifier returns the Stream identifier associated to the stream.
@@ -779,3 +788,7 @@ impl StreamState {
         self.reassembly_queue.get_num_bytes()
     }
 }
+
+#[cfg(test)]
+#[path = "stream_write_test.rs"]
+mod write_tests;

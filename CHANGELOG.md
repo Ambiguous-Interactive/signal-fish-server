@@ -29,11 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
-- Reduce memory used to index out-of-order sends and relay ledgers during capacity archive replay (#775).
+- Reduce memory used to index out-of-order sends and reserve exact relay-ledger offsets during capacity archive replay (#775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
 
+- Preserve streams on small reset budgets and reject zero-budget writes before consuming gameplay (#1201, #1203).
 - Recover native incoming gameplay after fragment loss independently of local send ordering (#1199).
 - Split native stream-reset requests to fit supported packet and chunk sizes (#1200).
 - Retain browser ICE rejection details in connection diagnostics (#853, #889).

@@ -314,6 +314,19 @@ chunk/parameter limits. Later markers remain queued until the outstanding
 request is acknowledged. Paired controls retain old and fresh gameplay, retry a
 lost request unchanged, and complete reciprocal reset at MTU 36, 64, 1191, and
 1200. A 33,000-ID control retains the unreported suffix within the 16-bit limit.
-Packet budgets below 36 bytes cannot represent a one-ID reset. Their existing
-minimum-control configuration mismatch remains tracked in #1201; the sender
-still emits at least one ID to avoid introducing permanent queue starvation.
+Packet budgets below 36 bytes cannot represent a one-ID reset. The #1201
+repair rejects local stop/close with `ErrOutboundPacketTooLarge` before
+changing either stream half. Incoming reset requests receive a cached Denied
+response before closing streams or queuing an impossible reciprocal request.
+DATA budgets remain independent of handshake packet sizes. The public
+`MIN_STREAM_RESET_PACKET_MTU` documents the 36-byte reset floor. Controls
+preserve pending gameplay, unread input, byte accounting, SID ownership,
+duplicate denial, and successful reciprocal reset after a representable retry.
+
+The #1203 repair rejects nonempty writes with a zero fragmentation budget before
+consuming source bytes or allocating a message identity. The former packetizer
+could loop without reducing the remaining payload. Empty writes remain no-ops.
+Controls cover all six public write adapters, unconsumed chunk arrays, sequence
+and byte accounting, and a successful positive-budget write. Replacement
+qualification in #912 must retain the `zero_fragment_budget` controls as well
+as the existing reset selector.
