@@ -8703,3 +8703,71 @@ sends and duplicate order remain exact. The [capacity audit](arm-capacity-audit.
 records all measured cohorts, binary hashes, peak RSS reductions, and the
 higher sorting cost. This advances the memory campaign without claiming a
 complete process bound, a stall repair, or a server capacity point.
+
+### Native receive storage ownership (#636/#912/#1145)
+
+Session 540 starts from `61cbf41e`. The SCTP handler copied every complete
+message into fresh storage, including an unfragmented message whose received
+packet had no other owner. `Chunks::into_payload` now consumes that message
+and tries to recover its mutable buffer. Shared and fragmented messages use
+the existing bounded copy fallback. The borrowed `to_payload` API is unchanged.
+Cursor reads within one fragment also share its storage; cross-fragment reads
+keep the existing bounded copy. This does not change wire data or delivery modes.
+
+The paired handler control fails with the old `to_payload` call: a 64-byte
+received message does not retain the input packet's storage. It passes with
+the consuming call. The history also drives acknowledgments for a 5,000-byte
+fragmented message and checks exact delivered bytes after transport drop.
+The graceful-shutdown control now holds the delivered mutable buffers through
+terminal endpoint retirement, instead of copying them before that boundary.
+Its normal and explicit-abort histories pass. These controls advance the
+retained-data qualification in #1145; they do not establish a historical
+public-client failure cause. Existing `reassembly_` and SCTP-handler selectors
+in `run-webrtc-interop.sh` retain the new controls for #912 replacement.
+
+Local debug probes retain counts and times, not a capacity or throughput claim.
+For 65,536 unique messages of 64, 1,200, and 65,536 bytes, the consuming path
+reuses all 65,536 input buffers; the borrowed path reuses none. Observed times
+are 48/57/129 ms versus 65/76/318 ms. For 4,096 64-KiB cursor messages with
+64/1,200/65,536-byte read limits, shared read counts rise from zero to
+4,194,304/225,280/4,096. The reads preserve exact lengths and final bytes.
+Runs used the warm ARM devcontainer and can include scheduling contention.
+Reusing a fragment retains its packet allocation until the delivered buffer
+is dropped; it does not promise lower retained payload memory.
+
+External-client assessment: the Rust crate has no RTC dependency; .NET has no
+native reference-client dependency; Godot's mesh uses its engine WebRTC classes.
+None consumes these vendored reference-client sources or the capacity runner.
+Server messages, defaults, ordering, relay, and reconnection rules are unchanged.
+All three clients are unaffected and need no tracking change.
+
+### Borrowed capacity artifact rows (#775/#636)
+
+Session 540 removes owned event copies from `RunRecords::events`. Artifact
+writing no longer increments shared-name counts for every send, receipt, and
+gap, and it no longer clones the entire registry when creating the iterator.
+The owned tagged event type remains the replay input. The all-event JSONL
+control compares borrowed output byte-for-byte with owned serialization.
+Replay controls retain missing, duplicate, misroute, order, and gap evidence.
+
+The isolated probe uses 500,000 receipts and 15,984 registry entries. Both paths
+write exactly 84,835,440 bytes. Initial debug observations show registry-stage
+RSS growth of 2,748,416 bytes for the old iterator and 528,384 bytes for the
+borrowed iterator. Whole-write times are 3.59 s and 4.85 s under concurrent
+build work; this is mixed timing evidence, not a speed claim. The record vectors
+still grow with offered work. This does not complete #775's ten-minute cell.
+
+Three alternating optimized runs use the same probe and separate executables.
+Only the event iterator and its matching test pattern differ in the old build.
+The candidate's median iterator time is 0.829 ms versus 22.952 ms. Registry-stage
+RSS growth is 69,632 bytes versus 2,355,200 bytes. Whole-write times overlap:
+old 175/204/209 ms, candidate 165/170/245 ms (sorted). The candidate's lower
+median is not a general export-throughput claim. Every run writes the same
+84,835,440 bytes. The earlier mixed debug result remains recorded above.
+
+Validation: 29 selected capacity records/replay controls, 46 SCTP
+reassembly/graceful-shutdown controls, three RTC receive/retirement controls,
+three live native receive/reset controls, and the real two-process native
+WebRTC exchange pass. Root and native all-target/all-feature strict lint pass.
+Markdown and doc consistency pass. The local CI-config wrapper retains its
+excluded audit failure; no audit change was made.

@@ -1477,6 +1477,11 @@ mod tests {
             let direct: DeliveryEvent<String> =
                 serde_json::from_slice(line).expect("canonical events use direct typed decoding");
             assert_eq!(
+                serde_json::to_vec(&direct).expect("owned event bytes"),
+                *line,
+                "borrowed output must preserve every byte of the owned event format"
+            );
+            assert_eq!(
                 serde_json::to_value(&direct).expect("direct event"),
                 serde_json::from_slice::<Value>(line).expect("original event")
             );

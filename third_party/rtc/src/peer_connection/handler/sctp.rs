@@ -190,14 +190,14 @@ impl<'a> SctpHandler<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            // Reassemble straight into the delivered buffer: one copy instead of the
-            // scratch-buffer round-trip (`max_len` preserves the max-message-size bound
-            // `read()` enforced via `ErrShortBuffer`).
-            let payload = chunks.to_payload(max_len)?;
+            // Reuse uniquely owned single-fragment storage. Shared or fragmented
+            // messages still copy once, under the same message-size bound.
+            let ppi = chunks.ppi;
+            let payload = chunks.into_payload(max_len)?;
             messages.push(SctpMessage::Inbound(DataChannelMessage {
                 association_handle: ch.0,
                 stream_id: id,
-                ppi: chunks.ppi,
+                ppi,
                 payload,
                 negotiated: false,
             }));
@@ -4786,6 +4786,76 @@ mod tests {
         assert!(handler.poll_write().is_none());
     }
 
+    #[test]
+    fn sctp_received_payload_reuses_single_packet_storage_after_retirement() {
+        for size in [64, 1200, 5000] {
+            let now = Instant::now();
+            let mut pair = establish();
+            let expected: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
+            pair.server_conn
+                .open_stream(0, PayloadProtocolIdentifier::Binary)
+                .unwrap()
+                .write_sctp(
+                    now,
+                    &Bytes::copy_from_slice(&expected),
+                    PayloadProtocolIdentifier::Binary,
+                )
+                .unwrap();
+            let mut ctx = client_ctx(now, pair.client_ep, pair.client_ch, pair.client_conn);
+            let mut storage = Vec::new();
+            let mut received = Vec::new();
+            for step in 0..10 {
+                let at = now + Duration::from_millis(step * 500);
+                pair.server_conn.handle_timeout(at);
+                let mut handler = SctpHandler::new(&mut ctx, 0);
+                for raw in drain_transmits(&mut pair.server_conn, at) {
+                    let input = raw_read(at, raw);
+                    if let RTCMessageInternal::Dtls(DTLSMessage::Raw(payload)) = &input.message {
+                        storage.push((payload.as_ptr() as usize, payload.len()));
+                    }
+                    handler.handle_read(input).unwrap();
+                    while let Some(message) = handler.poll_read() {
+                        if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(data)) = message.message {
+                            received.push(data.payload);
+                        }
+                    }
+                }
+                handler
+                    .handle_timeout(at + Duration::from_millis(250))
+                    .unwrap();
+                while let Some(message) = handler.poll_write() {
+                    if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message
+                        && let Some((_, DatagramEvent::AssociationEvent(event))) =
+                            pair.server_ep.handle(at, client_addr(), None, raw.freeze())
+                    {
+                        pair.server_conn.handle_event(event);
+                    }
+                }
+                if !received.is_empty() {
+                    break;
+                }
+            }
+            assert_eq!(received.len(), 1, "size={size}");
+            let payload = &received[0];
+            assert_eq!(payload.as_ref(), expected);
+            let pointer = payload.as_ptr() as usize;
+            if size == 64 {
+                assert!(
+                    storage.iter().any(|&(start, length)| pointer >= start
+                        && pointer + payload.len() <= start + length),
+                    "a uniquely owned received packet must not copy its gameplay payload"
+                );
+            }
+            drop(ctx);
+            drop(pair.server_conn);
+            assert_eq!(
+                received[0].as_ref(),
+                expected,
+                "size={size}: output outlives transport"
+            );
+        }
+    }
+
     // Issue #1145: a full pipeline must retain the complete graceful tail.
     #[test]
     fn graceful_shutdown_retains_tail_across_bounded_application_reads() {
@@ -4864,18 +4934,26 @@ mod tests {
                 let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT - 1);
                 while let Some(message) = handler.poll_read() {
                     if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(data)) = message.message {
-                        received.push(data.payload.to_vec());
+                        received.push(data.payload);
                     }
                 }
                 while handler.poll_write().is_some() {}
             }
-            assert_eq!(received, expected);
             assert!(ctx.pending_readable.is_empty());
             assert!(
                 ctx.sctp_transport.sctp_associations.is_empty(),
                 "the final application read must release the association"
             );
             assert!(ctx.association_transport.is_empty());
+            drop(ctx);
+            assert_eq!(received.len(), expected.len());
+            for (payload, expected) in received.iter().zip(&expected) {
+                assert_eq!(
+                    payload.as_ref(),
+                    expected,
+                    "received storage must outlive retirement"
+                );
+            }
         }
     }
 }
