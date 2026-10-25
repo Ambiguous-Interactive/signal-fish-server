@@ -9049,7 +9049,7 @@ change, so Rust, .NET, and Godot SDKs need no migration or source changes.
 
 Confirmed on `2347552d`; tracked in #1235 under #1145/#826/#912. Replaying
 SHUTDOWN ACK starts T2 again even when its previous deadline is already due.
-The red regression observes a fresh full RTO instead of the original deadline.
+The red regression observes a fresh retry interval instead of the original deadline.
 Repeated peer requests can therefore postpone configured retry exhaustion.
 
 ACK replays now arm T2 only when idle. The first simultaneous shutdown
