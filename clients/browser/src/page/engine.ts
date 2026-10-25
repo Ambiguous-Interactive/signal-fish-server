@@ -103,6 +103,10 @@ interface PeerLink {
   remoteCandidateCount: number;
   remoteCandidateBytes: number;
   remoteDescriptionSet: boolean;
+  iceCandidateFailures: {
+    count: number;
+    last: { source: 'buffered' | 'trickle'; name: string | null } | null;
+  };
   pairConnected: boolean;
   /** Observed failure fences queued work before the orchestrator retires this link. */
   terminal: boolean;
@@ -186,6 +190,7 @@ export class Engine {
       remoteCandidateCount: 0,
       remoteCandidateBytes: 0,
       remoteDescriptionSet: false,
+      iceCandidateFailures: { count: 0, last: null },
       pairConnected: false,
       terminal: false,
     };
@@ -304,7 +309,12 @@ export class Engine {
     link.remoteCandidateCount += 1;
     link.remoteCandidateBytes += payloadBytes;
     if (link.remoteDescriptionSet) {
-      await link.pc.addIceCandidate(init);
+      try {
+        await link.pc.addIceCandidate(init);
+      } catch (error) {
+        this.noteIceCandidateFailure(peer, link, 'trickle', error);
+        throw error;
+      }
     } else {
       link.pendingCandidates.push(init);
     }
@@ -440,6 +450,13 @@ export class Engine {
       dtlsState: link.pc.sctp?.transport?.state ?? null,
       sctpState: link.pc.sctp?.state ?? null,
       remoteDescriptionSet: link.remoteDescriptionSet,
+      iceCandidateFailures: {
+        count: link.iceCandidateFailures.count,
+        last:
+          link.iceCandidateFailures.last === null
+            ? null
+            : { ...link.iceCandidateFailures.last },
+      },
       remoteCandidateCount: link.remoteCandidateCount,
       pendingRemoteCandidates: link.pendingCandidates.length,
       channels: Object.fromEntries(
@@ -512,10 +529,31 @@ export class Engine {
       this.assertCurrentLink(peer, link);
       try {
         await link.pc.addIceCandidate(candidate);
-      } catch {
+      } catch (error) {
+        this.noteIceCandidateFailure(peer, link, 'buffered', error);
         console.error('The browser rejected a buffered ICE candidate.');
       }
     }
+  }
+
+  private noteIceCandidateFailure(
+    peer: string,
+    link: PeerLink,
+    source: 'buffered' | 'trickle',
+    error: unknown,
+  ): void {
+    if (this.peers.get(peer) !== link) return;
+    link.iceCandidateFailures.count = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      link.iceCandidateFailures.count + 1,
+    );
+    link.iceCandidateFailures.last = {
+      source,
+      name:
+        error instanceof Error && typeof error.name === 'string'
+          ? error.name.slice(0, 64)
+          : null,
+    };
   }
 
   /** Record observed states only; never enqueue orchestrator work. */

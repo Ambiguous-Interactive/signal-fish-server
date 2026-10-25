@@ -4015,3 +4015,143 @@ fn shutdown_forward_tsn_budget_preserves_fragment_and_stream_prefix() -> Result<
     }
     Ok(())
 }
+
+// Issue #1199: receive recovery follows incoming DATA, not local send settings.
+#[test]
+fn shutdown_forward_tsn_recovers_ordered_data_with_unordered_local_sends() -> Result<()> {
+    forward_tsn_recovers_opposite_ordering(false)
+}
+
+#[test]
+fn shutdown_forward_tsn_reclaims_unordered_data_with_ordered_local_sends() -> Result<()> {
+    forward_tsn_recovers_opposite_ordering(true)
+}
+
+fn forward_tsn_recovers_opposite_ordering(unordered: bool) -> Result<()> {
+    for shutdown in [false, true] {
+        for first_tsn in [100, u32::MAX - 1] {
+            let (mut local, mut remote) = reset_pair();
+            let now = Instant::now();
+            let payload_type = PayloadProtocolIdentifier::Binary;
+            local.my_next_tsn = first_tsn;
+            local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+            local.cwnd = 65536;
+            remote.ack_mode = AckMode::NoDelay;
+            local.ack_mode = AckMode::NoDelay;
+            local
+                .stream(1)?
+                .set_reliability_params(unordered, ReliabilityType::Rexmit, 0)?;
+            remote
+                .stream(1)?
+                .set_reliability_params(!unordered, ReliabilityType::Reliable, 0)?;
+            let abandoned = Bytes::from(vec![0xa5; local.max_payload_size as usize * 3 + 17]);
+            local.stream(1)?.write_sctp(now, &abandoned, payload_type)?;
+            local
+                .stream(1)?
+                .set_reliability_params(unordered, ReliabilityType::Reliable, 0)?;
+            let successor = Bytes::from_static(b"exact surviving gameplay");
+            local.stream(1)?.write_sctp(now, &successor, payload_type)?;
+            local
+                .stream(1)?
+                .set_reliability_params(!unordered, ReliabilityType::Reliable, 0)?;
+            let mixed_successor = Bytes::from_static(b"other ordering survives too");
+            local
+                .stream(1)?
+                .write_sctp(now, &mixed_successor, payload_type)?;
+            let expected_bytes = successor.len() + mixed_successor.len();
+            let missing_tsn = first_tsn.wrapping_add(1);
+            let mut dropped = 0;
+            for raw in local.gather_outbound(now).0 {
+                let packet = Packet::unmarshal(&raw)?;
+                if packet.chunks.iter().any(|chunk| {
+                    chunk
+                        .as_any()
+                        .downcast_ref::<ChunkPayloadData>()
+                        .is_some_and(|data| data.tsn == missing_tsn)
+                }) {
+                    assert_eq!(packet.chunks.len(), 1, "drop only one DATA fragment");
+                    dropped += 1;
+                } else {
+                    remote.handle_inbound(packet, now)?;
+                }
+            }
+            assert_eq!(dropped, 1);
+            assert!(
+                remote
+                    .streams
+                    .get(&1)
+                    .unwrap()
+                    .get_num_bytes_in_reassembly_queue()
+                    > expected_bytes
+            );
+            if shutdown {
+                local.shutdown()?;
+            }
+            let mut forwards = 0;
+            for step in 0..100 {
+                let at = now + Duration::from_millis(step * 100);
+                local.handle_timeout(at);
+                remote.handle_timeout(at);
+                for raw in local.gather_outbound(at).0 {
+                    let packet = Packet::unmarshal(&raw)?;
+                    forwards += packet
+                        .chunks
+                        .iter()
+                        .filter(|chunk| chunk.as_any().is::<ChunkForwardTsn>())
+                        .count();
+                    remote.handle_inbound(packet, at)?;
+                }
+                for raw in remote.gather_outbound(at).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                if forwards > 0
+                    && local.inflight_queue.is_empty()
+                    && (!shutdown || remote.state() == AssociationState::Closed)
+                {
+                    break;
+                }
+            }
+            assert!(forwards > 0, "the lost fragment must require FORWARD TSN");
+            assert_eq!(
+                remote
+                    .streams
+                    .get(&1)
+                    .unwrap()
+                    .get_num_bytes_in_reassembly_queue(),
+                expected_bytes,
+                "unordered={unordered}, shutdown={shutdown}, first_tsn={first_tsn}: abandoned fragments must release receive credit"
+            );
+            let mut received = vec![];
+            for _ in 0..2 {
+                received.push(
+                    remote
+                        .stream(1)?
+                        .read_sctp()?
+                        .expect("FORWARD TSN must preserve both exact successors")
+                        .to_payload(100)?
+                        .freeze(),
+                );
+            }
+            received.sort();
+            let mut expected = vec![successor, mixed_successor];
+            expected.sort();
+            assert_eq!(received, expected);
+            assert!(remote.stream(1).is_err() || remote.stream(1)?.read_sctp()?.is_none());
+            assert!(local.inflight_queue.is_empty());
+            assert!(local.pending_queue.is_empty());
+            if shutdown {
+                assert_eq!(local.state(), AssociationState::Closed);
+                assert_eq!(remote.state(), AssociationState::Closed);
+                assert!(remote.streams.is_empty());
+                assert!(matches!(
+                    remote.poll_endpoint_event(),
+                    Some(EndpointEvent(EndpointEventInner::Drained))
+                ));
+                assert!(remote.poll_timeout().is_none());
+            }
+        }
+    }
+    Ok(())
+}

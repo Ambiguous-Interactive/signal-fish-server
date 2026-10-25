@@ -24,7 +24,10 @@ fn create_association(config: TransportConfig) -> Association {
 // `test_assoc_unreliable_rexmit_*` suite.
 #[test]
 fn test_create_forward_tsn_forward_one_abandoned() -> Result<()> {
-    let mut a = Association::default();
+    let mut a = Association {
+        mtu: 1200,
+        ..Default::default()
+    };
 
     a.cumulative_tsn_ack_point = 9;
     a.advanced_peer_tsn_ack_point = 10;
@@ -43,7 +46,10 @@ fn test_create_forward_tsn_forward_one_abandoned() -> Result<()> {
 
 #[test]
 fn test_create_forward_tsn_forward_two_abandoned_with_the_same_si() -> Result<()> {
-    let mut a = Association::default();
+    let mut a = Association {
+        mtu: 1200,
+        ..Default::default()
+    };
 
     a.cumulative_tsn_ack_point = 9;
     a.advanced_peer_tsn_ack_point = 12;
@@ -83,7 +89,10 @@ fn test_create_forward_tsn_omits_unordered_streams() -> Result<()> {
     // advances unordered streams purely by `new_cumulative_tsn` and ignores the
     // per-stream list (see handle_forward_tsn), so create_forward_tsn must not
     // report them — only ordered streams contribute.
-    let mut a = Association::default();
+    let mut a = Association {
+        mtu: 1200,
+        ..Default::default()
+    };
 
     a.cumulative_tsn_ack_point = 9;
     a.advanced_peer_tsn_ack_point = 11;
@@ -1637,3 +1646,6 @@ mod message_selection_test;
 
 #[path = "stream_reset_test.rs"]
 mod stream_reset_test;
+
+#[path = "reset_packet_test.rs"]
+mod reset_packet_test;

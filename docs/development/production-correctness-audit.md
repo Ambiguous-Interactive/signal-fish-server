@@ -8276,3 +8276,55 @@ channel failure cause. The independent Rust SDK has no native RTC/SCTP graph,
 extension. None imports this private patched transport. Their wire contracts
 and migration requirements do not change. Published replacement qualification
 under #912 and the broader native shutdown investigation remain open.
+
+### F175 — Incoming native recovery follows the local send-order setting
+
+Confirmed on `66b55f71`; tracked in #1199 under #1145/#912/#826. The stream
+receive FORWARD TSN methods return early based on `StreamState.unordered`.
+That flag selects local outgoing DATA; incoming DATA carries its own U bit.
+With opposite endpoint send settings, the receiver ignores ordered progress or
+unordered incomplete-fragment cleanup. Both paired red controls retain 2,841
+bytes instead of the 24-byte reliable successor.
+
+Remove both local-send-policy gates. The receive queue methods already operate
+on their respective ordered and unordered collections. Paired controls retain
+both reliable receive classes on one SID, lose one middle partial-reliability
+fragment, wrap TSNs, and complete exact application reads after graceful close.
+The final focused shutdown/FORWARD qualification passes 70 controls. Three old
+report-construction fixtures now supply a real MTU instead of default zero.
+This repairs a legal low-level SCTP history. It does not prove that negotiated
+public data channels produced the historical #1120/#853/#889 failures.
+
+### F176 — Native stream-reset batches exceed packet and chunk sizes
+
+Confirmed on `66b55f71`; tracked in #1200 under #1145/#912/#826. The sender
+collects every ready reset ID into one RECONFIG parameter. Seven closing
+streams emit a 48-byte request at MTU 36. A 33,000-ID request also exceeds the
+16-bit chunk-length field. Both boundary controls fail before the repair.
+
+Limit each request to its padded packet and chunk budget. Preserve the queued
+suffix and the existing one-outstanding-request rule. Paired controls retain
+admitted old gameplay, lose the first request, require identical retry, complete
+both reset directions, reuse every SID, and read exact fresh payloads. Controls
+cover packet budgets 36, 64, 1191, and 1200; a separate large request checks
+16-bit lengths and retained suffix ownership. MTUs below 36 cannot represent a
+one-ID reset. That existing configuration limit remains open in #1201.
+
+### A20 browser failure evidence — Candidate application failures
+
+Open #853/#889 now retains a per-link ICE rejection count and the last buffered
+or trickle error name in browser connection snapshots. Previously buffered
+rejection left only a generic log, and later snapshots could not distinguish
+candidate rejection from missing channel DATA. The retained state has fixed
+size and copied snapshots; old pending failures cannot alter replacement links.
+Controls retain original trickle rejection, buffered recovery, both SDP roles,
+repeated failures, later successful ICE, and fresh-link recovery. Historical
+incident causes remain unknown.
+
+External-client assessment: Rust `da8f2d16` has no native RTC/SCTP dependency;
+.NET `e467c871` has no package dependencies and uses its own mesh driver;
+Godot `e5e20e0e` delegates WebRTC to the browser or engine extension. None imports
+this repository's private patched SCTP or browser reference engine. These
+repairs do not change signaling messages or public SDK contracts. No client
+migration or client tracking issue is required. Published replacement
+qualification in #912 remains open.

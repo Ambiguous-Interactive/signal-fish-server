@@ -30,8 +30,11 @@ use crate::config::{COMMON_HEADER_SIZE, DATA_CHUNK_HEADER_SIZE, ServerConfig, Tr
 use crate::packet::{CommonHeader, Packet};
 use crate::param::{
     Param,
+    param_header::PARAM_HEADER_LENGTH,
     param_heartbeat_info::ParamHeartbeatInfo,
-    param_outgoing_reset_request::ParamOutgoingResetRequest,
+    param_outgoing_reset_request::{
+        PARAM_OUTGOING_RESET_REQUEST_STREAM_IDENTIFIERS_OFFSET, ParamOutgoingResetRequest,
+    },
     param_reconfig_response::{ParamReconfigResponse, ReconfigResult},
     param_state_cookie::ParamStateCookie,
     param_supported_extensions::ParamSupportedExtensions,
@@ -3575,6 +3578,18 @@ impl Association {
             loop {
                 let Some(c) = self.pending_queue.peek() else {
                     if !self.reconfigs.is_empty() {
+                        break;
+                    }
+                    let chunk_budget = (self.mtu as usize)
+                        .saturating_sub(COMMON_HEADER_SIZE as usize)
+                        .min(u16::MAX as usize)
+                        & !3;
+                    let reset_header_size = CHUNK_HEADER_SIZE
+                        + PARAM_HEADER_LENGTH
+                        + PARAM_OUTGOING_RESET_REQUEST_STREAM_IDENTIFIERS_OFFSET;
+                    let reset_stream_budget = chunk_budget.saturating_sub(reset_header_size) / 2;
+                    /* One ID remains the minimum progress unit for smaller DATA-only budgets. */
+                    if sis_to_reset.len() >= reset_stream_budget.max(1) {
                         break;
                     }
                     if let Some(reset) = self.pending_queue.pop_ready_reset() {
