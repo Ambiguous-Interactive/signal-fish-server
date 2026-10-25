@@ -2835,14 +2835,13 @@ class Orchestrator {
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
       throw FatalError.connection('websocket is not open');
     }
-    // Browser `send()` never blocks or errors on backpressure — it buffers
-    // unboundedly in `bufferedAmount`. Crossing the ceiling means the
-    // connection has silently stopped draining; surface it loudly (see
-    // SEND_BUFFER_LIMIT_BYTES).
-    if (this.ws.bufferedAmount > SEND_BUFFER_LIMIT_BYTES) {
+    // Admission includes the next encoded frame: WebSocket.send() adds its
+    // UTF-8 or binary bytes to bufferedAmount without waiting for a drain.
+    const frameBytes = typeof frame === 'string' ? utf8Bytes(frame) : frame.byteLength;
+    if (frameBytes > SEND_BUFFER_LIMIT_BYTES - this.ws.bufferedAmount) {
       throw FatalError.connection(
-        `local websocket send buffer saturated: bufferedAmount=${this.ws.bufferedAmount} ` +
-          `exceeds ${SEND_BUFFER_LIMIT_BYTES} bytes`,
+        `local websocket send buffer saturated: bufferedAmount=${this.ws.bufferedAmount}, ` +
+          `frameBytes=${frameBytes}, limit=${SEND_BUFFER_LIMIT_BYTES} bytes`,
       );
     }
     try {

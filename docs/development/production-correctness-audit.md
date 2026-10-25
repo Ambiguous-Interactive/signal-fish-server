@@ -8392,3 +8392,50 @@ External-client assessment: current Rust `da8f2d16` has no RTC/SCTP dependency;
 or engine WebRTC. None imports the private patched SCTP package or capacity
 runner. These changes need no SDK migration or client issue. No signaling
 schema, room rule, or server runtime default changes.
+
+### F179 — Native custom DATA fragments exceed wire limits
+
+Confirmed on `cda46c14`; tracked in #1205/#1206 under #912/#826.
+A configured payload budget of 65520 lets a DATA chunk overflow its 16-bit
+length during marshaling. A budget of five emits a 36-byte padded DATA packet
+against its derived 33-byte packet budget. These are new custom-configuration
+defects. Neither establishes the historical channel reset timeout's cause.
+
+Packetization now limits each fragment by padded packet capacity and the
+16-bit DATA length. It preserves the complete admitted message. Budgets below
+four reject nonempty writes before consuming input or allocating identity.
+The configured getter and normal default fragment size remain unchanged.
+Paired histories drop the first DATA packet, recover by retransmission, close
+gracefully, and compare complete original and successor bodies through final
+application reads. All six public write adapters retain atomic refusal checks.
+The existing tail-first fragmented-message stress retains 1024 fragments with
+a representable four-byte payload budget.
+
+### F180 — Browser relay admission omits the next frame
+
+Confirmed on `cda46c14`; tracked in #1207 under #826. The browser reference
+client checked only already buffered WebSocket bytes. A new public-run control
+leaves one byte less room than the encoded relay frame. The old client still
+sends it and emits `game_data_sent`, exceeding its documented local ceiling.
+
+Admission now includes the next frame's UTF-8 or binary bytes. Exact remaining
+capacity stays valid; a one-byte overrun returns the existing connection error
+before sending or recording gameplay. Controls cover all four encodings,
+ASCII and multibyte text, and before/exact/after boundaries. This is a new
+local pacing repair, not an explanation of #853/#889.
+
+### F181 — Native congestion arithmetic overflows during loss recovery
+
+Confirmed on `cda46c14`; tracked in #1208 under #912/#826. The full-width
+packet setting in F179 reaches timeout recovery after the first DATA loss.
+The old congestion threshold calculation panics on `4 * mtu`. Fast recovery
+uses the same formula, and congestion-window growth uses unchecked addition.
+The repair saturates representable congestion values while preserving the
+normal formula. Boundary controls and paired exact-payload loss recovery
+qualify the repair. Normal WebRTC settings do not reach these numeric limits.
+
+External-client assessment: Rust `da8f2d16` has no RTC/SCTP dependency;
+.NET `e467c871` supplies its own peer networking; Godot's addon uses its own
+engine/browser WebRTC integration. None imports these private SCTP sources,
+the browser reference orchestrator, or the capacity runner. These changes
+need no SDK migration or client issue and change no signaling contract.

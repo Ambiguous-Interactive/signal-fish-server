@@ -29,11 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
-- Reduce memory used to index out-of-order sends and reserve exact relay-ledger offsets during capacity archive replay (#775).
+- Reuse send indexes, reduce their memory, and reserve exact relay-ledger offsets during capacity archive replay (#775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
 
+- Keep native gameplay fragments within custom packet and chunk sizes (#1205, #1206).
+- Preserve native gameplay retransmission with full-width packet settings (#1208).
+- Include the next browser relay frame in the local send-buffer limit (#1207).
 - Preserve streams on small reset budgets and reject zero-budget writes before consuming gameplay (#1201, #1203).
 - Recover native incoming gameplay after fragment loss independently of local send ordering (#1199).
 - Split native stream-reset requests to fit supported packet and chunk sizes (#1200).

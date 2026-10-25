@@ -2494,6 +2494,7 @@ impl Association {
     }
 
     fn on_cumulative_tsn_ack_point_advanced(&mut self, total_bytes_acked: i64, now: Instant) {
+        let acked_bytes = u32::try_from(total_bytes_acked).unwrap_or(u32::MAX);
         // RFC 4096, sec 6.3.2.  Retransmission Timer Rules
         //   R2)  Whenever all outstanding data sent to an address have been
         //        acknowledged, turn off the T3-rtx timer of that address.
@@ -2524,7 +2525,9 @@ impl Association {
             //      outstanding DATA chunk(s) acknowledged, and 2) the destination's
             //      path MTU.
             if !self.in_fast_recovery && !self.pending_queue.is_empty() {
-                self.cwnd += std::cmp::min(total_bytes_acked as u32, self.cwnd); // TCP way
+                self.cwnd = self
+                    .cwnd
+                    .saturating_add(std::cmp::min(acked_bytes, self.cwnd)); // TCP way
                 // self.cwnd += min32(uint32(total_bytes_acked), self.mtu) // SCTP way (slow)
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (SS)",
@@ -2548,21 +2551,23 @@ impl Association {
             //      partial_bytes_acked by the total number of bytes of all new chunks
             //      acknowledged in that SACK including chunks acknowledged by the new
             //      Cumulative TSN Ack and by Gap Ack Blocks.
-            self.partial_bytes_acked += total_bytes_acked as u32;
+            let mut partial_bytes_acked =
+                u64::from(self.partial_bytes_acked) + u64::from(acked_bytes);
 
             //   o  When partial_bytes_acked is equal to or greater than cwnd and
             //      before the arrival of the SACK the sender had cwnd or more bytes
             //      of data outstanding (i.e., before arrival of the SACK, flight size
             //      was greater than or equal to cwnd), increase cwnd by MTU, and
             //      reset partial_bytes_acked to (partial_bytes_acked - cwnd).
-            if self.partial_bytes_acked >= self.cwnd && !self.pending_queue.is_empty() {
-                self.partial_bytes_acked -= self.cwnd;
-                self.cwnd += self.mtu;
+            if partial_bytes_acked >= u64::from(self.cwnd) && !self.pending_queue.is_empty() {
+                partial_bytes_acked -= u64::from(self.cwnd);
+                self.cwnd = self.cwnd.saturating_add(self.mtu);
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} acked={} (CA)",
                     self.side, self.cwnd, self.ssthresh, total_bytes_acked
                 );
             }
+            self.partial_bytes_acked = u32::try_from(partial_bytes_acked).unwrap_or(u32::MAX);
         }
     }
 
@@ -2601,7 +2606,8 @@ impl Association {
                             //     last sent, according to the formula described in Section 7.2.3.
                             self.in_fast_recovery = true;
                             self.fast_recover_exit_point = htna;
-                            self.ssthresh = std::cmp::max(self.cwnd / 2, 4 * self.mtu);
+                            self.ssthresh =
+                                std::cmp::max(self.cwnd / 2, self.mtu.saturating_mul(4));
                             self.cwnd = self.ssthresh;
                             self.partial_bytes_acked = 0;
                             self.will_retransmit_fast = true;
@@ -3088,7 +3094,7 @@ impl Association {
                     // decisions.
                     let data_chunk_size =
                         (DATA_CHUNK_HEADER_SIZE + c.user_data.len() as u32).next_multiple_of(4);
-                    if self.mtu < fast_retrans_size + data_chunk_size {
+                    if data_chunk_size > self.mtu.saturating_sub(fast_retrans_size) {
                         break;
                     }
 
@@ -4120,7 +4126,7 @@ impl Association {
                 //      ssthresh = max(cwnd/2, 4*MTU)
                 //      cwnd = 1*MTU
 
-                self.ssthresh = std::cmp::max(self.cwnd / 2, 4 * self.mtu);
+                self.ssthresh = std::cmp::max(self.cwnd / 2, self.mtu.saturating_mul(4));
                 self.cwnd = self.mtu;
                 trace!(
                     "[{}] updated cwnd={} ssthresh={} inflight={} (RTO)",

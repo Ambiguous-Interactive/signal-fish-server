@@ -2040,6 +2040,7 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
 /// Capture child peak RSS with the host profiler; set
 /// CAPACITY_MEMORY_PROBE_SENDS to 100, 1000, or 5000 for increasing fan-out.
 /// CAPACITY_MEMORY_PROBE_PLAYERS selects 2..=128 peers (default 16).
+/// CAPACITY_MEMORY_PROBE_REORDERED shuffles raw sends before summary timing.
 #[test]
 #[ignore = "generator memory profile; run in a fresh process"]
 fn generator_memory_profile_on_complete_fanout() {
@@ -2067,7 +2068,7 @@ fn generator_memory_profile_on_complete_fanout() {
         .map(|plan| (plan.name.clone(), plan.room))
         .collect::<Vec<_>>();
     let collection_started = std::time::Instant::now();
-    let records = match std::env::var_os("CAPACITY_MEMORY_PROBE_REPLAY_DIR") {
+    let mut records = match std::env::var_os("CAPACITY_MEMORY_PROBE_REPLAY_DIR") {
         Some(path) => artifacts::read_records(std::path::Path::new(&path))
             .expect("read memory probe artifact"),
         None => {
@@ -2089,6 +2090,18 @@ fn generator_memory_profile_on_complete_fanout() {
         config::count_u64(records.receipts.len()),
         players * (players - 1) * sends
     );
+    // Replays may retain arbitrary append order. Keep every event unchanged.
+    let reordered = std::env::var_os("CAPACITY_MEMORY_PROBE_REORDERED").is_some();
+    if reordered {
+        let mut state = 1_u64;
+        for end in (1..records.sent.len()).rev() {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let other = usize::try_from(state % u64::try_from(end + 1).unwrap()).unwrap();
+            records.sent.swap(end, other);
+        }
+    }
     let collected_rss = diagnostics::resident_memory_bytes(std::process::id());
     let started = std::time::Instant::now();
     let summary = oracle::summarize(
@@ -2113,6 +2126,7 @@ fn generator_memory_profile_on_complete_fanout() {
         "{}",
         serde_json::json!({
             "sends_per_peer": sends,
+            "reordered": reordered,
             "players": players,
             "receipts": records.receipts.len(),
             "sent_capacity": records.sent.capacity(),

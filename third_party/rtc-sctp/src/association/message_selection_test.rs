@@ -456,10 +456,10 @@ fn reassembly_tail_first_gameplay_preserves_exact_payload_and_release() -> Resul
             sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
             sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
             receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
-            sender.max_payload_size = 1;
+            sender.max_payload_size = 4;
             sender.cwnd = u32::MAX;
             let expected = Bytes::from(
-                (0..1024)
+                (0..4096)
                     .map(|index| (index % 251) as u8)
                     .collect::<Vec<_>>(),
             );
@@ -467,7 +467,7 @@ fn reassembly_tail_first_gameplay_preserves_exact_payload_and_release() -> Resul
             stream.set_reliability_params(unordered, ReliabilityType::Reliable, 0)?;
             stream.write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
             let data = transmitted_data(&sender.gather_outbound(now).0);
-            assert_eq!(data.len(), expected.len());
+            assert_eq!(data.len(), 1024);
             let tail = data.last().unwrap();
             receiver.handle_data(tail)?;
             assert!(receiver.stream(1)?.read_sctp()?.is_none());
@@ -476,7 +476,7 @@ fn reassembly_tail_first_gameplay_preserves_exact_payload_and_release() -> Resul
             }
             let message = receiver.stream(1)?.read_sctp()?.unwrap();
             assert_eq!(message.to_payload(expected.len())?.freeze(), expected);
-            assert!(message.adjacency_checks.get() <= expected.len() * 3);
+            assert!(message.adjacency_checks.get() <= data.len() * 3);
             assert!(receiver.stream(1)?.read_sctp()?.is_none());
             sender.handle_sack(&receiver.create_selective_ack_chunk(), now)?;
             assert!(sender.inflight_queue.is_empty());
