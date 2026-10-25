@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory use for session metrics filtered by application or completion cursor (#636).
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
@@ -37,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve native channel reset retry limits and deadlines when a peer reports a busy request (#1233).
 - Release native sent gameplay storage after selective acknowledgment or abandonment (#1230).
 - Keep native receive credit correct when accepted gameplay crosses full-width limits (#1231).
 - Keep native gameplay sending after messages are abandoned at a closed receive window (#1227).

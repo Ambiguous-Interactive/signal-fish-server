@@ -5864,3 +5864,75 @@ exact stream validation. Raw logs and retained executables are local in
 `schedule::tests::generator_churn_construction_profile` test; set
 `CAPACITY_CHURN_PROBE_ROOMS` to the room count. Whole-generator memory and the
 long live cell in #775 remain open.
+
+## Session 544 — compact adopted epochs (#775/#636)
+
+The oracle now stores each member's adopted epochs in a sorted vector instead
+of a separate tree. Binary search preserves unique epoch order and membership.
+Churn transitions also borrow epoch and member lists directly instead of
+cloning them before updating the separate close and floor maps. Initial room
+views still share their immutable state. Event records and artifact formats do
+not change.
+
+The isolated debug probe uses 16 players per room at 128 and 999 rooms.
+Ordinary rooms have no churn. Churn rooms record one rejoin per peer with an
+empty snapshot. Each cohort runs three fresh baseline/candidate process pairs
+per shape, alternating pair order. Linux `os.wait4` reports child peak RSS.
+Every process passes the same view-count and member-count assertions. Scoped
+set-reference, epoch, snapshot, live reconnect, room replacement, and replay
+controls pass. Sparse, repeated, reversed, zero, and maximum epochs retain
+set order. Vector insertion can shift old epochs; ordinary increasing epochs
+append. This does not establish a throughput improvement for arbitrary churn.
+
+The initial candidate retained a temporary member-key vector during each own
+rejoin. Its 24 attempts remain recorded. Median peak RSS KiB and construction
+microseconds are shown as baseline -> candidate:
+
+| Rooms | Churn | Peak RSS KiB | Construction us |
+| --- | --- | --- | --- |
+| 128 | no | 10996 -> 11240 | 15937 -> 13980 |
+| 128 | yes | 22772 -> 21624 | 241217 -> 246362 |
+| 999 | no | 15072 -> 14944 | 139144 -> 124087 |
+| 999 | yes | 102836 -> 94528 | 2380974 -> 1920741 |
+
+The next candidate removes that member-key vector. Its 24 attempts also pass;
+at 999 churn rooms, median peak RSS changes from 102,836 to 94,588 KiB.
+Those attempts remain recorded. The final source also applies an equivalent
+membership-predicate lint correction. All 24 final attempts pass. Trials remain
+in execution-pair order:
+
+| Rooms | Churn | Source | Peak RSS KiB, trials 0/1/2 | Construction us, trials 0/1/2 |
+| --- | --- | --- | --- | --- |
+| 128 | no | baseline | 11124, 11108, 11124 | 58468, 34432, 14439 |
+| 128 | no | candidate | 11132, 11068, 11068 | 15047, 13830, 16790 |
+| 128 | yes | baseline | 22888, 22748, 22644 | 560732, 674972, 468123 |
+| 128 | yes | candidate | 21496, 21628, 21560 | 366188, 289304, 278332 |
+| 999 | no | baseline | 15204, 15292, 14948 | 193799, 130633, 133370 |
+| 999 | no | candidate | 14640, 14628, 14780 | 117694, 104876, 118515 |
+| 999 | yes | baseline | 102840, 102964, 102908 | 1689962, 1650993, 1954274 |
+| 999 | yes | candidate | 94828, 94620, 94452 | 1356646, 1173620, 1390064 |
+
+At 999 churn rooms, final median peak RSS falls from 102,908 to 94,620 KiB
+(8.1%). Construction medians are 1,689,962 and 1,356,646 us. Other agent builds,
+lint, and live checks overlap on this shared ARM64 Linux host; timing remains
+an observation, not a controlled throughput claim. Ordinary-room differences
+are small and vary between cohorts. These probes isolate oracle view storage.
+They send no gameplay and do not bound whole-generator memory, qualify the
+long live cell, identify historical stalls, or establish server capacity.
+The remaining #775 requirements stay open.
+
+Reproduce with the ignored
+`oracle::coverage_tests::generator_churn_view_memory_profile` test in
+`capacity_runner`. Set `CAPACITY_VIEW_PROBE_PLAYERS=16` and
+`CAPACITY_VIEW_PROBE_ROOMS=128` or `999`; set `CAPACITY_VIEW_PROBE_CHURN=1`
+for churn. Run each built binary in a fresh process. Baseline source is
+`c6ee48b5`. SHA-256 hashes are:
+
+- Baseline: `351abc8744a7e8ddf2434420bbc0bf0e139af9612aa29f3f83228f647c8679d9`.
+- Initial candidate: `212af102d69e153dc027a453910269f9bf2e2fdb479302c3e51a26436dc54f4d`.
+- Second candidate: `62a4b0682c41d5aee6777cd19229c3912e03ee98b585956f2a406f5d1cb66b2d`.
+- Final candidate: `11a6858cf2ba528248d05236bf26f76095e29b6c6f71931700800a0def5fb6e8`.
+
+The registration, launcher, every raw attempt, and focused validation logs remain
+in ignored `progress/session-544-generator/`. Fixed executables remain in
+`/tmp/session544-capacity-*`.
