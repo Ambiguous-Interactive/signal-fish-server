@@ -1118,7 +1118,7 @@ struct ChurnView<'a> {
     // All name keys borrow the immutable roster during summarization.
     /// Member -> the epoch this recipient's seat adopts (and every epoch it
     /// has adopted, which are the streams it can be owed).
-    adopted: BTreeMap<&'a str, BTreeSet<u32>>,
+    adopted: BTreeMap<&'a str, Vec<u32>>,
     /// `(sender, epoch) -> instant past which deliveries for the stream are
     /// stale-epoch misroutes (the sender rejoined past it)`.
     closed_at: BTreeMap<(&'a str, u32), u64>,
@@ -1131,6 +1131,12 @@ struct ChurnView<'a> {
     /// omitted member, so a frame just past the seat can legally arrive
     /// with its recorded send time behind the rejoin instant.
     floors: BTreeMap<(&'a str, u32), (u64, u64, bool)>,
+}
+
+fn insert_epoch(epochs: &mut Vec<u32>, epoch: u32) {
+    if let Err(position) = epochs.binary_search(&epoch) {
+        epochs.insert(position, epoch);
+    }
 }
 
 fn room_churn_events<'a>(
@@ -1226,7 +1232,7 @@ fn churn_views<'a>(
             let initial = initial_views.entry(*room).or_insert_with(|| {
                 let mut view = ChurnView::default();
                 for member in &members_by_room[room] {
-                    view.adopted.entry(*member).or_default().insert(1);
+                    view.adopted.insert(*member, vec![1]);
                 }
                 Arc::new(view)
             });
@@ -1236,7 +1242,7 @@ fn churn_views<'a>(
         let mut view = ChurnView::default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
         for member in &members_by_room[room] {
-            view.adopted.entry(*member).or_default().insert(1);
+            view.adopted.insert(*member, vec![1]);
         }
         for event in viewer_churn_events(events, viewer) {
             let crate::records::ChurnEvent {
@@ -1260,15 +1266,10 @@ fn churn_views<'a>(
                     let Some(epochs) = view.adopted.get_mut(member) else {
                         continue;
                     };
-                    for old in epochs
-                        .iter()
-                        .filter(|old| **old != *new_epoch)
-                        .copied()
-                        .collect::<Vec<_>>()
-                    {
+                    for &old in epochs.iter().filter(|old| **old != *new_epoch) {
                         view.closed_at.entry((member, old)).or_insert(*at_us);
                     }
-                    epochs.insert(*new_epoch);
+                    insert_epoch(epochs, *new_epoch);
                 }
                 ChurnPhase::Rejoined => {
                     // This viewer rejoined. The snapshot is the authority on
@@ -1276,24 +1277,17 @@ fn churn_views<'a>(
                     // floor the stream at its tail. Members it omits are not
                     // closed — see the function doc — they receive a
                     // derived floor over every adopted stream instead.
-                    let adopted_members: Vec<&str> = view.adopted.keys().copied().collect();
-                    for member in adopted_members {
+                    for (&member, epochs) in &mut view.adopted {
                         match tails.get(member) {
                             Some(&(ref player_id, tail)) => {
                                 let Some(snap_epoch) = resolve(records, player_id, &mut unresolved)
                                 else {
                                     continue;
                                 };
-                                let epochs = view.adopted.entry(member).or_default();
-                                for old in epochs
-                                    .iter()
-                                    .filter(|old| **old != snap_epoch)
-                                    .copied()
-                                    .collect::<Vec<_>>()
-                                {
+                                for &old in epochs.iter().filter(|old| **old != snap_epoch) {
                                     view.closed_at.entry((member, old)).or_insert(*at_us);
                                 }
-                                epochs.insert(snap_epoch);
+                                insert_epoch(epochs, snap_epoch);
                                 view.floors
                                     .insert((member, snap_epoch), (tail, *at_us, true));
                             }
@@ -1301,17 +1295,14 @@ fn churn_views<'a>(
                                 // Absent from the snapshot: floor every
                                 // adopted stream at the sends that completed
                                 // at or before this rejoin.
-                                if let Some(epochs) = view.adopted.get(member).cloned() {
-                                    for old in epochs {
-                                        let completed = blocks
-                                            .get(&(member, old))
-                                            .map(|block| block.completed_by(*at_us))
-                                            .unwrap_or(0);
-                                        let completed =
-                                            u64::try_from(completed).unwrap_or(u64::MAX);
-                                        view.floors
-                                            .insert((member, old), (completed, *at_us, false));
-                                    }
+                                for &old in epochs.iter() {
+                                    let completed = blocks
+                                        .get(&(member, old))
+                                        .map(|block| block.completed_by(*at_us))
+                                        .unwrap_or(0);
+                                    let completed = u64::try_from(completed).unwrap_or(u64::MAX);
+                                    view.floors
+                                        .insert((member, old), (completed, *at_us, false));
                                 }
                             }
                         }
@@ -2008,7 +1999,7 @@ pub fn summarize(
                 // (or the viewer's snapshot superseded it), so nothing
                 // further is owed. Arrivals there are stale-epoch
                 // misroutes, caught by the arrival scan above.
-                if !adopted.is_some_and(|epochs| epochs.contains(epoch))
+                if adopted.is_none_or(|epochs| epochs.binary_search(epoch).is_err())
                     || view.closed_at.contains_key(&(sender, *epoch))
                 {
                     continue;
@@ -3120,7 +3111,7 @@ mod coverage_tests {
         assert_eq!(mixed["other"], initial["other"]);
         assert_eq!(mixed["alice"].floors[&("βob", 1)], (5, 100, true));
         assert_eq!(mixed["βob"].closed_at[&("alice", 1)], 100);
-        assert_eq!(mixed["βob"].adopted["alice"], BTreeSet::from([1, 2]));
+        assert_eq!(mixed["βob"].adopted["alice"], [1, 2]);
 
         records.registry.clear();
         let (_, unresolved) = churn_views(&records, &roster, &blocks);
@@ -3128,6 +3119,39 @@ mod coverage_tests {
         let (empty, unresolved) = churn_views(&records, &[], &blocks);
         assert!(empty.is_empty());
         assert!(unresolved.is_empty());
+    }
+
+    #[test]
+    fn adopted_epochs_match_set_order_for_sparse_repeated_and_reversed_inputs() {
+        for order in 0..3 {
+            let mut epochs = Vec::new();
+            let mut reference = BTreeSet::new();
+            let mut input: Vec<_> = (0..256_u32).chain([u32::MAX, 0, 1, u32::MAX]).collect();
+            if order == 1 {
+                input.reverse();
+            } else if order == 2 {
+                let mut state = 1_u64;
+                for end in (1..input.len()).rev() {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    let position =
+                        usize::try_from(state % u64::try_from(end + 1).unwrap()).unwrap();
+                    input.swap(end, position);
+                }
+            }
+            for epoch in input {
+                insert_epoch(&mut epochs, epoch);
+                reference.insert(epoch);
+                assert_eq!(epochs, reference.iter().copied().collect::<Vec<_>>());
+                for query in [0, 1, 128, 255, 256, u32::MAX - 1, u32::MAX] {
+                    assert_eq!(
+                        epochs.binary_search(&query).is_ok(),
+                        reference.contains(&query)
+                    );
+                }
+            }
+        }
     }
 
     // #775: reuse immutable roster spellings in every oracle epoch and floor map.

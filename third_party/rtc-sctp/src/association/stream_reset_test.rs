@@ -746,6 +746,146 @@ fn stream_reset_busy_response_retries_same_request_sequence() -> Result<()> {
     Ok(())
 }
 
+// Issue #1233: busy replies must not replenish the configured reset retry budget.
+#[test]
+fn stream_reset_repeated_busy_responses_keep_retry_budget_and_backoff() -> Result<()> {
+    for retries in [0, 1, 5] {
+        let (mut a, _) = reset_pair();
+        a.timers = TimerTable::new(TimerConfig {
+            max_reconfig_retrans: retries,
+            ..TimerConfig::default()
+        });
+        let now = Instant::now();
+        a.events.clear();
+        a.send_reset_request(now, 1)?;
+        let original = reset_requests(&mut a, now).remove(0);
+        let rsn = request(&original).reconfig_request_sequence_number;
+        let busy = response(rsn, ReconfigResult::ErrorRequestAlreadyInProgress);
+        let mut at = now;
+        let mut interval = a.rto_mgr.get_rto();
+        let mut observed_intervals = vec![];
+        let mut expected_intervals = vec![];
+        for attempt in 0..=retries {
+            a.handle_reconfig_param(&busy, &mut vec![], at)?;
+            let deadline = a.poll_timeout().expect("busy reset keeps recovery armed");
+            observed_intervals.push(deadline.duration_since(at));
+            expected_intervals.push(Duration::from_millis(interval));
+            a.handle_timeout(deadline);
+            at = deadline;
+            if attempt < retries {
+                let resent = reset_requests(&mut a, at);
+                assert_eq!(resent.len(), 1, "budget={retries}, attempt={attempt}");
+                assert_eq!(request(&resent[0]), request(&original));
+                assert_eq!(a.state(), AssociationState::Established);
+                interval = (interval * 2).min(60000);
+            }
+        }
+        assert_eq!(a.state(), AssociationState::Closed, "budget={retries}");
+        assert_eq!(observed_intervals, expected_intervals, "budget={retries}");
+        assert!(a.poll_timeout().is_none());
+        assert!(a.streams.is_empty());
+        assert_eq!(
+            a.events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AssociationFailed {
+                        reason: AssociationError::TimedOut
+                    }
+                ))
+                .count(),
+            1
+        );
+        a.events.clear();
+        a.handle_timeout(at + Duration::from_secs(1000));
+        a.handle_reconfig_param(&busy, &mut vec![], at)?;
+        assert!(a.events.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_reset_busy_recovery_preserves_reopened_gameplay() -> Result<()> {
+    let (mut a, mut b) = reset_pair();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    let mut now = Instant::now();
+    a.send_reset_request(now, 1)?;
+    let original = reset_requests(&mut a, now).remove(0);
+    let rsn = request(&original).reconfig_request_sequence_number;
+    for _ in 0..2 {
+        a.handle_reconfig_param(
+            &response(rsn, ReconfigResult::ErrorRequestAlreadyInProgress),
+            &mut vec![],
+            now,
+        )?;
+        now = a.poll_timeout().expect("busy retry remains armed");
+        a.handle_timeout(now);
+        let retry = reset_requests(&mut a, now).remove(0);
+        assert_eq!(request(&retry), request(&original));
+    }
+    for packet in b.handle_reconfig(&original, now)? {
+        a.handle_inbound(packet, now)?;
+    }
+    for _ in 0..4 {
+        for raw in b.gather_outbound(now).0 {
+            a.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in a.gather_outbound(now).0 {
+            b.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+    }
+    assert!(!a.streams.contains_key(&1));
+    assert!(!b.streams.contains_key(&1));
+    assert!(a.timers.get(Timer::Reconfig).is_none());
+    a.open_stream(1, ppi)?
+        .write_sctp(now, &Bytes::from_static(b"fresh gameplay"), ppi)?;
+    for raw in a.gather_outbound(now).0 {
+        b.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert_eq!(
+        b.stream(1)?.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+        Bytes::from_static(b"fresh gameplay")
+    );
+    assert!(b.stream(1)?.read_sctp()?.is_none());
+    Ok(())
+}
+
+#[test]
+fn stream_reset_duplicate_busy_responses_preserve_due_deadline() -> Result<()> {
+    let (mut a, _) = reset_pair();
+    a.timers = TimerTable::new(TimerConfig {
+        max_reconfig_retrans: 1,
+        ..TimerConfig::default()
+    });
+    let mut now = Instant::now();
+    a.send_reset_request(now, 1)?;
+    let original = reset_requests(&mut a, now).remove(0);
+    let busy = response(
+        request(&original).reconfig_request_sequence_number,
+        ReconfigResult::ErrorRequestAlreadyInProgress,
+    );
+    for attempt in 0..2 {
+        let deadline = a.poll_timeout().expect("reset recovery remains armed");
+        for reply_at in [
+            now + Duration::from_millis(1),
+            deadline + Duration::from_millis(1),
+        ] {
+            a.handle_reconfig_param(&busy, &mut vec![], reply_at)?;
+            assert_eq!(a.poll_timeout(), Some(deadline));
+        }
+        now = deadline + Duration::from_millis(1);
+        a.handle_timeout(now);
+        if attempt == 0 {
+            let retried = reset_requests(&mut a, now);
+            assert_eq!(retried.len(), 1);
+            assert_eq!(request(&retried[0]), request(&original));
+        }
+    }
+    assert_eq!(a.state(), AssociationState::Closed);
+    assert!(a.poll_timeout().is_none());
+    Ok(())
+}
+
 #[test]
 fn stream_reset_held_forward_tsn_discards_incomplete_but_keeps_complete_data() -> Result<()> {
     for unordered in [false, true] {

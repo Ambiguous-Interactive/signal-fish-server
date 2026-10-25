@@ -374,37 +374,7 @@ impl SessionRecords {
 
     /// Copy the registry for one scrape.
     pub fn snapshot(&self) -> SessionsSnapshot {
-        let mut active: Vec<SessionRecord> = self
-            .active
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-        active.sort_by(|a, b| {
-            a.created_at_ms
-                .cmp(&b.created_at_ms)
-                .then_with(|| a.room_id.cmp(&b.room_id))
-        });
-        // Poisoning recovers the guarded data: the ring is a plain queue, so
-        // a panicked writer leaves element-consistent state behind.
-        let completed: Vec<SessionRecord> = self
-            .completed
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .rev()
-            .cloned()
-            .collect();
-        let active_count = active.len();
-        let completed_count = completed.len();
-        SessionsSnapshot {
-            active,
-            completed,
-            active_count,
-            completed_count,
-            completed_cap: SESSION_RECORDS_COMPLETED_CAP,
-            completed_dropped_total: self.completed_dropped_total.load(Ordering::Relaxed),
-            unpublished_dropped_total: self.unpublished_dropped_total.load(Ordering::Relaxed),
-        }
+        self.snapshot_view(None, None)
     }
 
     /// Snapshot for one scrape with the `/metrics/sessions` query filters
@@ -419,23 +389,52 @@ impl SessionRecords {
         since: Option<u64>,
         application_id: Option<Uuid>,
     ) -> SessionsSnapshot {
-        let mut snapshot = self.snapshot();
-        if application_id.is_some() {
-            snapshot
-                .active
-                .retain(|record| record.application_id == application_id);
-            snapshot
+        let matches_application = |record: &SessionRecord| {
+            application_id.is_none_or(|id| record.application_id == Some(id))
+        };
+        let mut active: Vec<SessionRecord> = self
+            .active
+            .iter()
+            .filter(|entry| matches_application(entry.value()))
+            .map(|entry| entry.value().clone())
+            .collect();
+        active.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.room_id.cmp(&b.room_id))
+        });
+        // Poisoning recovers the guarded data: the ring is a plain queue, so
+        // a panicked writer leaves element-consistent state behind.
+        let completed: Vec<SessionRecord> = {
+            let completed = self
                 .completed
-                .retain(|record| record.application_id == application_id);
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if since.is_none() && application_id.is_none() {
+                completed.iter().rev().cloned().collect()
+            } else {
+                completed
+                    .iter()
+                    .rev()
+                    .filter(|record| {
+                        matches_application(record)
+                            && since.is_none_or(|cursor| record.seq.is_some_and(|seq| seq > cursor))
+                    })
+                    .cloned()
+                    .collect()
+            }
+        };
+        let active_count = active.len();
+        let completed_count = completed.len();
+        SessionsSnapshot {
+            active,
+            completed,
+            active_count,
+            completed_count,
+            completed_cap: SESSION_RECORDS_COMPLETED_CAP,
+            completed_dropped_total: self.completed_dropped_total.load(Ordering::Relaxed),
+            unpublished_dropped_total: self.unpublished_dropped_total.load(Ordering::Relaxed),
         }
-        if let Some(since) = since {
-            snapshot
-                .completed
-                .retain(|record| record.seq.is_some_and(|seq| seq > since));
-        }
-        snapshot.active_count = snapshot.active.len();
-        snapshot.completed_count = snapshot.completed.len();
-        snapshot
     }
 }
 
@@ -912,5 +911,62 @@ mod tests {
         );
         // Cursor zero keeps every completed record.
         assert_eq!(records.snapshot_view(Some(0), None).completed_count, 3);
+    }
+
+    #[test]
+    fn combined_views_preserve_record_order_and_global_counters() {
+        let records = SessionRecords::new();
+        let app = Uuid::from_u128(100);
+        let other_app = Uuid::from_u128(200);
+        for index in 1..=6 {
+            let mut room = room_fixture(Uuid::from_u128(index), "ROOM");
+            room.created_at = chrono::DateTime::from_timestamp_millis(0).expect("epoch");
+            room.application_id = match index {
+                1 | 4 => Some(app),
+                2 | 5 => Some(other_app),
+                _ => None,
+            };
+            records.record_created(&room, true);
+            if index >= 4 {
+                records.record_closed(&room.id, SessionCloseReason::Deleted);
+            }
+        }
+        let hidden = room_fixture(Uuid::from_u128(7), "HIDDEN");
+        records.record_created(&hidden, false);
+        records.record_closed(&hidden.id, SessionCloseReason::Deleted);
+
+        let cases = [
+            (None, None, vec![1, 2, 3], vec![6, 5, 4]),
+            (None, Some(app), vec![1], vec![4]),
+            (Some(1), Some(app), vec![1], vec![]),
+            (Some(1), Some(other_app), vec![2], vec![5]),
+            (Some(2), None, vec![1, 2, 3], vec![6]),
+            (Some(u64::MAX), None, vec![1, 2, 3], vec![]),
+            (Some(0), Some(Uuid::nil()), vec![], vec![]),
+        ];
+        for (since, application_id, active, completed) in cases {
+            let view = records.snapshot_view(since, application_id);
+            let context = format!("since={since:?}, application_id={application_id:?}");
+            assert_eq!(view.active_count, active.len(), "{context}");
+            assert_eq!(view.completed_count, completed.len(), "{context}");
+            assert_eq!(
+                view.active
+                    .iter()
+                    .map(|r| r.room_id.as_u128())
+                    .collect::<Vec<_>>(),
+                active,
+                "{context}"
+            );
+            assert_eq!(
+                view.completed
+                    .iter()
+                    .map(|r| r.room_id.as_u128())
+                    .collect::<Vec<_>>(),
+                completed,
+                "{context}"
+            );
+            assert_eq!(view.unpublished_dropped_total, 1, "{context}");
+            assert_eq!(view.completed_dropped_total, 0, "{context}");
+        }
     }
 }

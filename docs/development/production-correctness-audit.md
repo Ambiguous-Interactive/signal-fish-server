@@ -8990,3 +8990,57 @@ root and native all-target/all-feature lint and SCTP production lint pass.
 Markdown and documentation consistency pass. The CI-config wrapper retains
 its excluded audit failure. The three new defects are separate from the
 historical public-client timeout investigations, which remain open.
+
+### F192 — Busy native reset responses erase retry limits and deadlines
+
+Confirmed on `c6ee48b5`; tracked in #1233 under #826/#912. The reset response
+handler stops and restarts its timer for both `InProgress` and a busy error.
+Stopping clears the retry count and control backoff. Repeated busy responses
+can therefore keep a stream reset pending beyond its configured retry limit.
+Restarting also lets a duplicate response postpone an active or overdue timer.
+The red regression with retry limit one remains Established after its final
+allowed expiration. A separate red interval assertion observes one second
+instead of the expected two-second backoff.
+
+The repair preserves the busy request's retry count, backoff, and live deadline.
+An idle busy timer can still start. `InProgress` keeps its separate restart and
+no-error retry policy. Controls retain retry limits zero, one, and five, exact
+request sequences, one terminal failure event, timer cleanup, and duplicates
+before and after a deadline. A paired recovery history accepts the request
+after two busy replies, completes both reset directions, reopens the SID, and
+reads exact fresh gameplay. All 75 selected reset and shutdown controls pass;
+the existing isolated storage profile stays ignored. Strict SCTP production
+lint passes. Independent review found the duplicate-deadline defect in the
+first candidate; the final source and regressions have no remaining findings.
+
+This is a low-level accepted-response liveness defect. It does not establish
+the cause of historical public-client reset timeout #1120 or complete the
+published dependency replacement in #912. Server wire messages and SDK APIs
+are unchanged. The independent Rust, .NET, and Godot clients do not import this
+private vendored reference-client stack, so all three are unaffected and need
+no tracking change.
+
+### Filtered session metrics allocation (#636)
+
+At `c6ee48b5`, application and completion-cursor queries clone the full session
+registry before removing excluded records. A no-match application view allocates
+6,336 bytes for 16 rooms and 595,456 bytes for 1,024 rooms in the release
+allocation probe. The regression fails on that source. These are allocation
+bytes per snapshot, not retained RSS or a server capacity measurement.
+
+The view now checks both predicates before cloning. Active ordering, newest-first
+completion ordering, strict cursor comparison, counts, global drop counters,
+and response truncation remain unchanged. Unfiltered completed snapshots keep
+exact preallocation. The probe compares no-match views with an empty registry's
+fixed shard-guard overhead; one-match views may allocate only output-sized
+storage. It covers active and completed registries at 16 and 1,024 rooms,
+exhausted cursors, and unfiltered completed snapshots without reallocations.
+
+The final release probe allocates 1,536 bytes for each no-match view at both
+room counts, equal to empty-registry traversal. One-match active and completed
+views allocate 2,676 bytes in both shapes. Unfiltered completed snapshots have
+zero reallocations. The full relay allocation ceiling bench passes.
+
+All 17 session-record controls and two endpoint truncation controls pass.
+Independent source reviews report no remaining findings. Metrics JSON does not
+change, so Rust, .NET, and Godot SDKs need no migration or source changes.

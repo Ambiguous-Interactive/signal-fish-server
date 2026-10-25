@@ -30,6 +30,13 @@ It closes every stream once, stops all timers, and emits a typed terminal
 association event. The RTC layer uses this event to retire the physical transport.
 Controls retain limits 0, 1, and 5, plus public blocked-send recovery.
 See [#1133](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1133).
+Busy reset responses preserve the existing retry count, control backoff, and
+live deadline. Duplicate busy replies cannot postpone a due recovery attempt.
+`InProgress` retains its separate no-error retry policy. Controls cover retry
+limits 0, 1, and 5, duplicate responses before and after a deadline, terminal
+cleanup, and successful reciprocal reset followed by exact fresh gameplay.
+See [#1233](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1233).
+Replacement qualification must retain the `stream_reset_` controls.
 
 DATA for a new stream generation can arrive before the final reset response.
 The receiver acknowledges it at once and saves its reassembly separately until

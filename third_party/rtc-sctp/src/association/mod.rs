@@ -2309,9 +2309,14 @@ impl Association {
             match p.result {
                 ReconfigResult::InProgress | ReconfigResult::ErrorRequestAlreadyInProgress => {
                     self.reconfig_in_progress = p.result == ReconfigResult::InProgress;
-                    self.timers.stop(Timer::Reconfig);
-                    self.timers
-                        .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
+                    if self.reconfig_in_progress {
+                        self.timers.stop(Timer::Reconfig);
+                        self.timers
+                            .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
+                    } else {
+                        self.timers
+                            .start_if_idle(Timer::Reconfig, now, self.rto_mgr.get_rto());
+                    }
                 }
                 ReconfigResult::SuccessNop | ReconfigResult::SuccessPerformed => {
                     self.acknowledge_reset(rsn, now)

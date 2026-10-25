@@ -647,10 +647,19 @@ fn assert_database_metrics_reuse_game_names() {
         .expect("runtime");
     runtime.block_on(async {
         let mut bounded = true;
+        let empty_records = signal_fish_server::session_records::SessionRecords::new();
+        let region = Region::new(GLOBAL);
+        let empty_snapshot = empty_records.snapshot_view(None, None);
+        let empty_overhead = region.change();
+        assert_eq!(empty_snapshot.active_count, 0);
+        assert_eq!(empty_snapshot.completed_count, 0);
+        eprintln!("empty_session_view={empty_overhead:?}");
         for room_count in [16, 1_024] {
             let database = InMemoryDatabase::new();
+            let matching_application = PlayerId::from_u128(1);
+            let mut room_ids = Vec::with_capacity(room_count);
             for index in 0..room_count {
-                database
+                let room = database
                     .create_room(
                         format!("game-{}-水", index % 4),
                         Some(format!("R{index:05}")),
@@ -659,10 +668,11 @@ fn assert_database_metrics_reuse_game_names() {
                         PlayerId::new_v4(),
                         "relay".into(),
                         "test".into(),
-                        None,
+                        (index == 0).then_some(matching_application),
                     )
                     .await
                     .expect("room");
+                room_ids.push(room.id);
             }
             let region = Region::new(GLOBAL);
             std::hint::black_box(database.get_rooms_by_game().await.expect("game counts"));
@@ -675,10 +685,62 @@ fn assert_database_metrics_reuse_game_names() {
                 counts.allocations, counts.reallocations, counts.bytes_allocated,
                 percentiles.allocations, percentiles.reallocations, percentiles.bytes_allocated,
             );
+            let records = database.session_records().expect("session records");
+            let region = Region::new(GLOBAL);
+            let empty_view = records.snapshot_view(None, Some(PlayerId::nil()));
+            let filtered = region.change();
+            assert_eq!(empty_view.active_count, 0);
+            assert_eq!(empty_view.completed_count, 0);
+            eprintln!("rooms={room_count} empty_application_view={filtered:?}");
+            bounded &= filtered.allocations <= empty_overhead.allocations
+                && filtered.reallocations <= empty_overhead.reallocations
+                && filtered.bytes_allocated <= empty_overhead.bytes_allocated;
+            for completed in [false, true] {
+                if completed {
+                    for room_id in &room_ids {
+                        assert!(database.delete_room(room_id).await.expect("delete room"));
+                    }
+                    let region = Region::new(GLOBAL);
+                    let unfiltered = records.snapshot();
+                    let copied = region.change();
+                    assert_eq!(unfiltered.active_count, 0);
+                    assert_eq!(unfiltered.completed_count, room_count);
+                    eprintln!("rooms={room_count} unfiltered_completed_view={copied:?}");
+                    bounded &= copied.reallocations == 0;
+                    for (since, application) in [
+                        (None, Some(PlayerId::nil())),
+                        (Some(u64::MAX), None),
+                    ] {
+                        let region = Region::new(GLOBAL);
+                        let empty_view = records.snapshot_view(since, application);
+                        let filtered = region.change();
+                        assert_eq!(empty_view.active_count, 0);
+                        assert_eq!(empty_view.completed_count, 0);
+                        eprintln!("rooms={room_count} since={since:?} application={application:?} empty_completed_view={filtered:?}");
+                        bounded &= filtered.allocations <= empty_overhead.allocations
+                            && filtered.reallocations <= empty_overhead.reallocations
+                            && filtered.bytes_allocated <= empty_overhead.bytes_allocated;
+                    }
+                }
+                let region = Region::new(GLOBAL);
+                let matched = records.snapshot_view(None, Some(matching_application));
+                let filtered = region.change();
+                assert_eq!(matched.active_count, usize::from(!completed));
+                assert_eq!(matched.completed_count, usize::from(completed));
+                eprintln!("rooms={room_count} completed={completed} one_application_view={filtered:?}");
+                bounded &= filtered.allocations <= empty_overhead.allocations + 4
+                    && filtered.reallocations <= empty_overhead.reallocations
+                    && filtered.bytes_allocated
+                        <= empty_overhead.bytes_allocated
+                            + 4 * std::mem::size_of::<
+                                signal_fish_server::session_records::SessionRecord,
+                            >()
+                            + 128;
+            }
             bounded &= counts.allocations + counts.reallocations <= 16
                 && percentiles.allocations + percentiles.reallocations <= 96;
         }
-        assert!(bounded, "game metrics repeated-name allocation regression");
+        assert!(bounded, "filtered session views and repeated game names must avoid unused allocations");
     });
 }
 
