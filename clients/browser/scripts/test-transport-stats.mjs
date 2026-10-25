@@ -76,6 +76,18 @@ try {
           snapshot.dataChannelStats.status === 'ready',
           `side ${side}: Chromium exposes channel reports`,
         );
+        const route = snapshot.dataChannelStats.selectedCandidatePair;
+        check(
+          route?.state === 'succeeded' && route.nominated === true,
+          `side ${side}: retain the selected live ICE route`,
+        );
+        check(
+          route.bytesSent > 0 &&
+            route.bytesReceived > 0 &&
+            route.localCandidateType === 'host' &&
+            route.remoteCandidateType === 'host',
+          `side ${side}: retain bidirectional local route evidence`,
+        );
         for (const label of ['reliable', 'unreliable']) {
           const totals = snapshot.dataChannelStats.channels[label];
           check(totals?.id === snapshot.channels[label].id, 'bind totals to actual channel ID');

@@ -5749,3 +5749,78 @@ Candidate:
 `e27d33014a58d1f47e836edd3acd91fa08cf4be2ebb39c9e62dbe4d0025d6dc4`.
 The source baseline, binaries, logs, overlap notes, and measurement script
 remain in ignored `progress/session-538/capacity/`.
+
+## Session 539 — high-cardinality collector sorting (#775/#636)
+
+The collector formerly abandoned compact positions when distinct sender names
+exceeded `max(16, sends / 16)`. It then used stable full-event sorting. Each
+`SentEvent` occupies 64 bytes on this ARM64 host. Stable sort can allocate
+scratch for half those events. The candidate retains compact positions in this
+branch and uses stable position sorting. This retains four position bytes per
+send plus the position sort's temporary scratch, rather than full-event scratch.
+The existing grouped path, small-input path, and wider-than-u32 fallback remain.
+
+The exact original order breaks duplicate-key ties. Nine new sparse layouts
+compare every position with an independent stable ordering and roundtrip the
+complete records through JSONL. Existing full-event differential controls also
+compare the final permuted records, including duplicates and Unicode names.
+All 27 focused records controls pass. No record or summary contract changes.
+
+Measurements use fresh debug processes on the shared ARM64 Linux host. Each
+shape has eight sends per sender: one million sends / 125,000 names and four
+million sends / 500,000 names. These synthetic collector shapes exercise the
+fallback; they exceed the live room roster and are not live workload or server
+capacity points. Every event retains its original position and is checked after
+sorting. Three alternating old/new process pairs run at each size. The baseline
+is main `a62f7885` with only the ignored probe's sender-count parameter added.
+`os.wait4` supplies each child's peak RSS. The first measurement launcher could
+not find `/usr/bin/time`; no child started. The retained launcher uses `wait4`.
+Initial browser checks and final-cohort root lint can overlap these measurements.
+The shared host and debug builds limit timing and whole-process conclusions.
+
+### First candidate: unstable position sort
+
+Baseline SHA-256: `3232208c73fa4bb73484049ea5f16f44ba357b17cc4014b54712c26613b15bea`
+Candidate SHA-256: `7e706ffa01d320fb159a60a424d8ab6a70f5d7146ad06c12286d8ee1241c8157`
+
+| Sends | Source | Sort time us, trials 0/1/2 | Peak RSS KiB, trials 0/1/2 | Process seconds, trials 0/1/2 |
+| --- | --- | --- | --- | --- |
+| 1,000,000 | baseline | 308552, 317135, 305617 | 115860, 115752, 115872 | 0.532891, 0.569376, 0.566545 |
+| 1,000,000 | candidate | 1643023, 1688109, 1807666 | 91192, 91120, 91184 | 1.847977, 1.93997, 2.040339 |
+| 4,000,000 | baseline | 1197165, 1655435, 1657817 | 435008, 435008, 434808 | 2.099894, 3.021776, 2.912724 |
+| 4,000,000 | candidate | 10706823, 12744965, 10902638 | 328144, 328144, 328008 | 11.857822, 14.166829, 12.159606 |
+
+### Final candidate: stable position sort
+
+Baseline SHA-256: `3232208c73fa4bb73484049ea5f16f44ba357b17cc4014b54712c26613b15bea`
+Candidate SHA-256: `233257ff68da6164527e031f76e39d3597865a9a443d85abe5abc4cc5f9147d8`
+
+| Sends | Source | Sort time us, trials 0/1/2 | Peak RSS KiB, trials 0/1/2 | Process seconds, trials 0/1/2 |
+| --- | --- | --- | --- | --- |
+| 1,000,000 | baseline | 467392, 428326, 352180 | 115908, 115772, 115904 | 0.828991, 0.733386, 0.642751 |
+| 1,000,000 | candidate | 1115613, 906203, 975385 | 92904, 93104, 92856 | 1.468336, 1.29045, 1.259639 |
+| 4,000,000 | baseline | 1995428, 1424997, 1569107 | 435004, 435008, 435068 | 3.523838, 2.544891, 2.861391 |
+| 4,000,000 | candidate | 5281104, 4301712, 4904972 | 335868, 335780, 335720 | 6.739228, 5.461679, 6.29726 |
+
+The first candidate lowered peak RSS but had a large sorting cost. The final
+candidate reduces that cost with stable sorting of positions. Final median peak
+RSS falls from 115,904 to 92,904 KiB at one million sends and from 435,008 to
+335,780 KiB at four million. Final median sort time rises from 428,326 to
+975,385 us and from 1,569,107 to 4,904,972 us. This is an explicit memory/work
+tradeoff for the high-cardinality branch, not a throughput improvement or a fix
+for the historical generator stalls. The long live workload and whole-generator
+memory requirements in #775 remain open.
+
+Reproduce with the ignored `records::tests::generator_send_sort_memory_profile`
+control in `capacity_runner`: set `CAPACITY_SORT_PROBE_COMPACT=1`,
+`CAPACITY_SORT_PROBE_SENDS` to 1000000 or 4000000, and
+`CAPACITY_SORT_PROBE_SENDERS` to one eighth of that count. Run the built binary
+in a fresh process with these arguments:
+
+```text
+--exact records::tests::generator_send_sort_memory_profile --ignored --nocapture
+```
+
+Retain process peak RSS and the `SEND_SORT_PROFILE` row.
+Raw logs and the measurement launcher remain in ignored
+`progress/session-539/`. Both cohorts and all attempts are reported above.
