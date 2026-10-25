@@ -7,6 +7,7 @@ function assert(condition: boolean, message: string): void {
 
 // Regression #1011: a stalled peer must not hold relay or another peer's SDP/ICE.
 // Regression #1183: retired negotiation must release queued task credits.
+// Audit #853/#889: qualify each suspended stack phase with both late outcomes.
 const ordinaryOutcomes = [
   'resolve',
   'reject',
@@ -28,17 +29,38 @@ const failedOutcomes = [
   'remote-answer-rejected',
   'candidate-rejected',
 ] as const;
-for (const { oldOutcome, healthyConnected } of [
-  ...ordinaryOutcomes.map((oldOutcome) => ({ oldOutcome, healthyConnected: false })),
+const retirementPhases = [
+  'offer',
+  'local-offer',
+  'remote-offer',
+  'answer',
+  'local-answer',
+  'remote-answer',
+  'candidate',
+] as const;
+for (const { oldOutcome, healthyConnected, retirementPhase } of [
+  ...ordinaryOutcomes
+    .filter((outcome) => !outcome.startsWith('retired-'))
+    .map((oldOutcome) => ({ oldOutcome, healthyConnected: false, retirementPhase: 'offer' })),
+  ...retirementPhases.flatMap((retirementPhase) =>
+    (['retired-resolve', 'retired-reject'] as const).map((oldOutcome) => ({
+      oldOutcome,
+      healthyConnected: false,
+      retirementPhase,
+    })),
+  ),
   ...failedOutcomes.flatMap((oldOutcome) =>
-    [false, true].map((healthyConnected) => ({ oldOutcome, healthyConnected })),
+    [false, true].map((healthyConnected) => ({
+      oldOutcome,
+      healthyConnected,
+      retirementPhase: 'offer',
+    })),
   ),
 ]) {
-  const responder = [
-    'remote-offer-rejected',
-    'answer-rejected',
-    'local-answer-rejected',
-  ].includes(oldOutcome);
+  const retirementChurn = oldOutcome.startsWith('retired-');
+  const responder =
+    (retirementChurn && ['remote-offer', 'answer', 'local-answer'].includes(retirementPhase)) ||
+    ['remote-offer-rejected', 'answer-rejected', 'local-answer-rejected'].includes(oldOutcome);
   const signalFailure = responder || oldOutcome === 'remote-answer-rejected';
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
@@ -69,8 +91,18 @@ for (const { oldOutcome, healthyConnected } of [
   });
   const turn = () => new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
   let running: Promise<number> | undefined;
-  const retirementChurn = oldOutcome.startsWith('retired-');
   let holdReplacement = retirementChurn;
+  const heldConnections = new Set<number>();
+  const holdPhase = async (index: number, phase: string) => {
+    if (
+      retirementChurn &&
+      phase === retirementPhase &&
+      (index === 0 || (index > 1 && holdReplacement))
+    ) {
+      heldConnections.add(index);
+      await held;
+    }
+  };
   class Connection {
     readonly index = connections.length;
     closed = false;
@@ -90,21 +122,27 @@ for (const { oldOutcome, healthyConnected } of [
     }
     async createOffer() {
       calls.push(`${this.index}:offer`);
-      if (this.index === 0 || (this.index > 1 && holdReplacement)) {
+      if (!retirementChurn && this.index === 0) {
         await held;
         if (oldOutcome === 'offer-rejected') throw new Error('offer failed');
       }
+      await holdPhase(this.index, 'offer');
       if (this.index === 2 && oldOutcome === 'resolve') await retryHeld;
       return { type: 'offer', sdp: `offer-${this.index}` };
     }
     async createAnswer() {
       calls.push(`${this.index}:answer`);
+      await holdPhase(this.index, 'answer');
       if (this.index === 0 && oldOutcome === 'answer-rejected')
         throw new Error('answer failed');
       return { type: 'answer', sdp: `answer-${this.index}` };
     }
     async setLocalDescription(description: { type: string }) {
       calls.push(`${this.index}:local`);
+      await holdPhase(
+        this.index,
+        description.type === 'offer' ? 'local-offer' : 'local-answer',
+      );
       if (
         this.index === 0 &&
         (oldOutcome === 'local-rejected' ||
@@ -112,9 +150,13 @@ for (const { oldOutcome, healthyConnected } of [
       )
         throw new Error('local description failed');
     }
-    async setRemoteDescription() {
+    async setRemoteDescription(description: { type: string }) {
       calls.push(`${this.index}:remote`);
-      if (this.index === 0 && signalFailure) {
+      await holdPhase(
+        this.index,
+        description.type === 'offer' ? 'remote-offer' : 'remote-answer',
+      );
+      if (!retirementChurn && this.index === 0 && signalFailure) {
         await held;
         if (oldOutcome === 'remote-offer-rejected' || oldOutcome === 'remote-answer-rejected')
           throw new Error('remote description failed');
@@ -122,6 +164,7 @@ for (const { oldOutcome, healthyConnected } of [
     }
     async addIceCandidate() {
       calls.push(`${this.index}:candidate`);
+      await holdPhase(this.index, 'candidate');
       if (this.index === 0 && oldOutcome === 'candidate-rejected')
         throw new Error('candidate failed');
     }
@@ -215,7 +258,7 @@ for (const { oldOutcome, healthyConnected } of [
       playerName: 'test',
       appId: 'test',
       platform: 'test',
-      exchange: signalFailure,
+      exchange: signalFailure || retirementChurn,
       relayPayload: null,
       crippleIce: false,
       p2pTimeoutSecs: 1,
@@ -233,6 +276,18 @@ for (const { oldOutcome, healthyConnected } of [
     await turn();
     assert(connections.length === 2, 'healthy peer starts while the first offer is held');
     if (retirementChurn) {
+      const negotiate = () => {
+        socket.signal(slow, responder ? { Offer: 'phase-offer' } : { Answer: 'phase-answer' });
+        socket.signal(slow, { IceCandidate: 'phase-candidate' });
+      };
+      negotiate();
+      await turn();
+      const oldCalls = calls.filter((call) => call.startsWith('0:')).join(',');
+      const phaseCall = retirementPhase.split('-')[0];
+      assert(
+        calls.includes(`0:${phaseCall}`),
+        `${retirementPhase}: old stack reaches held phase`,
+      );
       let result: number | undefined;
       void running.then((code) => {
         result = code;
@@ -245,6 +300,8 @@ for (const { oldOutcome, healthyConnected } of [
         await turn();
         socket.plan([slow, healthy]);
         await turn();
+        negotiate();
+        await turn();
         assert(
           result === undefined,
           'retired negotiation releases task credits before replacement',
@@ -256,9 +313,18 @@ for (const { oldOutcome, healthyConnected } of [
       socket.plan([slow, healthy]);
       await turn();
       const replacement = connections.at(-1)!;
+      assert(
+        heldConnections.size === 13,
+        `${retirementPhase}: every retired link reached the held phase`,
+      );
+      const retiredCallHistory = () =>
+        calls
+          .filter((call) => !call.startsWith('1:') && !call.startsWith(`${replacement.index}:`))
+          .join(',');
+      const retiredCalls = retiredCallHistory();
       if (oldOutcome === 'retired-reject') rejectOld(new Error('retired stack failure'));
       else resolveOld();
-      socket.signal(slow, { Answer: 'fresh-answer' });
+      socket.signal(slow, responder ? { Offer: 'fresh-offer' } : { Answer: 'fresh-answer' });
       socket.signal(healthy, { Answer: 'healthy-answer' });
       socket.signal(healthy, { IceCandidate: 'healthy-candidate' });
       socket.deliver('GameData', {
@@ -268,13 +334,71 @@ for (const { oldOutcome, healthyConnected } of [
         data: { after_retirement: true },
       });
       await turn();
+      for (const [connection, peer] of [
+        [replacement, slow],
+        [connections[1]!, healthy],
+      ] as const) {
+        if (connection.channels.length === 0) {
+          for (const label of ['reliable', 'unreliable']) {
+            const channel = {
+              label,
+              readyState: 'connecting',
+              ordered: label === 'reliable',
+              maxRetransmits: label === 'reliable' ? null : 0,
+              maxPacketLifeTime: null,
+              onopen: null,
+              send() {},
+            };
+            connection.channels.push(channel);
+            (
+              connection as unknown as { ondatachannel: (event: unknown) => void }
+            ).ondatachannel({ channel });
+          }
+        }
+        connection.connectionState = 'connected';
+        for (const channel of connection.channels) {
+          channel.readyState = 'open';
+          channel.onopen?.();
+        }
+        await turn();
+        for (const channel of connection.channels) {
+          (channel as unknown as { onmessage: (event: { data: string }) => void }).onmessage({
+            data: JSON.stringify({ from: peer, channel: channel.label, seq: 0 }),
+          });
+        }
+      }
+      await turn();
+      for (const eventName of ['channel_message_sent', 'channel_message']) {
+        for (const peer of [slow, healthy]) {
+          for (const label of ['reliable', 'unreliable']) {
+            const matching = events.filter(
+              (event) =>
+                event['event'] === eventName &&
+                event['peer'] === peer &&
+                event['label'] === label,
+            );
+            assert(
+              matching.length === 1 &&
+                matching[0]?.['text'] ===
+                  JSON.stringify({
+                    from: eventName === 'channel_message_sent' ? me : peer,
+                    channel: label,
+                    seq: 0,
+                  }),
+              `${retirementPhase}/${oldOutcome}: exact fresh/sibling gameplay once (${eventName}/${peer}/${label})`,
+            );
+          }
+        }
+      }
       assert(
         result === undefined && !replacement.closed && !connections[1]!.closed,
         'fresh and sibling gameplay remain active after old operations settle',
       );
       assert(
-        calls.includes(`${replacement.index}:remote`) && calls.includes('1:candidate'),
-        'fresh and sibling signaling continues after retirement churn',
+        calls.filter((call) => call === `${replacement.index}:remote`).length === 1 &&
+          !calls.includes(`${replacement.index}:candidate`) &&
+          calls.includes('1:candidate'),
+        `${retirementPhase}: only fresh SDP reaches the replacement; sibling ICE continues`,
       );
       assert(
         events.some((event) => event['event'] === 'game_data_received'),
@@ -282,11 +406,12 @@ for (const { oldOutcome, healthyConnected } of [
       );
       assert(
         !events.some((event) => event['event'] === 'error'),
-        'retired promise rejection cannot report a current-peer error',
+        `${retirementPhase}/${oldOutcome}: retired promise cannot report a current-peer error`,
       );
       assert(
-        !calls.includes('0:local') && !calls.includes('0:remote'),
-        'retired SDP and queued answers cannot resume on the replacement',
+        calls.filter((call) => call.startsWith('0:')).join(',') === oldCalls &&
+          retiredCallHistory() === retiredCalls,
+        `${retirementPhase}: retired negotiation cannot advance after its held phase`,
       );
       continue;
     }

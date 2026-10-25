@@ -3652,3 +3652,189 @@ fn empty_stream_writes_preserve_following_gameplay_and_shutdown() -> Result<()> 
     }
     Ok(())
 }
+
+#[test]
+fn simultaneous_shutdown_retries_lost_forward_tsn_before_draining_mixed_streams() -> Result<()> {
+    for first_tsn in [100, u32::MAX - 2] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.my_next_tsn = first_tsn;
+        local.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        local.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        remote.peer_last_tsn = first_tsn.wrapping_sub(1);
+        local.cwnd = 65536;
+        local.ack_mode = AckMode::NoDelay;
+        remote.ack_mode = AckMode::NoDelay;
+        let abandoned = Bytes::from(vec![0xa5; local.max_payload_size as usize * 3 + 17]);
+        local
+            .stream(1)?
+            .set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+        local
+            .stream(1)?
+            .write_sctp(now, &abandoned, PayloadProtocolIdentifier::Binary)?;
+        local
+            .stream(1)?
+            .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+        let ordered_tail = [
+            Bytes::from_static(b"first command"),
+            Bytes::from_static(b"last command"),
+        ];
+        for payload in &ordered_tail {
+            local
+                .stream(1)?
+                .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+        }
+        let other_stream = Bytes::from_static(b"other stream gameplay");
+        local
+            .open_stream(3, PayloadProtocolIdentifier::Binary)?
+            .write_sctp(now, &other_stream, PayloadProtocolIdentifier::Binary)?;
+        let reverse = Bytes::from_static(b"reverse gameplay");
+        remote
+            .stream(1)?
+            .write_sctp(now, &reverse, PayloadProtocolIdentifier::Binary)?;
+        let initial = local.gather_outbound(now).0;
+        let missing_tsn = first_tsn.wrapping_add(1);
+        let local_tail_tsn = local.my_next_tsn.wrapping_sub(1);
+        let remote_tail_tsn = remote.my_next_tsn;
+        let mut dropped_data = 0;
+        for raw in initial {
+            let packet = Packet::unmarshal(&raw)?;
+            if packet.chunks.iter().any(|chunk| {
+                chunk
+                    .as_any()
+                    .downcast_ref::<ChunkPayloadData>()
+                    .is_some_and(|data| data.tsn == missing_tsn)
+            }) {
+                assert_eq!(
+                    packet.chunks.len(),
+                    1,
+                    "drop only the missing DATA fragment"
+                );
+                dropped_data += 1;
+            } else {
+                remote.handle_inbound(packet, now)?;
+            }
+        }
+        assert_eq!(dropped_data, 1);
+        assert!(remote.stream(1)?.read_sctp()?.is_none());
+        local.shutdown()?;
+        remote.shutdown()?;
+        assert_eq!(local.state(), AssociationState::ShutdownPending);
+        assert_eq!(remote.state(), AssociationState::ShutdownPending);
+        for endpoint in [&mut local, &mut remote] {
+            assert_eq!(
+                endpoint.stream(1)?.write(now, b"late"),
+                Err(Error::ErrStreamClosed)
+            );
+        }
+        let mut forwards = vec![];
+        for step in 0..200 {
+            let at = now + Duration::from_millis(step * 100);
+            local.handle_timeout(at);
+            remote.handle_timeout(at);
+            for raw in local.gather_outbound(at).0 {
+                let packet = Packet::unmarshal(&raw)?;
+                if let Some(forward) = packet
+                    .chunks
+                    .iter()
+                    .find_map(|chunk| chunk.as_any().downcast_ref::<ChunkForwardTsn>())
+                {
+                    forwards.push((
+                        forward.new_cumulative_tsn,
+                        forward
+                            .streams
+                            .iter()
+                            .map(|stream| (stream.identifier, stream.sequence))
+                            .collect::<Vec<_>>(),
+                    ));
+                    if forwards.len() == 1 {
+                        assert_eq!(packet.chunks.len(), 1, "drop only FORWARD TSN");
+                        continue;
+                    }
+                }
+                if packet.chunks.iter().any(|chunk| {
+                    chunk.as_any().is::<ChunkShutdown>() || chunk.as_any().is::<ChunkShutdownAck>()
+                }) {
+                    assert!(local.pending_queue.is_empty());
+                    assert!(local.inflight_queue.is_empty());
+                    assert_eq!(local.cumulative_tsn_ack_point, local_tail_tsn);
+                }
+                remote.handle_inbound(packet, at)?;
+            }
+            for raw in remote.gather_outbound(at).0 {
+                let packet = Packet::unmarshal(&raw)?;
+                if packet.chunks.iter().any(|chunk| {
+                    chunk.as_any().is::<ChunkShutdown>() || chunk.as_any().is::<ChunkShutdownAck>()
+                }) {
+                    assert!(remote.pending_queue.is_empty());
+                    assert!(remote.inflight_queue.is_empty());
+                    assert_eq!(remote.cumulative_tsn_ack_point, remote_tail_tsn);
+                }
+                local.handle_inbound(packet, at)?;
+            }
+            if local.state() == AssociationState::Closed
+                && remote.state() == AssociationState::Closed
+            {
+                break;
+            }
+        }
+        assert!(
+            forwards.len() >= 2,
+            "a lost FORWARD TSN must actually be retried"
+        );
+        assert_eq!(forwards[0], forwards[1]);
+        assert_eq!(forwards[0].1, vec![(1, 0)]);
+        assert_eq!(local.state(), AssociationState::Closed);
+        assert_eq!(remote.state(), AssociationState::Closed);
+        assert!(
+            local.poll_endpoint_event().is_none(),
+            "reverse input remains unread"
+        );
+        assert!(
+            remote.poll_endpoint_event().is_none(),
+            "forward input remains unread"
+        );
+        assert_eq!(
+            local
+                .stream(1)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(100)?
+                .freeze(),
+            reverse
+        );
+        for expected in ordered_tail {
+            assert_eq!(
+                remote
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(100)?
+                    .freeze(),
+                expected,
+                "the abandoned fragmented message must not reach the application"
+            );
+        }
+        assert_eq!(
+            remote
+                .stream(3)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(100)?
+                .freeze(),
+            other_stream
+        );
+        for endpoint in [&mut local, &mut remote] {
+            assert!(endpoint.streams.is_empty());
+            assert!(endpoint.pending_queue.is_empty());
+            assert!(endpoint.inflight_queue.is_empty());
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(matches!(
+                endpoint.poll_endpoint_event(),
+                Some(EndpointEvent(EndpointEventInner::Drained))
+            ));
+            assert!(endpoint.poll_endpoint_event().is_none());
+        }
+    }
+    Ok(())
+}

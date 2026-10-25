@@ -554,6 +554,52 @@ test('batched gap reports preserve each sender and epoch through partial termina
   }
 });
 
+test('retained gap backlogs accept reordered reports and reject overlap atomically', () => {
+  for (const ordering of ['ascending', 'descending', 'interleaved']) {
+    const state = joinedState();
+    const count = 512;
+    for (let index = 0; index < count; index += 1) {
+      const ordinal =
+        ordering === 'descending'
+          ? count - index
+          : ordering === 'interleaved'
+            ? index % 2 === 0
+              ? index / 2 + 1
+              : count - Math.floor(index / 2)
+            : index + 1;
+      state.recordReport({
+        per_class: countersWithSuperseded(index + 1),
+        gaps: [gap(ordinal * 2, ordinal * 2)],
+      });
+    }
+    for (const [from, to] of [
+      [2, 2],
+      [1, 2],
+      [3, 5],
+      [count, count + 2],
+      [count * 2, count * 2 + 1],
+    ] as const) {
+      expectViolation(
+        () =>
+          state.recordReport({
+            per_class: countersWithSuperseded(count + to - from + 1),
+            gaps: [gap(from, to)],
+          }),
+        'overlapping/duplicate gap',
+      );
+    }
+    for (let seq = 1; seq <= count * 2 + 1; seq += 2) {
+      if (state.recordGameData({ from_player: SENDER, epoch: 1, seq }) !== 'apply')
+        throw new Error(`unexpected stale data at ${seq}`);
+    }
+    state.recordReport({
+      per_class: countersWithSuperseded(count + 1),
+      gaps: [gap(count * 2 + 2, count * 2 + 2)],
+    });
+    state.recordGameData({ from_player: SENDER, epoch: 1, seq: count * 2 + 3 });
+  }
+});
+
 test('PlayerLeft terminal watermarks keep seat churn state bounded and preserve v2 shape', () => {
   const state = new DeliveryAccountability();
   for (let index = 1; index <= 1_024; index += 1) {

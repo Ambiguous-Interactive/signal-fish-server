@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce delivery-report processing work in both reference clients (#1192).
+- Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
 - Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
 - Reduce native receive work when partial-reliability recovery discards fragmented gameplay (#1182).
 - Reduce native gameplay fragment insertion work for ordered and unordered messages (#636, #1191).
