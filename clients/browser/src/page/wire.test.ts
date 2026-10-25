@@ -1,4 +1,4 @@
-import { encode, decode } from '@msgpack/msgpack';
+import { encode, decode, ExtData } from '@msgpack/msgpack';
 import {
   bytesToBase64,
   classifyMessagePackNegotiatedServerInput,
@@ -510,6 +510,71 @@ for (const version of [2, 3]) {
     'safe int64 remains exact',
   );
 }
+
+// Regression #1215: long MessagePack strings must preserve their leading BOM.
+for (const version of [2, 3]) {
+  for (const length of [0, 190, 191, 192, 200, 1_000]) {
+    for (const prefix of ['', '\ufeff', '\ufeff\ufeff']) {
+      const text = `${prefix}${'a'.repeat(length)}世界`;
+      for (const value of [text, [text], { nested: [{ dialogue: text }] }]) {
+        const frame = classifyMessagePackNegotiatedServerInput(
+          encode({
+            from_player: SENDER_BYTES,
+            encoding: 'message_pack',
+            payload: encode(value),
+            ...(version === 3 ? { seq: 1, epoch: 1 } : {}),
+          }),
+          version,
+        );
+        assert(
+          JSON.stringify(frame.data['data']) === JSON.stringify(value),
+          `v${version}/${length}/${prefix.length}: MessagePack preserves complete string values`,
+        );
+      }
+    }
+  }
+  for (const [invalid, error] of [
+    [Uint8Array.of(0xef, 0xbb, 0xbf), 'not a plain object'],
+    [new Date(0), 'not a plain object'],
+    [new ExtData(42, Uint8Array.of(0xef, 0xbb, 0xbf)), 'not a plain object'],
+    [9007199254740992n, 'not exactly representable'],
+    [Number.NaN, 'not a finite number'],
+  ] as const) {
+    expectError(
+      () =>
+        classifyMessagePackNegotiatedServerInput(
+          encode({
+            from_player: SENDER_BYTES,
+            encoding: 'message_pack',
+            payload: encode({ text: '\ufeffvalue', invalid }, { useBigInt64: true }),
+            ...(version === 3 ? { seq: 1, epoch: 1 } : {}),
+          }),
+          version,
+        ),
+      error,
+    );
+  }
+  const dialogue = { dialogue: `\ufeff${'a'.repeat(200)}` };
+  const envelope = encode({
+    from_player: SENDER_BYTES,
+    encoding: 'message_pack',
+    payload: encode(dialogue),
+    ...(version === 3 ? { seq: 1, epoch: 1 } : {}),
+  });
+  const storage = Uint8Array.from([9, ...envelope, 8]);
+  for (const view of [
+    storage.subarray(1, -1),
+    new DataView(storage.buffer, 1, envelope.length),
+  ]) {
+    assert(
+      JSON.stringify(classifyMessagePackNegotiatedServerInput(view, version).data['data']) ===
+        JSON.stringify(dialogue),
+      `v${version}: preserve MessagePack dialogue inside an offset view`,
+    );
+  }
+}
+console.error('ok - MessagePack string values preserve leading BOMs across decoder sizes');
+
 {
   let output: ArrayBuffer | undefined;
   sendMessagePackGameData(

@@ -30,11 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
-- Reuse send indexes, reduce their memory, and reserve exact relay-ledger offsets during capacity archive replay (#775).
+- Reuse compact capacity replay indexes and reduce reordered send lookup work (#636, #775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
 
+- Preserve leading BOM characters in browser MessagePack gameplay strings (#1215).
+- Keep repeated native data-channel close successful after completed reset (#1214).
+- Bound native chunk-cursor reads by the remaining message size (#1213).
 - Apply native chunk-array message limits to each message instead of the whole array (#1210).
 - Close late browser data-channel announcements after their peer link retires (#1211).
 - Keep native gameplay fragments within custom packet and chunk sizes (#1205, #1206).

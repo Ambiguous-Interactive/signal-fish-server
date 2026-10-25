@@ -362,3 +362,11 @@ its descriptor vector during a send. Four-byte padding and DATA wire limits
 still determine fragment size. Controls cover small, ordinary, and wire-limit
 budgets and preserve full payload bytes and fragment boundaries. Retain
 `packetization_reserves_only_the_required_fragment_slots` on replacement.
+
+`Chunks::next` reserves only the bytes its current read can return, bounded by
+both the requested maximum and the remaining fragments. Large read limits no
+longer panic on a small message or reserve the full requested limit. Each read
+scans only the fragments needed for that result. The reassembly cursor control
+covers zero and partial reads, empty fragments, exact boundaries, exhaustion,
+and `usize::MAX` final reads with exact payload comparison. See
+[#1213](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1213).

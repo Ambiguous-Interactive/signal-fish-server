@@ -1048,6 +1048,35 @@ fn test_chunk_set_empty_chunk_set() -> Result<()> {
 }
 
 #[test]
+fn reassembly_chunk_cursor_large_read_limit_preserves_exact_remaining_bytes() {
+    for first_limit in [0, 1, 3, 4, 6, 7, 8] {
+        let mut message = Chunks::new(
+            0,
+            0,
+            PayloadProtocolIdentifier::Binary,
+            [b"abc".as_slice(), b"".as_slice(), b"defg".as_slice()]
+                .into_iter()
+                .map(|payload| ChunkPayloadData {
+                    user_data: Bytes::copy_from_slice(payload),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        let expected = b"abcdefg";
+        let first = message.next(first_limit).unwrap();
+        let split = first_limit.min(expected.len());
+        assert_eq!(first.bytes.as_ref(), &expected[..split]);
+        if split < expected.len() {
+            let tail = message.next(usize::MAX).unwrap();
+            assert_eq!(tail.bytes.as_ref(), &expected[split..]);
+        }
+        assert!(message.next(usize::MAX).is_none());
+    }
+    let mut empty = Chunks::new(0, 0, PayloadProtocolIdentifier::Binary, vec![]);
+    assert!(empty.next(usize::MAX).is_none());
+}
+
+#[test]
 fn test_chunk_set_push_dup_chunks_to_chunk_set() -> Result<()> {
     let mut cset = Chunks::new(0, 0, PayloadProtocolIdentifier::default(), vec![]);
     cset.push(ChunkPayloadData {
