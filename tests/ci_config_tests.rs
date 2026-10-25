@@ -32356,6 +32356,11 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("rtc", "stream_count_boundary"),
         ("rtc-sctp", "reset"),
         ("rtc-sctp", "zero_fragment_budget"),
+        ("rtc-sctp", "chunk_array_applies_message_limit"),
+        (
+            "rtc-sctp",
+            "packetization_reserves_only_the_required_fragment_slots",
+        ),
         ("rtc-sctp", "shutdown"),
         ("rtc-sctp", "payload_queue_gap_ack"),
         ("rtc-sctp", "reassembly_"),
