@@ -406,8 +406,19 @@ export class DeliveryAccountability {
 
     for (const [key, ranges] of reportRanges) {
       const pending = this.pendingGaps.get(key) ?? [];
-      pending.push(...ranges);
-      pending.sort((left, right) => left.fromSeq - right.fromSeq);
+      ranges.sort((left, right) => left.fromSeq - right.fromSeq);
+      const previous = pending[pending.length - 1];
+      const earliest = pending[0];
+      const first = ranges[0];
+      const last = ranges[ranges.length - 1];
+      if (earliest !== undefined && last !== undefined && last.toSeq < earliest.fromSeq) {
+        pending.unshift(...ranges);
+      } else {
+        pending.push(...ranges);
+        if (previous !== undefined && first !== undefined && previous.toSeq >= first.fromSeq) {
+          pending.sort((left, right) => left.fromSeq - right.fromSeq);
+        }
+      }
       this.pendingGaps.set(key, pending);
     }
     if (unsupportedGap !== null) {
@@ -560,7 +571,7 @@ export class DeliveryAccountability {
       );
     }
     const key = senderEpochKey(gap.fromPlayer, gap.epoch);
-    if ((this.pendingGaps.get(key) ?? []).some((existing) => rangesOverlap(existing, gap))) {
+    if (overlapsSortedGaps(this.pendingGaps.get(key) ?? [], gap.fromSeq, gap.toSeq)) {
       violation(
         `overlapping/duplicate gap ${gap.fromSeq}..=${gap.toSeq} for ` +
           `${gap.fromPlayer} epoch ${gap.epoch}`,
@@ -586,7 +597,7 @@ export class DeliveryAccountability {
       return;
     }
     if (received === expected) {
-      if (gaps.some((gap) => gap.fromSeq <= received && received <= gap.toSeq)) {
+      if (overlapsSortedGaps(gaps, received, received)) {
         violation(
           `prior gap report for ${fromPlayer} epoch ${epoch} includes delivered seq ${received}`,
         );
@@ -840,6 +851,23 @@ function asArray(value: unknown, field: string): unknown[] {
 
 function senderEpochKey(playerId: string, epoch: number): string {
   return `${playerId}\u0000${epoch}`;
+}
+
+function overlapsSortedGaps(
+  gaps: readonly ParsedGap[],
+  fromSeq: number,
+  toSeq: number,
+): boolean {
+  let lower = 0;
+  let upper = gaps.length;
+  while (lower < upper) {
+    const middle = lower + Math.floor((upper - lower) / 2);
+    const gap = gaps[middle];
+    if (gap !== undefined && gap.toSeq < fromSeq) lower = middle + 1;
+    else upper = middle;
+  }
+  const firstPossible = gaps[lower];
+  return firstPossible !== undefined && firstPossible.fromSeq <= toSeq;
 }
 
 function rangesOverlap(left: ParsedGap, right: ParsedGap): boolean {

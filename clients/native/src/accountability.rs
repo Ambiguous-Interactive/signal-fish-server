@@ -564,9 +564,24 @@ impl DeliveryAccountability {
                 .or_default();
             gaps.push(gap.clone());
         }
-        for key in report_ranges.keys() {
+        for (key, ranges) in &report_ranges {
             if let Some(gaps) = self.pending_gaps.get_mut(key) {
-                gaps.sort_unstable_by_key(|candidate| candidate.from_seq);
+                let previous_length = gaps.len().saturating_sub(ranges.len());
+                let (previous, additions) = gaps.split_at_mut(previous_length);
+                additions.sort_unstable_by_key(|candidate| candidate.from_seq);
+                let prepend = additions
+                    .last()
+                    .zip(previous.first())
+                    .is_some_and(|(next, prior)| next.to_seq < prior.from_seq);
+                let interleaved = previous
+                    .last()
+                    .zip(additions.first())
+                    .is_some_and(|(prior, next)| prior.to_seq >= next.from_seq);
+                if prepend {
+                    gaps.rotate_right(ranges.len());
+                } else if interleaved {
+                    gaps.sort_unstable_by_key(|candidate| candidate.from_seq);
+                }
             }
         }
         if unsupported_gap.is_some() {
@@ -772,11 +787,7 @@ impl DeliveryAccountability {
         if self
             .pending_gaps
             .get(&(gap.from_player, gap.epoch))
-            .is_some_and(|pending| {
-                pending.iter().any(|existing| {
-                    gap.from_seq <= existing.to_seq && existing.from_seq <= gap.to_seq
-                })
-            })
+            .is_some_and(|pending| overlaps_sorted_gaps(pending, gap.from_seq, gap.to_seq))
         {
             return Err(format!(
                 "delivery accountability violation: overlapping/duplicate gap {}..={} for {} epoch {}",
@@ -802,10 +813,7 @@ impl DeliveryAccountability {
             ));
         };
         if received == expected {
-            if gaps
-                .iter()
-                .any(|gap| gap.from_seq <= received && received <= gap.to_seq)
-            {
+            if overlaps_sorted_gaps(gaps, received, received) {
                 return Err(format!(
                     "delivery accountability violation: prior gap report for {} epoch {} includes delivered seq {received}",
                     key.0, key.1
@@ -936,6 +944,12 @@ impl DeliveryAccountability {
             self.stale_senders.remove(&player_id);
         }
     }
+}
+
+fn overlaps_sorted_gaps(gaps: &[DeliveryGap], from_seq: u64, to_seq: u64) -> bool {
+    let first_possible = gaps.partition_point(|gap| gap.to_seq < from_seq);
+    gaps.get(first_possible)
+        .is_some_and(|gap| gap.from_seq <= to_seq)
 }
 
 /// Validate the protocol's delivery class/key pairing.
@@ -1656,6 +1670,61 @@ mod tests {
         assert!(state.pending_gaps.is_empty());
         assert!(state.departed_senders.is_empty());
         assert!(state.senders.is_empty());
+    }
+
+    #[test]
+    fn retained_gap_backlog_accepts_reordered_reports_and_rejects_overlap_atomically() {
+        let sender = id(636);
+        for ordering in ["ascending", "descending", "interleaved"] {
+            let mut state = DeliveryAccountability::default();
+            state.note_player_joined(&player(sender, 1)).unwrap();
+            let count = 512_u64;
+            for index in 0..count {
+                let ordinal = match ordering {
+                    "descending" => count - index,
+                    "interleaved" if index % 2 == 0 => index / 2 + 1,
+                    "interleaved" => count - index / 2,
+                    _ => index + 1,
+                };
+                let seq = ordinal * 2;
+                state
+                    .record_report(&DeliveryReportPayload {
+                        per_class: counters_with_superseded(index + 1),
+                        gaps: vec![gap(sender, seq, seq)],
+                    })
+                    .unwrap();
+            }
+            assert_eq!(state.pending_gaps[&(sender, 1)].len(), count as usize);
+            for (from, to) in [
+                (2, 2),
+                (1, 2),
+                (3, 5),
+                (count, count + 2),
+                (count * 2, count * 2 + 1),
+            ] {
+                let before = state.counters;
+                assert!(
+                    state
+                        .record_report(&DeliveryReportPayload {
+                            per_class: counters_with_superseded(count + to - from + 1),
+                            gaps: vec![gap(sender, from, to)],
+                        })
+                        .is_err(),
+                    "overlap {from}..={to} must be rejected"
+                );
+                assert_eq!(state.counters, before);
+                assert_eq!(state.pending_gaps[&(sender, 1)].len(), count as usize);
+            }
+            for seq in (1..=count * 2 + 1).step_by(2) {
+                assert_eq!(
+                    state
+                        .record_game_data(sender, Some(seq), Some(1), None, None)
+                        .unwrap(),
+                    GameDataDisposition::Apply
+                );
+            }
+            assert!(state.pending_gaps.is_empty());
+        }
     }
 
     #[test]

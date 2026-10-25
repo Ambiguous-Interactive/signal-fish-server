@@ -8153,3 +8153,65 @@ track independent repairs within their existing retained-gap limits. The Godot
 source tree has no delivery-accountability implementation and imports neither
 reference validator. The signaling wire is unchanged; no application migration
 is required. SDK issue completion is separate from server CI.
+
+### A20 shutdown qualification — Mixed streams and lost abandonment recovery
+
+Open #1145/#826 now has a paired simultaneous-shutdown history with a lost
+middle fragment of an ordered Rexmit(0) message and a lost standalone FORWARD
+TSN. Ordinary and wrapped TSNs require an identical FORWARD TSN retry before
+both endpoints close. Reliable successors retain exact order and bytes on the
+same stream and another stream. Reverse gameplay remains readable after
+transport closure. Each emitted SHUTDOWN or SHUTDOWN ACK requires an empty
+outbound tail and the exact final cumulative acknowledgment. New writes fail.
+Each endpoint emits exactly one Drained event after the final application read.
+The abandoned fragmented payload never reaches the application.
+
+The new `simultaneous_shutdown_retries_lost_forward_tsn_` control passes on the
+existing implementation. It adds acceptance evidence; it is not a new repair
+or proof of the historical #1120 cause. Broader #1145 qualification stays open.
+
+### A20 browser recovery qualification — Retirement at each stack wait
+
+Open #853/#889/#826 now has fourteen orchestrator histories: seven held WebRTC
+operations, each with late resolution and late rejection. The held operations
+are offer creation, local offer installation, remote offer installation, answer
+creation, local answer installation, remote answer installation, and candidate
+installation. Each history retires the same peer twelve times with 48 queued
+signals per incarnation, then starts a fresh physical link.
+
+Old calls cannot advance past their held phase or deliver queued SDP/ICE into
+the replacement. Fresh and healthy sibling links each send and receive exactly
+one probe on both required labels, with exact payloads. Relay gameplay also
+continues. This extends the existing `peer-work.test.ts` fixture. The stack is
+a deterministic fake; these histories qualify orchestrator cancellation and
+credit release, not Chromium transport establishment or historical failure
+causes. No production browser recovery change was needed.
+
+### F172 — Retained delivery gaps repeat linear searches and backlog sorting
+
+Confirmed on `4e4db8d0`; tracked in #1194 under #636/#826. Both reference
+validators scan the retained sender/epoch gaps for each overlap or contiguous
+GameData membership check. They also sort the entire retained backlog when a
+report adds later ranges. Retained gaps are sorted and nonoverlapping, so
+binary lookup can check the first range whose end reaches the input start.
+Reports still validate completely before any retained-state mutation.
+
+The new backlog controls retain 512 singleton ranges in ascending, descending,
+and interleaved arrival order, reject duplicate and boundary/interior overlaps,
+and drain exact intervening gameplay. Existing
+controls cover interleaved senders/epochs, reversed report ranges, counters,
+terminal reads and fresh epochs. The capacity ledger records measurements and
+their limits. This reduces local validator work; it does not establish a
+historical WebRTC failure cause or a server throughput result.
+
+External-client assessment: current Rust SDK `da8f2d16` and .NET SDK `e467c871`
+validators have matching retained-gap scans and sorting. Existing
+[Rust #295](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/295)
+and [.NET #146](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/146)
+now include this follow-up and acceptance cases within their current state
+limits. Godot `38bb6765` has no delivery-accountability implementation and uses
+browser WebRTC or its engine extension. It imports neither reference validator
+nor the private native transport graph. The signaling wire and public SDK
+contracts stay unchanged; no migration is required. The new browser recovery
+and SCTP shutdown histories change tests only. SDK follow-up completion is
+separate from server CI.

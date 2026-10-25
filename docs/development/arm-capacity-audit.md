@@ -5441,3 +5441,51 @@ The linked issue retains all attempts. Raw capture and reproduction script
 remain in the ignored session-529 progress directory. The independent Rust
 and .NET SDKs have lower retained-gap limits; these browser timings do not
 qualify those SDKs. No historical #889, #853 or #1120 cause is established.
+
+### Retained delivery-gap lookup and sorting (#1194)
+
+On `4e4db8d0`, both reference validators scan every retained range for overlap
+and contiguous GameData membership. Every report also sorts the full retained
+sender/epoch backlog. The repair uses binary lookup, sorts the new ranges,
+and appends or prepends groups that lie beyond the retained endpoints.
+Interleaved additions retain full sorting. Prepending still shifts retained
+storage; consuming a prefix still moves retained vector/array entries.
+
+A fixed workload records 4,096 legal one-gap reports for even sequences.
+The native workload then checks duplicate and boundary/interior rejection and
+exact odd-sequence drain outside the timed region. The browser capture times
+report admission only; its separate controls check rejection and exact drain.
+All attempts pass. Each source runs twice in
+baseline/candidate/candidate/baseline order on shared ARM64 Linux. The native
+experiment compiles the actual validator modules as isolated unoptimized Rust
+test executables against the same server library. It excludes Cargo rebuilds.
+The browser experiment bundles the actual TypeScript validators for Node and
+warms each workload before capture. Observed elapsed milliseconds:
+
+| Client and report order | Previous attempts | Candidate attempts |
+| --- | --- | --- |
+| Native ascending | 125.324, 123.570 | 10.005, 7.815 |
+| Native descending | 2453.017, 2464.688 | 17.823, 21.836 |
+| Browser ascending | 336.221, 331.239 | 42.645, 18.693 |
+| Browser descending | 344.398, 328.357 | 25.506, 17.030 |
+
+These are local processing observations with two attempts per source. They do
+not measure optimized native builds, Chromium scheduling, server throughput,
+network latency, or a historical incident cause. Permanent 512-range controls
+also cover interleaved arrivals and full-sort fallback. Existing sender/epoch,
+terminal-tail, whole-report atomicity and counter controls remain in place.
+
+Native captured baseline source SHA-256:
+`2a347fc2fc531aeee9895d88278b9d60ebb99f999138fdb13bf9708654c8d3fb`.
+Native captured candidate source SHA-256:
+`0094cfa6e89fb810bdee935c64d364f0d6a87e96970fdfd969ce9a2fb49239d1`.
+Captured sources include the same timed workload; permanent controls remove
+timing output and use the smaller three-order history. The linked issue keeps
+raw measurements and reproduction details. SDK follow-ups remain separate:
+the independent Rust and .NET clients have lower retained-gap limits, so these
+reference-client timings do not establish their cost.
+
+Browser captured baseline source SHA-256:
+`19e1fc7d3e47a108c4d647f25239411bf979804e5140acc4d0aae533a5d8ecfb`.
+Browser captured candidate source SHA-256:
+`43a142d6d33e7faa27e289bf1c2ea7a8e89c2d1289dfa89286439248c251d3ae`.
