@@ -414,3 +414,35 @@ obsolete probe. It delivers fragmented pending gameplay after abandonment,
 then completes acknowledgment and graceful retirement across TSN wrap.
 These controls are retained by the interop runner's `shutdown` selector.
 See [#1227](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1227).
+
+## Payload ownership across packet gaps
+
+The receive acknowledgment queue now retains TSNs without payload references.
+Reassembly owns accepted bytes. A gap on another stream no longer pins delivered
+packet storage or prevents uniquely owned single-fragment receive reuse.
+Send-side release now replaces the payload with an empty `Bytes` value; clearing
+its length alone can retain its backing allocation. Selectively acknowledged
+and abandoned DATA still keep their TSN, message, and recovery metadata.
+See [#1229](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1229)
+and [#1230](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1230).
+
+Replacement qualification in #912 must retain
+`shutdown_receive_gap_does_not_retain_delivered_payload_storage`,
+`shutdown_released_send_storage_does_not_wait_for_missing_prefix`, and
+`payload_queue_gap_ack_release_drops_storage_before_cumulative_ack`.
+These controls cover exact bytes, duplicates, gap reports, shared caller
+ownership, fragmented abandonment, reliable successors, TSN wrap, and graceful
+retirement. The ignored `shutdown_receive_gap_storage_profile` measures retained
+receive payload bytes in a fresh process; it is not a throughput benchmark.
+
+## Full-width receive credit
+
+Receive credit subtracts stream and deferred-reset storage with saturation
+before narrowing to the wire's `u32`. Accepted DATA can exceed the final positive
+credit by one fragment. A full-width configured window must then stay at zero,
+not wrap back into free space. Multiple streams must not overflow the sum.
+See [#1231](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1231).
+Replacement qualification must retain both `shutdown_receive_credit_` controls,
+including exact credit after every application read. The large logical-payload
+history shares physical buffers; it does not claim a 4 GiB socket transfer.
+All new runtime controls run under the existing shutdown and gap-ACK selectors.

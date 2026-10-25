@@ -3549,7 +3549,7 @@ fn shutdown_forward_tsn_work_tracks_retained_data_not_abandoned_distance() -> Re
             })?;
             assert_eq!(local.peer_last_tsn, base.wrapping_add(4096));
             assert_eq!(local.payload_queue.len(), 1);
-            assert_eq!(local.payload_queue.get_num_bytes(), 4);
+            assert_eq!(local.payload_queue.get_num_bytes(), 0);
             assert!(
                 local.payload_queue.pop_attempts <= 3,
                 "base={base}, shutdown={shutdown}: {} removal attempts for two retained chunks",
@@ -4627,5 +4627,407 @@ fn shutdown_zero_window_pending_tail_recovers_a_lost_window_update() -> Result<(
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn shutdown_receive_gap_does_not_retain_delivered_payload_storage() -> Result<()> {
+    for (shutdown, receiver_shutdown) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        for first_tsn in [100, u32::MAX - 2] {
+            let (mut sender, mut receiver) = reset_pair();
+            let now = Instant::now();
+            sender.my_next_tsn = first_tsn;
+            sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+            sender.ack_mode = AckMode::NoDelay;
+            receiver.ack_mode = AckMode::NoDelay;
+            sender.cwnd = 64 * sender.mtu;
+            sender.rwnd = sender.cwnd;
+            let ppi = PayloadProtocolIdentifier::Binary;
+            let missing = Bytes::from(vec![0xa5; sender.max_payload_size as usize]);
+            sender.stream(1)?.write_sctp(now, &missing, ppi)?;
+            sender.open_stream(2, ppi)?;
+            let expected: Vec<_> = (0..16)
+                .map(|index| Bytes::from(vec![index; sender.max_payload_size as usize]))
+                .collect();
+            for payload in &expected {
+                sender.stream(2)?.write_sctp(now, payload, ppi)?;
+            }
+            if shutdown {
+                sender.shutdown()?;
+            }
+            let mut packets = sender.gather_outbound(now).0.into_iter();
+            if receiver_shutdown {
+                receiver.shutdown()?;
+            }
+            let held = packets.next().expect("missing prefix packet");
+            let mut outputs = Vec::new();
+            for (index, raw) in packets.enumerate() {
+                // A socket supplies independent receive storage. The sender's
+                // zero-copy burst shares its backing allocation across packets.
+                let raw = Bytes::copy_from_slice(&raw);
+                let packet = Packet::unmarshal(&raw)?;
+                assert_eq!(packet.chunks.len(), 1);
+                let data = packet.chunks[0]
+                    .as_any()
+                    .downcast_ref::<ChunkPayloadData>()
+                    .expect("one complete gameplay message per packet");
+                assert_eq!(data.user_data, expected[index]);
+                let pointer = data.user_data.as_ptr();
+                receiver.handle_inbound(packet, now)?;
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                drop(raw);
+                let message = receiver
+                    .stream(2)?
+                    .read_sctp()?
+                    .expect("ready other stream");
+                assert!(
+                    message.chunks[0].user_data.is_unique(),
+                    "gap must not share payload storage"
+                );
+                let output = message.into_payload(65536)?;
+                assert_eq!(
+                    output.as_ptr(),
+                    pointer,
+                    "gap must not force a receive copy"
+                );
+                assert_eq!(output.as_ref(), expected[index].as_ref());
+                outputs.push(output);
+            }
+            assert_eq!(outputs.len(), expected.len());
+            assert_eq!(receiver.payload_queue.len(), expected.len());
+            assert_eq!(receiver.payload_queue.get_num_bytes(), 0);
+            assert_eq!(
+                receiver.get_my_receiver_window_credit(),
+                receiver.max_receive_buffer_size
+            );
+            // Duplicate detection and the exact gap report must survive application reads.
+            let sack = receiver.create_selective_ack_chunk();
+            assert_eq!(sack.cumulative_tsn_ack, first_tsn.wrapping_sub(1));
+            assert_eq!(sack.gap_ack_blocks.len(), 1);
+            assert_eq!(sack.gap_ack_blocks[0].start, 2);
+            assert_eq!(sack.gap_ack_blocks[0].end, 17);
+            assert_eq!(
+                sack.duplicate_tsn,
+                (1_u32..=16)
+                    .map(|offset| first_tsn.wrapping_add(offset))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                receiver.stream(2)?.read_sctp()?.is_none(),
+                "duplicates cannot become gameplay"
+            );
+            sender.handle_sack(&sack, now)?;
+            receiver.handle_inbound(Packet::unmarshal(&held)?, now)?;
+            drop(held);
+            assert_eq!(receiver.peer_last_tsn, first_tsn.wrapping_add(16));
+            assert!(receiver.payload_queue.is_empty());
+            assert_eq!(
+                receiver
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .into_payload(65536)?
+                    .as_ref(),
+                missing.as_ref()
+            );
+            for _ in 0..8 {
+                for raw in receiver.gather_outbound(now).0 {
+                    sender.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+                for raw in sender.gather_outbound(now).0 {
+                    receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+            }
+            if shutdown || receiver_shutdown {
+                for endpoint in [&mut sender, &mut receiver] {
+                    assert_eq!(endpoint.state(), AssociationState::Closed);
+                    assert!(endpoint.poll_endpoint_event().is_some());
+                    assert!(endpoint.poll_endpoint_event().is_none());
+                }
+            }
+            for (output, expected) in outputs.iter().zip(&expected) {
+                assert_eq!(
+                    output.as_ref(),
+                    expected.as_ref(),
+                    "application owns bytes after closure"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "isolated receive-gap storage measurement; run in a fresh process"]
+fn shutdown_receive_gap_storage_profile() -> Result<()> {
+    let (mut sender, mut receiver) = reset_pair();
+    let now = Instant::now();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    sender.cwnd = 64 * 1024 * 1024;
+    sender.rwnd = sender.cwnd;
+    receiver.max_receive_buffer_size = sender.cwnd;
+    sender
+        .stream(1)?
+        .write_sctp(now, &Bytes::from(vec![0xff; 1024]), ppi)?;
+    sender.open_stream(2, ppi)?;
+    for index in 0..16384_u32 {
+        let mut payload = vec![0; 1024];
+        payload[..4].copy_from_slice(&index.to_be_bytes());
+        sender.stream(2)?.write(now, &payload)?;
+    }
+    sender.shutdown()?;
+    let mut packets = sender.gather_outbound(now).0.into_iter();
+    let _held = packets.next().expect("hold the first TSN");
+    let mut received = 0_u32;
+    for raw in packets {
+        // Match independent socket receive buffers, rather than send-burst slices.
+        let raw = Bytes::copy_from_slice(&raw);
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        drop(raw);
+        while let Some(message) = receiver.stream(2)?.read_sctp()? {
+            let payload = message.into_payload(1024)?;
+            assert_eq!(&payload[..4], &received.to_be_bytes());
+            assert!(payload[4..].iter().all(|byte| *byte == 0));
+            received += 1;
+        }
+    }
+    assert_eq!(received, 16384);
+    assert_eq!(receiver.payload_queue.len(), received as usize);
+    println!(
+        "RECEIVE_GAP_STORAGE messages={received} retained_payload_bytes={}",
+        receiver.payload_queue.get_num_bytes()
+    );
+    std::hint::black_box(receiver);
+    Ok(())
+}
+
+#[test]
+fn shutdown_released_send_storage_does_not_wait_for_missing_prefix() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct OwnedPayload(Vec<u8>, Arc<AtomicUsize>);
+    impl AsRef<[u8]> for OwnedPayload {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Drop for OwnedPayload {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for abandon in [false, true] {
+        for first_tsn in [100, u32::MAX - 2] {
+            let (mut sender, mut receiver) = reset_pair();
+            let now = Instant::now();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let ppi = PayloadProtocolIdentifier::Binary;
+            sender.my_next_tsn = first_tsn;
+            sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+            sender.cwnd = 64 * sender.mtu;
+            sender.rwnd = sender.cwnd;
+            sender.ack_mode = AckMode::NoDelay;
+            receiver.ack_mode = AckMode::NoDelay;
+            sender.stream(1)?.write(now, b"missing prefix")?;
+            let missing = sender.gather_outbound(now).0;
+            sender.open_stream(2, ppi)?;
+            if abandon {
+                sender
+                    .stream(2)?
+                    .set_reliability_params(false, ReliabilityType::Rexmit, 0)?;
+            }
+            let expected: Vec<_> = (0..3000).map(|index| (index % 251) as u8).collect();
+            sender.stream(2)?.write_sctp(
+                now,
+                &Bytes::from_owner(OwnedPayload(expected.clone(), Arc::clone(&drops))),
+                ppi,
+            )?;
+            for raw in sender.gather_outbound(now).0 {
+                if !abandon {
+                    receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+            }
+            sender.stream(1)?.write(now, b"reliable successor")?;
+            // Keep a successor admitted but unsent while the old storage retires.
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            sender.shutdown()?;
+            let at = if abandon {
+                let at = sender.poll_timeout().expect("retry deadline");
+                sender.handle_timeout(at);
+                // T3 retires all fragments of the no-retry message.
+                sender.gather_outbound(at);
+                at
+            } else {
+                assert_eq!(
+                    receiver
+                        .stream(2)?
+                        .read_sctp()?
+                        .unwrap()
+                        .into_payload(65536)?
+                        .as_ref(),
+                    expected.as_slice()
+                );
+                sender.handle_sack(&receiver.create_selective_ack_chunk(), now)?;
+                now
+            };
+            assert_eq!(sender.cumulative_tsn_ack_point, first_tsn.wrapping_sub(1));
+            assert!(!sender.inflight_queue.is_empty());
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "released fragments must not retain caller storage behind a missing prefix"
+            );
+            for raw in missing {
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+            }
+            assert_eq!(
+                receiver
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .into_payload(65536)?
+                    .as_ref(),
+                b"missing prefix"
+            );
+            let mut successors = Vec::new();
+            for step in 0..80 {
+                let at = at + Duration::from_millis(step * 100);
+                sender.handle_timeout(at);
+                receiver.handle_timeout(at);
+                for raw in sender.gather_outbound(at).0 {
+                    receiver.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                for raw in receiver.gather_outbound(at).0 {
+                    sender.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+                }
+                if receiver.streams.contains_key(&1) {
+                    while let Some(message) = receiver.stream(1)?.read_sctp()? {
+                        successors.push(message.into_payload(65536)?.freeze());
+                    }
+                }
+                if sender.state() == AssociationState::Closed
+                    && receiver.state() == AssociationState::Closed
+                {
+                    break;
+                }
+            }
+            assert_eq!(successors, vec![Bytes::from_static(b"reliable successor")]);
+            if abandon && receiver.streams.contains_key(&2) {
+                assert!(receiver.stream(2)?.read_sctp()?.is_none());
+            }
+            for endpoint in [&mut sender, &mut receiver] {
+                assert_eq!(endpoint.state(), AssociationState::Closed);
+                assert!(endpoint.poll_endpoint_event().is_some());
+                assert!(endpoint.poll_endpoint_event().is_none());
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_receive_credit_saturates_across_stream_and_reset_storage() -> Result<()> {
+    for maximum in [0, 1, 65536, u32::MAX] {
+        for (first, second, deferred) in [
+            (0, 0, 0),
+            (1, 2, 3),
+            (u32::MAX as usize, 1, 0),
+            (u32::MAX as usize / 2 + 1, u32::MAX as usize / 2 + 1, 0),
+            (1, 1, usize::MAX),
+        ] {
+            let (mut receiver, _) = reset_pair();
+            receiver.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+            receiver.max_receive_buffer_size = maximum;
+            receiver
+                .streams
+                .get_mut(&1)
+                .unwrap()
+                .reassembly_queue
+                .n_bytes = first;
+            receiver
+                .streams
+                .get_mut(&2)
+                .unwrap()
+                .reassembly_queue
+                .n_bytes = second;
+            receiver.deferred_reset_bytes = deferred;
+            let expected = u128::from(maximum)
+                .saturating_sub(first as u128 + second as u128 + deferred as u128)
+                as u32;
+            assert_eq!(
+                receiver.get_my_receiver_window_credit(),
+                expected,
+                "maximum={maximum}, queues={first}/{second}, deferred={deferred}"
+            );
+            receiver.shutdown()?;
+            assert_eq!(
+                receiver
+                    .create_selective_ack_chunk()
+                    .advertised_receiver_window_credit,
+                expected
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn shutdown_receive_credit_keeps_large_accepted_tail_until_read() -> Result<()> {
+    let (mut receiver, _) = reset_pair();
+    let now = Instant::now();
+    receiver.max_receive_buffer_size = u32::MAX;
+    let body = Bytes::from(vec![0x5a; 65000]);
+    let count = u32::MAX as usize / body.len() + 1;
+    // Share physical storage to exercise over 4 GiB of logically accepted
+    // DATA without requiring a 4 GiB test allocation. Every message has its
+    // own valid TSN and ordered SSN; no queue counters are injected here.
+    for index in 0..count {
+        receiver.handle_data(&ChunkPayloadData {
+            tsn: receiver.peer_last_tsn.wrapping_add(1),
+            stream_identifier: 1,
+            stream_sequence_number: index as u16,
+            beginning_fragment: true,
+            ending_fragment: true,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: body.clone(),
+            ..Default::default()
+        })?;
+    }
+    assert_eq!(
+        receiver.get_my_receiver_window_credit(),
+        0,
+        "a final admitted message may exceed remaining credit; it must not reopen the window"
+    );
+    assert_eq!(
+        receiver.streams[&1].get_num_bytes_in_reassembly_queue(),
+        count * body.len()
+    );
+    // A live graceful state must keep every accepted payload readable.
+    receiver
+        .open_stream(2, PayloadProtocolIdentifier::Binary)?
+        .write(now, b"pending local command")?;
+    receiver.shutdown()?;
+    assert_eq!(receiver.state(), AssociationState::ShutdownPending);
+    for index in 0..count {
+        let message = receiver.stream(1)?.read_sctp()?.expect("accepted tail");
+        assert_eq!(message.chunks.len(), 1);
+        assert_eq!(message.chunks[0].user_data, body, "message {index}");
+        let expected = (u32::MAX as usize).saturating_sub((count - index - 1) * body.len()) as u32;
+        assert_eq!(receiver.get_my_receiver_window_credit(), expected);
+    }
+    assert_eq!(receiver.get_my_receiver_window_credit(), u32::MAX);
+    assert!(receiver.stream(1)?.read_sctp()?.is_none());
     Ok(())
 }

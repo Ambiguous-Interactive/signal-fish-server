@@ -1,6 +1,7 @@
 use crate::chunk::chunk_payload_data::{ChunkPayloadData, MessageId, MessageReliability};
 use crate::chunk::chunk_selective_ack::GapAckBlock;
 use crate::util::*;
+use bytes::Bytes;
 
 use rustc_hash::FxHashMap;
 use std::collections::{VecDeque, hash_map::Entry};
@@ -158,6 +159,19 @@ impl PayloadQueue {
         true
     }
 
+    /// Receive acknowledgments need only the TSN. Reassembly owns accepted
+    /// payloads; retaining another Bytes here pins delivered storage behind
+    /// unrelated packet loss and prevents single-fragment receive reuse.
+    pub(crate) fn push_received(&mut self, tsn: u32, cumulative_tsn: u32) -> bool {
+        self.push(
+            ChunkPayloadData {
+                tsn,
+                ..Default::default()
+            },
+            cumulative_tsn,
+        )
+    }
+
     /// pop pops only if the oldest chunk's TSN matches the given TSN.
     pub(crate) fn pop(&mut self, tsn: u32) -> Option<ChunkPayloadData> {
         #[cfg(test)]
@@ -278,7 +292,9 @@ impl PayloadQueue {
         if let Some(c) = self.chunk_map.get_mut(&tsn) {
             let n = c.user_data.len();
             self.n_bytes -= n;
-            c.user_data.clear();
+            // Empty Bytes can still own the full allocation. Retire ownership
+            // now, while retaining TSN and acknowledgment metadata for holes.
+            c.user_data = Bytes::new();
             n
         } else {
             0

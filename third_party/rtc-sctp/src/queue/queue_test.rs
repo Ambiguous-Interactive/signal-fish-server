@@ -2133,3 +2133,58 @@ fn reassembly_unordered_forward_tsn_preserves_later_run_endpoints() {
         assert_eq!(queue.get_num_bytes(), 0);
     }
 }
+
+#[test]
+fn payload_queue_gap_ack_release_drops_storage_before_cumulative_ack() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct OwnedPayload(Vec<u8>, Arc<AtomicUsize>);
+    impl AsRef<[u8]> for OwnedPayload {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Drop for OwnedPayload {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    for acknowledge in [false, true] {
+        for shared in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let payload = Bytes::from_owner(OwnedPayload(vec![0x5a; 4096], Arc::clone(&drops)));
+            let held = shared.then(|| payload.clone());
+            let mut queue = PayloadQueue::new();
+            queue.push_no_check(ChunkPayloadData {
+                tsn: 7,
+                user_data: payload,
+                ..Default::default()
+            });
+            if acknowledge {
+                assert!(queue.acknowledge(7));
+            }
+            assert_eq!(queue.release_payload(7), 4096);
+            assert_eq!(queue.get_num_bytes(), 0);
+            assert_eq!(
+                queue.len(),
+                1,
+                "TSN evidence stays until cumulative progress"
+            );
+            assert_eq!(queue.get(7).unwrap().acknowledged, acknowledge);
+            assert_eq!(queue.release_payload(7), 0);
+            assert_eq!(drops.load(Ordering::SeqCst), usize::from(!shared));
+            drop(held);
+            assert_eq!(
+                drops.load(Ordering::SeqCst),
+                1,
+                "queue must not pin empty payload ownership"
+            );
+            assert!(queue.pop(7).is_some());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+}

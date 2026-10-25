@@ -8919,3 +8919,74 @@ Artifacts remain at `/tmp/session542-live-long`; binary hashes, logs, selected
 stall intervals, and the resource report remain in `progress/session-542/`.
 This is a new partial-work memory observation. It does not bound the full
 planned workload or complete #775 and #1009.
+
+### F189 — Native receive acknowledgment gaps retain delivered payloads
+
+Confirmed on `116c6240`; tracked in #1229 under #636/#1145/#912. The receive
+acknowledgment queue clones accepted DATA, although it uses only the TSN.
+A missing prefix on one stream therefore keeps later packet buffers alive
+after another stream's application reads. It also prevents single-fragment
+storage reuse. The new paired wire control fails on the old source after
+independent receive buffers and packet ownership are released.
+
+The repair retains TSN metadata without payload ownership. Sixteen messages
+on another stream reuse their exact received storage while the first packet
+is withheld. Exact duplicate TSNs, gap blocks, receive credit, final cumulative
+progress, and application bytes survive ordinary and wrapped TSNs. Graceful
+shutdown retires both endpoints once. Application buffers remain valid after
+closure. A fresh-process debug cohort delivers and reads 16,384 messages of
+1,024 bytes behind one withheld packet. All three baseline trials retain
+16,777,216 receive payload bytes; all three candidates retain zero. Peak RSS
+is 69,388–69,712 KiB before and 54,352–54,384 KiB after. This measures this
+retained-storage workload, not general process memory or server capacity.
+Existing deferred-generation reset controls qualify the other
+receive-admission branch. This does not establish a historical timeout cause.
+
+### F190 — Native released send bytes keep their backing allocation
+
+Confirmed on `116c6240`; tracked in #1230 under #636/#1145/#912. Send payload
+release uses `Bytes::clear`, which can retain the backing owner after its
+logical length reaches zero. Selective acknowledgment and abandonment can
+therefore report released bytes while a missing prefix still pins storage.
+The owner-drop regression and paired fragmented-send control fail before repair.
+
+The repair drops payload ownership while preserving acknowledgment, message,
+and TSN metadata. Shared caller ownership remains valid. Repeated release
+returns zero and drops no owner twice. A paired history holds the reliable
+prefix, selectively acknowledges or abandons a later fragmented message, and
+requires its owner to retire before cumulative progress. Exact reliable
+successor bytes and graceful endpoint retirement survive ordinary and wrapped
+TSNs. This qualifies the storage boundary; it is not a throughput result.
+
+### F191 — Full-width native receive credit wraps after accepted DATA
+
+Confirmed on `116c6240`; tracked in #1231 under #1145/#826/#912. Receive credit
+narrows queue totals to `u32` before summing them. Multiple stream totals can
+panic on overflow. One accepted message can cross the final positive receive
+credit, making a full-width queue advertise free space again. The boundary
+table panics on the old sum. The accepted-DATA history reports 4,294,929,591
+bytes of free space instead of zero.
+
+The repair subtracts each stream and deferred-reset owner with saturation
+before narrowing the result. The table covers zero, ordinary, and full-width
+limits. The large history admits 66,077 distinct ordered messages of 65,000
+bytes through `handle_data`, across SSN wrap. Shared physical buffers keep
+test memory small. Every accepted message remains exact through application
+reads in ShutdownPending, and each read returns the exact remaining credit.
+This is a low-level accepted-DATA history, not a 4 GiB socket experiment or
+proof that a particular UDP route supports this configured workload.
+
+External-client assessment for F189–F191: Rust `da8f2d16` has no RTC runtime
+dependency. .NET `e467c871` has no package dependency on this stack and exposes
+an independent transport seam. Godot `abb17511` uses engine or browser WebRTC
+classes. Current manifest and mesh-source inspection confirms that none uses
+these vendored native sources. Server wire messages, SDK APIs, and migration
+needs are unchanged. All three independent clients are unaffected.
+
+Local validation for F189–F191 passes: 108 selected SCTP shutdown, reset, and
+payload-queue controls; all four receive-gap shutdown-role histories; four
+real native reset/loss histories; and a live two-peer WebRTC exchange. Strict
+root and native all-target/all-feature lint and SCTP production lint pass.
+Markdown and documentation consistency pass. The CI-config wrapper retains
+its excluded audit failure. The three new defects are separate from the
+historical public-client timeout investigations, which remain open.

@@ -1578,7 +1578,7 @@ impl Association {
         );
         self.stats.inc_datas();
         if !self.payload_queue.can_push(d, self.peer_last_tsn) {
-            self.payload_queue.push(d.clone(), self.peer_last_tsn);
+            self.payload_queue.push_received(d.tsn, self.peer_last_tsn);
             return self.handle_peer_last_tsn_and_acknowledgement(true);
         }
         // A peer may reuse its SID before the final reset response reaches
@@ -1623,7 +1623,7 @@ impl Association {
                 queue.push(d.clone());
                 self.deferred_reset_bytes += Self::deferred_data_cost(d) + queue_cost;
                 self.deferred_reset_data.insert(d.tsn, d.clone());
-                self.payload_queue.push(d.clone(), self.peer_last_tsn);
+                self.payload_queue.push_received(d.tsn, self.peer_last_tsn);
             }
             // ACK accepted DATA, duplicates, and the current receive window
             // even while the application cannot access the new generation.
@@ -1637,7 +1637,7 @@ impl Association {
         if self.get_or_create_stream(d.stream_identifier).is_some() {
             if self.get_my_receiver_window_credit() > 0 {
                 // Pass the new chunk to stream level as soon as it arrives
-                self.payload_queue.push(d.clone(), self.peer_last_tsn);
+                self.payload_queue.push_received(d.tsn, self.peer_last_tsn);
                 stream_handle_data = true;
             } else {
                 // Receive buffer is full. Two kinds of chunk are still worth taking,
@@ -1680,7 +1680,7 @@ impl Association {
                         d.tsn,
                         d.stream_sequence_number
                     );
-                    self.payload_queue.push(d.clone(), self.peer_last_tsn);
+                    self.payload_queue.push_received(d.tsn, self.peer_last_tsn);
                     stream_handle_data = true;
                 } else {
                     debug!(
@@ -2855,12 +2855,15 @@ impl Association {
     }
 
     pub(crate) fn get_my_receiver_window_credit(&self) -> u32 {
-        let mut bytes_queued = self.deferred_reset_bytes as u32;
-        for s in self.streams.values() {
-            bytes_queued += s.get_num_bytes_in_reassembly_queue() as u32;
+        // Accepted DATA can exceed the remaining window by one fragment.
+        // Subtract each owner before narrowing, so full-width windows and
+        // multiple streams cannot wrap their aggregate back into free credit.
+        let mut credit =
+            (self.max_receive_buffer_size as usize).saturating_sub(self.deferred_reset_bytes);
+        for stream in self.streams.values() {
+            credit = credit.saturating_sub(stream.get_num_bytes_in_reassembly_queue());
         }
-
-        self.max_receive_buffer_size.saturating_sub(bytes_queued)
+        credit as u32
     }
 
     /// gather_outbound gathers outgoing packets. The returned bool value set to
