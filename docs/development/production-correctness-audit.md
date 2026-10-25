@@ -8813,3 +8813,55 @@ all-target/all-feature lint and SCTP production lint pass. Markdown and doc
 consistency pass. The CI-config wrapper retains its excluded audit error.
 An extra strict vendored-test lint pass finds the same 61 existing findings on
 both main and the candidate; #1224 tracks that separate cleanup.
+
+### Native zero-window retries behind retained DATA (#1227/#1145/#912)
+
+Session 542 starts from `3c2fee74`. T3 retry selection permits a zero-window
+probe only at `cumulative_ack + 1`. An abandoned or gap-acknowledged entry can
+retain that position while later reliable DATA still needs delivery. Two new
+regressions fail with the old selection condition. The repair uses the earliest
+outstanding DATA, sharing the existing SACK timer lookup. It does not treat an
+already retried but still outstanding predecessor as permission for another
+probe.
+
+The paired serialized packet history drops an obsolete partial-reliability
+message and the ending fragment of a later reliable message. Its beginning
+fragment fills the receiver. The receiver sends a real zero-window SACK with
+a gap acknowledgment. T3 abandons the obsolete message. The old source emits
+no live retry. The repaired source emits one, and the network delivers FORWARD
+TSN before that probe while withholding newer cumulative progress. The
+receiver then accepts the ending fragment and returns the exact application
+bytes once. Established and graceful-shutdown histories cover ordinary and
+wrapped TSNs. Shutdown retires both endpoints once after acknowledgment.
+Additional controls cover a partial window, two live candidates, expiry during
+retry selection, and repeated polls. This establishes a low-level paired SCTP
+history. It does not establish the cause of #1120 or a historical public-client
+incident. The broader #1145 and #912 campaigns remain open.
+
+### Capacity schedule iteration (#636)
+
+Sequential schedule iteration now advances through each sorted churn boundary
+once. It retains constant iterator state and no new per-send storage. Indexed
+access keeps its former rule. Unsorted synthetic churn histories use that rule
+as a fallback. Every shift still uses the original intended time. Frozen eager
+timelines and indexed comparisons cover jitter, phases, independent iterators,
+repeated boundaries, and exhaustion.
+
+An alternating local debug probe visits 720,000 sends and 26 churn boundaries.
+All eight passes retain digest `260363167789419`. Indexed scans take
+465,723–580,183 microseconds. Sequential iteration takes 43,595–52,047
+microseconds. This measures generator schedule work, not server capacity or
+release throughput. It does not explain the no-churn #1009 workload or complete
+the ten-minute capacity qualification in #775.
+
+External-client assessment: the current Rust manifest declares no RTC runtime
+dependency. .NET `e467c871` has no package dependencies. Godot `c4bf6e01` uses
+engine or browser WebRTC classes. None consumes the vendored reference-client
+SCTP sources or the capacity runner. Server messages and SDK contracts are
+unchanged. All three clients are unaffected and need no tracking change.
+
+Local validation passes: 52 selected SCTP shutdown histories, eight recovery
+controls, 14 capacity schedule/replay controls, and root and native strict
+all-target/all-feature lint. The new paired control also fails when only the
+old probe-selection condition is restored. The retained dependency audit
+failure remains excluded from session delivery.

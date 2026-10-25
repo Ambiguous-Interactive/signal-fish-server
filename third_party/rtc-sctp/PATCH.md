@@ -393,3 +393,20 @@ and `reassembly_single_fragment_messages_retain_one_fragment_slot`.
 The graceful unread-message control also holds 1,024 small messages at each
 endpoint until terminal reads. The queue defect does not establish a failure
 through association-level duplicate filtering or explain #1120.
+
+## Zero-window retry selection
+
+T3 retries select the earliest outstanding DATA for a receive-window probe.
+Abandoned and gap-acknowledged entries can remain ahead of that DATA until a
+cumulative acknowledgment arrives. Those retained entries must not block the
+probe. An earlier live entry still blocks a later probe after repeated polls.
+The same outstanding lookup continues to own SACK timer progress.
+
+The `shutdown_zero_window_` controls cover ordinary gameplay and graceful
+drain, zero and partial receive credit, expiry while selecting a retry,
+multiple live candidates, repeated polls, and TSN wrap. The paired packet
+history fills the receiver with a fragmented reliable message, abandons a
+lost earlier message, reorders FORWARD TSN ahead of the live probe, and
+preserves exact payloads through reads, acknowledgments, and endpoint drain.
+These controls are retained by the interop runner's `shutdown` selector.
+See [#1227](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1227).
