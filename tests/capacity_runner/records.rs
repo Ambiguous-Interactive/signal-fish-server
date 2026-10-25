@@ -994,22 +994,7 @@ fn sort_sent_events(events: &mut [SentEvent]) {
         events.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
         return;
     }
-    let maximum_grouped_senders = (events.len() / 16).max(16);
-    let mut sender_ranges: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
-    for event in events.iter() {
-        sender_ranges.entry(event.sender.as_str()).or_default().1 += 1;
-        if sender_ranges.len() > maximum_grouped_senders {
-            drop(sender_ranges);
-            events.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
-            return;
-        }
-    }
-    let mut offset = 0;
-    for (next, count) in sender_ranges.values_mut() {
-        *next = offset;
-        offset += *count;
-    }
-    let mut source_positions = grouped_send_positions(events, &mut sender_ranges);
+    let mut source_positions = send_sort_positions(events);
     for start in 0..source_positions.len() {
         let mut destination = start;
         loop {
@@ -1023,6 +1008,30 @@ fn sort_sent_events(events: &mut [SentEvent]) {
             destination = source;
         }
     }
+}
+
+fn send_sort_positions(events: &[SentEvent]) -> Vec<u32> {
+    let maximum_grouped_senders = (events.len() / 16).max(16);
+    let mut sender_ranges: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for event in events {
+        sender_ranges.entry(event.sender.as_str()).or_default().1 += 1;
+        if sender_ranges.len() > maximum_grouped_senders {
+            drop(sender_ranges);
+            let mut positions: Vec<u32> =
+                (0..u32::try_from(events.len()).expect("validated send count")).collect();
+            positions.sort_by_key(|&position| {
+                let event = &events[position as usize];
+                (event.sender.as_str(), event.seq)
+            });
+            return positions;
+        }
+    }
+    let mut offset = 0;
+    for (next, count) in sender_ranges.values_mut() {
+        *next = offset;
+        offset += *count;
+    }
+    grouped_send_positions(events, &mut sender_ranges)
 }
 
 fn compact_send_positions_fit(count: usize) -> bool {
@@ -1232,6 +1241,52 @@ mod tests {
     }
 
     #[test]
+    fn sparse_sender_sort_positions_keep_exact_stable_identity_in_four_bytes() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        for sender_count in [17, 64, 1024] {
+            for repeats in [1, 2, 3] {
+                let mut events = Vec::new();
+                for repetition in 0..repeats {
+                    for sender in (0..sender_count).rev() {
+                        let mut event = base.clone();
+                        event.sender = format!("未知-{sender:04}").into();
+                        event.seq = if sender % 2 == 0 { 0 } else { u64::MAX };
+                        event.sent_us = repetition;
+                        events.push(event);
+                    }
+                }
+                let positions = send_sort_positions(&events);
+                assert_eq!(positions.len(), events.len());
+                assert!(positions.capacity() * std::mem::size_of::<u32>() <= events.len() * 4);
+                let mut expected: Vec<_> = (0..events.len()).collect();
+                expected.sort_by_key(|&position| {
+                    (events[position].sender.as_str(), events[position].seq)
+                });
+                assert_eq!(
+                    positions
+                        .iter()
+                        .map(|&position| position as usize)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                sort_sent_events(&mut events);
+                let output = tempfile::tempdir().expect("sparse sender artifacts");
+                let records = RunRecords {
+                    sent: events,
+                    ..RunRecords::default()
+                };
+                crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+                let replayed = crate::artifacts::read_records(output.path()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&records).unwrap(),
+                    serde_json::to_value(&replayed).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sparse_sender_sort_matches_stable_order_with_single_and_repeated_keys() {
         let context = crate::unit_context();
         let base = crate::complete_records(&context.plans).sent[0].clone();
@@ -1303,7 +1358,12 @@ mod tests {
         let compact = std::env::var("CAPACITY_SORT_PROBE_COMPACT").as_deref() == Ok("1");
         let context = crate::unit_context();
         let base = crate::complete_records(&context.plans).sent[0].clone();
-        let names: Vec<ReceiptName> = (0..256)
+        let sender_count = std::env::var("CAPACITY_SORT_PROBE_SENDERS")
+            .unwrap_or_else(|_| "256".into())
+            .parse::<usize>()
+            .expect("sender count");
+        assert!((1..=count).contains(&sender_count));
+        let names: Vec<ReceiptName> = (0..sender_count)
             .map(|index| format!("peer-{index:03}").into())
             .collect();
         let mut events = Vec::with_capacity(count);
@@ -1331,7 +1391,7 @@ mod tests {
         println!(
             "SEND_SORT_PROFILE {}",
             serde_json::json!({
-                "sends": count, "compact": compact, "collected_rss_bytes": collected_rss,
+                "sends": count, "senders": sender_count, "compact": compact, "collected_rss_bytes": collected_rss,
                 "event_bytes": std::mem::size_of::<SentEvent>(),
                 "elapsed_us": elapsed_us,
             })

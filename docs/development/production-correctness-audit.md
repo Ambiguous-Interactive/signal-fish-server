@@ -8660,3 +8660,46 @@ old-sort comparisons. Shared-host measurements, all attempts, and limits
 are recorded in the [capacity audit](arm-capacity-audit.md).
 This reduces repeated analysis work; it does not close #775 or qualify a
 server capacity point.
+
+### A20 — Selected browser ICE route evidence (#853/#889)
+
+The browser previously retained channel counters but discarded the selected
+ICE route from the same stats report. It could not show whether the selected
+route had received transport bytes when a gameplay receipt was missing. The
+red-first control fails on the baseline because that evidence is absent.
+
+The reference engine now records one transport-selected pair, its observed
+state, nomination, exact byte counters, round-trip seconds, and local/remote
+candidate types. It does not infer selection from a nominated or successful
+pair. Missing references, ambiguous transport selections, and unsupported
+fields remain explicit as null. The existing sample age and pending/failed
+query state apply to this evidence. A failed refresh retains aged previous
+values; a successful refresh with no route clears them. Snapshots copy scalars,
+and a query from a retired physical link cannot change its replacement.
+
+The browser unit harness and type checks pass. The three-player missing-label
+controls verify the selected route survives into the final timeout output for
+both roles and both labels. Hung queries preserve the existing exit deadline.
+The real Chromium pair retains succeeded host/host routes on both endpoints,
+with 2,468/2,596 transport bytes in opposite directions and 0.003 second RTT in
+this observation. Exact multibyte application receipts remain 20/22 bytes per
+required label. Transport bytes include protocol traffic and do not prove
+application receipt. No historical failure cause or transport repair is claimed.
+The two investigations stay open. The change affects diagnostic output only.
+
+External-client assessment: Rust `da8f2d16` declares no concrete RTC runtime
+and exposes a driver seam. .NET `e467c871` has no package dependencies and
+leaves peer networking to applications. Godot `e4537c17` uses its own addon
+and engine WebRTC classes. Current source checks confirm none imports the
+browser reference engine or capacity collector. No signaling wire, SDK API,
+transport decision, or migration changes are required for these clients.
+
+### High-cardinality capacity collector memory (#775/#636)
+
+The compact send-sort path now also handles high sender counts. The prior
+fallback used stable full-event scratch. Nine sparse differential layouts,
+complete artifact roundtrips, and all 27 focused records controls pass. Raw
+sends and duplicate order remain exact. The [capacity audit](arm-capacity-audit.md)
+records all measured cohorts, binary hashes, peak RSS reductions, and the
+higher sorting cost. This advances the memory campaign without claiming a
+complete process bound, a stall repair, or a server capacity point.

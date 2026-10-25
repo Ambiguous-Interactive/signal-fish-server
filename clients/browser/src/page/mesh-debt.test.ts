@@ -84,25 +84,33 @@ for (const unpaidInitiates of [false, true]) {
         getStats(): Promise<Map<string, object>> {
           this.statsCalls += 1;
           if (statsMode === 'pending') return new Promise(() => {});
-          return Promise.resolve(
-            new Map(
-              [...this.channels].map(([label, channel]) => [
+          const report = new Map<string, object>(
+            [...this.channels].map(([label, channel]) => [
+              label,
+              {
+                type: 'data-channel',
                 label,
-                {
-                  type: 'data-channel',
-                  label,
-                  dataChannelIdentifier: channel.id,
-                  state: channel.readyState,
-                  messagesSent: sent.filter(
-                    (probe) => probe.peer === this.owner && probe.label === label,
-                  ).length,
-                  messagesReceived: channel.wireReceipts,
-                  bytesSent: 0,
-                  bytesReceived: 0,
-                },
-              ]),
-            ),
+                dataChannelIdentifier: channel.id,
+                state: channel.readyState,
+                messagesSent: sent.filter(
+                  (probe) => probe.peer === this.owner && probe.label === label,
+                ).length,
+                messagesReceived: channel.wireReceipts,
+                bytesSent: 0,
+                bytesReceived: 0,
+              },
+            ]),
           );
+          report.set('transport', { type: 'transport', selectedCandidatePairId: 'route' });
+          report.set('route', {
+            type: 'candidate-pair',
+            state: 'succeeded',
+            nominated: true,
+            bytesSent: 120,
+            bytesReceived: 240,
+            currentRoundTripTime: 0.01,
+          });
+          return Promise.resolve(report);
         }
         createDataChannel(label: string): Channel {
           const channel = new Channel(this.owner, label);
@@ -444,6 +452,7 @@ for (const unpaidInitiates of [false, true]) {
                 pending: boolean;
                 ageMs: number | null;
                 channels: Record<string, { messagesReceived: number }>;
+                selectedCandidatePair: { bytesReceived: number; state: string } | null;
               };
               channels: Record<string, { receipts: { raw: number; admitted: number } }>;
             };
@@ -460,6 +469,8 @@ for (const unpaidInitiates of [false, true]) {
               assert(
                 link.dataChannelStats.status === 'ready' &&
                   link.dataChannelStats.ageMs === 1000 &&
+                  link.dataChannelStats.selectedCandidatePair?.bytesReceived === 240 &&
+                  link.dataChannelStats.selectedCandidatePair.state === 'succeeded' &&
                   link.dataChannelStats.channels[missingLabel]?.messagesReceived ===
                     (statsMode === 'invalid' ? 6 : 0) &&
                   link.channels[missingLabel]?.receipts.raw ===
@@ -470,7 +481,9 @@ for (const unpaidInitiates of [false, true]) {
               );
             } else {
               assert(
-                link.dataChannelStats.pending && link.dataChannelStats.ageMs === null,
+                link.dataChannelStats.pending &&
+                  link.dataChannelStats.ageMs === null &&
+                  link.dataChannelStats.selectedCandidatePair === null,
                 `${context}: hung stats cannot invent evidence or delay the failure exit`,
               );
             }

@@ -357,6 +357,15 @@ A pending or old sample cannot prove
 what the stack received at failure. Stack totals do not prove application
 admission, packet delivery, or the historical missing-exchange cause.
 
+`dataChannelStats.selectedCandidatePair` identifies the route selected by the
+browser transport in that sample. It reports `state`, `nominated`, `bytesSent`,
+`bytesReceived`, `currentRoundTripTime` in seconds, and `localCandidateType` /
+`remoteCandidateType`. Missing or ambiguous route selection is `null`. Missing
+optional fields are also `null`; zero counters remain zero. These transport
+bytes include protocol traffic and do not prove channel message receipt.
+The same sample age and query state apply. A successful refresh without a route
+clears prior route evidence. A failed refresh retains the aged prior sample.
+
 With `--exchange`, timeout snapshots also retain `received_probes` checks for
 each required label. `valid` counts admitted probes with the expected sender,
 label, and sequence. Other counters name the first mismatch: `invalid_json`,

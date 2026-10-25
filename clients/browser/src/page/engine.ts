@@ -62,12 +62,71 @@ interface DataChannelTotals {
   bytesReceived: number;
 }
 
+interface SelectedCandidatePair {
+  state: string;
+  nominated: boolean | null;
+  bytesSent: number | null;
+  bytesReceived: number | null;
+  currentRoundTripTime: number | null;
+  localCandidateType: string | null;
+  remoteCandidateType: string | null;
+}
+
+function selectedCandidatePair(report: RTCStatsReport): SelectedCandidatePair | null {
+  let selectedId: string | null = null;
+  let ambiguous = false;
+  report.forEach((row: Record<string, unknown>) => {
+    if (row['type'] !== 'transport' || typeof row['selectedCandidatePairId'] !== 'string')
+      return;
+    const id = row['selectedCandidatePairId'];
+    if (selectedId !== null && selectedId !== id) ambiguous = true;
+    selectedId = id;
+  });
+  if (selectedId === null || ambiguous) return null;
+  const pair = report.get(selectedId) as Record<string, unknown> | undefined;
+  if (
+    pair?.['type'] !== 'candidate-pair' ||
+    !['frozen', 'waiting', 'in-progress', 'failed', 'succeeded'].includes(String(pair['state']))
+  )
+    return null;
+  const numeric = (field: string, integral: boolean): number | null => {
+    const value = pair[field];
+    return typeof value === 'number' &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      (!integral || Number.isSafeInteger(value))
+      ? value
+      : null;
+  };
+  const candidateType = (field: string, type: string): string | null => {
+    const id = pair[field];
+    if (typeof id !== 'string') return null;
+    const candidate = report.get(id) as Record<string, unknown> | undefined;
+    const kind = candidate?.['candidateType'];
+    return candidate?.['type'] === type &&
+      typeof kind === 'string' &&
+      ['host', 'srflx', 'prflx', 'relay'].includes(kind)
+      ? kind
+      : null;
+  };
+  return {
+    state: pair['state'] as string,
+    nominated: typeof pair['nominated'] === 'boolean' ? pair['nominated'] : null,
+    bytesSent: numeric('bytesSent', true),
+    bytesReceived: numeric('bytesReceived', true),
+    currentRoundTripTime: numeric('currentRoundTripTime', false),
+    localCandidateType: candidateType('localCandidateId', 'local-candidate'),
+    remoteCandidateType: candidateType('remoteCandidateId', 'remote-candidate'),
+  };
+}
+
 interface DataChannelStats {
   status: 'not_requested' | 'ready' | 'failed' | 'unavailable';
   pending: boolean;
   sampledAt: number | null;
   requestedAt: number | null;
   channels: Record<string, DataChannelTotals>;
+  selectedCandidatePair: SelectedCandidatePair | null;
 }
 
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
@@ -191,6 +250,7 @@ export class Engine {
         pending: false,
         sampledAt: null,
         channels: {},
+        selectedCandidatePair: null,
       },
       channels: new Map(),
       openLabels: new Set(),
@@ -421,6 +481,7 @@ export class Engine {
           stats.status = Object.keys(channels).length === 0 ? 'unavailable' : 'ready';
           stats.sampledAt = sampledAt;
           stats.channels = channels;
+          stats.selectedCandidatePair = selectedCandidatePair(report);
         })
         .catch(failed);
     } catch {
@@ -448,6 +509,10 @@ export class Engine {
           link.dataChannelStats.sampledAt === null
             ? null
             : Math.max(0, monotonicNowMs() - link.dataChannelStats.sampledAt),
+        selectedCandidatePair:
+          link.dataChannelStats.selectedCandidatePair === null
+            ? null
+            : { ...link.dataChannelStats.selectedCandidatePair },
         channels: Object.fromEntries(
           Object.entries(link.dataChannelStats.channels).map(([label, totals]) => [
             label,
