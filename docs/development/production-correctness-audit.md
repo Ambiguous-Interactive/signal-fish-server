@@ -8609,3 +8609,54 @@ External-client assessment: Rust `da8f2d16`, .NET `e467c871`, and Godot
 `b24443e3` do not import this reference engine or its diagnostic snapshots.
 Their transport implementations remain independent. The added fields change
 no signaling frame or SDK contract and need no client migration.
+
+### A20 — Browser DTLS and SCTP transition evidence (#853/#889)
+
+The browser reference engine previously retained only peer-connection, ICE,
+and signaling transitions. DTLS and SCTP appeared only as final snapshot
+values. A transport could pass through a failed state before the timeout
+snapshot and lose that evidence.
+
+The engine now observes DTLS and SCTP state events in its existing 32-entry
+history. It attaches observers when description operations expose the
+transports. The red-first control loses the transient DTLS failure on the
+baseline. Controls cover both offerer roles, bounded history, independent
+snapshots, one observer per transport, retired-link fencing, and fresh
+application receipts. This changes diagnostic evidence, not transport decisions.
+The full browser unit harness, strict type checks, formatting, and real
+Chromium exchange pass. Chromium retains connected DTLS/SCTP transitions on
+both endpoints while exact payload totals remain unchanged. The historical
+causes in #853 and #889 remain unresolved.
+
+### F188 — Empty native messages inflate received application bytes
+
+Confirmed on `b8ae0549`; tracked in #1219 under #826/#912. The RTC
+receive handler updates channel byte statistics before normalizing Empty
+payload identifiers. RFC 8831 carries an empty message with one SCTP padding
+byte. The application receives zero bytes, but the old receive counter adds
+one. The real-pair baseline control fails with sender zero and receiver one.
+
+The handler now records the normalized application length. Message counts
+still include empty messages. The regression checks exact empty text and
+binary receipts, multibyte text, nonempty binary data, both required labels,
+and both offerer roles. It also checks final totals after reciprocal reset. The new live control and
+the existing completed-reset control both pass in Nextest `29937882`.
+This repairs traffic evidence; it does not establish gameplay loss or explain
+the reset timeout in #1120.
+
+External-client assessment for F188 and the new browser transition evidence:
+Rust `da8f2d16` declares no RTC/SCTP runtime dependency; .NET `e467c871` has
+no package dependencies and leaves peer networking to applications. Godot
+`59a24685` uses its own addon and engine or browser WebRTC. None imports the
+private native RTC source or browser reference engine changed here. No
+signaling schema, SDK API, or client migration changes are required.
+
+### Shared capacity room-change ordering (#636)
+
+Capacity replay now groups room-change events and sorts each room once.
+It preserves exact record identity and stable own-first timestamp ties for
+every viewer. Nine focused controls pass, including 1,152 independent
+old-sort comparisons. Shared-host measurements, all attempts, and limits
+are recorded in the [capacity audit](arm-capacity-audit.md).
+This reduces repeated analysis work; it does not close #775 or qualify a
+server capacity point.

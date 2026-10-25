@@ -68,6 +68,11 @@ try {
       for (let side = 0; side < 2; side++) {
         const snapshot = snapshots[side];
         check(
+          snapshot.transportStateHistory.some((entry) => entry.dtlsState === 'connected') &&
+            snapshot.transportStateHistory.some((entry) => entry.sctpState === 'connected'),
+          `side ${side}: retain live DTLS and SCTP establishment transitions`,
+        );
+        check(
           snapshot.dataChannelStats.status === 'ready',
           `side ${side}: Chromium exposes channel reports`,
         );
@@ -91,7 +96,10 @@ try {
           );
         }
       }
-      return snapshots.map(({ dataChannelStats }) => dataChannelStats);
+      return snapshots.map(({ dataChannelStats, transportStateHistory }) => ({
+        dataChannelStats,
+        transportStateHistory,
+      }));
     } finally {
       for (const engine of engines) engine.removePeer('peer');
     }

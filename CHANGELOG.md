@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
 - Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
@@ -35,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Count empty native data-channel messages as zero application bytes in traffic statistics (#1219).
 - Disable Nagle on native reference-client sockets so small relay frames can send promptly (#1217).
 - Preserve leading BOM characters in browser MessagePack gameplay strings (#1215).
 - Keep repeated native data-channel close successful after completed reset (#1214).
@@ -47,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve streams on small reset budgets and reject zero-budget writes before consuming gameplay (#1201, #1203).
 - Recover native incoming gameplay after fragment loss independently of local send ordering (#1199).
 - Split native stream-reset requests to fit supported packet and chunk sizes (#1200).
-- Retain local ICE server error codes and remote ICE rejection details in browser connection diagnostics (#853, #889).
+- Retain DTLS and SCTP transitions, local ICE server errors, and remote ICE rejections in browser diagnostics (#853, #889).
 - Reject reference-client gameplay that an earlier exact report already marks as dropped (#1196).
 - Keep native recovery packets within the transport size when losses span many ordered streams (#1197).
 - Retain browser connection details when initial offer creation fails (#853).

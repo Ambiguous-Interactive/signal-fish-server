@@ -1,5 +1,129 @@
 use super::{receive_tests::LivePair, *};
 
+// Regression #1219: empty-message SCTP padding is not an application byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_channel_messages_count_zero_application_bytes_through_reset() {
+    async fn assert_stats(
+        engine: &Engine,
+        peer: PlayerId,
+        label: &str,
+        sending: bool,
+        expected: (u32, u64, rtc::data_channel::RTCDataChannelState),
+    ) {
+        let reports = engine.peers[&peer]
+            .pc
+            .get_stats(std::time::Instant::now(), StatsSelector::None)
+            .await;
+        let stats = reports
+            .iter()
+            .find_map(|entry| match entry {
+                RTCStatsReportEntry::DataChannel(stats) if stats.label == label => Some(stats),
+                _ => None,
+            })
+            .expect("live and closed channels retain statistics");
+        let (messages, bytes) = if sending {
+            (stats.messages_sent, stats.bytes_sent)
+        } else {
+            (stats.messages_received, stats.bytes_received)
+        };
+        assert_eq!(
+            (messages, bytes, stats.state),
+            expected,
+            "label={label}, sending={sending}"
+        );
+    }
+    for initiator_sends in [true, false] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let mut pair = LivePair::connect().await;
+            if !initiator_sends {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
+            let mut expected_bytes = 0_u64;
+            for (index, (binary, body)) in [(false, ""), (false, "鱼"), (true, ""), (true, "tail")]
+                .into_iter()
+                .enumerate()
+            {
+                if binary {
+                    channel.send(body.as_bytes().into()).await.unwrap();
+                } else {
+                    channel.send_text(body).await.unwrap();
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let EngineEvent::ChannelMessage {
+                            label: received_label,
+                            text,
+                            ..
+                        } = pair.receiver_events.recv().await.unwrap()
+                        {
+                            assert_eq!(received_label, label);
+                            assert_eq!(text, body);
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("each complete message arrives before the next send");
+                expected_bytes += u64::try_from(body.len()).unwrap();
+                for (endpoint, peer, sending) in [
+                    (&pair.sender, pair.receiver_id, true),
+                    (&pair.receiver, pair.sender_id, false),
+                ] {
+                    assert_stats(
+                        endpoint,
+                        peer,
+                        label,
+                        sending,
+                        (
+                            u32::try_from(index + 1).unwrap(),
+                            expected_bytes,
+                            rtc::data_channel::RTCDataChannelState::Open,
+                        ),
+                    )
+                    .await;
+                }
+            }
+            let remote = pair.receiver.channel(pair.sender_id, label).unwrap();
+            channel.close().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let local_removed = matches!(
+                        channel.ready_state().await,
+                        Err(webrtc::error::Error::ErrDataChannelClosed)
+                    );
+                    let remote_removed = matches!(
+                        remote.ready_state().await,
+                        Err(webrtc::error::Error::ErrDataChannelClosed)
+                    );
+                    if local_removed && remote_removed {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reciprocal reset retires both channel handles");
+            for (endpoint, peer, sending) in [
+                (&pair.sender, pair.receiver_id, true),
+                (&pair.receiver, pair.sender_id, false),
+            ] {
+                assert_stats(
+                    endpoint,
+                    peer,
+                    label,
+                    sending,
+                    (4, 7, rtc::data_channel::RTCDataChannelState::Closed),
+                )
+                .await;
+            }
+            pair.cleanup().await;
+        }
+    }
+}
+
 // Regression #1214: completed SCTP reset must preserve idempotent cleanup.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_channel_reset_keeps_public_close_idempotent() {
