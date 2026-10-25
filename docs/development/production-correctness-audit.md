@@ -8771,3 +8771,45 @@ three live native receive/reset controls, and the real two-process native
 WebRTC exchange pass. Root and native all-target/all-feature strict lint pass.
 Markdown and doc consistency pass. The local CI-config wrapper retains its
 excluded audit failure; no audit change was made.
+
+### Native ordered receive credit and retained fragments (#1223/#636/#1145)
+
+Session 541 starts from `3e30142f`. Ordered reassembly adds fragment bytes
+before rejecting a retained duplicate TSN. A red-first control repeats one
+byte and observes two accounted bytes. Reading or abandoning the message
+subtracts only unique payload bytes. The repair credits only newly retained
+fragments. Controls cover all six three-fragment arrival orders, TSN wrap,
+repeated duplicates, a complete future message, wrong streams, stale messages,
+exact reads, and FORWARD TSN abandonment. Association duplicate filtering may
+exclude this history for ordinary peers. This is a low-level queue repair;
+it does not establish a public gameplay incident or explain #1120.
+
+Complete one-fragment ordered messages now retain one descriptor slot. The
+baseline regression observes four slots. Incomplete messages keep the prior
+growth path. A fresh-process debug probe retains 16,384 messages with exactly
+1,048,576 payload bytes. Descriptor storage falls from 8,388,608 to 2,097,152
+bytes. Sampled process peak RSS is 15,200 versus 8,992 KiB. This is a retained
+storage observation, not a general receive-throughput or process-memory bound.
+
+The paired graceful-shutdown history now also retains 1,024 small unread
+messages per endpoint, plus its original fragmented message. Both ordinary
+and simultaneous shutdown preserve exact message order and bytes, reject new
+writes, keep routing until terminal reads, and retire each endpoint once.
+This advances #1145's unread-tail qualification and #912's replacement contract.
+Both broader issues remain open. Existing `reassembly_` and shutdown selectors
+in the interop runner include these controls.
+
+External-client assessment: Rust `da8f2d16` declares no RTC runtime dependency;
+.NET `e467c871` has no package dependencies and supplies its own transport seam.
+Godot `c6229ee2` uses Godot or browser WebRTC classes. Current source inspection
+confirms none consumes these vendored native sources or the capacity runner.
+Server messages, SDK interfaces, transport choices, and migration needs are
+unchanged. All three clients are unaffected.
+
+Local validation passes: 80 selected reassembly/shutdown histories, three live
+native reset/loss controls, 29 source-policy controls, focused schedule/replay
+checks, and live reconnect/room-replacement cells. Root and native strict
+all-target/all-feature lint and SCTP production lint pass. Markdown and doc
+consistency pass. The CI-config wrapper retains its excluded audit error.
+An extra strict vendored-test lint pass finds the same 61 existing findings on
+both main and the candidate; #1224 tracks that separate cleanup.

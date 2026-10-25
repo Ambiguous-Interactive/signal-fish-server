@@ -381,3 +381,15 @@ The `reassembly_owned_payload_` and `reassembly_chunk_cursor_` controls cover
 ownership, shared-buffer isolation, bounds, partial reads, and exact bytes.
 Replacement qualification in #912 must retain these controls and the RTC
 `sctp_received_payload_reuses_single_packet_storage_after_retirement` history.
+
+The #1223 repair adds ordered receive bytes only when the queue retains a new
+fragment. Rejected duplicate TSNs no longer leave phantom receive credit after
+an application read or FORWARD TSN abandonment. Complete one-fragment ordered
+messages reserve one descriptor slot; incomplete messages keep the prior growth
+path. Replacement qualification in #912 must retain
+`reassembly_ordered_duplicate_fragments_preserve_exact_receive_credit`,
+`reassembly_future_complete_duplicates_release_credit_after_read_or_forward`,
+and `reassembly_single_fragment_messages_retain_one_fragment_slot`.
+The graceful unread-message control also holds 1,024 small messages at each
+endpoint until terminal reads. The queue defect does not establish a failure
+through association-level duplicate filtering or explain #1120.

@@ -601,9 +601,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             .as_deref()
             .filter(|designated| *designated == name.as_str())
             .map(|_| config.pause_reads.expect("paused reader carries its pause"));
-        let churn_cycles: Vec<PeerChurnCycle> = churn_plan
-            .victim_instants(&name)
-            .into_iter()
+        let churn_cycles: Vec<PeerChurnCycle> = plan
+            .sends
+            .churn_instants()
             .enumerate()
             .map(|(cycle_index, (disconnect_us, reconnect_us))| {
                 // A room replacement's k-th wave (per this peer) rejoins the

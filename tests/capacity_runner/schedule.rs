@@ -8,7 +8,7 @@
 //! measured window.
 
 use crate::config::{micros, ChurnSchedule, RunConfig};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// Which window a scheduled send lands in. Warm-up sends are
@@ -109,6 +109,10 @@ impl SendSchedule {
             next: 0,
         }
     }
+
+    pub fn churn_instants(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.shifts.iter().copied()
+    }
 }
 
 impl<'a> IntoIterator for &'a SendSchedule {
@@ -167,6 +171,7 @@ pub struct ChurnPlan {
 
 impl ChurnPlan {
     /// Whether this peer is victimized by any cycle.
+    #[cfg(test)]
     pub fn victim_instants(&self, peer: &str) -> Vec<(u64, u64)> {
         self.cycles
             .iter()
@@ -196,7 +201,7 @@ impl ChurnPlan {
 pub fn build_run_shape(config: &RunConfig) -> Result<(Vec<SenderPlan>, ChurnPlan), String> {
     let plans = build_plans(config)?;
     let churn = build_churn(config, &plans)?;
-    apply_churn_shifts(plans, &churn)
+    apply_churn_shifts(plans, churn)
 }
 
 /// Deterministic churn plan for one run. `None` produces an empty plan; the
@@ -436,13 +441,28 @@ fn build_replacement_churn(
 /// the C3 churn cells schedule around.
 fn apply_churn_shifts(
     mut plans: Vec<SenderPlan>,
-    churn: &ChurnPlan,
+    churn: ChurnPlan,
 ) -> Result<(Vec<SenderPlan>, ChurnPlan), String> {
-    for plan in &mut plans {
-        let instants = churn.victim_instants(&plan.name);
-        if instants.is_empty() {
-            continue;
+    let mut shifts: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    for cycle in &churn.cycles {
+        let mut seen = BTreeSet::new();
+        for peer in &cycle.peers {
+            if seen.insert(peer.as_str()) {
+                shifts.entry(peer).or_default().push((
+                    cycle.disconnect_us,
+                    cycle
+                        .reconnects_us
+                        .get(peer)
+                        .copied()
+                        .unwrap_or(cycle.disconnect_us),
+                ));
+            }
         }
+    }
+    for plan in &mut plans {
+        let Some(instants) = shifts.remove(plan.name.as_str()) else {
+            continue;
+        };
         instants.iter().try_fold(0_u64, |total, (at, rejoin)| {
             total
                 .checked_add(rejoin.saturating_sub(*at))
@@ -450,7 +470,8 @@ fn apply_churn_shifts(
         })?;
         plan.sends.shifts = instants;
     }
-    Ok((plans, churn.clone()))
+    drop(shifts);
+    Ok((plans, churn))
 }
 
 /// splitmix64: a tiny, dependency-free, platform-stable PRNG. Only the
@@ -558,6 +579,98 @@ pub fn build_plans(config: &RunConfig) -> Result<Vec<SenderPlan>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_churn_shifts_match_cycle_scans_with_repeated_and_missing_peers() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.rooms = 2;
+        config.players_per_room = 3;
+        let plans = build_plans(&config).unwrap();
+        let churn = ChurnPlan {
+            cycles: vec![
+                ChurnCycle {
+                    peers: vec!["r0p0".into(), "r0p0".into(), "unknown".into()],
+                    disconnect_us: 400_000,
+                    reconnects_us: BTreeMap::from([("r0p0".into(), 600_000)]),
+                },
+                ChurnCycle {
+                    peers: vec!["r0p0".into(), "r1p1".into()],
+                    disconnect_us: 100_000,
+                    reconnects_us: BTreeMap::from([("r1p1".into(), 300_000)]),
+                },
+            ],
+        };
+        let expected: Vec<_> = plans
+            .iter()
+            .map(|plan| {
+                let instants = churn.victim_instants(&plan.name);
+                plan.sends
+                    .iter()
+                    .map(|mut send| {
+                        send.intended_us = send.intended_us.saturating_add(
+                            instants
+                                .iter()
+                                .filter(|(at, _)| send.intended_us >= *at)
+                                .map(|(at, rejoin)| rejoin.saturating_sub(*at))
+                                .sum::<u64>(),
+                        );
+                        send
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let serialized_churn = serde_json::to_vec(&churn).unwrap();
+        let (shifted, churn) = apply_churn_shifts(plans, churn).unwrap();
+        assert_eq!(serde_json::to_vec(&churn).unwrap(), serialized_churn);
+        for (plan, expected) in shifted.iter().zip(expected) {
+            assert_eq!(
+                plan.sends.iter().collect::<Vec<_>>(),
+                expected,
+                "{}",
+                plan.name
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated churn construction profile; run in a fresh process"]
+    fn generator_churn_construction_profile() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.rooms = std::env::var("CAPACITY_CHURN_PROBE_ROOMS")
+            .unwrap_or_else(|_| "64".into())
+            .parse()
+            .unwrap();
+        config.players_per_room = 16;
+        config.send_rate_per_sender = 60.0;
+        config.warmup = Duration::from_secs(120);
+        config.duration = Duration::from_secs(600);
+        config.churn = ChurnSchedule::RoomReplacement {
+            fraction_percent: 100,
+            start: Duration::from_secs(10),
+            window: Duration::from_secs(1),
+            interval: Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let (plans, churn) = build_run_shape(&config).unwrap();
+        let elapsed = started.elapsed();
+        let mut checksum = 0_u64;
+        for plan in &plans {
+            for index in [0, plan.sends.len() / 2, plan.sends.len() - 1] {
+                let send = plan.sends.get(index).unwrap();
+                checksum = checksum.rotate_left(7).wrapping_add(send.intended_us);
+            }
+        }
+        println!(
+            "CHURN_CONSTRUCTION_PROFILE {}",
+            serde_json::json!({
+                "rooms": config.rooms, "senders": plans.len(), "cycles": churn.cycles.len(),
+                "planned_sends": plans.iter().map(|plan| plan.sends.len()).sum::<usize>(),
+                "checksum": checksum, "elapsed_us": elapsed.as_micros(),
+                "churn_json_bytes": serde_json::to_vec(&churn).unwrap().len(),
+            })
+        );
+        std::hint::black_box((plans, churn));
+    }
     fn frozen_eager_sends(config: &RunConfig) -> Vec<Vec<ScheduledSend>> {
         let period = config.period_micros();
         let warmup_sends = config.warmup_sends_per_sender();
@@ -648,6 +761,7 @@ mod tests {
                     let (plans, churn) = build_run_shape(&config).expect("valid shape");
                     for (plan, mut expected) in plans.iter().zip(expected) {
                         let shifts = churn.victim_instants(&plan.name);
+                        assert_eq!(plan.sends.churn_instants().collect::<Vec<_>>(), shifts);
                         for send in &mut expected {
                             let original = send.intended_us;
                             send.intended_us = original.saturating_add(
