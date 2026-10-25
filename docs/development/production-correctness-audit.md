@@ -8554,3 +8554,58 @@ networking to applications. Godot `64969b97` uses its own addon and engine or
 browser WebRTC. None imports the private native sources or browser reference
 wire decoder changed here. No signaling schema, SDK API, or migration changes;
 no client tracking issue is required for these reference-stack repairs.
+
+### F187 — Native relay sockets retain Nagle buffering
+
+Confirmed on `81c5db90`; tracked in #1217 under #826/#636. The native
+reference client uses the default WebSocket connector. Its connected TCP
+socket retains Nagle buffering even though accepted server sockets disable it.
+The new real-socket control fails with `TCP_NODELAY=false` before repair.
+
+The connector now disables Nagle before the handshake. The original absolute
+connection deadline and default WebSocket configuration remain in place.
+The green control verifies the socket option and exact small text/binary
+frame exchange. All four scoped socket, deadline, and refusal controls pass.
+This proves a socket pacing setting, not a measured latency improvement or
+the cause of a historical interop failure.
+
+External-client assessment: Rust `da8f2d16` already defaults to
+`disable_nagle=true` in its independent WebSocket transport. .NET `e467c871`
+uses its own transport and has no native-reference dependency. Godot
+`b24443e3` wraps its engine's `WebSocketPeer`. None imports the changed
+reference connector. No signaling contract or SDK migration changes.
+
+### Compact capacity send-sort positions (#636/#775)
+
+The capacity collector now stores each temporary send-sort position in four
+bytes on 64-bit hosts. Equal sequence keys retain their original order through
+an explicit original-position tie key. Larger-than-u32 event counts retain the
+original full-width stable-sort fallback. Raw events and duplicate evidence
+remain unchanged. This is separate from the earlier replay lookup repair.
+
+The resource control fails on the old eight-byte position vector. All 26
+scoped records controls pass after repair, including 4,096 differential
+histories and exact collector/artifact roundtrips. The isolated send-sort
+experiment and its limits are recorded in the
+[capacity audit](arm-capacity-audit.md). Neither campaign is complete.
+
+### A20 — Browser local ICE server error evidence (#853/#889)
+
+The browser reference engine now retains a count and latest numeric code from
+`icecandidateerror` events. The browser previously discarded these events.
+The initial-negotiation failure control fails on the missing summary before
+this change. It now verifies that error code 701 survives in the pre-teardown
+diagnostic output. Repeated errors use constant storage; snapshots copy the
+summary, and retired physical links cannot change replacement evidence.
+
+The nonfatal-error control delivers exact gameplay after local ICE server
+errors. An error from one STUN or TURN server must not close an otherwise
+usable peer. No transport decisions change. This adds evidence for the
+unresolved initial-establishment and three-player investigations; it does not
+reproduce their historical failures or identify their cause. Browser tests and
+type checks pass. Both issues remain open.
+
+External-client assessment: Rust `da8f2d16`, .NET `e467c871`, and Godot
+`b24443e3` do not import this reference engine or its diagnostic snapshots.
+Their transport implementations remain independent. The added fields change
+no signaling frame or SDK contract and need no client migration.

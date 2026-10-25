@@ -36,10 +36,13 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Connect to the signaling endpoint (full `ws://.../v3/ws` URL).
 /// The upgrade must complete before the original [`CONNECT_TIMEOUT`] deadline.
+/// The connected socket disables Nagle so small gameplay frames send promptly.
 pub async fn connect(server_url: &str) -> Result<WsStream> {
     let deadline = Deadline::after(tokio::time::Instant::now(), CONNECT_TIMEOUT);
     let connection = deadline
-        .timeout(tokio_tungstenite::connect_async(server_url))
+        .timeout(tokio_tungstenite::connect_async_with_config(
+            server_url, None, true,
+        ))
         .await;
     if deadline.is_due(tokio::time::Instant::now()) {
         return Err(anyhow!("websocket connect to {server_url} timed out"));
@@ -379,6 +382,50 @@ mod tests {
     use super::*;
 
     const PATTERNED_PLAYER_ID: u128 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+
+    // Regression #1217: the outgoing relay socket needs its own TCP_NODELAY.
+    #[tokio::test]
+    async fn relay_client_socket_disables_nagle_and_preserves_small_frames() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let frames = [
+            Message::Text("{\"move\":1}".into()),
+            Message::Binary(vec![0, 1, 255, 2].into()),
+            Message::Text("{\"move\":2}".into()),
+        ];
+        let expected = frames.clone();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            for frame in expected {
+                let received = tokio::time::timeout(Duration::from_secs(1), ws.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(received, frame);
+                ws.send(received).await.unwrap();
+            }
+        });
+        let mut ws = connect(&format!("ws://{address}")).await.unwrap();
+        let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = ws.get_ref() else {
+            panic!("ws:// must use a plain TCP stream");
+        };
+        assert!(
+            tcp.nodelay().unwrap(),
+            "the native relay client must disable Nagle on its connected socket"
+        );
+        for frame in frames {
+            ws.send(frame.clone()).await.unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(1), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(received, frame);
+        }
+        server.await.unwrap();
+    }
 
     // Regression #981: a ready upgrade cannot bypass an expired timeout.
     #[tokio::test(start_paused = true)]
