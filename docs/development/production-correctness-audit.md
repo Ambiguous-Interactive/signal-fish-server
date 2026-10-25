@@ -8439,3 +8439,66 @@ External-client assessment: Rust `da8f2d16` has no RTC/SCTP dependency;
 engine/browser WebRTC integration. None imports these private SCTP sources,
 the browser reference orchestrator, or the capacity runner. These changes
 need no SDK migration or client issue and change no signaling contract.
+
+### F182 — Native chunk-array admission uses the wrong message size
+
+Confirmed on `8755be58`; tracked in #1210 under #826/#912. With a six-byte
+message limit, an array of two six-byte buffers fails before its first write.
+The successful adapter sends only one nonempty buffer, so the total array is
+not the size of that message. The red control returns `ErrOutboundPacketTooLarge`.
+
+The adapter now checks and sends the next nonempty buffer, then clears that
+caller buffer only after success. Later buffers remain unchanged. Repeated
+calls preserve exact bytes, separate ordered SSNs, and fragment boundaries.
+Oversized next messages retain input, identity, and sequence state. Existing
+zero-fragment, exhausted-identity, shutdown, and empty-write controls remain.
+This affects the low-level SCTP API; the native WebRTC wrapper does not call
+this array adapter. It does not explain a historical public-client failure.
+
+### F183 — Late browser channel announcements escape explicit retirement
+
+Confirmed on `8755be58`; tracked in #1211 under #826. A queued `datachannel`
+event can hold the previous physical link after removal or replacement.
+The old handler returns without closing the announced channel. A red control
+requires the late channel to close and fails on the removed-link history.
+
+The handler now closes that channel before returning. Removed and replaced
+link controls require no handler registration, no application callbacks, and
+no channel in the replacement link. The existing responder open-order control
+also verifies late announcement closure. Existing duplicate-label, mode,
+terminal-channel, and fresh-link recovery controls remain. This is explicit
+resource retirement; it does not prove the cause of #853 or #889.
+
+External-client assessment: Rust `da8f2d16` has no RTC/SCTP dependency;
+.NET `e467c871` leaves peer networking to applications. Godot `908146fb`
+ships its own addon rather than importing the reference browser engine or
+these private SCTP sources. The signaling protocol is unchanged. None needs
+migration or a client issue for these reference-stack changes.
+
+### Native fragment allocation measurement (#636)
+
+The packetizer knows its complete fragment count before building descriptors.
+It now reserves that count once. The control checks exact bytes, fragment
+boundaries, and descriptor capacity for payload budgets 4, 1200, and 65535,
+with application sizes 1, 4, 1201, and 65536. The old vector reserves four
+slots even for one descriptor; its first capacity assertion fails on main.
+
+Three fresh debug-process trials per source packetize 1000 identical 65536-byte
+messages. Descriptors are 128 bytes on this ARM64 host. At budget 1200, baseline
+capacity totals 64000 slots and candidate capacity totals 55000 slots. Each
+message saves 1152 descriptor bytes (14.06%) during packetization. The fragment
+count remains 55. At budget 4, both retain 16384 slots per message, while the
+candidate avoids intermediate vector growth. One-fragment messages reserve
+one slot instead of four, saving 384 descriptor bytes during packetization.
+
+| Budget | Baseline elapsed us | Candidate elapsed us |
+| --- | --- | --- |
+| 4 | 2646753, 2615529, 3777096 | 2397331, 2825369, 2267725 |
+| 1200 | 8867, 9189, 12356 | 8075, 7871, 9424 |
+
+These debug timings vary on a shared host. They do not establish gameplay
+throughput or server capacity. Capacity and exact output controls establish
+the allocation-shape improvement. Reproduce with the ignored
+`packetization_allocation_profile` control in the SCTP library, in fresh
+processes. Raw observations remain in ignored `progress/session-535/`.
+The broader optimization and source-replacement campaigns remain open.

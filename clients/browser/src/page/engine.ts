@@ -624,7 +624,10 @@ export class Engine {
         event.channel.close();
         return;
       }
-      if (this.peers.get(peer) !== link) return;
+      if (this.peers.get(peer) !== link) {
+        channel.close();
+        return;
+      }
       if (!this.usableLink(peer, link)) {
         channel.close();
         return;

@@ -154,6 +154,12 @@ echo "==> Verifying zero-budget SCTP write rejection"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib zero_fragment_budget
 
+echo "==> Verifying SCTP chunk-array admission and fragment allocation"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib chunk_array_applies_message_limit
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib packetization_reserves_only_the_required_fragment_slots
+
 echo "==> Verifying graceful SCTP shutdown and final packet recovery"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib shutdown

@@ -348,3 +348,17 @@ window limit. Slow start and congestion avoidance cannot wrap send credit.
 Congestion avoidance computes its acknowledgment sum in a wider type before
 subtracting the old window, so it retains the exact remainder. The full-width
 paired loss history and focused growth/recovery controls retain these bounds.
+
+The #1210 repair applies `write_chunks` admission to the next nonempty buffer,
+not the sum of the input array. Each successful call still sends one message
+and returns its byte count. Later buffers stay untouched. An oversized next
+message fails before caller input, message identity, or stream sequence changes.
+The adapter documentation now states these existing single-message semantics.
+Replacement qualification in #912 must retain the `chunk_array_applies_message_limit`
+control, including exact message bytes, boundaries, and sequence numbers.
+
+The #636 packetizer reserves the exact fragment count once instead of growing
+its descriptor vector during a send. Four-byte padding and DATA wire limits
+still determine fragment size. Controls cover small, ordinary, and wire-limit
+budgets and preserve full payload bytes and fragment boundaries. Retain
+`packetization_reserves_only_the_required_fragment_slots` on replacement.
