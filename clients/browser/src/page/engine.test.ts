@@ -1791,3 +1791,62 @@ for (const path of ['offer', 'answer', 'trickle'] as const) {
   }
 }
 console.error('ok - browser ICE failure evidence preserves recovery and physical ownership');
+
+// A queued datachannel event can outlive removal and replacement of its peer link.
+for (const replace of [false, true]) {
+  const originalPc = globalThis.RTCPeerConnection;
+  const connections: LateConnection[] = [];
+  const callbacks: string[] = [];
+  class LateConnection {
+    connectionState = 'new';
+    ondatachannel: ((event: { channel: LateChannel }) => void) | null = null;
+    constructor() {
+      connections.push(this);
+    }
+    close(): void {
+      this.connectionState = 'closed';
+    }
+  }
+  class LateChannel {
+    label = RELIABLE_LABEL;
+    ordered = true;
+    maxRetransmits = null;
+    maxPacketLifeTime = null;
+    readyState = 'open';
+    onmessage = null;
+    close(): void {
+      this.readyState = 'closed';
+    }
+  }
+  try {
+    globalThis.RTCPeerConnection = LateConnection as unknown as typeof RTCPeerConnection;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => callbacks.push('candidate'),
+      onPcState: () => callbacks.push('state'),
+      onChannelOpen: () => callbacks.push('open'),
+      onChannelClosed: () => callbacks.push('closed'),
+      onChannelMessage: () => {
+        callbacks.push('message');
+      },
+    });
+    await engine.pairWith('peer', false, []);
+    const old = connections[0];
+    assert(old !== undefined, 'create original peer');
+    engine.removePeer('peer');
+    if (replace) await engine.pairWith('peer', false, []);
+    const channel = new LateChannel();
+    const before = callbacks.length;
+    old?.ondatachannel?.({ channel });
+    await Promise.resolve();
+    assert(channel.readyState === 'closed', `replacement=${replace}: close late announcement`);
+    assert(channel.onmessage === null, 'do not register late channel handlers');
+    assert(callbacks.length === before, 'late announcement emits no callbacks');
+    assert(
+      engine.channel('peer', RELIABLE_LABEL) === undefined,
+      'replacement has no old channel',
+    );
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}

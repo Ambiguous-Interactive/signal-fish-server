@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
 - Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
 - Reduce native receive work when partial-reliability recovery discards fragmented gameplay (#1182).
@@ -34,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply native chunk-array message limits to each message instead of the whole array (#1210).
+- Close late browser data-channel announcements after their peer link retires (#1211).
 - Keep native gameplay fragments within custom packet and chunk sizes (#1205, #1206).
 - Preserve native gameplay retransmission with full-width packet settings (#1208).
 - Include the next browser relay frame in the local send-buffer limit (#1207).

@@ -6,7 +6,7 @@ use crate::queue::reassembly_queue::{Chunks, ReassemblyQueue};
 use crate::{ErrorCauseCode, Event, Side};
 use shared::error::{Error, Result};
 
-use crate::util::{ByteSlice, BytesArray, BytesChunk, BytesSource};
+use crate::util::{ByteSlice, BytesChunk, BytesSource};
 use bytes::Bytes;
 use log::{debug, error, trace};
 use std::fmt;
@@ -249,16 +249,18 @@ impl Stream<'_> {
 
     /// Send data on the given stream
     ///
-    /// Returns the number of bytes and chunks successfully written.
-    /// Note that this method might also write a partial chunk. In this case
-    /// it will not count this chunk as fully written. However
-    /// the chunk will be advanced and contain only non-written data after the call.
+    /// Writes the next nonempty buffer as one message and returns its byte count.
+    /// Later buffers remain unchanged. The message limit applies to that buffer,
+    /// not the total array. A failed write leaves every buffer unchanged.
     pub fn write_chunks(&mut self, now: Instant, data: &mut [Bytes]) -> Result<usize> {
-        self.write_source(
-            now,
-            &mut BytesArray::from_chunks(data),
-            self.get_default_payload_type()?,
-        )
+        let ppi = self.get_default_payload_type()?;
+        let Some(next) = data.iter_mut().find(|chunk| !chunk.is_empty()) else {
+            return self.write_source(now, &mut BytesChunk::new(&Bytes::new()), ppi);
+        };
+        let written = self.write_source(now, &mut BytesChunk::new(next), ppi)?;
+        // Commit caller ownership only after admission succeeds.
+        *next = Bytes::new();
+        Ok(written)
     }
 
     /// write_source writes BytesSource to the DTLS connection
@@ -698,12 +700,13 @@ impl StreamState {
             }
         };
 
-        let mut chunks = vec![];
-
         // DATA padding must fit the configured packet budget. The
         // 16-bit chunk length includes the complete DATA header.
         let fragment_budget = (self.max_payload_size as usize & !3)
             .min(usize::from(u16::MAX) - crate::config::DATA_CHUNK_HEADER_SIZE as usize);
+        // Admission has checked a nonzero budget. Reserve the known shape once,
+        // including one slot rather than Vec's minimum growth for whole messages.
+        let mut chunks = Vec::with_capacity(raw.len().div_ceil(fragment_budget));
         while remaining != 0 {
             let fragment_size = fragment_budget.min(remaining);
 

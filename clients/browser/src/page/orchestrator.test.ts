@@ -1065,6 +1065,9 @@ for (const alreadyOpen of [false, true]) {
       this.ordered = label !== UNRELIABLE_LABEL;
       this.maxRetransmits = label === UNRELIABLE_LABEL ? 0 : null;
     }
+    close(): void {
+      this.readyState = 'closed';
+    }
   }
   class ResponderConnection {
     ondatachannel: ((event: { channel: RemoteChannel }) => void) | null = null;
@@ -1127,7 +1130,9 @@ for (const alreadyOpen of [false, true]) {
       channel.onopen?.();
       channel.onmessage?.({ data: 'stale-message' });
     }
-    connections[0]?.ondatachannel?.({ channel: new RemoteChannel(RELIABLE_LABEL) });
+    const lateChannel = new RemoteChannel(RELIABLE_LABEL);
+    connections[0]?.ondatachannel?.({ channel: lateChannel });
+    assert(lateChannel.readyState === 'closed', 'retire a late responder announcement');
     assert(
       messages.length === 2 && opens.length === 2 && connected === 1,
       'retired responder callbacks must not change replacement state',
