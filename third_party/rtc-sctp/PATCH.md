@@ -300,3 +300,20 @@ unordered fragments, partial fragment prefixes, and the maximum chunk length.
 This is a low-level multi-stream contract repair. The reference clients' two
 required channels do not by themselves exceed the ordinary report budget.
 Replacement qualification in #912 must retain `shutdown_forward_tsn_` controls.
+
+The #1199 repair applies incoming FORWARD TSN to both receive queue classes,
+independent of the stream's local send-order setting. Incoming DATA carries its
+own ordering flag. Paired controls drop a middle fragment, retain exact ordered
+and unordered reliable survivors, release abandoned receive bytes, and complete
+graceful shutdown across TSN wrap. Replacement qualification must retain the
+shutdown_forward_tsn controls. This qualifies asymmetric low-level SCTP streams;
+it does not establish the cause of historical public data-channel failures.
+
+The #1200 repair batches outgoing reset IDs within the padded packet and 16-bit
+chunk/parameter limits. Later markers remain queued until the outstanding
+request is acknowledged. Paired controls retain old and fresh gameplay, retry a
+lost request unchanged, and complete reciprocal reset at MTU 36, 64, 1191, and
+1200. A 33,000-ID control retains the unreported suffix within the 16-bit limit.
+Packet budgets below 36 bytes cannot represent a one-ID reset. Their existing
+minimum-control configuration mismatch remains tracked in #1201; the sender
+still emits at least one ID to avoid introducing permanent queue starvation.

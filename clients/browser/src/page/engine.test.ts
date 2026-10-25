@@ -1651,3 +1651,143 @@ for (const failureStage of [
 console.error(
   'ok - initial browser negotiation failures retain operation and link evidence before cleanup',
 );
+
+// Investigations #853/#889: distinguish rejected ICE from missing channel DATA.
+for (const path of ['offer', 'answer', 'trickle'] as const) {
+  for (const retireWhilePending of [false, true]) {
+    const originalPc = globalThis.RTCPeerConnection;
+    const originalError = console.error;
+    let rejection: unknown = new DOMException('candidate:private-address', 'OperationError');
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let rejectCandidate = true;
+    class Connection {
+      createDataChannel(label: string): object {
+        return { label, readyState: 'connecting' };
+      }
+      async createOffer(): Promise<RTCSessionDescriptionInit> {
+        return { type: 'offer', sdp: 'offer' };
+      }
+      async createAnswer(): Promise<RTCSessionDescriptionInit> {
+        return { type: 'answer', sdp: 'answer' };
+      }
+      async setRemoteDescription(): Promise<void> {}
+      async setLocalDescription(): Promise<void> {}
+      async addIceCandidate(): Promise<void> {
+        if (rejectCandidate) {
+          await held;
+          throw rejection;
+        }
+      }
+      close(): void {}
+    }
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: () => {},
+      onChannelClosed: () => {},
+      onChannelMessage: () => {},
+    });
+    const snapshot = () =>
+      engine.diagnosticSnapshot('peer') as {
+        iceCandidateFailures: {
+          count: number;
+          last: { source: string; name: string | null } | null;
+        };
+      };
+    try {
+      globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+      console.error = () => {};
+      await engine.pairWith('peer', path === 'answer', []);
+      if (path === 'trickle') await engine.handleAnswer('peer', 'remote-answer');
+      else await engine.handleRemoteCandidate('peer', 'early-candidate');
+      const operation =
+        path === 'offer'
+          ? engine.handleOffer('peer', 'remote-offer')
+          : path === 'answer'
+            ? engine.handleAnswer('peer', 'remote-answer')
+            : engine.handleRemoteCandidate('peer', 'later-candidate');
+      const outcome = operation.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      if (retireWhilePending) {
+        engine.removePeer('peer');
+        await engine.pairWith('peer', false, []);
+      }
+      release();
+      const failure = await outcome;
+      assert(
+        path === 'trickle' ? failure === rejection : retireWhilePending || failure === null,
+        `${path}: preserve original trickle rejection and buffered recovery`,
+      );
+      const evidence = snapshot().iceCandidateFailures;
+      assert(
+        evidence.count === (retireWhilePending ? 0 : 1),
+        `${path}: failure evidence belongs only to its physical link`,
+      );
+      assert(
+        JSON.stringify(evidence.last) ===
+          JSON.stringify(
+            retireWhilePending
+              ? null
+              : { source: path === 'trickle' ? 'trickle' : 'buffered', name: 'OperationError' },
+          ),
+        `${path}: retain browser error type and candidate application phase`,
+      );
+      assert(
+        !JSON.stringify(snapshot()).includes('private-address'),
+        `${path}: error text and candidate contents stay outside the snapshot`,
+      );
+      if (!retireWhilePending) {
+        const detached = snapshot().iceCandidateFailures;
+        if (detached.last !== null) detached.last.name = 'changed';
+        assert(
+          snapshot().iceCandidateFailures.last?.name === 'OperationError',
+          'copy evidence',
+        );
+      }
+      rejectCandidate = false;
+      await engine.handleAnswer('peer', 'remote-answer');
+      let failures = retireWhilePending ? 0 : 1;
+      const longName = new Error('candidate:private-address');
+      longName.name = 'x'.repeat(128);
+      for (const error of [longName, 'opaque candidate rejection']) {
+        rejection = error;
+        rejectCandidate = true;
+        const observed = await engine.handleRemoteCandidate('peer', 'failed-candidate').then(
+          () => null,
+          (failure: unknown) => failure,
+        );
+        failures += 1;
+        const evidence = snapshot().iceCandidateFailures;
+        assert(observed === error, `${path}: keep each original rejection`);
+        assert(evidence.count === failures, `${path}: count repeated candidate failures`);
+        assert(evidence.last?.source === 'trickle', `${path}: keep the latest failure source`);
+        assert(
+          evidence.last?.name === (error === longName ? 'x'.repeat(64) : null),
+          `${path}: bound error names and tolerate untyped rejections`,
+        );
+      }
+      rejectCandidate = false;
+      await engine.handleRemoteCandidate('peer', 'working-candidate');
+      assert(
+        snapshot().iceCandidateFailures.count === failures,
+        `${path}: successful later ICE preserves the rejection count`,
+      );
+      engine.removePeer('peer');
+      await engine.pairWith('peer', false, []);
+      assert(snapshot().iceCandidateFailures.count === 0, `${path}: fresh link starts clean`);
+      engine.removePeer('peer');
+    } finally {
+      release();
+      globalThis.RTCPeerConnection = originalPc;
+      console.error = originalError;
+    }
+  }
+}
+console.error('ok - browser ICE failure evidence preserves recovery and physical ownership');

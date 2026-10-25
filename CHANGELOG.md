@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recover native incoming gameplay after fragment loss independently of local send ordering (#1199).
+- Split native stream-reset requests to fit supported packet and chunk sizes (#1200).
+- Retain browser ICE rejection details in connection diagnostics (#853, #889).
 - Reject reference-client gameplay that an earlier exact report already marks as dropped (#1196).
 - Keep native recovery packets within the transport size when losses span many ordered streams (#1197).
 - Retain browser connection details when initial offer creation fails (#853).
