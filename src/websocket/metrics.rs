@@ -1,5 +1,7 @@
 use crate::server::EnhancedGameServer;
-use crate::session_records::{SESSIONS_RESPONSE_MAX_BYTES, SESSION_RECORDS_ACTIVE_RESPONSE_CAP};
+use crate::session_records::SESSIONS_RESPONSE_MAX_BYTES;
+#[cfg(test)]
+use crate::session_records::SESSION_RECORDS_ACTIVE_RESPONSE_CAP;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
@@ -543,28 +545,13 @@ pub async fn sessions_metrics_handler(
                 "the configured database backend does not track session records",
         })));
     };
-    let snapshot = records.snapshot_view(query.since, query.application_id);
+    let snapshot = records.response_snapshot(query.since, query.application_id);
+    let active_omitted = snapshot.active_count.saturating_sub(snapshot.active.len());
     let mut value = serde_json::to_value(&snapshot)
         .unwrap_or_else(|_| serde_json::json!({ "truncated": true }));
-    // Cap the active list deterministically (oldest survive, per the
-    // snapshot's order); counters keep their pre-truncation values.
     if let Some(object) = value.as_object_mut() {
         object.insert("available".to_string(), serde_json::Value::Bool(true));
-        let active_omitted = object
-            .get("active")
-            .and_then(|active| active.as_array())
-            .map_or(0, |active| {
-                active
-                    .len()
-                    .saturating_sub(SESSION_RECORDS_ACTIVE_RESPONSE_CAP)
-            });
         if active_omitted > 0 {
-            if let Some(active) = object
-                .get_mut("active")
-                .and_then(|active| active.as_array_mut())
-            {
-                active.truncate(SESSION_RECORDS_ACTIVE_RESPONSE_CAP);
-            }
             object.insert("activeTruncated".to_string(), serde_json::Value::Bool(true));
             object.insert(
                 "activeOmitted".to_string(),

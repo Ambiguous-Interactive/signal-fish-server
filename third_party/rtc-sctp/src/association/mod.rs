@@ -2005,6 +2005,9 @@ impl Association {
             self.postprocess_sack(AssociationState::ShutdownReceived, true, now);
         } else {
             // Simultaneous or repeated SHUTDOWN must send (or replay) our ACK.
+            if state == AssociationState::ShutdownSent {
+                self.timers.set(Timer::T2Shutdown, None);
+            }
             self.will_send_shutdown = false;
             self.will_send_shutdown_ack = true;
             self.set_state(AssociationState::ShutdownAckSent);
@@ -3208,7 +3211,7 @@ impl Association {
 
             if let Ok(raw) = self.create_packet(vec![Box::new(shutdown_ack)]).marshal() {
                 self.timers
-                    .start(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
+                    .start_if_idle(Timer::T2Shutdown, now, self.rto_mgr.get_rto());
                 raw_packets.push(raw);
             } else {
                 warn!("[{}] failed to serialize a ShutdownAck packet", self.side);

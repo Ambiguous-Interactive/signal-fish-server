@@ -1019,9 +1019,9 @@ fn send_sort_positions(events: &[SentEvent]) -> Vec<u32> {
             drop(sender_ranges);
             let mut positions: Vec<u32> =
                 (0..u32::try_from(events.len()).expect("validated send count")).collect();
-            positions.sort_by_key(|&position| {
+            positions.sort_unstable_by_key(|&position| {
                 let event = &events[position as usize];
-                (event.sender.as_str(), event.seq)
+                (event.sender.as_str(), event.seq, position)
             });
             return positions;
         }

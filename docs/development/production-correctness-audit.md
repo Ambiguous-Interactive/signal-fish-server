@@ -9044,3 +9044,53 @@ zero reallocations. The full relay allocation ceiling bench passes.
 All 17 session-record controls and two endpoint truncation controls pass.
 Independent source reviews report no remaining findings. Metrics JSON does not
 change, so Rust, .NET, and Godot SDKs need no migration or source changes.
+
+### F193 — Repeated shutdown ACKs postpone due recovery
+
+Confirmed on `2347552d`; tracked in #1235 under #1145/#826/#912. Replaying
+SHUTDOWN ACK starts T2 again even when its previous deadline is already due.
+The red regression observes a fresh full RTO instead of the original deadline.
+Repeated peer requests can therefore postpone configured retry exhaustion.
+
+ACK replays now arm T2 only when idle. The first simultaneous shutdown
+transition clears the old deadline, so it still restarts T2 as RFC 9260
+section 9.2 requires, without clearing retry history. Controls cover ordinary
+and simultaneous shutdown, due input before timeout processing, backoff,
+configured exhaustion, and paired loss of SHUTDOWN and ACK. The paired history
+loses a replayed ACK before servicing the still-due timeout, then completes
+both endpoint retirements. This is a low-level graceful association repair;
+it does not explain historical reset timeout #1120. The public WebRTC close
+path uses abort. External Rust, .NET, and Godot clients do not import these
+private vendored reference-client sources and need no migration.
+
+### Active session response materialization (#636)
+
+The metrics endpoint used to construct JSON for every matching active record
+before applying its 512-record response cap. It now selects the same oldest
+prefix before serialization. Full library snapshots remain complete. Filters,
+strict completed cursors, deterministic timestamp/room-ID ordering, pre-cap
+counts, and global counters remain unchanged. The regression compares capped
+views with complete snapshots across filters, timestamp ties, and empty views.
+With 10,000 active fixture records, JSON materialization falls from 10,000
+records and 5,160,140 serialized bytes to 512 records and 264,332 bytes.
+These are intermediate JSON sizes, not allocation-byte or throughput results.
+The registry snapshot still clones matching active records before selection;
+this repair bounds JSON materialization, not all snapshot memory.
+
+### Sparse replay sort scratch (#775/#636)
+
+The compact send index's high-cardinality fallback used a stable offset sort.
+It now uses an in-place unstable sort with the original row offset as a final
+key. Duplicate sender/sequence records retain their exact original order.
+Existing sparse-sender controls compare with an independent stable sort and
+round-trip full delivery artifacts. Offered work, event budgets, raw records,
+and oracle checks remain unchanged. This does not identify the historical
+long-cell stall cause in #1009 or bound the largest planned capacity sweep.
+
+Three alternating fresh-process debug pairs sort 1,000,000 sends from 100,000
+senders. Baseline peaks are 90,708–90,792 KiB; candidate peaks are
+88,860–89,104 KiB. Exact retained event identities pass in every process.
+Candidate sorting takes 3.35–5.93 seconds versus 1.37–2.29 seconds for baseline.
+The shared host and overlapping local checks limit timing attribution, but
+these samples do not support a speed improvement. This is a memory tradeoff
+for high-cardinality replay, not a live relay throughput improvement.
