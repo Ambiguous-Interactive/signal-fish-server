@@ -1387,7 +1387,7 @@ async fn peer_task(
     // The next session's halves; `None` between a churn disconnect and its
     // rejoin.
     let mut session: Option<(WsSink, WsReceiver)> = Some((initial.0, initial.1));
-    let mut send_cursor = 0usize;
+    let mut sends = plan.sends.iter().peekable();
     let mut churn_cursor = 0usize;
     // Generator failure stops sends for every later incarnation. Keep the
     // socket and its inbound evidence alive through the normal lifecycle.
@@ -1461,7 +1461,7 @@ async fn peer_task(
                 let next_send = if outbound_stopped {
                     None
                 } else {
-                    plan.sends.get(send_cursor)
+                    sends.peek().copied()
                 };
                 let mut writer = std::pin::pin!(async {
                     let Some(send) = next_send else {
@@ -1634,7 +1634,9 @@ async fn peer_task(
                 }
             };
             match event {
-                SessionEvent::Send(SendOutcome::Sent) => send_cursor += 1,
+                SessionEvent::Send(SendOutcome::Sent) => {
+                    sends.next();
+                }
                 SessionEvent::Send(SendOutcome::Stopped) => outbound_stopped = true,
                 SessionEvent::Quiescence => return,
                 SessionEvent::Send(SendOutcome::TransportFailed) => {

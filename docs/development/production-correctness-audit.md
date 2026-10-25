@@ -8841,8 +8841,9 @@ incident. The broader #1145 and #912 campaigns remain open.
 ### Capacity schedule iteration (#636)
 
 Sequential schedule iteration now advances through each sorted churn boundary
-once. It retains constant iterator state and no new per-send storage. Indexed
-access keeps its former rule. Unsorted synthetic churn histories use that rule
+once. The live writer peeks at that iterator and advances only after a recorded
+completed send, so churn keeps the pending item. It retains constant iterator
+state and no new per-send storage. Indexed access keeps its former rule. Unsorted synthetic churn histories use that rule
 as a fallback. Every shift still uses the original intended time. Frozen eager
 timelines and indexed comparisons cover jitter, phases, independent iterators,
 repeated boundaries, and exhaustion.
@@ -8865,3 +8866,42 @@ controls, 14 capacity schedule/replay controls, and root and native strict
 all-target/all-feature lint. The new paired control also fails when only the
 old probe-selection condition is restored. The retained dependency audit
 failure remains excluded from session delivery.
+
+The live-writer iterator connection also passes 11 selected schedule, reconnect,
+room-replacement, lag, pause, and replay controls plus strict root lint.
+
+### Retained long-cell attempt (#775/#1009)
+
+Fixed binaries from `3967a709` attempt the original one-room, 16-player cell:
+60 sends/s per sender, 96 application bytes, seed 1, v3 JSON reliable delivery,
+120 seconds of warm-up and 600 seconds of measurement, with the 250 ms lag
+bound. No local builds or tests overlap the attempt. The shared ARM64 WSL2
+host has 12 available CPUs and no cgroup CPU quota. It is not an isolated host.
+The later live-writer iterator connection is absent from this fixed binary.
+This no-churn cell does not exercise the churn-scan optimization.
+
+Run `480649b4-5e01-4cc8-9eec-3aefc487368b` is invalid. It schedules 691,232
+sends, completes 121,854, and retains 569,378 unsent. All 1,827,810 owed
+deliveries arrive; outstanding and gap-covered totals are zero. Full artifact
+replay reproduces the summary. The standalone test passes that equality;
+it does not turn this invalid workload into capacity evidence.
+
+The first recorded completed-write lag is 250,287 microseconds: intended
+126,934,706, wake 127,160,287, preparation 251, and write 24,455. Later
+before-write lag reaches 1,245,388 microseconds. The summary retains that
+fault and a separate 364,371-microsecond completed-send maximum. The largest
+sampler wake gap is 1,432,133 microseconds. Between neighboring resource
+observations at 126,755,157 and 128,212,322 microseconds, server CPU rises by
+12.4 seconds and generator CPU by 0.84 seconds. Generator RSS rises from
+149,991,424 to 150,241,280 bytes. Worker runqueue-wait deltas range from
+8.5 to 174.3 ms; the scheduler-enable setting is unavailable. These counters
+do not identify a cause. The server CPU burst warrants a matched profile;
+late fault-report work must also be distinguished from the initial overrun.
+
+The 2,889 interval samples retain a peak generator RSS of 163,950,592 bytes.
+The child-process peak is 174,156 KiB. The process finishes after 768.922
+seconds, including its original receive deadline, export, and replay.
+Artifacts remain at `/tmp/session542-live-long`; binary hashes, logs, selected
+stall intervals, and the resource report remain in `progress/session-542/`.
+This is a new partial-work memory observation. It does not bound the full
+planned workload or complete #775 and #1009.
