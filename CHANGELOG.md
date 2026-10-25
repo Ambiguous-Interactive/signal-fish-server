@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
-- Reduce native gameplay receive copies when a message owns its packet buffer (#636).
+- Reduce native gameplay receive copies and retained fragment storage for small messages (#636).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
 - Reduce native recovery work when partial-reliability messages leave large sequence gaps (#1187).
 - Reduce native receive work when partial-reliability recovery discards fragmented gameplay (#1182).
@@ -32,11 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
-- Reduce capacity collector, artifact writing, and replay memory and reordered send lookup work (#636, #775).
+- Reduce capacity collector, churn planning, artifact writing, and replay memory and lookup work (#636, #775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
 
+- Keep native receive-byte accounting exact when ordered reassembly rejects duplicate fragments (#1223).
 - Count empty native data-channel messages as zero application bytes in traffic statistics (#1219).
 - Disable Nagle on native reference-client sockets so small relay frames can send promptly (#1217).
 - Preserve leading BOM characters in browser MessagePack gameplay strings (#1215).

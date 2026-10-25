@@ -437,6 +437,171 @@ fn test_pending_queue_selection_persistence() -> Result<()> {
 use super::reassembly_queue::*;
 
 #[test]
+fn reassembly_ordered_duplicate_fragments_preserve_exact_receive_credit() {
+    for abandon in [false, true] {
+        for mut permutation in 0..6 {
+            let mut available = vec![0, 1, 2];
+            let mut queue = ReassemblyQueue::new(0);
+            let mut expected_bytes = 0;
+            for remaining in (1..=3).rev() {
+                let index = available.remove(permutation % remaining);
+                permutation /= remaining;
+                let fragment = ChunkPayloadData {
+                    tsn: u32::MAX.wrapping_add(index),
+                    beginning_fragment: index == 0,
+                    ending_fragment: index == 2,
+                    payload_type: PayloadProtocolIdentifier::Binary,
+                    user_data: Bytes::from(vec![index as u8; index as usize + 1]),
+                    ..Default::default()
+                };
+                expected_bytes += fragment.user_data.len();
+                assert_eq!(queue.push(fragment.clone()), remaining == 1);
+                assert_eq!(queue.get_num_bytes(), expected_bytes);
+                for _ in 0..3 {
+                    assert!(!queue.push(fragment.clone()));
+                    assert_eq!(
+                        queue.get_num_bytes(),
+                        expected_bytes,
+                        "duplicate TSN {} must not consume receive credit",
+                        fragment.tsn
+                    );
+                }
+                if abandon && remaining == 2 {
+                    queue.forward_tsn_for_ordered(0);
+                    assert_eq!(queue.get_num_bytes(), 0);
+                    assert!(queue.read().is_none());
+                    break;
+                }
+            }
+            if !abandon {
+                let message = queue.read().unwrap();
+                assert_eq!(
+                    message.into_payload(6).unwrap().as_ref(),
+                    [0, 1, 1, 2, 2, 2]
+                );
+                assert_eq!(queue.get_num_bytes(), 0);
+                assert!(queue.read().is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn reassembly_future_complete_duplicates_release_credit_after_read_or_forward() {
+    for abandon_predecessor in [false, true] {
+        let mut queue = ReassemblyQueue::new(0);
+        let future = ChunkPayloadData {
+            tsn: 2,
+            stream_sequence_number: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from_static(b"future"),
+            ..Default::default()
+        };
+        assert!(queue.push(future.clone()));
+        for _ in 0..3 {
+            assert!(!queue.push(future.clone()));
+            assert_eq!(queue.get_num_bytes(), 6);
+            assert!(queue.read().is_none());
+        }
+        let mut wrong_stream = future.clone();
+        wrong_stream.stream_identifier = 1;
+        assert!(!queue.push(wrong_stream));
+        assert_eq!(queue.get_num_bytes(), 6);
+        if abandon_predecessor {
+            queue.forward_tsn_for_ordered(0);
+        } else {
+            assert!(queue.push(ChunkPayloadData {
+                tsn: 1,
+                stream_sequence_number: 0,
+                user_data: Bytes::from_static(b"first"),
+                ..future.clone()
+            }));
+            assert_eq!(queue.get_num_bytes(), 11);
+            assert_eq!(
+                queue.read().unwrap().into_payload(5).unwrap().as_ref(),
+                b"first"
+            );
+        }
+        assert_eq!(
+            queue.read().unwrap().into_payload(6).unwrap().as_ref(),
+            b"future"
+        );
+        assert_eq!(queue.get_num_bytes(), 0);
+        assert!(!queue.push(future));
+        assert_eq!(queue.get_num_bytes(), 0);
+        assert!(queue.read().is_none());
+    }
+}
+
+#[test]
+fn reassembly_single_fragment_messages_retain_one_fragment_slot() {
+    for unordered in [false, true] {
+        let mut queue = ReassemblyQueue::new(0);
+        for seq in 0..1024_u16 {
+            assert!(queue.push(ChunkPayloadData {
+                tsn: u32::from(seq),
+                stream_sequence_number: seq,
+                unordered,
+                beginning_fragment: true,
+                ending_fragment: true,
+                payload_type: PayloadProtocolIdentifier::Binary,
+                user_data: Bytes::from(vec![seq as u8]),
+                ..Default::default()
+            }));
+        }
+        assert_eq!(queue.get_num_bytes(), 1024);
+        for seq in 0..1024_u16 {
+            let message = queue.read().unwrap();
+            assert_eq!(
+                message.chunks.capacity(),
+                1,
+                "unordered={unordered}, seq={seq}"
+            );
+            assert_eq!(message.into_payload(1).unwrap().as_ref(), [seq as u8]);
+        }
+        assert_eq!(queue.get_num_bytes(), 0);
+        assert!(queue.read().is_none());
+    }
+}
+
+#[test]
+#[ignore = "isolated retained fragment storage profile; run in a fresh process"]
+fn reassembly_single_fragment_storage_profile() {
+    let mut queue = ReassemblyQueue::new(0);
+    for sequence in 0..16384_u16 {
+        assert!(queue.push(ChunkPayloadData {
+            tsn: u32::from(sequence),
+            stream_sequence_number: sequence,
+            beginning_fragment: true,
+            ending_fragment: true,
+            payload_type: PayloadProtocolIdentifier::Binary,
+            user_data: Bytes::from(vec![sequence as u8; 64]),
+            ..Default::default()
+        }));
+    }
+    let slots: usize = queue
+        .ready_ordered
+        .iter()
+        .map(|message| message.chunks.capacity())
+        .sum();
+    println!(
+        "FRAGMENT_STORAGE_PROFILE messages=16384 payload_bytes={} fragment_slots={slots} fragment_slot_bytes={}",
+        queue.get_num_bytes(),
+        slots * std::mem::size_of::<ChunkPayloadData>()
+    );
+    for sequence in 0..16384_u16 {
+        assert_eq!(
+            queue.read().unwrap().into_payload(64).unwrap().as_ref(),
+            [sequence as u8; 64]
+        );
+    }
+    assert_eq!(queue.get_num_bytes(), 0);
+    assert!(queue.read().is_none());
+}
+
+#[test]
 fn test_reassembly_queue_ordered_fragments() -> Result<()> {
     let mut rq = ReassemblyQueue::new(0);
 

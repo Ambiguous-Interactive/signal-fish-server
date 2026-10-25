@@ -2227,16 +2227,19 @@ fn shutdown_window_update_preserves_delayed_ack_and_empty_read_policy() -> Resul
 // Issue #1145: transport completion must not discard an unread accepted tail.
 #[test]
 fn graceful_shutdown_preserves_messages_until_application_reads() -> Result<()> {
-    for simultaneous in [false, true] {
+    for (simultaneous, unread_tail) in [(false, 0_u64), (true, 0), (false, 1024), (true, 1024)] {
         let (mut local, mut remote) = reset_pair();
         let now = Instant::now();
         local.ack_mode = AckMode::NoDelay;
         remote.ack_mode = AckMode::NoDelay;
-        let expected = vec![
+        let mut expected = vec![
             Bytes::from_static(b"one"),
             Bytes::from(vec![0x5a; 4096]),
             Bytes::from_static(b"tail"),
         ];
+        expected.extend(
+            (0..unread_tail).map(|sequence| Bytes::copy_from_slice(&sequence.to_be_bytes())),
+        );
         for endpoint in [&mut local, &mut remote] {
             for payload in &expected {
                 endpoint
@@ -2289,7 +2292,14 @@ fn graceful_shutdown_preserves_messages_until_application_reads() -> Result<()> 
             for _ in &expected {
                 assert!(endpoint.poll_endpoint_event().is_none());
                 let message = endpoint.stream(1)?.read_sctp()?.unwrap();
-                received.push(message.to_payload(65536)?.freeze());
+                if message.chunks.len() == 1 {
+                    assert_eq!(
+                        message.chunks.capacity(),
+                        1,
+                        "unread gameplay must retain only its admitted fragment"
+                    );
+                }
+                received.push(message.into_payload(65536)?.freeze());
             }
             assert_eq!(received, expected);
             assert!(endpoint.poll_endpoint_event().is_some());

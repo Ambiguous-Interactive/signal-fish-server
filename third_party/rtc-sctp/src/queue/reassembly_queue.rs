@@ -398,8 +398,6 @@ impl ReassemblyQueue {
                 return false;
             }
 
-            self.n_bytes += chunk.user_data.len();
-
             // `ordered` is kept sorted by SSN, so binary-search for the chunk
             // set instead of scanning linearly (O(N) per arriving chunk when
             // the application drains slower than data arrives).
@@ -409,7 +407,12 @@ impl ReassemblyQueue {
                 && s.ssn == ssn
             {
                 let was_complete = s.is_complete();
+                let previous_fragments = s.chunks.len();
+                let bytes = chunk.user_data.len();
                 let complete = s.push(chunk);
+                if s.chunks.len() != previous_fragments {
+                    self.n_bytes += bytes;
+                }
                 if complete && !was_complete {
                     s.arrival = self.next_arrival;
                     self.next_arrival += 1;
@@ -420,8 +423,14 @@ impl ReassemblyQueue {
 
             // If not found, create a new chunkSet and insert it in SSN order
             // (this branch is only reached for ordered chunks).
-            let mut cset = Chunks::new(self.next_arrival, ssn, chunk.payload_type, vec![]);
-            let ok = cset.push(chunk);
+            self.n_bytes += chunk.user_data.len();
+            let mut fragments = Vec::with_capacity(usize::from(
+                chunk.beginning_fragment && chunk.ending_fragment,
+            ));
+            let payload_type = chunk.payload_type;
+            fragments.push(chunk);
+            let cset = Chunks::new(self.next_arrival, ssn, payload_type, fragments);
+            let ok = cset.is_complete();
             if ok {
                 self.next_arrival += 1;
             }

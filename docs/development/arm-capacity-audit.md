@@ -5824,3 +5824,43 @@ in a fresh process with these arguments:
 Retain process peak RSS and the `SEND_SORT_PROFILE` row.
 Raw logs and the measurement launcher remain in ignored
 `progress/session-539/`. Both cohorts and all attempts are reported above.
+
+### Indexed churn construction (#636/#775, session 541)
+
+At `3e30142f`, churn shifting scans every wave's peer list for every sender,
+then clones the full churn plan. The candidate indexes victim instants once,
+moves each vector into its sender schedule, and returns the original plan.
+The runner uses the schedule's same instants instead of repeating the scan.
+Repeated names within a wave still count once. Missing reconnect entries,
+cycle order, shift overflow checks, workload counts, and JSON data are preserved.
+
+Fresh-process debug probes use 16 players per room, 60 sends per second,
+120 seconds of warmup, 600 measured seconds, and 24 full-room replacement waves.
+These are plan-construction probes. They do not send gameplay or qualify a live
+capacity point. Baseline and candidate use the same probe. Each paired cohort
+has identical sampled-send checksums and serialized churn sizes.
+
+| Rooms | Source | Construction us | Sampled peak RSS KiB | Planned sends |
+| --- | --- | --- | --- | --- |
+| 64 | baseline, first | 390300 | 18536 | 44238848 |
+| 64 | candidate, first | 135065 | 15836 | 44238848 |
+| 64 | baseline, second | 301148 | 18556 | 44238848 |
+| 64 | candidate, second | 162612 | 15784 | 44238848 |
+| 128 | baseline | 946169 | 27376 | 88477696 |
+| 128 | candidate | 259902 | 20672 | 88477696 |
+| 999 | candidate only | 1851770 | 88376 | 690540768 |
+
+RSS samples read the child process's `/proc` high-water mark at one-millisecond
+intervals. They can miss a short peak. The process wait metric was inconsistent
+under this launcher and is not used. The 999-room observation has no paired
+baseline. Timing includes shared-host contention and debug code. No broad
+throughput or ten-minute live-workload claim follows from these results.
+
+The frozen schedule differential checks all scheduled sends on small shapes.
+The added control covers repeated and unknown peers, missing reconnect entries,
+and unsorted waves. Live reconnect-burst and room-replacement controls retain
+exact stream validation. Raw logs and retained executables are local in
+`progress/session-541/`. Reproduce the probe with the ignored
+`schedule::tests::generator_churn_construction_profile` test; set
+`CAPACITY_CHURN_PROBE_ROOMS` to the room count. Whole-generator memory and the
+long live cell in #775 remain open.
