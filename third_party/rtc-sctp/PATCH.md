@@ -288,3 +288,15 @@ previous 11,242 while retaining exact payload and receive-credit assertions.
 Permutation, abandonment and wrap controls remain unchanged. This is an
 operation-count result, not a throughput measurement. See
 [#1191](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1191).
+
+The #1197 repair fits FORWARD TSN stream reports to both the packet MTU and
+16-bit chunk length. When the next ordered stream cannot fit, the report stops
+before its first skipped TSN. It continues after acknowledgment without losing
+that stream's sequence progress. The usual cached report path stays unchanged
+when every stream fits. Paired controls cover small and normal packet budgets,
+TSN wrap, a lost first report, exact reliable successors on every stream, and
+graceful terminal reads. Boundary controls retain repeated stream entries,
+unordered fragments, partial fragment prefixes, and the maximum chunk length.
+This is a low-level multi-stream contract repair. The reference clients' two
+required channels do not by themselves exceed the ordinary report budget.
+Replacement qualification in #912 must retain `shutdown_forward_tsn_` controls.

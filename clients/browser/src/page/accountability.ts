@@ -623,6 +623,12 @@ export class DeliveryAccountability {
           `gap ${expected}..=${received - 1}`,
       );
     }
+    const following = gaps[consumed];
+    if (following !== undefined && following.fromSeq <= received) {
+      violation(
+        `prior gap report for ${fromPlayer} epoch ${epoch} includes delivered seq ${received}`,
+      );
+    }
     gaps.splice(0, consumed);
     if (gaps.length === 0) {
       this.pendingGaps.delete(key);

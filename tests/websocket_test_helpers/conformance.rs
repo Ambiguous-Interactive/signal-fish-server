@@ -1827,10 +1827,9 @@ impl ConformanceAuditor {
             }
         };
 
+        Self::assert_stamp_not_reported(receiver, receiver_state, key, seq);
         if seq > expected {
             Self::consume_exact_gap(receiver, receiver_state, key, expected, seq);
-        } else {
-            Self::assert_stamp_not_reported(receiver, receiver_state, key, seq);
         }
 
         let sender_state = receiver_state

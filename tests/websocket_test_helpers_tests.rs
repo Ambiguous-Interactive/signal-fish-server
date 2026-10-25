@@ -746,6 +746,29 @@ fn conformance_stamps_require_prior_exact_gap_reports() {
             false,
         ),
         (
+            "issue 1196 skipped prefix followed by reported delivered sequence",
+            ReceiverProtocolMode::V3,
+            &[
+                Step::Data(Some(1), Some(1)),
+                Step::Gap {
+                    sender: 1,
+                    epoch: 1,
+                    from_seq: 2,
+                    to_seq: 3,
+                    reason: DeliveryGapReason::LatestSuperseded,
+                },
+                Step::Gap {
+                    sender: 1,
+                    epoch: 1,
+                    from_seq: 4,
+                    to_seq: 5,
+                    reason: DeliveryGapReason::VolatileDropped,
+                },
+                Step::Data(Some(4), Some(1)),
+            ],
+            true,
+        ),
+        (
             "future exact cause remains pending",
             ReceiverProtocolMode::V3,
             &[

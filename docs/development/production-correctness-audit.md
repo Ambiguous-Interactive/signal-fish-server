@@ -8215,3 +8215,64 @@ nor the private native transport graph. The signaling wire and public SDK
 contracts stay unchanged; no migration is required. The new browser recovery
 and SCTP shutdown histories change tests only. SDK follow-up completion is
 separate from server CI.
+
+### F173 — Delivered gameplay overlaps a retained drop after an explained gap
+
+Confirmed on `cd9db830`; tracked in #1196 under #826. Both reference validators
+check delivered-sequence overlap only for contiguous DATA. With baseline
+sequence 0 and retained exact ranges [1,1] and [2,2], DATA sequence 2 uses the
+first range to explain its skipped prefix and reaches Apply despite the second
+range reporting it dropped. The same branch exists in the root conformance
+oracle. Red-first controls reproduce the contradictory acceptance.
+
+Check the first retained range after the explained prefix before consuming
+ranges or advancing the sender. Rejection preserves the exact retained state,
+so a later valid sequence can still use those ranges. This changes invalid
+traffic handling through the existing delivery-violation path. Valid traffic
+and the wire schema stay unchanged. It does not explain the historical native
+reset or browser mesh failures.
+
+Current independent Rust `da8f2d16` and .NET `e467c871` sources have the same
+conditional check. Follow-ups [Rust #296](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/296)
+and [.NET #147](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/147)
+track separate correctness repairs. Godot `e3c075f7` has no delivery-accountability
+validator and imports neither reference implementation. No valid application
+traffic needs migration. SDK issue completion is separate from server CI.
+
+### A20 browser failure evidence — Initial offer cleanup
+
+Open #853/#889 now retains the failed browser operation and bounded connection
+snapshot before initial offer cleanup deletes its link. Previously the later
+orchestrator snapshot could no longer inspect that connection. Controls cover
+both channel-creation steps, offer creation, local description installation,
+missing SDP, and rejection after retirement. They retain pre-close transport
+state, channel progress, the original exception, and fresh-link recovery.
+Late failures cannot describe or remove a replacement. These are deterministic
+failure controls; the historical Chromium/native incident remains unexplained.
+The three external SDKs import neither this browser reference engine nor its
+private diagnostic output; no SDK migration is required.
+
+### F174 — Multi-stream abandonment exceeds the native packet budget
+
+Confirmed on `cd9db830`; tracked in #1197 under #1145/#826/#912. A paired
+history with sixteen ordered streams and MTU 64 emits an 84-byte FORWARD TSN.
+The report includes all abandoned stream sequences without a packet budget.
+The red control fails on the published source; normal-MTU controls also cover
+more ordered streams than one recovery report can hold.
+
+Cap the report at the last cumulative TSN before an ordered stream whose entry
+cannot fit. Acknowledgment permits the next bounded prefix. Never advance the
+cumulative point over an omitted required stream entry. Paired controls use
+MTU 64 and 1200, ordinary and wrapped TSNs, a lost first report, and exact
+matching retry before graceful completion. Every reliable successor stays
+readable with exact bytes after transport closure. Budget controls cover
+repeated stream sequences, unordered chunks, fragment boundaries, small report
+slots, and the 16-bit chunk-length limit.
+
+This repairs the low-level multi-stream API. The reference gameplay engines use
+two required channels; these histories do not establish a historical public
+channel failure cause. The independent Rust SDK has no native RTC/SCTP graph,
+.NET uses its own implementation, and Godot uses browser WebRTC or its engine
+extension. None imports this private patched transport. Their wire contracts
+and migration requirements do not change. Published replacement qualification
+under #912 and the broader native shutdown investigation remain open.

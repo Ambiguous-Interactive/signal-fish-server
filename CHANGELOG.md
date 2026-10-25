@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject reference-client gameplay that an earlier exact report already marks as dropped (#1196).
+- Keep native recovery packets within the transport size when losses span many ordered streams (#1197).
+- Retain browser connection details when initial offer creation fails (#853).
 - Keep empty native SCTP writes from blocking later ordered messages (#1190).
 - Preserve native channel close notifications when remote admission waits until channel retirement (#1188).
 - Release browser negotiation backlog when peer links retire so repeated replacements keep gameplay active (#1183).
