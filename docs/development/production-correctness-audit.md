@@ -9577,3 +9577,61 @@ All attempts remain in ignored `progress/session-553/`. Earlier attempts used
 an incompatible cached bridge, lacked the export-template path, or exhausted
 the temporary filesystem before service gameplay. Those setup failures remain
 separate from the retained Web buffer-loss history.
+
+### Classify native SCTP DATA admission (#1244)
+
+The native transport snapshot now splits DATA attempts into accepted, redundant,
+and refused chunks. Acceptance records entry into the receive TSN space. It
+includes saved reset DATA and DATA acknowledged for stopped readers during
+graceful drain. Redundant TSNs include received and FORWARD-TSN-covered positions.
+Refused chunks retain the existing retry behavior. Counters belong to one physical
+association; they neither identify channels nor prove reassembly or delivery.
+The receive path adds no allocation.
+
+Three deterministic controls cover ordinary and wrapped TSNs, duplicate DATA,
+full receive windows, exact reads, saved reset queues, counter reset, the
+full-window fragment-completion exception, and stopped-reader drain. The live
+held-poller control retains four fragmented 4 KiB packets in both receiver roles
+and both generations. All chunks are classified before callback admission resumes.
+RTC mapping/absence controls retain the existing null semantics.
+
+### Godot-offer service sessions (#1240, #1244)
+
+The [pinned fixture](../../clients/native/tests/fixtures/README.md) applies to
+Godot client `988797b4c2f2a870b946870b59046ea5a5f1a297`. The control elects the
+reference as authority/host so Godot offers through the real v3 service.
+Its portable patch keeps early service signals until native pairing completes,
+counts signals from phase entry, and freezes the gameplay generation before
+teardown can publish another plan. Early attempts retain authority-selection,
+pre-pair signal, and teardown-evidence failures. These are harness failures;
+they do not establish production packet loss.
+
+Godot 4.7.2 native and Web use Chromium 154 on Linux ARM64, with native
+webrtc-native 1.2.2-stable. Both offer-role service histories pass two generations
+in fresh rooms. Each direction receives and acknowledges all 128 reliable chunks
+per generation: 1,024 exact snapshot receipts across the two runtimes. Mixed
+reliable/ordered/unordered traffic, selected-packet retirement, required-channel
+closure, and fresh links pass. Both sides record the same room and plan generation;
+Godot records initiate=true and the reference initiate=false in every phase.
+HTTP carries markers only. Snapshot bodies retain their original 1 KiB size,
+32-packet outstanding window, receipt requirements, and deadlines.
+
+At snapshot chunk 127, four native SCTP samples classify 182, 176, 187, and 189
+received chunks as accepted, with zero redundant or refused chunks. These totals
+include all channel modes and credits. They cannot attribute the historical
+Godot 4.3 missing prefix. The probe SHA-256 is
+`777bc6c066e799001732d97021dea81f11569c0848de10c1257cccec040222fd`.
+
+Earlier 4 KiB/8-outstanding diagnostic attempts remain separate. One intermediate
+cohort also inherited an 8-packet Godot window before the final 32-packet fixture
+was frozen; it is not the source of the final original-workload qualification.
+All attempts remain in ignored `progress/session-554/`.
+
+Godot-offer host departure/rejoin, larger meshes, remote networks, corrected
+Godot lifetimes, and historical-prefix attribution remain open in #1240/#1244
+and Godot #355/#433.
+[Godot #444](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/444)
+tracks the general driver and host-departure control. Rust at `da8f2d16` and .NET at `e467c871` have no dependency
+on the patched peer stack in their inspected manifests. Their wire contracts do
+not change. Godot's optional reference probe can consume the added diagnostics;
+its production adapter keeps the existing negotiated channel contract.

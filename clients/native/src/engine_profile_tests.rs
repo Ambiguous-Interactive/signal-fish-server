@@ -360,6 +360,13 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             let physical_generation = link.generation;
             let initial = pair.receiver.transport_diagnostic_snapshot(peer).await;
             assert_eq!(initial["sctp"]["data_chunks_received"], 0);
+            for field in [
+                "data_chunks_accepted",
+                "data_chunks_redundant",
+                "data_chunks_refused",
+            ] {
+                assert_eq!(initial["sctp"][field], 0);
+            }
             let initial_transport = initial["transports"].as_array().unwrap();
             assert_eq!(initial_transport.len(), 1);
             let initial_transport = &initial_transport[0];
@@ -419,6 +426,17 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             .expect("RTC receives the whole snapshot while callback polling is held");
             assert_eq!(held["generation"], physical_generation);
             assert!(held["sctp"]["data_chunks_received"].as_u64().unwrap() > 4);
+            let accepted = held["sctp"]["data_chunks_accepted"].as_u64().unwrap();
+            let redundant = held["sctp"]["data_chunks_redundant"].as_u64().unwrap();
+            let refused = held["sctp"]["data_chunks_refused"].as_u64().unwrap();
+            assert!(
+                accepted > 4,
+                "four fragmented messages require more than four admitted chunks"
+            );
+            assert_eq!(
+                held["sctp"]["data_chunks_received"],
+                accepted + redundant + refused
+            );
             let held_transport = &held["transports"][0];
             assert_eq!(held_transport["id"], initial_transport["id"]);
             assert!(held_transport["packets_received"].as_u64().unwrap() > initial_packets);

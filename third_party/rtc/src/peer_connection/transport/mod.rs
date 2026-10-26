@@ -387,12 +387,19 @@ pub struct RTCSctpTransport<'a> {
 }
 
 /// Local SCTP association counters, before data-channel message reassembly.
-/// Received chunks include retransmissions and refused DATA. They do not prove
-/// acceptance, identify a stream, or count delivered application messages.
+/// Received chunks split into accepted, redundant, and refused attempts.
+/// These counters do not identify streams or count delivered application messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct RTCSctpAssociationStats {
     /// DATA chunks received, including duplicates and refused chunks.
     pub data_chunks_received: u64,
+    /// New DATA chunks admitted to the receive TSN space, including saved reset DATA.
+    /// Acceptance does not prove message reassembly or application delivery.
+    pub data_chunks_accepted: u64,
+    /// DATA whose TSNs were already received or passed by FORWARD TSN.
+    pub data_chunks_redundant: u64,
+    /// New DATA refused by stream admission or receive credit.
+    pub data_chunks_refused: u64,
     /// SACK chunks received from the peer.
     pub sack_chunks_received: u64,
     /// Local DATA retransmission timer expirations.
@@ -407,6 +414,9 @@ impl From<::sctp::AssociationStats> for RTCSctpAssociationStats {
     fn from(mut stats: ::sctp::AssociationStats) -> Self {
         Self {
             data_chunks_received: stats.get_num_datas(),
+            data_chunks_accepted: stats.get_num_accepted_datas(),
+            data_chunks_redundant: stats.get_num_redundant_datas(),
+            data_chunks_refused: stats.get_num_refused_datas(),
             sack_chunks_received: stats.get_num_sacks(),
             retransmission_timeouts: stats.get_num_t3timeouts(),
             acknowledgement_timeouts: stats.get_num_ack_timeouts(),

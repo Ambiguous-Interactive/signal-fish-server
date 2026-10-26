@@ -1583,6 +1583,7 @@ impl Association {
         );
         self.stats.inc_datas();
         if !self.payload_queue.can_push(d, self.peer_last_tsn) {
+            self.stats.inc_redundant_datas();
             self.payload_queue.push_received(d.tsn, self.peer_last_tsn);
             return self.handle_peer_last_tsn_and_acknowledgement(true);
         }
@@ -1629,6 +1630,9 @@ impl Association {
                 self.deferred_reset_bytes += Self::deferred_data_cost(d) + queue_cost;
                 self.deferred_reset_data.insert(d.tsn, d.clone());
                 self.payload_queue.push_received(d.tsn, self.peer_last_tsn);
+                self.stats.inc_accepted_datas();
+            } else {
+                self.stats.inc_refused_datas();
             }
             // ACK accepted DATA, duplicates, and the current receive window
             // even while the application cannot access the new generation.
@@ -1697,7 +1701,14 @@ impl Association {
         } else {
             // silently discard the data. (sender will retry on T3-rtx timeout)
             debug!("[{}] discard {}", self.side, d.stream_sequence_number);
+            self.stats.inc_refused_datas();
             return Ok(vec![]);
+        }
+
+        if stream_handle_data {
+            self.stats.inc_accepted_datas();
+        } else {
+            self.stats.inc_refused_datas();
         }
 
         // Graceful drain still acknowledges a stopped generation's DATA, but

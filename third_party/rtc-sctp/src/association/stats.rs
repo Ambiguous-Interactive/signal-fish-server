@@ -2,6 +2,9 @@
 #[derive(Default, Debug, Copy, Clone)]
 pub struct AssociationStats {
     n_datas: u64,
+    n_accepted_datas: u64,
+    n_redundant_datas: u64,
+    n_refused_datas: u64,
     n_sacks: u64,
     n_t3timeouts: u64,
     n_ack_timeouts: u64,
@@ -9,14 +12,44 @@ pub struct AssociationStats {
 }
 
 impl AssociationStats {
-    /// Counts one DATA chunk sent.
+    /// Counts one DATA chunk received.
     pub fn inc_datas(&mut self) {
         self.n_datas += 1;
     }
 
-    /// The number of DATA chunks sent.
+    /// The number of DATA chunks received.
     pub fn get_num_datas(&mut self) -> u64 {
         self.n_datas
+    }
+
+    /// Counts new DATA admitted to the receive TSN space, not application delivery.
+    pub(crate) fn inc_accepted_datas(&mut self) {
+        self.n_accepted_datas = self.n_accepted_datas.saturating_add(1);
+    }
+
+    /// New DATA chunks admitted to the receive TSN space.
+    pub fn get_num_accepted_datas(&self) -> u64 {
+        self.n_accepted_datas
+    }
+
+    /// Counts DATA whose TSN was already received or passed by FORWARD TSN.
+    pub(crate) fn inc_redundant_datas(&mut self) {
+        self.n_redundant_datas = self.n_redundant_datas.saturating_add(1);
+    }
+
+    /// DATA chunks already covered by the receive TSN space.
+    pub fn get_num_redundant_datas(&self) -> u64 {
+        self.n_redundant_datas
+    }
+
+    /// Counts new DATA not admitted to the receive TSN space.
+    pub(crate) fn inc_refused_datas(&mut self) {
+        self.n_refused_datas = self.n_refused_datas.saturating_add(1);
+    }
+
+    /// New DATA chunks refused by stream admission or receive credit.
+    pub fn get_num_refused_datas(&self) -> u64 {
+        self.n_refused_datas
     }
 
     /// Counts one SACK chunk received.
@@ -62,6 +95,9 @@ impl AssociationStats {
     /// Zeroes every counter.
     pub fn reset(&mut self) {
         self.n_datas = 0;
+        self.n_accepted_datas = 0;
+        self.n_redundant_datas = 0;
+        self.n_refused_datas = 0;
         self.n_sacks = 0;
         self.n_t3timeouts = 0;
         self.n_ack_timeouts = 0;

@@ -485,3 +485,11 @@ payload delivery and one terminal endpoint event. Additional accepted-response
 controls rearm reset recovery with late busy and InProgress replies and service
 the new due deadline; they do not prove strict-peer reachability of that ordering.
 The public WebRTC close path still uses abort.
+
+The #1244 diagnostics split inbound DATA attempts into accepted, redundant,
+and refused chunks. Acceptance records receive-TSN admission, including saved
+reset DATA and stopped-read graceful drain. Redundant TSNs include positions
+passed by FORWARD TSN. Refused chunks retain the existing retry behavior.
+The counters add no receive-path allocation and do not identify channels or
+prove message reassembly. Replacement qualification must retain the
+`data_ingress_counters_` and `data_ingress_acceptance_` controls.

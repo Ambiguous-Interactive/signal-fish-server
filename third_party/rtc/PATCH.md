@@ -273,3 +273,10 @@ Replacement qualification in #912 must retain
 and `godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generations`.
 The cause of the captured Godot 4.3 incident in #1244 remains separate until
 matched runtime evidence establishes it.
+
+The #1244 SCTP snapshot also reports accepted, redundant, and refused DATA
+attempts. The conversion preserves association-owned counters without resetting
+them. Accepted chunks enter the receive TSN space; they do not prove reassembly
+or application delivery. Redundant positions include FORWARD TSN progress.
+The native held-poller control retains the complete fragmented reliable prefix
+while comparing classified SCTP attempts with RTC and Engine observations.

@@ -1,0 +1,98 @@
+diff --git a/scripts/check-webrtc-reference.py b/scripts/check-webrtc-reference.py
+index 2ab92b7..1e7ab3c 100644
+--- a/scripts/check-webrtc-reference.py
++++ b/scripts/check-webrtc-reference.py
+@@ -1184,2 +1184,4 @@ def main() -> None:
+-    if args.service_url and args.offerer != "reference":
+-        parser.error("--service-url requires --offerer reference")
++    if args.service_url and args.service_rejoin:
++        parser.error("Godot-offer service control does not qualify host departure and rejoin")
++    if args.service_url and args.offerer != "godot":
++        parser.error("Godot-offer service control requires --offerer godot")
+diff --git a/tests/smoke/webrtc_native_reference.rs b/tests/smoke/webrtc_native_reference.rs
+index 42bff23..b21c949 100644
+--- a/tests/smoke/webrtc_native_reference.rs
++++ b/tests/smoke/webrtc_native_reference.rs
+@@ -91 +91 @@ async fn main() -> anyhow::Result<()> {
+-                        "snapshot" => Ok(engine.diagnostic_snapshot(peer)),
++                        "snapshot" => Ok(engine.transport_diagnostic_snapshot(peer).await),
+@@ -134,0 +135,3 @@ async fn main() -> anyhow::Result<()> {
++                        if std::str::from_utf8(&data).is_ok_and(|text| text.starts_with("snapshot:") && text.split(':').nth(3) == Some("127")) {
++                            eprintln!("SCTP_INGRESS {}", engine.transport_diagnostic_snapshot(peer).await);
++                        }
+diff --git a/tests/smoke/webrtc_reference.js b/tests/smoke/webrtc_reference.js
+index 256b8ba..481bdae 100644
+--- a/tests/smoke/webrtc_reference.js
++++ b/tests/smoke/webrtc_reference.js
+@@ -384,0 +385 @@ window.runReference = async function (
++            window.referenceServicePaired = true;
+diff --git a/tests/smoke/webrtc_reference_service.gd.inc b/tests/smoke/webrtc_reference_service.gd.inc
+index 3f3868d..66d3e83 100644
+--- a/tests/smoke/webrtc_reference_service.gd.inc
++++ b/tests/smoke/webrtc_reference_service.gd.inc
+@@ -0,0 +1,2 @@
++var _service_generation := ""
++var _service_initiate := false
+@@ -101 +103 @@ func _service_join(phase: int) -> bool:
+-	params.supports_authority = false
++	params.supports_authority = true
+@@ -107,0 +110,2 @@ func _service_join(phase: int) -> bool:
++	if _client.request_authority(false) != OK:
++		return false
+@@ -132,2 +135,0 @@ func _service_finalize() -> bool:
+-		if _client.start_game() != OK:
+-			return false
+@@ -142 +144 @@ func _service_finalize() -> bool:
+-		or _service_plan.peers[0].initiate
++		or not _service_plan.peers[0].initiate
+@@ -144 +146 @@ func _service_finalize() -> bool:
+-		_fail("service needs a WebRTC host plan with the reference offering")
++		_fail("service needs a WebRTC host plan with Godot offering")
+@@ -145,0 +148,2 @@ func _service_finalize() -> bool:
++	_service_generation = _service_plan.generation
++	_service_initiate = _service_plan.peers[0].initiate
+@@ -159 +163,2 @@ func _service_end(phase: int) -> bool:
+-		"generation": _service_plan.generation,
++		"generation": _service_generation,
++		"initiate": _service_initiate,
+diff --git a/tests/smoke/webrtc_reference_service.js b/tests/smoke/webrtc_reference_service.js
+index 11c1eac..71948ce 100644
+--- a/tests/smoke/webrtc_reference_service.js
++++ b/tests/smoke/webrtc_reference_service.js
+@@ -37,2 +37 @@ export function configureReferenceService(url, appId, rejoin = false) {
+-        if (
+-          !currentSession ||
++        if (currentSession && (
+@@ -41 +40 @@ export function configureReferenceService(url, appId, rejoin = false) {
+-        )
++        ))
+@@ -66,0 +66,3 @@ export function configureReferenceService(url, appId, rejoin = false) {
++      window.referenceServicePaired = false;
++      const sentBefore = signalsSent;
++      const receivedBefore = signalsReceived;
+@@ -91 +93 @@ export function configureReferenceService(url, appId, rejoin = false) {
+-        supports_authority: false,
++        supports_authority: true,
+@@ -95,0 +98,3 @@ export function configureReferenceService(url, appId, rejoin = false) {
++        send("AuthorityRequest", {become_authority: true});
++        const authority = await wait(() => take("AuthorityResponse"), "reference authority");
++        if (!authority.granted) throw new Error("reference authority was refused");
+@@ -96,0 +102,2 @@ export function configureReferenceService(url, appId, rejoin = false) {
++        await wait(() => {const state = take("LobbyStateChanged"); return state?.all_ready;}, "all ready");
++        send("StartGame");
+@@ -104 +111 @@ export function configureReferenceService(url, appId, rejoin = false) {
+-        !plan.peers[0].initiate
++        plan.peers[0].initiate
+@@ -107 +114 @@ export function configureReferenceService(url, appId, rejoin = false) {
+-          "reference service needs an initiating WebRTC host plan",
++          "reference service needs an answering WebRTC host plan",
+@@ -114,0 +122 @@ export function configureReferenceService(url, appId, rejoin = false) {
++        initiate: plan.peers[0].initiate,
+@@ -122,2 +129,0 @@ export function configureReferenceService(url, appId, rejoin = false) {
+-      const sentBefore = signalsSent;
+-      const receivedBefore = signalsReceived;
+@@ -143,0 +150 @@ export function configureReferenceService(url, appId, rejoin = false) {
++          if (!window.referenceServicePaired) return [];
+@@ -147,0 +155,2 @@ export function configureReferenceService(url, appId, rejoin = false) {
++              if (frame.data.from !== record.peer_id || frame.data.generation !== record.generation)
++                throw new Error("reference service queued signal identity differs");

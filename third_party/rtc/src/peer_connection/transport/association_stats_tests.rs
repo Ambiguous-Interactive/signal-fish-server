@@ -50,6 +50,9 @@ fn association_stats_distinguish_an_absent_association_from_zero_data() {
     .association_stats()
     .unwrap();
     assert_eq!(snapshot.data_chunks_received, 0);
+    assert_eq!(snapshot.data_chunks_accepted, 0);
+    assert_eq!(snapshot.data_chunks_redundant, 0);
+    assert_eq!(snapshot.data_chunks_refused, 0);
     assert_eq!(snapshot.retransmission_timeouts, 0);
     pc.sctp_transport_mut().sctp_associations.clear();
     assert_eq!(
