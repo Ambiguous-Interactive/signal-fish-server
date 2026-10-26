@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Count every misrouted delivery from unexpected senders in capacity reports (#1243).
 - Preserve unread native gameplay between shutdown acknowledgment and final completion (#1239).
 - Complete native graceful shutdown before queued shutdown retries (#1237).
 - Preserve native graceful shutdown retry deadlines when a peer repeats its shutdown request (#1235).

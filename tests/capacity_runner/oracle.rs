@@ -1963,14 +1963,12 @@ pub fn summarize(
                 continue;
             }
             if !expected_senders.contains(sender) {
-                let seq = stream.first;
                 outcome.misrouted += stream.total;
-                misrouted.record(DeliveryKey {
-                    recipient: recipient.clone(),
-                    sender: (*sender).to_string(),
-                    epoch: *epoch,
-                    seq,
-                });
+                SequenceViolations {
+                    count: stream.total,
+                    first: stream.first,
+                }
+                .append_to(&mut misrouted, recipient, sender, *epoch);
                 continue;
             }
             // Closed-stream and invalid-sequence arrivals still count as evidence.
@@ -5056,39 +5054,84 @@ mod coverage_tests {
         }
     }
 
-    // Issue #775: the old per-position set retained a node per receipt.
     #[test]
-    fn misrouted_stream_preserves_zero_and_full_width_first_sequence() {
-        let context = crate::unit_context_with_class(DeliveryClass::Reliable);
-        for first in [0, u64::MAX] {
-            let mut records = crate::complete_records(&context.plans);
-            let mut receipt = records.receipts[0].clone();
-            receipt.sender = "unknown-sender".into();
-            receipt.server_seq = first;
-            records.receipts.push(receipt.clone());
-            receipt.server_seq = 7;
-            records.receipts.push(receipt);
-            let summary = summarize(
-                &context.plans,
-                &context.roster,
-                &records,
-                1_000,
-                96,
-                DeliveryClass::Reliable,
-                &ChurnPlan::default(),
-                None,
-            );
-            let violation = summary
-                .reasons
+    fn unexpected_sender_counts_each_receipt_and_preserves_first_key_and_replay() {
+        for class in [
+            DeliveryClass::Reliable,
+            DeliveryClass::Latest,
+            DeliveryClass::Volatile,
+        ] {
+            let mut config = crate::scenario_config(crate::Encoding::V2Json);
+            config.rooms = 2;
+            config.delivery_class = class;
+            config.warmup = std::time::Duration::ZERO;
+            config.duration = std::time::Duration::from_millis(400);
+            config.send_rate_per_sender = 10.0;
+            let (plans, churn) = crate::build_run_shape(&config).unwrap();
+            let roster: Vec<_> = plans
                 .iter()
-                .find_map(|reason| match reason {
-                    InvalidReason::MisroutedDeliveries { count, first } => Some((*count, first)),
-                    _ => None,
-                })
-                .expect("unknown sender remains misroute evidence");
-            assert_eq!(violation.0, 1);
-            assert_eq!(violation.1.sender, "unknown-sender");
-            assert_eq!(violation.1.seq, first);
+                .map(|plan| (plan.name.clone(), plan.room))
+                .collect();
+            for sender in ["unknown-sender", "r0p0", "r1p1"] {
+                for first in [0, u64::MAX] {
+                    for duplicate in [false, true] {
+                        let mut records = crate::complete_records(&plans);
+                        let mut receipt = records.receipts[0].clone();
+                        receipt.recipient = "r0p0".into();
+                        receipt.sender = sender.into();
+                        receipt.server_seq = first;
+                        records.receipts.push(receipt.clone());
+                        if duplicate {
+                            records.receipts.push(receipt.clone());
+                        }
+                        receipt.server_seq = 7;
+                        records.receipts.push(receipt);
+                        let summarize = |records: &RunRecords| {
+                            super::summarize(
+                                &plans, &roster, records, 1_000, 96, class, &churn, None,
+                            )
+                        };
+                        let summary = summarize(&records);
+                        let count = 2 + u64::from(duplicate);
+                        assert!(
+                            summary
+                                .reasons
+                                .contains(&InvalidReason::MisroutedDeliveries {
+                                    count,
+                                    first: DeliveryKey {
+                                        recipient: "r0p0".into(),
+                                        sender: sender.into(),
+                                        epoch: 1,
+                                        seq: first,
+                                    },
+                                }),
+                            "{class:?} sender={sender} first={first} duplicate={duplicate}: {:?}",
+                            summary.reasons
+                        );
+                        assert_eq!(
+                            summary
+                                .per_recipient
+                                .iter()
+                                .find(|outcome| outcome.recipient == "r0p0")
+                                .unwrap()
+                                .misrouted,
+                            count
+                        );
+                        assert!(!summary.valid);
+                        let output = tempfile::tempdir().unwrap();
+                        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+                        let replayed = crate::artifacts::read_records(output.path()).unwrap();
+                        assert_eq!(
+                            serde_json::to_value(summarize(&replayed)).unwrap(),
+                            serde_json::to_value(summary).unwrap()
+                        );
+                        assert_eq!(
+                            serde_json::to_value(replayed).unwrap(),
+                            serde_json::to_value(records).unwrap()
+                        );
+                    }
+                }
+            }
         }
     }
 

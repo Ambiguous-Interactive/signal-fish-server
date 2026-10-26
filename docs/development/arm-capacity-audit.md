@@ -5985,3 +5985,14 @@ It retains both peak and in-process RSS observations. Shared-host builds and
 checks overlap some attempts. These are memory observations, not throughput
 claims, whole-generator bounds, live capacity qualification, or repairs for
 historical generator stalls. The planned long live workload remains open.
+
+Final review also found #1243 in the unchanged unexpected-sender branch.
+The per-recipient misroute count included every receipt, but the reason counted
+each stream once. The first-key regression initially preserved that old count.
+The corrected regression fails red with two receipts and reason count one.
+The repair uses the existing weighted sequence accumulator to count all raw
+receipts while retaining the first key. Controls cover unknown, self, and
+cross-room senders; repeated arrivals; zero and full-width first sequences;
+and all three delivery classes. Each case writes and reads raw delivery
+artifacts and compares the complete recomputed summary and records.
+The valid/invalid verdict and server routing do not change.
