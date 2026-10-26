@@ -179,7 +179,7 @@ retain binary insertion. A 1024-row ordered window requires at most 1024 serial
 comparisons, down from 11242. Wrapped sequence and deque controls retain exact
 pop order and byte accounting. These controls are included in the existing
 shutdown and payload_queue_gap_ack selectors. Replacement qualification in
-#912 must retain them.
+issue #912 must retain them.
 
 The #1165 repair records duplicate DATA before stream and saved-generation
 admission. Duplicate-only packets trigger an immediate SACK under the normal

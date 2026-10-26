@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Preserve unread native gameplay after shutdown acknowledgment when stream-reset recovery expires (#1239).
+- Preserve unread native gameplay between shutdown acknowledgment and final completion (#1239).
 - Complete native graceful shutdown before queued shutdown retries (#1237).
 - Preserve native graceful shutdown retry deadlines when a peer repeats its shutdown request (#1235).
 - Preserve native channel reset retry limits and deadlines when a peer reports a busy request (#1233).
