@@ -9515,3 +9515,65 @@ locate that delay. All attempts and full verdicts remain retained in ignored
 prefix loss in #1244 is not reproduced. Other service offer roles, larger
 meshes, remote networks, and corrected Godot packet lifetimes remain open in
 issue #1240 and Godot #355/#433. Rust and .NET SDKs do not own this peer stack.
+
+### Native SCTP ingress observations (#1244)
+
+The diagnostic boundary now includes existing association DATA/SACK counters,
+local retransmission and delayed-acknowledgment timeouts, and fast retransmissions.
+`RTCSctpTransport::association_stats` reads the current association without
+adding per-packet state. The async wrapper uses its existing core lock.
+`Engine::transport_diagnostic_snapshot` exposes the result as `sctp`.
+An absent association returns null; a sampling error also sets `sctp_error`.
+Terminal associations can already be removed, so sample before teardown.
+
+DATA counters advance before message reassembly. They include duplicates and
+refused chunks, do not identify a channel, and do not prove DATA acceptance.
+RTC channel counts still start after reassembly. Engine counts start when its
+poller sees a message. Samples across these layers are not atomic.
+
+The native control holds callback polling while four 4 KiB reliable packets
+arrive. SCTP records more than four chunks, RTC records exactly four messages
+and 16,384 bytes, and Engine records zero receipts. Resuming polling delivers
+every original byte in order. Both offer roles repeat on fresh physical links.
+Distinct-counter and absent-association core controls pass. The five native
+profile controls also pass with fragmented reliable startup and recovery traffic.
+This is diagnostic progress. It does not explain or repair the historical
+Godot 4.3 reliable-prefix loss.
+
+### Fragmented Godot gameplay and Web service buffer loss (#1240)
+
+Godot client `988797b4` supplies the local probe and driver. Only snapshot and
+partial bodies change from `repeat(64)` to `repeat(256)` in the JS `chunk`
+function and GDScript `_reference_chunk`. Each body has 4,096 bytes plus its
+prefix. Startup packets, 128 snapshot chunks, 32-packet credits, mixed modes,
+closure, retirement, two generations, and existing deadlines stay unchanged.
+The probe samples SCTP diagnostics while processing snapshot chunk 127.
+Its SHA-256 is `289ab87dd0e0d1cca496a8af80d4a2dfacac61a6e110a0954bcb84e25cea60a8`.
+
+All six final Engine-level cases pass: Godot 4.7.2 native/Web and Godot 4.3
+native, each offering and answering. They retain 3,072 exact reliable snapshot
+receipts. Active SCTP samples record 560–579 DATA chunks per generation,
+including other channel traffic. RTC reliable counts include credit messages.
+These counts are observations, not proof of a historical loss repair.
+
+The native Godot 4.7.2 service control also passes fragmented mixed gameplay,
+room leave/rejoin, epoch-2 recovery, selected-packet retirement, and closure.
+The Web service control fails in phase 1. Godot logs nine channel-buffer-full
+drops, then rejects a snapshot packet after 111 exact receipts. The native
+reference receives all 128 Godot chunks. Its bridge schedules 128 outgoing
+chunks, while its last observed credit acknowledges 104. Scheduling does not
+prove each write completed. A matched Web service control with the original
+1 KiB body passes both generations and all service predicates.
+
+[Godot #442](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/442)
+tracks the buffer capacity, exact missing sequence, native admission, and
+receiver-drain investigation. The failed 4 KiB service verdict remains false.
+No receipt requirement, credit window, or deadline was relaxed. This leaves
+full Godot support open in #1240 and Godot #355. Remote networks, larger
+meshes, and corrected Godot lifetimes remain unqualified. Rust and .NET SDKs
+have no dependency on this patched peer stack; their wire contracts do not change.
+
+All attempts remain in ignored `progress/session-553/`. Earlier attempts used
+an incompatible cached bridge, lacked the export-template path, or exhausted
+the temporary filesystem before service gameplay. Those setup failures remain
+separate from the retained Web buffer-loss history.

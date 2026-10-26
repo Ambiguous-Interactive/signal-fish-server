@@ -185,7 +185,7 @@ use rtc::peer_connection::state::RTCIceGatheringState;
 use rtc::peer_connection::transport::{
     RTCDtlsTransport as CoreDtlsTransport, RTCDtlsTransportState, RTCIceCandidate,
     RTCIceCandidatePair, RTCIceComponent, RTCIceParameters, RTCIceRole, RTCIceTransportState,
-    RTCSctpTransportState, RTCTransportId,
+    RTCSctpAssociationStats, RTCSctpTransportState, RTCTransportId,
 };
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 use std::sync::Arc;
@@ -199,6 +199,10 @@ use std::sync::Arc;
 /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcsctptransport)
 #[async_trait::async_trait]
 pub trait SctpTransport: crate::sealed::Sealed + Send + Sync + 'static {
+    /// Local SCTP counters below data-channel reassembly, or `None` when no
+    /// association remains. Received DATA includes duplicates and refusals.
+    async fn association_stats(&self) -> Result<Option<RTCSctpAssociationStats>>;
+
     /// This transport's identity. See [`RTCTransportId`].
     fn id(&self) -> RTCTransportId;
 
@@ -364,6 +368,14 @@ impl crate::sealed::Sealed for SctpTransportImpl {}
 
 #[async_trait::async_trait]
 impl SctpTransport for SctpTransportImpl {
+    async fn association_stats(&self) -> Result<Option<RTCSctpAssociationStats>> {
+        let peer_connection = self.inner.core.lock().await;
+        Ok(peer_connection
+            .sctp()
+            .ok_or(Error::ErrSCTPTransportNotExisted)?
+            .association_stats())
+    }
+
     fn id(&self) -> RTCTransportId {
         self.id
     }

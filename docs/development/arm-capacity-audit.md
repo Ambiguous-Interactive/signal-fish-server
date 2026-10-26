@@ -6179,3 +6179,36 @@ All attempts remain in ignored `progress/session-552/`. Live gameplay probes
 and compiler work overlap this cohort. No timing or throughput claim follows.
 Sparse range storage still dominates the largest cell. Whole-generator memory
 qualification and the planned ten-minute live workload remain open in #775.
+
+## Size latency counters per recipient (#775, #636)
+
+Base `e0ad4099` sizes every recipient histogram from the busiest recipient's
+raw receipt count. One noisy peer can widen every histogram. The oracle now
+uses each recipient's own raw count. Duplicates, malformed coordinates,
+self-echoes, and opaque leaks still count toward that bound. Unknown recipients
+still contribute to aggregate latency. Aggregate counters remain 64-bit.
+Delivery-stream and churn-view scratch is released before histogram allocation.
+Artifact formats and summary values do not change.
+
+An independent 64-bit histogram control compares aggregate and per-recipient
+statistics at 255, 256, 65,535, and 65,536 raw arrivals. Existing controls retain
+warm-up, unknown senders, malformed receipts, full-width timestamps, exact
+violation keys, and artifact replay. All 61 scoped oracle/artifact controls pass.
+
+The new `generator_skewed_latency_memory_profile` retains 1,000 histograms.
+One receives 65,536 samples; each other peer receives 255 samples. Both modes
+receive identical samples. The uniform control uses 32-bit counters everywhere;
+the candidate uses 32-bit counters for the busy peer and 8-bit counters elsewhere.
+Fresh debug processes run control/candidate/candidate/control on ARM64:
+
+| Observation | Uniform control | Per-recipient counters |
+| --- | --- | --- |
+| HDR bucket bytes | 45,056,000 | 11,297,792 |
+| Retained RSS bytes | 60,682,240 / 60,686,336 | 24,580,096 / 24,580,096 |
+| Statistics checksum | 3,585,597,281 | 3,585,597,281 |
+
+Run the ignored profile with `CAPACITY_SKEW_PROBE_INDIVIDUAL=0` or `1`.
+These are component retained-memory observations, not whole-generator peaks.
+Other host work overlaps the cohort; no timing or throughput conclusion follows.
+Raw send and receipt storage, sparse coverage, and long live qualification
+remain open in #775. All attempts remain in ignored `progress/session-553/`.

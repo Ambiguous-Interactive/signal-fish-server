@@ -1096,7 +1096,7 @@ impl Engine {
         })
     }
 
-    /// Add RTC packet and channel counters to the local callback observations for one
+    /// Add SCTP, RTC packet, and channel counters to callback observations for one
     /// physical generation. Returns null for an unknown peer. RTC channel receive
     /// counters advance after message reassembly, before Engine channel polling;
     /// they do not count raw SCTP fragments. Samples are not atomic across layers.
@@ -1105,6 +1105,8 @@ impl Engine {
     /// Transport packet counts include control traffic and protocol overhead;
     /// they do not prove SCTP DATA acceptance or application delivery.
     /// Transport IDs are scoped to this physical generation.
+    /// SCTP DATA counts include duplicates and refusals before reassembly.
+    /// Missing associations return null; sampling failures also set `sctp_error`.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
@@ -1113,6 +1115,13 @@ impl Engine {
             .pc
             .get_stats(std::time::Instant::now(), StatsSelector::None)
             .await;
+        let (sctp, sctp_error) = match link.pc.sctp().await {
+            Some(transport) => match transport.association_stats().await {
+                Ok(stats) => (stats, None),
+                Err(error) => (None, Some(error.to_string())),
+            },
+            None => (None, None),
+        };
         let channels: Vec<_> = reports
             .iter()
             .filter_map(|entry| match entry {
@@ -1146,6 +1155,8 @@ impl Engine {
             .collect();
         let mut snapshot = self.diagnostic_snapshot(peer);
         if let Some(fields) = snapshot.as_object_mut() {
+            fields.insert("sctp".to_string(), serde_json::json!(sctp));
+            fields.insert("sctp_error".to_string(), serde_json::json!(sctp_error));
             fields.insert(
                 "transports".to_string(),
                 serde_json::Value::Array(transports),
