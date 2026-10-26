@@ -1031,14 +1031,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "isolated session response allocation profile; run in a fresh process"]
+    #[ignore = "isolated session response materialization profile; run in a fresh process"]
     fn session_response_materialization_profile() {
         let records = SessionRecords::new();
         for index in 0..10_000 {
             let room = room_fixture(Uuid::from_u128(index), "ROOM");
             records.record_created(&room, true);
         }
-        let started = std::time::Instant::now();
         let snapshot = if std::env::var_os("SESSION_RESPONSE_LEGACY").is_some() {
             records.snapshot()
         } else {
@@ -1056,7 +1055,9 @@ mod tests {
             value["active"].as_array().unwrap().len(),
             SESSION_RECORDS_ACTIVE_RESPONSE_CAP
         );
-        println!("SESSION_RESPONSE_PROFILE records={materialized_records} bytes={materialized_bytes} elapsed_us={}", started.elapsed().as_micros());
+        println!(
+            "SESSION_RESPONSE_PROFILE records={materialized_records} bytes={materialized_bytes}"
+        );
         std::hint::black_box((snapshot, value));
     }
 }
