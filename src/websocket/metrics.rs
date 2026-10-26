@@ -1,4 +1,4 @@
-use crate::server::EnhancedGameServer;
+use crate::server::{canonical_json_len as json_size, EnhancedGameServer};
 use crate::session_records::SESSIONS_RESPONSE_MAX_BYTES;
 #[cfg(test)]
 use crate::session_records::SESSION_RECORDS_ACTIVE_RESPONSE_CAP;
@@ -185,10 +185,7 @@ fn bounded_metrics_response(
     server: &EnhancedGameServer,
     mut response: serde_json::Value,
 ) -> serde_json::Value {
-    // Serializing a `serde_json::Value` cannot fail; the `0` fallback is dead
-    // and degrades to pass-through.
-    let measured =
-        |value: &serde_json::Value| serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
+    let measured = json_size;
     if measured(&response) <= METRICS_RESPONSE_MAX_BYTES {
         return response;
     }
@@ -352,9 +349,7 @@ fn bounded_metrics_snapshot(
     server: &EnhancedGameServer,
     value: serde_json::Value,
 ) -> serde_json::Value {
-    // Serializing a `serde_json::Value` cannot fail; the `0` fallback is dead
-    // and degrades to pass-through.
-    let size_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    let size_bytes = json_size(&value);
     if size_bytes <= METRICS_SNAPSHOT_MAX_BYTES {
         return value;
     }
@@ -379,9 +374,7 @@ fn bounded_sessions_response(
     server: &EnhancedGameServer,
     mut value: serde_json::Value,
 ) -> serde_json::Value {
-    // Serializing a `serde_json::Value` cannot fail; the `0` fallback is dead
-    // and degrades to pass-through.
-    let size_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    let size_bytes = json_size(&value);
     if size_bytes <= SESSIONS_RESPONSE_MAX_BYTES {
         return value;
     }
@@ -404,7 +397,7 @@ fn bounded_sessions_response(
         );
         object.insert("completedOmitted".to_string(), serde_json::json!(omitted));
     }
-    let degraded_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    let degraded_bytes = json_size(&value);
     if degraded_bytes <= SESSIONS_RESPONSE_MAX_BYTES {
         server.metrics_truncation_log().record(
             "Metrics sessions truncated",
@@ -506,8 +499,7 @@ pub async fn room_lookup_handler(
             })
         });
     let value = serde_json::json!({"available": true, "room": room});
-    if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > ROOM_LOOKUP_RESPONSE_MAX_BYTES)
-    {
+    if json_size(&value) > ROOM_LOOKUP_RESPONSE_MAX_BYTES {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             axum::response::Json(serde_json::json!({
@@ -741,6 +733,34 @@ mod tests {
     use crate::server::ServerConfig;
     use axum::http::header::AUTHORIZATION;
     use axum::http::HeaderMap;
+
+    #[test]
+    #[ignore = "isolated metrics size scratch-memory profile; run in a fresh process"]
+    fn metrics_json_size_memory_profile() {
+        let value = serde_json::Value::Array(
+            (0..720)
+                .map(|index| serde_json::json!({"sample": index, "padding": "x".repeat(65_536)}))
+                .collect(),
+        );
+        let baseline = std::env::var_os("METRICS_JSON_SIZE_BASELINE").is_some();
+        let started = Instant::now();
+        let mut size = 0;
+        for _ in 0..4 {
+            size = if baseline {
+                serde_json::to_vec(std::hint::black_box(&value))
+                    .unwrap()
+                    .len()
+            } else {
+                json_size(std::hint::black_box(&value))
+            };
+            std::hint::black_box(size);
+        }
+        assert!(size > 47_000_000);
+        println!(
+            "METRICS_JSON_SIZE_PROFILE baseline={baseline} samples=720 bytes={size} elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+    }
 
     /// Data-driven: a snapshot within the cap passes through byte-identical;
     /// an oversized snapshot is replaced by a truncation marker that is small,

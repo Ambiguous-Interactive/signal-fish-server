@@ -5259,3 +5259,112 @@ fn shutdown_ack_completes_before_queued_timeout_retransmission() -> Result<()> {
     }
     Ok(())
 }
+
+// Regression #1239: terminal transport success takes precedence over reset recovery.
+#[test]
+fn shutdown_ack_preserves_unread_gameplay_before_due_reset_exhaustion() -> Result<()> {
+    for retries in [0, 1, 5] {
+        for simultaneous in [false, true] {
+            for late_reply in [
+                None,
+                Some(ReconfigResult::ErrorRequestAlreadyInProgress),
+                Some(ReconfigResult::InProgress),
+            ] {
+                let (mut local, mut remote) = reset_pair();
+                local.timers = TimerTable::new(TimerConfig {
+                    max_reconfig_retrans: retries,
+                    ..TimerConfig::default()
+                });
+                local.ack_mode = AckMode::NoDelay;
+                let mut now = Instant::now();
+                let payload =
+                    Bytes::from_static(b"accepted gameplay must survive terminal acknowledgment");
+                remote
+                    .open_stream(2, PayloadProtocolIdentifier::Binary)?
+                    .write_sctp(now, &payload, PayloadProtocolIdentifier::Binary)?;
+                for raw in remote.gather_outbound(now).0 {
+                    local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+                for raw in local.gather_outbound(now).0 {
+                    remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+                assert!(remote.inflight_queue.is_empty());
+                local.send_reset_request(now, 1)?;
+                let reset = reset_requests(&mut local, now).remove(0);
+                let reset_sequence = request(&reset).reconfig_request_sequence_number;
+                // Lose every reset request. The unrelated readable stream stays live.
+                for _ in 0..retries {
+                    now = local.poll_timeout().expect("reset retry is armed");
+                    local.handle_timeout(now);
+                    assert_eq!(reset_requests(&mut local, now).len(), 1);
+                }
+                let reset_deadline = local.poll_timeout().expect("final reset retry is armed");
+                local.shutdown()?;
+                let shutdown = local.gather_outbound(now).0;
+                if simultaneous {
+                    remote.shutdown()?;
+                    for raw in remote.gather_outbound(now).0 {
+                        local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                    }
+                }
+                for raw in shutdown {
+                    remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+                }
+                for raw in remote.gather_outbound(now).0 {
+                    // The ACK arrives on the same tick as the saved reset deadline.
+                    local.handle_inbound(Packet::unmarshal(&raw)?, reset_deadline)?;
+                }
+                assert!(local.will_send_shutdown_complete);
+                assert!(local.poll_timeout().is_none());
+                // Accepted late reset replies can rearm recovery before the final flush.
+                if let Some(result) = late_reply {
+                    let reply = remote.create_packet(vec![Box::new(ChunkReconfig {
+                        param_a: Some(response(reset_sequence, result)),
+                        ..Default::default()
+                    })]);
+                    local.handle_inbound(Packet::unmarshal(&reply.marshal()?)?, reset_deadline)?;
+                }
+                // A driver can service a due timer after this ACK and before flushing.
+                let callback_at = local.poll_timeout().unwrap_or(reset_deadline);
+                local.handle_timeout(callback_at);
+                assert!(local.poll_timeout().is_none());
+                assert!(
+                    !local
+                        .events
+                        .iter()
+                        .any(|event| matches!(event, Event::AssociationFailed { .. })),
+                    "retries={retries}, simultaneous={simultaneous}, late_reply={late_reply:?}: an accepted shutdown ACK must win over reset exhaustion"
+                );
+                let (complete, live) = local.gather_outbound(callback_at);
+                assert!(!live);
+                assert_eq!(complete.len(), 1);
+                let packet = Packet::unmarshal(&complete[0])?;
+                assert_eq!(packet.chunks.len(), 1);
+                assert!(packet.chunks[0].as_any().is::<ChunkShutdownComplete>());
+                remote.handle_inbound(packet, callback_at)?;
+                assert!(
+                    local.poll_endpoint_event().is_none(),
+                    "unread gameplay owns endpoint lifetime"
+                );
+                assert_eq!(
+                    local
+                        .stream(2)?
+                        .read_sctp()?
+                        .unwrap()
+                        .to_payload(1024)?
+                        .freeze(),
+                    payload
+                );
+                assert!(local.stream(2).is_err());
+                for endpoint in [&mut local, &mut remote] {
+                    assert_eq!(endpoint.state(), AssociationState::Closed);
+                    assert!(endpoint.poll_timeout().is_none());
+                    assert!(endpoint.poll_endpoint_event().is_some());
+                    assert!(endpoint.poll_endpoint_event().is_none());
+                    assert!(endpoint.poll_transmit(callback_at).is_none());
+                }
+            }
+        }
+    }
+    Ok(())
+}
