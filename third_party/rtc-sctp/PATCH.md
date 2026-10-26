@@ -467,3 +467,21 @@ Replacement qualification in #912 must retain
 services a repeated peer SHUTDOWN before the receiver's due timeout, loses its
 replayed ACK, and then completes both endpoint retirements. These controls use
 the existing shutdown selector. The public WebRTC close path still uses abort.
+
+## Shutdown completion and stream-reset recovery
+
+Accepting SHUTDOWN ACK stops all recovery timers. Completion-pending timeout
+callbacks also stop timers rearmed by late control replies. A dropped reset reply
+must not trigger an abrupt timeout after the peer accepted shutdown and before
+SHUTDOWN COMPLETE is flushed. That timeout previously discarded accepted unread
+gameplay. See [#1239](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1239).
+
+Replacement qualification in #912 must retain
+`shutdown_ack_preserves_unread_gameplay_before_due_reset_exhaustion`. The paired
+wire history loses reset requests with retry budgets zero, one, and five, then
+accepts a shutdown ACK in both ordinary and simultaneous shutdown. It services
+the saved reset deadline before the final transmit and checks exact unread
+payload delivery and one terminal endpoint event. Additional accepted-response
+controls rearm reset recovery with late busy and InProgress replies and service
+the new due deadline; they do not prove strict-peer reachability of that ordering.
+The public WebRTC close path still uses abort.

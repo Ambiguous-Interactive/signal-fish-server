@@ -9162,3 +9162,85 @@ Their current manifests or documentation confirm that they use their own
 WebSocket or peer-transport implementations, not these private vendored
 SCTP sources. Signal Fish protocol messages and metrics response content
 remain unchanged; capacity ordering storage is internal tooling.
+
+### F195 — Reset recovery aborts an acknowledged native shutdown
+
+Confirmed on `97fc7e01`; tracked in #1239 under #1145/#826/#912. A paired
+history delivers and acknowledges gameplay on stream 2, then leaves it unread.
+The local endpoint requests reset on empty stream 1 and loses the RECONFIG
+packet. Both endpoints then exchange graceful shutdown packets. After the
+local endpoint accepts SHUTDOWN ACK, its reset timer remains armed. A driver
+that services the saved deadline before the final transmit can exhaust reset
+recovery, emit `AssociationFailed`, discard unread gameplay, and suppress
+SHUTDOWN COMPLETE. The red regression fails at its no-failure assertion.
+
+Accepting the terminal acknowledgment now stops all obsolete recovery timers.
+Timeout callbacks also stop timers rearmed by accepted late control replies
+while final completion is pending. A negative control that retains the initial
+cleanup but removes this callback fence fails on a due late busy reset reply.
+These extra late-response cells test accepted input; strict-peer reachability
+of their ordering is not established.
+The final transmit still owns graceful closure and endpoint drain waits for
+retained reads. The paired regression covers reset retry limits 0, 1, and 5
+with ordinary and simultaneous shutdown. It retains exact unread bytes,
+final-packet identity, terminal state, timer cleanup, and one endpoint drain.
+This is a low-level graceful association repair. The public WebRTC wrapper
+uses abort; this does not establish a public gameplay incident or explain
+historical reset timeout #1120.
+
+### Metrics JSON byte-count scratch storage (#636)
+
+Metrics response, snapshot, session, and room-lookup size checks previously
+serialized each JSON value into a temporary byte vector. They now reuse the
+existing canonical JSON counting writer. The same serializer counts UTF-8,
+escapes, separators, and numbers without retaining its output. Caps, response
+content, truncation order, and omission counters remain unchanged. The
+existing byte-equivalence and serialization-failure controls pass alongside
+all focused metrics cap boundaries.
+
+Two alternating fresh-process debug pairs each size the same 720-sample JSON
+history four times. Every arm reports 47,205,971 bytes. Baseline process peaks
+are 103,436–103,624 KiB; candidate peaks are 57,704–57,832 KiB. Baseline elapsed
+time is 9.702–16.931 seconds and candidate time is 8.861–9.973 seconds, with
+concurrent local builds. These results establish scratch-memory reduction for
+this fixture, not a speed or live relay throughput improvement. Building the
+JSON value and the final HTTP response still allocates.
+
+### Sparse arrival violation state (#775)
+
+The capacity oracle now allocates violation counters only when a stream first
+shows a duplicate, an order violation, or a misroute. Each counter uses its
+count to distinguish an empty value from its first sequence. Sequence zero
+and the full `u64` range remain exact. Valid streams retain no violation box.
+The arrival value shrinks from 216 to 152 bytes on this ARM64 host; an invalid
+stream adds one 48-byte box. Raw events, category order, summary fields,
+workload budgets, and replay rules stay the same.
+
+Fresh debug processes compare the same retained baseline and candidate
+binaries in baseline/candidate/candidate/baseline order. The probe retains
+240 streams per room, each with 100 ordered arrivals. A second fixture adds
+all three violation classes to every stream. At 1, 64, and 999 rooms, both
+binaries retain the same unique counts. The 999-room fixture retains 239,760
+streams and 23,976,000 unique arrivals, or 24,215,760 in the invalid fixture.
+
+| Rooms | Fixture | Baseline peak KiB | Candidate peak KiB |
+| --- | --- | --- | --- |
+| 1 | Ordered | 9,516–9,628 | 9,716 |
+| 64 | Ordered | 15,388–15,520 | 13,752–13,936 |
+| 999 | Ordered | 106,904–107,168 | 79,672–79,912 |
+| 1 | All violation classes | 9,576–9,780 | 9,640–9,844 |
+| 64 | All violation classes | 15,468–15,904 | 15,032 |
+| 999 | All violation classes | 107,216–107,296 | 94,736–94,776 |
+
+The largest fixture's current RSS falls from about 108.8 to 80.8 MB for
+ordered streams and from about 109.0 to 96.3 MB for invalid streams. Small
+process differences remain visible in the one-room fixture. Timing ranges
+overlap; this establishes lower retained memory, not a speed improvement.
+The probe measures oracle state only, not full raw-event retention or live
+server capacity. It does not qualify the planned ten-minute cell under #775.
+
+Controls preserve the independent 4,096-sequence duplicate/order scan, empty
+and zero/full-width first keys, roster-first category ordering after churn,
+opaque leaks, misroutes, and exact raw/JSONL replay verdicts. External Rust,
+.NET, and Godot clients need no change: this is internal capacity-tool storage
+and does not change the protocol or server behavior.

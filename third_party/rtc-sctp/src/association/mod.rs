@@ -583,6 +583,11 @@ impl Association {
     /// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
+        if self.will_send_shutdown_complete {
+            /* Late control replies cannot resume recovery after shutdown success. */
+            self.close_all_timers();
+            return;
+        }
         for &timer in &Timer::VALUES {
             // A reset fence is local flow control, not DATA loss. With no live
             // DATA left and no permitted FWD progress, RECONFIG owns recovery.
@@ -2020,7 +2025,8 @@ impl Association {
     fn handle_shutdown_ack(&mut self, _: &ChunkShutdownAck) -> Result<Vec<Packet>> {
         let state = self.state();
         if state == AssociationState::ShutdownSent || state == AssociationState::ShutdownAckSent {
-            self.timers.stop(Timer::T2Shutdown);
+            /* A lost reset reply cannot abort gameplay after shutdown success. */
+            self.close_all_timers();
             self.will_send_shutdown_complete = true;
 
             self.awake_write_loop();

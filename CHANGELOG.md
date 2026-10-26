@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Bound active-session response storage and reduce memory use for filtered session metrics (#636).
+- Bound active-session response storage and reduce memory use for session metrics and metrics response sizing (#636).
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve unread native gameplay after shutdown acknowledgment when stream-reset recovery expires (#1239).
 - Complete native graceful shutdown before queued shutdown retries (#1237).
 - Preserve native graceful shutdown retry deadlines when a peer repeats its shutdown request (#1235).
 - Preserve native channel reset retry limits and deadlines when a peer reports a busy request (#1233).

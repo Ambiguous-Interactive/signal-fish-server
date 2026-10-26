@@ -456,6 +456,7 @@ use connection_manager::ConnectionManager;
 pub(crate) use connection_manager::{
     ClientLifecycle, NegotiatedProtocol, OutboundQueueSample, TransportStatusUpdate,
 };
+pub(crate) use signaling::canonical_json_len;
 
 /// Scrape-time live-state posture sampled when the metrics endpoint is hit:
 /// the capacity campaign's live-object observables (rooms, occupants,

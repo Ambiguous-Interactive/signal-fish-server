@@ -1764,7 +1764,7 @@ pub fn summarize(
             .and_then(|index| blocks.get(&(sender, epoch))?.get(index))
             .is_some_and(|event| event.seq == receipt.seq);
         if !ledger_matches || stale || below_floor {
-            stream.misrouted.record(receipt.server_seq);
+            stream.violations_mut().misrouted.record(receipt.server_seq);
         }
     }
 
@@ -1973,10 +1973,12 @@ pub fn summarize(
             }
             // Closed-stream and invalid-sequence arrivals still count as evidence.
             *received_by_sender.entry(sender).or_insert(0) += stream.unique;
-            outcome.misrouted += stream.misrouted.count;
-            stream
-                .misrouted
-                .append_to(&mut misrouted, recipient, sender, *epoch);
+            if let Some(violations) = stream.violations.as_deref() {
+                outcome.misrouted += violations.misrouted.count;
+                violations
+                    .misrouted
+                    .append_to(&mut misrouted, recipient, sender, *epoch);
+            }
         }
 
         maximum_recipient_receipts = maximum_recipient_receipts.max(recipient_receipts);
@@ -1989,14 +1991,16 @@ pub fn summarize(
             for ((_, _, epoch), stream) in arrivals
                 .range((recipient.as_str(), sender, 0)..=(recipient.as_str(), sender, u32::MAX))
             {
-                outcome.duplicates += stream.duplicates.count;
-                stream
-                    .duplicates
-                    .append_to(&mut duplicates, recipient, sender, *epoch);
-                outcome.out_of_order += stream.out_of_order.count;
-                stream
-                    .out_of_order
-                    .append_to(&mut out_of_order, recipient, sender, *epoch);
+                if let Some(violations) = stream.violations.as_deref() {
+                    outcome.duplicates += violations.duplicates.count;
+                    violations
+                        .duplicates
+                        .append_to(&mut duplicates, recipient, sender, *epoch);
+                    outcome.out_of_order += violations.out_of_order.count;
+                    violations
+                        .out_of_order
+                        .append_to(&mut out_of_order, recipient, sender, *epoch);
+                }
             }
             let adopted = view.adopted.get(sender);
             let Some(epochs) = sender_epochs.get(sender) else {
@@ -2286,23 +2290,25 @@ pub fn summarize(
 #[derive(Default)]
 struct SequenceViolations {
     count: u64,
-    first: Option<u64>,
+    first: u64,
 }
 
 impl SequenceViolations {
     fn record(&mut self, sequence: u64) {
+        if self.count == 0 {
+            self.first = sequence;
+        }
         self.count += 1;
-        self.first.get_or_insert(sequence);
     }
 
     fn append_to(&self, category: &mut Category, recipient: &str, sender: &str, epoch: u32) {
         category.count += self.count;
-        if let Some(seq) = self.first {
+        if self.count > 0 {
             category.first.get_or_insert_with(|| DeliveryKey {
                 recipient: recipient.to_string(),
                 sender: sender.to_string(),
                 epoch,
-                seq,
+                seq: self.first,
             });
         }
     }
@@ -2345,19 +2351,28 @@ struct ArrivalEvidence {
     first: Option<u64>,
     unique: u64,
     observed: ArrivalCoverage,
+    violations: Option<Box<ArrivalViolations>>,
+}
+
+#[derive(Default)]
+struct ArrivalViolations {
     duplicates: SequenceViolations,
     out_of_order: SequenceViolations,
     misrouted: SequenceViolations,
 }
 
 impl ArrivalEvidence {
+    fn violations_mut(&mut self) -> &mut ArrivalViolations {
+        self.violations.get_or_insert_with(Box::default)
+    }
+
     fn observe(&mut self, sequence: u64) {
         match self.observed.observe(sequence) {
-            None => self.duplicates.record(sequence),
+            None => self.violations_mut().duplicates.record(sequence),
             Some(out_of_order) => {
                 self.unique += 1;
                 if out_of_order {
-                    self.out_of_order.record(sequence);
+                    self.violations_mut().out_of_order.record(sequence);
                 }
             }
         }
@@ -4961,6 +4976,82 @@ mod coverage_tests {
         }
     }
 
+    #[test]
+    #[ignore = "isolated arrival-state memory profile; run in a fresh process"]
+    fn generator_arrival_state_memory_profile() {
+        let rooms: u32 = std::env::var("CAPACITY_ARRIVAL_PROBE_ROOMS")
+            .unwrap_or_else(|_| "999".into())
+            .parse()
+            .expect("probe rooms");
+        assert!((1..=999).contains(&rooms));
+        let invalid = std::env::var_os("CAPACITY_ARRIVAL_PROBE_INVALID").is_some();
+        let started = std::time::Instant::now();
+        let mut arrivals = BTreeMap::new();
+        for room in 0..rooms {
+            for recipient in 0_u8..16 {
+                for sender in 0_u8..16 {
+                    if recipient == sender {
+                        continue;
+                    }
+                    let mut stream = ArrivalEvidence::default();
+                    for sequence in 1..=100 {
+                        stream.observe(sequence);
+                    }
+                    if invalid {
+                        for sequence in [100, 0, 0] {
+                            stream.observe(sequence);
+                        }
+                        stream.violations_mut().misrouted.record(0);
+                    }
+                    arrivals.insert((room, recipient, sender), stream);
+                }
+            }
+        }
+        let unique: u64 = arrivals.values().map(|stream| stream.unique).sum();
+        assert_eq!(
+            unique,
+            u64::from(rooms) * 16 * 15 * (100 + u64::from(invalid))
+        );
+        println!(
+            "ARRIVAL_STATE_PROFILE {}",
+            serde_json::json!({
+                "rooms": rooms, "streams": arrivals.len(), "invalid": invalid,
+                "stream_bytes": std::mem::size_of::<ArrivalEvidence>(),
+                "retained_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                "unique": unique, "elapsed_us": started.elapsed().as_micros(),
+            })
+        );
+        std::hint::black_box(arrivals);
+    }
+
+    #[test]
+    fn violation_counts_preserve_empty_zero_and_full_width_first_keys() {
+        for sequences in [vec![], vec![0], vec![0, u64::MAX, 1], vec![u64::MAX, 0, 7]] {
+            let mut violations = SequenceViolations::default();
+            let mut category = Category::default();
+            violations.append_to(&mut category, "recipient", "sender", u32::MAX);
+            assert_eq!(category.count, 0);
+            assert!(category.first.is_none());
+            for &sequence in &sequences {
+                violations.record(sequence);
+            }
+            violations.append_to(&mut category, "recipient", "sender", u32::MAX);
+            assert_eq!(category.count, count_u64(sequences.len()));
+            assert_eq!(
+                category.first,
+                sequences.first().map(|&seq| DeliveryKey {
+                    recipient: "recipient".into(),
+                    sender: "sender".into(),
+                    epoch: u32::MAX,
+                    seq,
+                })
+            );
+            let first = category.first.clone();
+            violations.append_to(&mut category, "later", "later", 0);
+            assert_eq!(category.first, first);
+        }
+    }
+
     // Issue #775: the old per-position set retained a node per receipt.
     #[test]
     fn compact_arrival_evidence_matches_independent_event_scan() {
@@ -4990,23 +5081,25 @@ mod coverage_tests {
                 .map(|pair| pair[1])
                 .collect::<Vec<_>>();
             assert_eq!(evidence.unique, count_u64(unique.len()), "{sequences:?}");
+            let empty = ArrivalViolations::default();
+            let violations = evidence.violations.as_deref().unwrap_or(&empty);
             assert_eq!(
-                evidence.duplicates.count,
+                violations.duplicates.count,
                 count_u64(duplicates.len()),
                 "{sequences:?}"
             );
             assert_eq!(
-                evidence.duplicates.first,
+                (violations.duplicates.count > 0).then_some(violations.duplicates.first),
                 duplicates.first().copied(),
                 "{sequences:?}"
             );
             assert_eq!(
-                evidence.out_of_order.count,
+                violations.out_of_order.count,
                 count_u64(inversions.len()),
                 "{sequences:?}"
             );
             assert_eq!(
-                evidence.out_of_order.first,
+                (violations.out_of_order.count > 0).then_some(violations.out_of_order.first),
                 inversions.first().copied(),
                 "{sequences:?}"
             );
@@ -5017,8 +5110,7 @@ mod coverage_tests {
         }
         assert_eq!(ordered.unique, 100_000);
         assert_eq!(ordered.observed.covered.stored_ranges(), 1);
-        assert_eq!(ordered.duplicates.count, 0);
-        assert_eq!(ordered.out_of_order.count, 0);
+        assert!(ordered.violations.is_none());
     }
 
     #[test]
