@@ -1,5 +1,4 @@
 diff --git a/scripts/check-webrtc-reference.py b/scripts/check-webrtc-reference.py
-index 2ab92b7..1e7ab3c 100644
 --- a/scripts/check-webrtc-reference.py
 +++ b/scripts/check-webrtc-reference.py
 @@ -1184,2 +1184,4 @@ def main() -> None:
@@ -10,7 +9,6 @@ index 2ab92b7..1e7ab3c 100644
 +    if args.service_url and args.offerer != "godot":
 +        parser.error("Godot-offer service control requires --offerer godot")
 diff --git a/tests/smoke/webrtc_native_reference.rs b/tests/smoke/webrtc_native_reference.rs
-index 42bff23..b21c949 100644
 --- a/tests/smoke/webrtc_native_reference.rs
 +++ b/tests/smoke/webrtc_native_reference.rs
 @@ -91 +91 @@ async fn main() -> anyhow::Result<()> {
@@ -21,13 +19,11 @@ index 42bff23..b21c949 100644
 +                            eprintln!("SCTP_INGRESS {}", engine.transport_diagnostic_snapshot(peer).await);
 +                        }
 diff --git a/tests/smoke/webrtc_reference.js b/tests/smoke/webrtc_reference.js
-index 256b8ba..481bdae 100644
 --- a/tests/smoke/webrtc_reference.js
 +++ b/tests/smoke/webrtc_reference.js
 @@ -384,0 +385 @@ window.runReference = async function (
 +            window.referenceServicePaired = true;
 diff --git a/tests/smoke/webrtc_reference_service.gd.inc b/tests/smoke/webrtc_reference_service.gd.inc
-index 3f3868d..66d3e83 100644
 --- a/tests/smoke/webrtc_reference_service.gd.inc
 +++ b/tests/smoke/webrtc_reference_service.gd.inc
 @@ -0,0 +1,2 @@
@@ -56,7 +52,6 @@ index 3f3868d..66d3e83 100644
 +		"generation": _service_generation,
 +		"initiate": _service_initiate,
 diff --git a/tests/smoke/webrtc_reference_service.js b/tests/smoke/webrtc_reference_service.js
-index 11c1eac..71948ce 100644
 --- a/tests/smoke/webrtc_reference_service.js
 +++ b/tests/smoke/webrtc_reference_service.js
 @@ -37,2 +37 @@ export function configureReferenceService(url, appId, rejoin = false) {
