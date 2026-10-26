@@ -6212,3 +6212,41 @@ These are component retained-memory observations, not whole-generator peaks.
 Other host work overlaps the cohort; no timing or throughput conclusion follows.
 Raw send and receipt storage, sparse coverage, and long live qualification
 remain open in #775. All attempts remain in ignored `progress/session-553/`.
+
+## Promote latency buckets only when full (#775, #636)
+
+Base `98a501fa` sizes each recipient histogram from its raw receipt count.
+The new accumulator starts with 8-bit counters. It promotes the whole histogram
+before an actual bucket fills, preserving every bucket and the exact raw maximum.
+The aggregate stays 64-bit. The oracle no longer retains a separate recipient-count
+map for histogram sizing. Raw events, invalidations, offered work, and replay stay unchanged.
+
+Red-first hot-bucket controls expose saturation without promotion. The candidate
+matches independent 64-bit statistics across 255/256 and 65,535/65,536 arrivals,
+zero and full-width sample values, mixed buckets, and values sharing one HDR bucket.
+A weighted control crosses the 32-bit boundary without billions of iterations.
+All final oracle/artifact controls retain exact raw replay and delivery violations.
+
+The ignored `generator_distributed_latency_memory_profile` retains 1,000 histograms.
+Each receives 65,536 samples spread across 1,024 values. The static control selects
+32-bit counters from the receipt total and writes without a saturation check.
+The candidate retains 8-bit counters because no bucket fills. Four fresh ARM64
+optimized processes run control/candidate/candidate/control:
+
+| Observation | Static control | Adaptive counters |
+| --- | --- | --- |
+| HDR bucket bytes | 45,056,000 | 11,264,000 |
+| Retained RSS bytes | 56,586,240 / 56,586,240 | 20,144,128 / 20,144,128 |
+| Histogram fill seconds | 0.254 / 0.230 | 0.428 / 0.419 |
+| Statistics checksum | 3,670,269,000 | 3,670,269,000 |
+
+Set `CAPACITY_DISTRIBUTED_ADAPTIVE=0` or `1` to reproduce the component comparison.
+The optimized binary SHA-256 is
+`a600b508621356f7bb28625fe31a210d8998f1a2f117b9a7bd5fd1c004d0ed51`.
+The additional bucket check costs CPU: this is a memory tradeoff, not a speed gain.
+Earlier debug cohorts also show the extra cost; their initial control retained
+the same saturation check as the candidate. All cohorts remain recorded.
+Concentrated traffic still requires wider counters and briefly holds old and new
+storage during promotion. These observations do not bound whole-generator peaks
+or establish live throughput. The ten-minute live cell and raw-event growth
+remain open. All attempts remain in ignored `progress/session-554/`.

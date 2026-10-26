@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and handle binary channel events.
 - Bound active-session response storage and reduce metrics memory and dashboard-history sizing work (#636).
 - Reduce capacity-run analysis work and retained stream memory (#636, #775).
-- Add native SCTP, transport packet, and RTC channel counters to gameplay diagnostic snapshots (#1244).
+- Add native SCTP acceptance, refusal, transport packet, and RTC channel counters to gameplay diagnostic snapshots (#1244).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).

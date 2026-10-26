@@ -88,16 +88,22 @@ All 24 cases preserve mixed gameplay, reliable snapshots, retained-packet
 retirement, and fresh-link recovery across two physical generations.
 A two-seat native Godot 4.7.2 service session also passes room leave and rejoin,
 exact mixed gameplay, selected-packet retirement, and a fresh peer generation
-with the native Engine offering. Other service roles, larger meshes, corrected
-Godot packet lifetimes, remote networks, and the historical Godot 4.3 loss remain open in
+with the native Engine offering. Native and Web Godot 4.7.2 also pass two-seat
+service sessions with Godot offering, exact mixed gameplay, and fresh rooms.
+The [pinned service control](tests/fixtures/README.md) includes its source patch.
+Godot-offer host departure/rejoin, larger meshes, corrected Godot packet lifetimes,
+remote networks, and the historical Godot 4.3 loss remain open in
 [server #1240](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1240)
 and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
 
 For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
 Its `sctp` entry records received DATA and SACK chunks, local retransmission
 and delayed-acknowledgment timeouts, and fast retransmissions. DATA counts
-advance before message reassembly and include duplicate and refused chunks.
-They do not prove acceptance or identify the affected channel. An absent
+advance before message reassembly. Separate counters report new accepted DATA,
+redundant TSNs, and refused DATA. Accepted chunks enter the receive TSN space,
+including saved reset DATA and stopped readers. Redundant TSNs include positions
+passed by FORWARD TSN. These counters do not prove reassembly, identify a channel,
+or count delivered messages. An absent
 association returns null. Sampling errors also set `sctp_error`.
 It adds transport IDs, ICE/DTLS states, sent/received packet and byte counts,
 and RTC channel IDs, states, and message/byte counts to the local callback snapshot.

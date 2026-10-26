@@ -1105,7 +1105,10 @@ impl Engine {
     /// Transport packet counts include control traffic and protocol overhead;
     /// they do not prove SCTP DATA acceptance or application delivery.
     /// Transport IDs are scoped to this physical generation.
-    /// SCTP DATA counts include duplicates and refusals before reassembly.
+    /// SCTP DATA attempts split into accepted, redundant, and refused chunks.
+    /// Acceptance means receive-TSN admission, including saved reset DATA and
+    /// stopped readers; it does not prove reassembly or application delivery.
+    /// Redundant TSNs include positions passed by FORWARD TSN.
     /// Missing associations return null; sampling failures also set `sctp_error`.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {

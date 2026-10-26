@@ -1059,8 +1059,8 @@ impl<T: Counter> LatencyAccumulator<T> {
     }
 }
 
-// HDR counters saturate silently. Bound each bucket by every raw arrival at
-// the busiest recipient, before allocating any recipient histogram.
+// Static counters remain a comparison control for adaptive bucket promotion.
+#[cfg(test)]
 fn recipient_latency_counter_bytes(receipts: u64) -> usize {
     if u8::try_from(receipts).is_ok() {
         1
@@ -1081,7 +1081,12 @@ enum RecipientLatency {
 }
 
 impl RecipientLatency {
-    fn new(receipts: u64) -> Self {
+    fn new() -> Self {
+        Self::Byte(LatencyAccumulator::default())
+    }
+
+    #[cfg(test)]
+    fn with_receipt_bound(receipts: u64) -> Self {
         match recipient_latency_counter_bytes(receipts) {
             1 => Self::Byte(LatencyAccumulator::default()),
             2 => Self::Short(LatencyAccumulator::default()),
@@ -1091,6 +1096,45 @@ impl RecipientLatency {
     }
 
     fn record(&mut self, sample: u64) {
+        fn bucket_is_full<T: Counter>(
+            value: &LatencyAccumulator<T>,
+            sample: u64,
+            limit: T,
+        ) -> bool {
+            sample <= value.histogram.highest_equivalent(value.max_us)
+                && value.histogram.count_at(sample) == limit
+        }
+
+        fn widen<T: Counter, U: Counter>(source: &LatencyAccumulator<T>) -> LatencyAccumulator<U> {
+            let mut target = LatencyAccumulator::<U>::default();
+            for bucket in source.histogram.iter_recorded() {
+                target
+                    .histogram
+                    .record_n(
+                        bucket.value_iterated_to(),
+                        U::from_u64(bucket.count_since_last_iteration())
+                            .expect("wider latency counter"),
+                    )
+                    .expect("latency histogram auto-resizes to fit retained bucket");
+            }
+            target.max_us = source.max_us;
+            target
+        }
+        let promoted = match self {
+            Self::Byte(value) if bucket_is_full(value, sample, u8::MAX) => {
+                Some(Self::Short(widen(value)))
+            }
+            Self::Short(value) if bucket_is_full(value, sample, u16::MAX) => {
+                Some(Self::Word(widen(value)))
+            }
+            Self::Word(value) if bucket_is_full(value, sample, u32::MAX) => {
+                Some(Self::Wide(widen(value)))
+            }
+            _ => None,
+        };
+        if let Some(promoted) = promoted {
+            *self = promoted;
+        }
         match self {
             Self::Byte(histogram) => histogram.record(sample),
             Self::Short(histogram) => histogram.record(sample),
@@ -1112,17 +1156,17 @@ impl RecipientLatency {
 fn individual_recipient_latency_statistics(
     records: &RunRecords,
     sent_by_key: &SendIndex<'_>,
-    receipt_counts: &BTreeMap<&str, u64>,
+    member_names: &BTreeSet<&str>,
     per_recipient: &mut [RecipientOutcome],
 ) -> LatencyStats {
     let mut latency = LatencyAccumulator::<u64>::default();
     let mut by_recipient = BTreeMap::<&str, RecipientLatency>::new();
     for (recipient, sample) in indexed_latency_pairs(records, sent_by_key) {
         latency.record(sample);
-        if let Some(&receipts) = receipt_counts.get(recipient) {
+        if let Some(&recipient) = member_names.get(recipient) {
             by_recipient
                 .entry(recipient)
-                .or_insert_with(|| RecipientLatency::new(receipts))
+                .or_insert_with(RecipientLatency::new)
                 .record(sample);
         }
     }
@@ -1963,7 +2007,6 @@ pub fn summarize(
     // summaries outlive their raw run records without changing artifact JSON.
     let mut summary_sender_names: BTreeMap<&str, ReceiptName> = BTreeMap::new();
     let mut per_recipient = Vec::with_capacity(roster.len());
-    let mut recipient_receipt_counts = BTreeMap::new();
     for (recipient, room) in roster {
         let view = views
             .get(recipient.as_str())
@@ -2000,10 +2043,7 @@ pub fn summarize(
         // that epoch, not outlive its stream (the sender rejoined past it),
         // and never repeat what the rejoin snapshot already accounted.
         let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
-        let mut recipient_receipts = 0_u64;
         for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
-            // Count malformed, duplicate, opaque, and misrouted arrivals too.
-            recipient_receipts += stream.total();
             if stream.total() == 0 {
                 continue;
             }
@@ -2047,8 +2087,6 @@ pub fn summarize(
                     .append_to(&mut misrouted, recipient, sender, *epoch);
             }
         }
-
-        recipient_receipt_counts.insert(recipient.as_str(), recipient_receipts);
 
         // (b) Validate all observed gaps, then check completeness only for
         // streams this seat still owes. Closed epochs keep their evidence.
@@ -2174,7 +2212,7 @@ pub fn summarize(
     let latency_us = individual_recipient_latency_statistics(
         records,
         &sent_by_key,
-        &recipient_receipt_counts,
+        &member_names,
         &mut per_recipient,
     );
 
@@ -3400,7 +3438,7 @@ mod coverage_tests {
             serde_json::to_value(wide_peers).unwrap()
         );
         for (count, bytes) in [(255, 1), (256, 2), (65_535, 2), (65_536, 4), (u64::MAX, 8)] {
-            let histogram = RecipientLatency::new(count);
+            let histogram = RecipientLatency::with_receipt_bound(count);
             let actual = match histogram {
                 RecipientLatency::Byte(_) => 1,
                 RecipientLatency::Short(_) => 2,
@@ -3423,7 +3461,7 @@ mod coverage_tests {
         let started = std::time::Instant::now();
         let mut histograms: Vec<_> = (0..peers)
             .map(|peer| {
-                RecipientLatency::new(if !individual || peer == 0 {
+                RecipientLatency::with_receipt_bound(if !individual || peer == 0 {
                     65_536
                 } else {
                     255
@@ -3457,6 +3495,124 @@ mod coverage_tests {
                 "peers":peers,"individual":individual,"checksum":checksum,"bucket_bytes":bucket_bytes,
                 "rss_bytes":crate::diagnostics::resident_memory_bytes(std::process::id()),
                 "elapsed_us":started.elapsed().as_micros(),
+            })
+        );
+        std::hint::black_box(histograms);
+    }
+
+    #[test]
+    fn adaptive_latency_promotes_before_hot_bucket_saturation() {
+        for sample in [0, 2048, u64::MAX] {
+            let mut adaptive = RecipientLatency::new();
+            let mut wide = LatencyAccumulator::<u64>::default();
+            for count in 1..=65_537 {
+                adaptive.record(sample);
+                wide.record(sample);
+                if [1, 255, 256, 65_535, 65_536, 65_537].contains(&count) {
+                    assert_eq!(
+                        serde_json::to_value(adaptive.stats()).unwrap(),
+                        serde_json::to_value(wide.stats()).unwrap(),
+                        "sample={sample} count={count}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_latency_does_not_widen_for_a_new_bucket_beyond_a_full_tail() {
+        let mut histogram = RecipientLatency::new();
+        for _ in 0..255 {
+            histogram.record(2047);
+        }
+        assert!(matches!(histogram, RecipientLatency::Byte(_)));
+        histogram.record(u64::MAX);
+        assert!(matches!(histogram, RecipientLatency::Byte(_)));
+        assert_eq!(histogram.stats().samples, 256);
+        assert_eq!(histogram.stats().max_us, u64::MAX);
+    }
+
+    #[test]
+    fn adaptive_latency_preserves_all_buckets_and_raw_max_through_promotion() {
+        let mut adaptive = RecipientLatency::new();
+        let mut wide = LatencyAccumulator::<u64>::default();
+        for sample in [0, 2048, 2049, 4095, u64::MAX]
+            .into_iter()
+            .cycle()
+            .take(2000)
+        {
+            adaptive.record(sample);
+            wide.record(sample);
+            assert_eq!(
+                serde_json::to_value(adaptive.stats()).unwrap(),
+                serde_json::to_value(wide.stats()).unwrap()
+            );
+        }
+        assert!(matches!(adaptive, RecipientLatency::Short(_)));
+
+        let mut source = LatencyAccumulator::<u32>::default();
+        source.histogram.record_n(2048, u32::MAX).unwrap();
+        source.max_us = 2048;
+        let mut adaptive = RecipientLatency::Word(source);
+        let mut wide = LatencyAccumulator::<u64>::default();
+        wide.histogram.record_n(2048, u64::from(u32::MAX)).unwrap();
+        wide.max_us = 2048;
+        adaptive.record(2049);
+        wide.record(2049);
+        assert!(matches!(adaptive, RecipientLatency::Wide(_)));
+        assert_eq!(
+            serde_json::to_value(adaptive.stats()).unwrap(),
+            serde_json::to_value(wide.stats()).unwrap()
+        );
+        assert_eq!(adaptive.stats().samples, u64::from(u32::MAX) + 1);
+        assert_eq!(adaptive.stats().max_us, 2049);
+    }
+
+    #[test]
+    #[ignore = "distributed latency bucket memory profile; run in a fresh process"]
+    fn generator_distributed_latency_memory_profile() {
+        let adaptive = std::env::var("CAPACITY_DISTRIBUTED_ADAPTIVE").as_deref() == Ok("1");
+        let started = std::time::Instant::now();
+        let mut histograms: Vec<_> = (0..1000)
+            .map(|_| {
+                if adaptive {
+                    RecipientLatency::new()
+                } else {
+                    RecipientLatency::with_receipt_bound(65_536)
+                }
+            })
+            .collect();
+        for histogram in &mut histograms {
+            for sample in 0..65_536 {
+                let sample = (sample % 1024) * 1024;
+                match (adaptive, &mut *histogram) {
+                    (false, RecipientLatency::Word(value)) => value.record(sample),
+                    (_, value) => value.record(sample),
+                }
+            }
+        }
+        let checksum: u64 = histograms
+            .iter()
+            .map(|histogram| {
+                let stats = histogram.stats();
+                stats.samples + stats.max_us + stats.p50_us + stats.p95_us + stats.p99_us
+            })
+            .sum();
+        let bucket_bytes: usize = histograms
+            .iter()
+            .map(|histogram| match histogram {
+                RecipientLatency::Byte(value) => value.histogram.distinct_values(),
+                RecipientLatency::Short(value) => value.histogram.distinct_values() * 2,
+                RecipientLatency::Word(value) => value.histogram.distinct_values() * 4,
+                RecipientLatency::Wide(value) => value.histogram.distinct_values() * 8,
+            })
+            .sum();
+        println!(
+            "DISTRIBUTED_LATENCY_PROFILE {}",
+            serde_json::json!({
+                "adaptive": adaptive, "checksum": checksum, "bucket_bytes": bucket_bytes,
+                "rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                "elapsed_us": started.elapsed().as_micros(),
             })
         );
         std::hint::black_box(histograms);

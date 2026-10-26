@@ -5368,3 +5368,149 @@ fn shutdown_ack_preserves_unread_gameplay_before_due_reset_exhaustion() -> Resul
     }
     Ok(())
 }
+
+#[test]
+fn data_ingress_counters_distinguish_acceptance_redundancy_and_refusal() -> Result<()> {
+    for wrap in [false, true] {
+        let (_, mut receiver) = reset_pair();
+        if wrap {
+            receiver.peer_last_tsn = u32::MAX - 1;
+        }
+        receiver.max_receive_buffer_size = 4;
+        let first_tsn = receiver.peer_last_tsn.wrapping_add(1);
+        let mut data = ChunkPayloadData {
+            tsn: first_tsn,
+            stream_identifier: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"play"),
+            ..Default::default()
+        };
+        receiver.handle_data(&data)?;
+        receiver.handle_data(&data)?;
+        data.tsn = first_tsn.wrapping_add(1);
+        data.stream_sequence_number = 1;
+        receiver.handle_data(&data)?;
+        assert_eq!(receiver.stats.get_num_accepted_datas(), 1);
+        assert_eq!(receiver.stats.get_num_redundant_datas(), 1);
+        assert_eq!(receiver.stats.get_num_refused_datas(), 1);
+        assert_eq!(
+            receiver
+                .stream(1)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(4)?
+                .freeze(),
+            Bytes::from_static(b"play")
+        );
+        receiver.handle_data(&data)?;
+        assert_eq!(
+            receiver
+                .stream(1)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(4)?
+                .freeze(),
+            Bytes::from_static(b"play")
+        );
+        data.tsn = first_tsn.wrapping_add(2);
+        data.stream_sequence_number = 2;
+        receiver.handle_forward_tsn(&ChunkForwardTsn {
+            new_cumulative_tsn: data.tsn,
+            streams: vec![ChunkForwardTsnStream {
+                identifier: 1,
+                sequence: 2,
+            }],
+        })?;
+        receiver.handle_data(&data)?;
+        let mut stats = receiver.stats();
+        assert_eq!(stats.get_num_datas(), 5);
+        assert_eq!(stats.get_num_accepted_datas(), 2);
+        assert_eq!(stats.get_num_redundant_datas(), 2);
+        assert_eq!(stats.get_num_refused_datas(), 1);
+        receiver.stats.reset();
+        let mut cleared = receiver.stats();
+        assert_eq!(cleared.get_num_datas(), 0);
+        assert_eq!(
+            cleared.get_num_accepted_datas()
+                + cleared.get_num_redundant_datas()
+                + cleared.get_num_refused_datas(),
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn data_ingress_counters_include_saved_reset_data_and_credit_refusal() -> Result<()> {
+    let (_, mut receiver) = reset_pair();
+    receiver.max_receive_buffer_size = 4096;
+    receiver
+        .streams
+        .get_mut(&1)
+        .unwrap()
+        .incoming_reset_complete = true;
+    let first_tsn = receiver.peer_last_tsn.wrapping_add(1);
+    let mut data = ChunkPayloadData {
+        tsn: first_tsn,
+        stream_identifier: 1,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(b"saved gameplay"),
+        ..Default::default()
+    };
+    receiver.handle_data(&data)?;
+    receiver.handle_data(&data)?;
+    receiver.max_receive_buffer_size = receiver.deferred_reset_bytes as u32;
+    data.tsn = first_tsn.wrapping_add(1);
+    receiver.handle_data(&data)?;
+    let mut stats = receiver.stats();
+    assert_eq!(stats.get_num_datas(), 3);
+    assert_eq!(stats.get_num_accepted_datas(), 1);
+    assert_eq!(stats.get_num_redundant_datas(), 1);
+    assert_eq!(stats.get_num_refused_datas(), 1);
+    assert_eq!(receiver.deferred_reset_data.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn data_ingress_acceptance_includes_full_window_completion_and_stopped_drain() -> Result<()> {
+    let (_, mut receiver) = reset_pair();
+    receiver.max_receive_buffer_size = 1;
+    let mut data = ChunkPayloadData {
+        tsn: receiver.peer_last_tsn.wrapping_add(1),
+        stream_identifier: 1,
+        beginning_fragment: true,
+        ending_fragment: false,
+        user_data: Bytes::from_static(b"part"),
+        ..Default::default()
+    };
+    receiver.handle_data(&data)?;
+    assert_eq!(receiver.get_my_receiver_window_credit(), 0);
+    data.tsn = data.tsn.wrapping_add(1);
+    data.beginning_fragment = false;
+    data.ending_fragment = true;
+    receiver.handle_data(&data)?;
+    assert_eq!(
+        receiver
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(8)?
+            .freeze(),
+        Bytes::from_static(b"partpart")
+    );
+    receiver.set_state(AssociationState::ShutdownPending);
+    receiver.streams.get_mut(&1).unwrap().state = RecvSendState::Writable;
+    data.tsn = data.tsn.wrapping_add(1);
+    data.beginning_fragment = true;
+    data.stream_sequence_number = 1;
+    receiver.handle_data(&data)?;
+    let mut stats = receiver.stats();
+    assert_eq!(stats.get_num_datas(), 3);
+    assert_eq!(stats.get_num_accepted_datas(), 3);
+    assert_eq!(stats.get_num_redundant_datas(), 0);
+    assert_eq!(stats.get_num_refused_datas(), 0);
+    assert_eq!(receiver.streams[&1].get_num_bytes_in_reassembly_queue(), 0);
+    Ok(())
+}
