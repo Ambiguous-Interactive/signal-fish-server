@@ -1127,7 +1127,12 @@ impl Engine {
             })
             .collect();
         let mut snapshot = self.diagnostic_snapshot(peer);
-        snapshot["transport_channels"] = serde_json::Value::Array(channels);
+        if let Some(fields) = snapshot.as_object_mut() {
+            fields.insert(
+                "transport_channels".to_string(),
+                serde_json::Value::Array(channels),
+            );
+        }
         snapshot
     }
 
