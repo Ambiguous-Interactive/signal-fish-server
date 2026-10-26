@@ -250,3 +250,19 @@ retirement instead of copying them into separate vectors first.
 Replacement qualification in #912 must retain
 `sctp_received_payload_reuses_single_packet_storage_after_retirement` and
 `graceful_shutdown_retains_tail_across_bounded_application_reads`.
+
+Association connection now shares the ordered read queue with following DATA.
+The separate event queue previously let reliable startup packets reach an
+uninitialized negotiated channel. SCTP had already consumed those packets,
+so a later connection event could not recover their prefix.
+The delta changes `src/peer_connection/handler/sctp.rs` and
+`src/peer_connection/message/internal.rs`. The paired-wire control sends 32
+exact packets before or after COOKIE-ACK and defers event polling through
+the burst. The public Engine control sends 128 exact snapshot packets as soon
+as the reliable channel opens in each direction, then repeats on a fresh link.
+See [#1250](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1250).
+Replacement qualification in #912 must retain
+`negotiated_startup_burst_preserves_every_reliable_prefix_before_event_poll`
+and `godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generations`.
+The cause of the captured Godot 4.3 incident in #1244 remains separate until
+matched runtime evidence establishes it.

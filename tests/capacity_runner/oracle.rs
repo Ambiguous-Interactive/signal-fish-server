@@ -1709,7 +1709,7 @@ pub fn summarize(
         .map(|(name, room)| (name.as_str(), *room))
         .collect();
     let mut unknown_recipients = Category::default();
-    let mut arrivals: BTreeMap<ArrivalKey<'_>, ArrivalEvidence> = BTreeMap::new();
+    let mut arrivals: BTreeMap<ArrivalKey<'_>, ArrivalEvidence<'_>> = BTreeMap::new();
     for receipt in &records.receipts {
         let recipient = receipt.recipient.as_str();
         let sender = receipt.sender.as_str();
@@ -1736,8 +1736,8 @@ pub fn summarize(
                     let view = views.get(recipient).expect("roster peer has a churn view");
                     let stream_key = (receipt.sender.as_str(), epoch);
                     Some(ArrivalContract {
-                        closed_after: view.closed_at.get(&stream_key).copied(),
-                        floor: view.floors.get(&stream_key).copied(),
+                        closed_after: view.closed_at.get(&stream_key),
+                        floor: view.floors.get(&stream_key),
                     })
                 };
                 ArrivalEvidence {
@@ -1756,9 +1756,9 @@ pub fn summarize(
         };
         let stale = contract
             .closed_after
-            .is_some_and(|at_us| receipt.received_us > at_us);
+            .is_some_and(|at_us| receipt.received_us > *at_us);
         let below_floor = contract.floor.is_some_and(|(floor, from_us, enforced)| {
-            enforced && receipt.received_us >= from_us && receipt.server_seq <= floor
+            *enforced && receipt.received_us >= *from_us && receipt.server_seq <= *floor
         });
         let ledger_matches = receipt
             .server_seq
@@ -2317,19 +2317,19 @@ impl SequenceViolations {
 
 /// Stream boundaries are resolved once, without cloning a sender per receipt.
 #[derive(Clone, Copy)]
-struct ArrivalContract {
-    closed_after: Option<u64>,
-    floor: Option<(u64, u64, bool)>,
+struct ArrivalContract<'a> {
+    closed_after: Option<&'a u64>,
+    floor: Option<&'a (u64, u64, bool)>,
 }
 
 type ArrivalKey<'a> = (&'a str, &'a str, u32);
 
 /// Seek directly to one recipient's streams. The empty sender and epoch zero
 /// include malformed names and epochs, which must remain delivery evidence.
-fn recipient_arrivals<'map, 'records>(
-    arrivals: &'map BTreeMap<ArrivalKey<'records>, ArrivalEvidence>,
+fn recipient_arrivals<'map, 'records, 'view>(
+    arrivals: &'map BTreeMap<ArrivalKey<'records>, ArrivalEvidence<'view>>,
     recipient: &'records str,
-) -> impl Iterator<Item = (&'map ArrivalKey<'records>, &'map ArrivalEvidence)> {
+) -> impl Iterator<Item = (&'map ArrivalKey<'records>, &'map ArrivalEvidence<'view>)> {
     arrivals
         .range((recipient, "", 0)..)
         .take_while(move |((name, _, _), _)| *name == recipient)
@@ -2346,8 +2346,8 @@ struct GapStreamEvidence {
 
 /// Ordered complete streams retain one range, rather than one receipt pointer.
 #[derive(Default)]
-struct ArrivalEvidence {
-    contract: Option<ArrivalContract>,
+struct ArrivalEvidence<'a> {
+    contract: Option<ArrivalContract<'a>>,
     total: u64,
     first: u64,
     unique: u64,
@@ -2362,7 +2362,7 @@ struct ArrivalViolations {
     misrouted: SequenceViolations,
 }
 
-impl ArrivalEvidence {
+impl ArrivalEvidence<'_> {
     fn violations_mut(&mut self) -> &mut ArrivalViolations {
         self.violations.get_or_insert_with(Box::default)
     }
@@ -5038,7 +5038,7 @@ mod coverage_tests {
             "ARRIVAL_STATE_PROFILE {}",
             serde_json::json!({
                 "rooms": rooms, "streams": arrivals.len(), "invalid": invalid, "fragmented": fragmented,
-                "stream_bytes": std::mem::size_of::<ArrivalEvidence>(),
+                "stream_bytes": std::mem::size_of::<ArrivalEvidence<'_>>(),
                 "retained_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
                 "unique": unique, "elapsed_us": started.elapsed().as_micros(),
             })

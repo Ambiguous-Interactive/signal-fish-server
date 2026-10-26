@@ -1,6 +1,6 @@
 use super::{receive_tests::LivePair, *};
 
-async fn negotiated_pair() -> LivePair {
+fn unconnected_negotiated_pair() -> LivePair {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
     let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
     let settings = EngineSettings {
@@ -8,14 +8,18 @@ async fn negotiated_pair() -> LivePair {
         channel_profile: ChannelProfile::Godot,
         ..EngineSettings::default()
     };
-    let mut pair = LivePair {
+    LivePair {
         sender: Engine::new(settings, sender_tx).unwrap(),
         receiver: Engine::new(settings, receiver_tx).unwrap(),
         sender_events,
         receiver_events,
         sender_id: PlayerId::from_u128(0x1240),
         receiver_id: PlayerId::from_u128(0x1241),
-    };
+    }
+}
+
+async fn negotiated_pair() -> LivePair {
+    let mut pair = unconnected_negotiated_pair();
     pair.negotiate().await;
     pair
 }
@@ -320,4 +324,81 @@ async fn godot_profile_preserves_non_utf8_gameplay_bytes() {
         }
     }
     pair.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generations() {
+    let mut pair = unconnected_negotiated_pair();
+    for generation in 0u8..2 {
+        let offer = pair
+            .sender
+            .pair_with(pair.receiver_id, true, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        pair.receiver
+            .pair_with(pair.sender_id, false, &[])
+            .await
+            .unwrap();
+        let answer = pair
+            .receiver
+            .handle_offer(pair.sender_id, offer)
+            .await
+            .unwrap();
+        pair.sender
+            .handle_answer(pair.receiver_id, answer)
+            .await
+            .unwrap();
+        let payloads: Vec<Vec<u8>> = (0u8..128)
+            .map(|sequence| {
+                let mut packet = vec![0xff; 1024];
+                packet[..3].copy_from_slice(&[generation, sequence, 0]);
+                packet
+            })
+            .collect();
+        let mut received = [0usize; 2];
+        let mut sent = [false; 2];
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while received != [128, 128] {
+                let (seat, event) = tokio::select! {
+                    event = pair.sender_events.recv() => (0, event.unwrap()),
+                    event = pair.receiver_events.recv() => (1, event.unwrap()),
+                };
+                let (engine, peer) = if seat == 0 {
+                    (&mut pair.sender, pair.receiver_id)
+                } else {
+                    (&mut pair.receiver, pair.sender_id)
+                };
+                if !engine.is_current_event(&event) { continue; }
+                match event {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => {
+                        let (remote, source) = if seat == 0 {
+                            (&mut pair.receiver, pair.sender_id)
+                        } else {
+                            (&mut pair.sender, pair.receiver_id)
+                        };
+                        remote.handle_remote_candidate(source, &candidate_json).await.unwrap();
+                    }
+                    EngineEvent::ChannelOpen { label, .. } if label == RELIABLE_LABEL => {
+                        assert!(!sent[seat], "one startup burst per physical generation");
+                        sent[seat] = true;
+                        let channel = engine.channel(peer, RELIABLE_LABEL).unwrap();
+                        for packet in &payloads {
+                            channel.send(packet.as_slice().into()).await.unwrap();
+                        }
+                    }
+                    EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                        assert_eq!(label, RELIABLE_LABEL);
+                        assert_eq!(data, payloads[received[seat]], "generation={generation} seat={seat}: startup must retain the reliable prefix");
+                        received[seat] += 1;
+                    }
+                    EngineEvent::ChannelReceiveRejected { .. } | EngineEvent::ChannelClosed { .. } => panic!("startup must keep every admitted reliable packet"),
+                    _ => {}
+                }
+            }
+        }).await.expect("both startup snapshot bursts arrive in full");
+        assert_eq!(sent, [true, true]);
+        pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+        pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+    }
 }

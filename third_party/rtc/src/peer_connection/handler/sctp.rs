@@ -235,10 +235,7 @@ impl<'a> SctpHandler<'a> {
                 }
                 Event::Connected => {
                     debug!("association_handle {} is connected", ch.0);
-                    event_outs.push_back(TaggedRTCEventInternal {
-                        now,
-                        event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
-                    });
+                    messages.push(SctpMessage::StreamEvent(SctpStreamEvent::Connected(ch.0)));
                 }
                 Event::AssociationLost { reason, id } => {
                     debug!("association_handle {} is closed due to {}", ch.0, reason);
@@ -3429,11 +3426,10 @@ mod tests {
         }
     }
 
-    /// Build a client association that has sent COOKIE-ECHO but has not yet received COOKIE-ACK,
-    /// then create one DATA datagram from the already-established server.  This is the ordering
-    /// that can occur when a peer opens a DataChannel in the same flight as the final SCTP
-    /// handshake packet.
-    fn client_with_data_before_cookie_ack() -> (SctpHandlerContext, Vec<Bytes>, Vec<Bytes>) {
+    /// Hold COOKIE-ACK while an established server emits DCEP or negotiated gameplay DATA.
+    fn client_with_data_before_cookie_ack(
+        negotiated: bool,
+    ) -> (SctpHandlerContext, Vec<Bytes>, Vec<Bytes>) {
         let now = Instant::now();
 
         let mut client_ep = Endpoint::new(
@@ -3496,30 +3492,33 @@ mod tests {
         let cookie_ack = drain_transmits(&mut server_conn, now);
         assert!(!cookie_ack.is_empty(), "server must produce COOKIE-ACK");
 
-        // Send a DCEP OPEN before the client receives COOKIE-ACK.
-        let dcep_open = Message::DataChannelOpen(DataChannelOpen {
-            channel_type: ChannelType::Reliable,
-            priority: CHANNEL_PRIORITY_NORMAL,
-            reliability_parameter: 0,
-            label: b"early-channel".to_vec(),
-            protocol: Vec::new(),
-        })
-        .marshal()
-        .expect("DCEP OPEN");
+        let (ppi, payloads) = if negotiated {
+            (
+                PayloadProtocolIdentifier::Binary,
+                (0u8..32)
+                    .map(|seq| Bytes::from(vec![seq, 0xff, 0]))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let open = Message::DataChannelOpen(DataChannelOpen {
+                channel_type: ChannelType::Reliable,
+                priority: CHANNEL_PRIORITY_NORMAL,
+                reliability_parameter: 0,
+                label: b"early-channel".to_vec(),
+                protocol: Vec::new(),
+            })
+            .marshal()
+            .unwrap();
+            (PayloadProtocolIdentifier::Dcep, vec![Bytes::from(open)])
+        };
         {
-            let mut stream = server_conn
-                .open_stream(1, PayloadProtocolIdentifier::Dcep)
-                .expect("open server stream");
-            stream
-                .write_sctp(
-                    now,
-                    &Bytes::from(dcep_open),
-                    PayloadProtocolIdentifier::Dcep,
-                )
-                .expect("server data");
+            let mut stream = server_conn.open_stream(1, ppi).unwrap();
+            for payload in payloads {
+                stream.write_sctp(now, &payload, ppi).unwrap();
+            }
         }
         let early_data = drain_transmits(&mut server_conn, now);
-        assert!(!early_data.is_empty(), "server must produce DCEP DATA");
+        assert!(!early_data.is_empty(), "server must produce startup DATA");
 
         (
             client_ctx(now, client_ep, client_ch, client_conn),
@@ -4065,7 +4064,7 @@ mod tests {
     #[test]
     fn inbound_data_waits_for_sctp_handshake() {
         let now = Instant::now();
-        let (mut ctx, cookie_ack, early_data) = client_with_data_before_cookie_ack();
+        let (mut ctx, cookie_ack, early_data) = client_with_data_before_cookie_ack(false);
 
         {
             let mut handler = SctpHandler::new(&mut ctx, 0);
@@ -4099,7 +4098,12 @@ mod tests {
             ctx.pending_readable.is_empty(),
             "the stream must be drained after SCTP becomes established"
         );
-        assert_eq!(ctx.read_outs.len(), 1, "early DCEP must be delivered once");
+        assert_eq!(ctx.read_outs.len(), 2, "connect must precede early DCEP");
+        let connected = ctx.read_outs.pop_front().expect("connected marker");
+        assert!(matches!(
+            &connected.message,
+            RTCMessageInternal::Dtls(DTLSMessage::SctpStreamEvent(SctpStreamEvent::Connected(_)))
+        ));
         let inbound = ctx.read_outs.pop_front().expect("delivered DCEP");
         assert!(matches!(
             &inbound.message,
@@ -4123,6 +4127,9 @@ mod tests {
                 None,
             );
             handler
+                .handle_read(connected)
+                .expect("initialize before DCEP");
+            handler
                 .handle_read(inbound)
                 .expect("accept DCEP after SCTP handshake");
         }
@@ -4134,6 +4141,58 @@ mod tests {
             )),
             "the DataChannel Open event must follow SCTP establishment"
         );
+    }
+
+    /// Issue #1250: SCTP acknowledgment must not hide an uninitialized channel's lost prefix.
+    #[test]
+    fn negotiated_startup_burst_preserves_every_reliable_prefix_before_event_poll() {
+        use crate::data_channel::RTCDataChannelInit;
+        use crate::peer_connection::{RTCPeerConnectionBuilder, message::RTCMessage};
+
+        for data_first in [false, true] {
+            let now = Instant::now();
+            let (ctx, cookie_ack, early_data) = client_with_data_before_cookie_ack(true);
+            let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+            let id = pc
+                .create_data_channel(
+                    "reliable",
+                    Some(RTCDataChannelInit {
+                        negotiated: Some(1),
+                        ..Default::default()
+                    }),
+                )
+                .unwrap()
+                .id();
+            while pc.poll_event().is_some() {}
+            pc.dtls_transport_mut().dtls_role = RTCDtlsRole::Client;
+            pc.pipeline_context.sctp_handler_context = ctx;
+            let packets = if data_first {
+                early_data.into_iter().chain(cookie_ack).collect::<Vec<_>>()
+            } else {
+                cookie_ack.into_iter().chain(early_data).collect::<Vec<_>>()
+            };
+            for packet in packets {
+                pc.get_sctp_handler()
+                    .handle_read(raw_read(now, packet))
+                    .unwrap();
+                pc.pump_reads(None);
+            }
+            while pc.poll_event().is_some() {}
+            assert!(matches!(pc.poll_data_read().unwrap().message,
+                RTCMessage::DataChannelOpened(opened) if opened == id));
+            for seq in 0u8..32 {
+                let receipt = pc.poll_data_read().unwrap_or_else(|| {
+                    panic!("data_first={data_first}: reliable prefix lost at {seq}")
+                });
+                assert!(
+                    matches!(receipt.message,
+                    RTCMessage::DataChannelMessage(channel, ref message)
+                        if channel == id && message.data == [seq, 0xff, 0][..]),
+                    "data_first={data_first}: wrong reliable packet at {seq}"
+                );
+            }
+            assert!(pc.poll_data_read().is_none());
+        }
     }
 
     /// With the pipeline already at its bound, inbound DATA must be left in the reassembly

@@ -6068,3 +6068,41 @@ seconds in the candidate. No local cargo work overlaps either measurement
 cohort. The host is shared; these are component experiments, not server
 capacity qualification. External Rust, .NET, and Godot SDKs need no changes
 for these internal metrics and capacity-tool changes.
+
+## Borrowed stream contracts (#775, #636)
+
+On base `18cadb5d`, each arrival record copies immutable churn closure and
+snapshot floor values. Borrowing them from the summary's fixed churn views
+reduces the ARM64 record from 112 to 96 bytes without another allocation.
+The views outlive the arrival map. Invalid streams retain their separate
+contract state. No coordinate, offered event, raw budget, or verdict changes.
+
+The unchanged `generator_arrival_state_memory_profile` fixture runs in fresh
+debug processes in baseline/candidate/candidate/baseline order. The ordered
+and invalid cells retain 239,760 streams at 999 rooms. Each stream has 100
+distinct positive arrivals; the invalid cell adds all three violation classes.
+The fragmented cell retains 24,000 streams at 100 rooms with 100 separate
+ranges per stream. The table reports in-process retained RSS, not peak RSS.
+
+| Cell | Baseline retained bytes | Candidate retained bytes |
+| --- | --- | --- |
+| Ordered | 63,176,704 / 63,180,800 | 56,082,432 / 56,082,432 |
+| Three violation classes | 78,659,584 / 78,655,488 | 71,618,560 / 71,622,656 |
+| 100 sparse ranges per stream | 107,094,016 / 107,085,824 | 106,389,504 / 106,389,504 |
+
+Ordered insertion takes 1.12–1.39 seconds on the base and 1.08 seconds on
+the candidate. Invalid insertion takes 1.17–1.25 versus 1.15–1.17 seconds.
+Fragmented insertion takes 3.67–5.07 versus 4.03–4.38 seconds. Shared-host
+scheduling and debug code limit these timings. No live throughput claim follows.
+The sparse cell's remaining range storage dominates its smaller saving.
+
+Binary SHA-256 values:
+
+- Baseline: `5b6b50a0f7785ab00972d051920d0dfc29ca48dcab032aae50cea71daee96f1a`.
+- Candidate: `973aa685b3a14e42f61f29c58d50daeca9f1d025da4c709e05aa2bbfd71dc393`.
+
+All attempts remain in ignored `progress/session-550/`. All 40 scoped oracle
+controls pass, including exact replay, churn, malformed-stream classification,
+duplicate/order checks, and full-width sequence cases. This isolates arrival
+storage; it does not bound the whole generator, qualify the long live cell,
+or explain the historical generator stalls.
