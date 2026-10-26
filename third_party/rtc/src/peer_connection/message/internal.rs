@@ -38,6 +38,7 @@ pub(crate) enum STUNMessage {
 
 #[derive(Debug, Clone)]
 pub(crate) enum SctpStreamEvent {
+    Connected(usize),
     Closed(usize, sctp::StreamId),
     BufferReleased(usize, sctp::StreamId, usize),
     BufferedAmountLow(usize, sctp::StreamId),
@@ -47,6 +48,7 @@ pub(crate) enum SctpStreamEvent {
 impl From<SctpStreamEvent> for RTCEventInternal {
     fn from(event: SctpStreamEvent) -> Self {
         match event {
+            SctpStreamEvent::Connected(association) => Self::SCTPHandshakeComplete(association),
             SctpStreamEvent::Closed(association, stream) => {
                 Self::SCTPStreamClosed(association, stream)
             }
@@ -67,7 +69,7 @@ impl From<SctpStreamEvent> for RTCEventInternal {
 pub(crate) enum DTLSMessage {
     Raw(BytesMut),
     Sctp(DataChannelMessage),
-    // Ordered stream notification, tied to the generation before the next OPEN.
+    // Ordered association and stream notifications before their following DATA.
     SctpStreamEvent(SctpStreamEvent),
     // Local control for an existing, remotely opened SCTP stream. It carries
     // no wire message and must precede the channel's ACK and application data.

@@ -78,7 +78,10 @@ The reference profile keeps its existing text projection for received packets.
 
 Local native-stack controls verify channel properties, SCTP IDs, exact binary
 payloads in both directions, every required channel's closure in both roles,
-and fresh-link recovery. These controls do not establish compatibility with a
+and fresh-link recovery. Startup controls also send 128 exact reliable packets
+as soon as either endpoint opens its channel, then repeat on a fresh link.
+The native stack initializes negotiated channels before consuming following
+startup DATA (#1250). These controls do not establish compatibility with a
 Godot application. Native Godot, Godot Web, full service sessions, queued-send
 retirement with Godot, and remote-network qualification remain open in
 [server #1240](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1240)

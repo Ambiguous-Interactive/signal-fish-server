@@ -9281,3 +9281,92 @@ Those remain open in #1240 and Godot #355/#433.
 Rust and .NET external SDKs need no changes: their current READMEs assign peer
 networking to the application and do not use this reference Engine. Existing
 Godot tracking remains necessary. The server protocol is unchanged.
+
+### F196 — Native startup DATA precedes negotiated channel initialization
+
+At `18cadb5d`, SCTP publishes `Event::Connected` through the event queue and
+consumed DATA through the read queue. A read sweep can reach a pre-created
+negotiated channel before its connection event initializes the channel.
+`DataChannelHandler` returns `ErrDataChannelNotExisted`; the pipeline logs the
+error and continues. The acknowledged payload no longer exists in SCTP.
+A later event poll opens the channel but cannot restore the reliable prefix.
+
+The paired-wire regression
+`negotiated_startup_burst_preserves_every_reliable_prefix_before_event_poll`
+creates negotiated SID 1 and sends 32 exact binary packets around COOKIE-ACK.
+It pumps reads after each datagram and defers event polling through the burst.
+The base fails at sequence 0 with COOKIE-ACK first. The repair carries the
+association connection through the ordered read queue before following DATA.
+Both COOKIE-ACK-first and DATA-first controls preserve all bytes, order, one
+open notification, and no extra receipts. All 34 scoped SCTP handler controls
+pass. The existing early-DCEP control now requires the connection marker
+before the DCEP packet.
+
+The public Engine control sends 128 binary snapshot packets of 1,024 bytes
+as soon as each reliable channel opens. Both directions require the complete
+prefix in the initial generation and after physical-link replacement.
+No application-ready barrier delays those sends. This supplements the existing
+mixed negotiated-channel, required-channel closure, stale-callback, and binary
+ownership controls. The repair changes no public API or server wire message.
+Track the confirmed defect in #1250 and retain these controls for #912.
+
+The captured Godot 4.3 incident in #1244 has the same missing-prefix symptom,
+but that does not prove a common cause. Matched Godot runtime comparisons and
+service/network qualification remain separate evidence. The Rust and .NET
+SDKs own signaling and relay, not this native peer stack. Their current
+READMEs assign peer networking to the application. Godot #355 tracks the
+reference Engine pairing and probe migration.
+
+The matched Godot 4.3 control uses official Linux ARM64 Godot 4.3,
+`webrtc-native` 1.2.2-stable, Chromium 154, and the portable Godot driver at
+`1a23f8fb28b9583507bab6538fa1306cf66a1d80`. Each treatment runs in
+baseline/candidate/candidate/baseline order with both offer roles. One
+cohort adds no busy workers; the other adds four CPU workers on the 12-CPU
+host. All 16 pairings pass both physical generations. They preserve all
+8,192 offered reliable snapshot receipts across directions and generations,
+plus the existing exact mixed-mode and required-channel retirement checks.
+Godot 4.7.2 also passes both native offer-role pairings on the candidate.
+All attempts remain retained. These shared-host controls do not reproduce issue #1244.
+They do not exclude its original load pattern or establish its cause.
+
+Both native probe builds use the portable source's unchanged send and wait
+rules. Its event match adds `ChannelBinaryMessage`, converts the drill's
+known UTF-8 payloads with checked `String::from_utf8`, and fails on receive
+rejection. This is required after the existing binary-event migration;
+ignoring the new event would invalidate the comparison. The exact opaque
+binary ownership checks remain separate native tests. Probe SHA-256 values:
+
+- Main: `44cbcfe1e1c93da13df88b1af4efae6bb1350a4c83d89cbfecc5918661dc8840`.
+- Candidate: `bcee53a01d0d35b01adabd59fb4b766fe294eee58697397642b42f35bbd0aaf4`.
+
+The candidate also passes a real v3 service rejoin against Godot 4.7.2 Web
+with the native Engine offering. Both seats join the same service room and
+exchange Offer, Answer, ICE, and transport status through the service.
+The HTTP coordinator rejects signaling payloads; it records zero such
+attempts. Phase 1 leaves the room while retaining a selected packet and
+retires the old receiver. Both seats rejoin the same room with a fresh plan
+generation and reference epoch 2. Each phase receives and acknowledges all
+128 snapshot chunks in each direction. Exact mixed-mode delivery, required
+channel closure, retained-packet retirement, and final room leave pass.
+
+This advances #1240's service boundary for this one local two-seat cell.
+It does not qualify other offer roles, native Godot service sessions, larger
+meshes, remote networks, or finite lifetimes on repaired Godot engines.
+The portable probe still requires its explicit binary-event migration in
+Godot #355. No service behavior or client API changes in this control.
+
+### Borrowed capacity stream boundaries (#775, #636)
+
+The oracle previously copied each stream's fixed churn closure and snapshot
+floor into `ArrivalEvidence`. It now borrows those values from immutable
+churn views for the duration of summary evaluation. Invalid streams still
+have no valid contract. Zero and full-width coordinates retain their exact
+meaning. No per-stream allocation replaces the copied values.
+
+On ARM64, the arrival record falls from 112 to 96 bytes. All 40 scoped oracle
+controls pass, including independent sequence scans, churn boundaries,
+malformed senders, loss coverage, and exact artifact replay. The profiling
+fixture and workload are unchanged. The capacity audit records matched
+retained-memory observations and their limits. This does not establish a
+whole-generator memory bound or qualify the planned ten-minute workload.
+External client APIs and server behavior do not change.
