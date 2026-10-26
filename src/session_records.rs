@@ -389,6 +389,23 @@ impl SessionRecords {
         since: Option<u64>,
         application_id: Option<Uuid>,
     ) -> SessionsSnapshot {
+        self.snapshot_with_active_limit(since, application_id, usize::MAX)
+    }
+
+    pub(crate) fn response_snapshot(
+        &self,
+        since: Option<u64>,
+        application_id: Option<Uuid>,
+    ) -> SessionsSnapshot {
+        self.snapshot_with_active_limit(since, application_id, SESSION_RECORDS_ACTIVE_RESPONSE_CAP)
+    }
+
+    fn snapshot_with_active_limit(
+        &self,
+        since: Option<u64>,
+        application_id: Option<Uuid>,
+        active_limit: usize,
+    ) -> SessionsSnapshot {
         let matches_application = |record: &SessionRecord| {
             application_id.is_none_or(|id| record.application_id == Some(id))
         };
@@ -398,11 +415,17 @@ impl SessionRecords {
             .filter(|entry| matches_application(entry.value()))
             .map(|entry| entry.value().clone())
             .collect();
-        active.sort_by(|a, b| {
+        let active_count = active.len();
+        let order = |a: &SessionRecord, b: &SessionRecord| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
                 .then_with(|| a.room_id.cmp(&b.room_id))
-        });
+        };
+        if active.len() > active_limit {
+            active.select_nth_unstable_by(active_limit, order);
+            active.truncate(active_limit);
+        }
+        active.sort_unstable_by(order);
         // Poisoning recovers the guarded data: the ring is a plain queue, so
         // a panicked writer leaves element-consistent state behind.
         let completed: Vec<SessionRecord> = {
@@ -424,7 +447,6 @@ impl SessionRecords {
                     .collect()
             }
         };
-        let active_count = active.len();
         let completed_count = completed.len();
         SessionsSnapshot {
             active,
@@ -968,5 +990,74 @@ mod tests {
             assert_eq!(view.unpublished_dropped_total, 1, "{context}");
             assert_eq!(view.completed_dropped_total, 0, "{context}");
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn response_snapshot_matches_full_view_prefix_and_counts() {
+        let records = SessionRecords::new();
+        let app = Uuid::from_u128(100);
+        for index in (0..1100).rev() {
+            let mut room = room_fixture(Uuid::from_u128(index), "ROOM");
+            room.created_at = chrono::DateTime::from_timestamp_millis((index % 7) as i64)
+                .expect("fixture timestamp");
+            room.application_id = (index % 2 == 0).then_some(app);
+            records.record_created(&room, true);
+            if index % 11 == 0 {
+                records.record_closed(&room.id, SessionCloseReason::Deleted);
+            }
+        }
+        for application_id in [None, Some(app), Some(Uuid::nil())] {
+            for since in [None, Some(0), Some(50), Some(u64::MAX)] {
+                let full = records.snapshot_view(since, application_id);
+                for limit in [0, 1, 17, SESSION_RECORDS_ACTIVE_RESPONSE_CAP, usize::MAX] {
+                    let limited = records.snapshot_with_active_limit(since, application_id, limit);
+                    let mut expected = serde_json::to_value(&full).expect("full view");
+                    expected["active"].as_array_mut().unwrap().truncate(limit);
+                    assert_eq!(
+                        serde_json::to_value(limited).unwrap(),
+                        expected,
+                        "application={application_id:?}, since={since:?}, limit={limit}"
+                    );
+                }
+                let response = records.response_snapshot(since, application_id);
+                assert_eq!(response.active_count, full.active_count);
+                assert_eq!(
+                    response.active.len(),
+                    full.active.len().min(SESSION_RECORDS_ACTIVE_RESPONSE_CAP)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated session response materialization profile; run in a fresh process"]
+    fn session_response_materialization_profile() {
+        let records = SessionRecords::new();
+        for index in 0..10_000 {
+            let room = room_fixture(Uuid::from_u128(index), "ROOM");
+            records.record_created(&room, true);
+        }
+        let snapshot = if std::env::var_os("SESSION_RESPONSE_LEGACY").is_some() {
+            records.snapshot()
+        } else {
+            records.response_snapshot(None, None)
+        };
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let materialized_records = value["active"].as_array().unwrap().len();
+        let materialized_bytes = serde_json::to_vec(&value).unwrap().len();
+        value["active"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(SESSION_RECORDS_ACTIVE_RESPONSE_CAP);
+        assert_eq!(value["activeCount"], 10_000);
+        assert_eq!(
+            value["active"].as_array().unwrap().len(),
+            SESSION_RECORDS_ACTIVE_RESPONSE_CAP
+        );
+        println!(
+            "SESSION_RESPONSE_PROFILE records={materialized_records} bytes={materialized_bytes}"
+        );
+        std::hint::black_box((snapshot, value));
     }
 }

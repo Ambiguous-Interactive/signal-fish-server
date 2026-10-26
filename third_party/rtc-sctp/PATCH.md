@@ -453,3 +453,17 @@ Replacement qualification must retain both `shutdown_receive_credit_` controls,
 including exact credit after every application read. The large logical-payload
 history shares physical buffers; it does not claim a 4 GiB socket transfer.
 All new runtime controls run under the existing shutdown and gap-ACK selectors.
+
+## Repeated shutdown ACK recovery
+
+SHUTDOWN ACK replays preserve active and due T2 deadlines. Repeated incoming
+SHUTDOWN no longer postpones retry backoff or configured exhaustion. The first
+simultaneous shutdown transition still restarts T2, retaining its retry history.
+See [#1235](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1235).
+
+Replacement qualification in #912 must retain
+`shutdown_repeated_peer_request_preserves_due_retry_and_exhaustion` and
+`graceful_shutdown_retries_lost_shutdown_and_ack`. The paired loss history
+services a repeated peer SHUTDOWN before the receiver's due timeout, loses its
+replayed ACK, and then completes both endpoint retirements. These controls use
+the existing shutdown selector. The public WebRTC close path still uses abort.

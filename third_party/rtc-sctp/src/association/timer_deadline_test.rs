@@ -294,3 +294,85 @@ fn recovery_retry_exhaustion_retires_all_streams() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn shutdown_repeated_peer_request_preserves_due_retry_and_exhaustion() -> Result<()> {
+    for simultaneous in [false, true] {
+        let mut a = timed_test_association();
+        a.timers = TimerTable::new(TimerConfig {
+            max_t2_shutdown_retrans: 1,
+            ..TimerConfig::default()
+        });
+        let now = Instant::now();
+        let shutdown = ChunkShutdown {
+            cumulative_tsn_ack: a.my_next_tsn.wrapping_sub(1),
+        };
+        if simultaneous {
+            a.shutdown()?;
+            assert!(!a.gather_outbound(now).0.is_empty());
+        }
+        let received_at = now + Duration::from_millis(10);
+        a.handle_shutdown(&shutdown, received_at)?;
+        assert!(!a.gather_outbound(received_at).0.is_empty());
+        assert_eq!(a.state(), AssociationState::ShutdownAckSent);
+        assert_eq!(
+            a.timers.get(Timer::T2Shutdown),
+            Some(received_at + Duration::from_millis(a.rto_mgr.get_rto()))
+        );
+        let deadline = a.timers.get(Timer::T2Shutdown).unwrap();
+        let due = deadline + Duration::from_millis(1);
+        a.handle_shutdown(&shutdown, due)?;
+        assert!(!a.gather_outbound(due).0.is_empty());
+        assert_eq!(
+            a.timers.get(Timer::T2Shutdown),
+            Some(deadline),
+            "simultaneous={simultaneous}: replaying an ACK must preserve the due timeout"
+        );
+        a.handle_timeout(due);
+        assert!(!a.gather_outbound(due).0.is_empty());
+        let retry = a.timers.get(Timer::T2Shutdown).unwrap();
+        assert!(retry > due);
+        a.handle_shutdown(&shutdown, retry)?;
+        assert!(!a.gather_outbound(retry).0.is_empty());
+        assert_eq!(a.timers.get(Timer::T2Shutdown), Some(retry));
+        a.handle_timeout(retry);
+        assert_eq!(a.state(), AssociationState::Closed);
+        assert!(a.poll_timeout().is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_simultaneous_transition_retains_retry_history() -> Result<()> {
+    for retries in [0, 1, 5] {
+        let mut a = timed_test_association();
+        a.timers = TimerTable::new(TimerConfig {
+            max_t2_shutdown_retrans: retries,
+            ..TimerConfig::default()
+        });
+        let mut now = Instant::now();
+        a.shutdown()?;
+        assert!(!a.gather_outbound(now).0.is_empty());
+        for _ in 0..retries {
+            now = a.timers.get(Timer::T2Shutdown).unwrap();
+            a.handle_timeout(now);
+            assert!(!a.gather_outbound(now).0.is_empty());
+        }
+        let interval = a.timers.get(Timer::T2Shutdown).unwrap().duration_since(now);
+        let received_at = now + Duration::from_millis(10);
+        a.handle_shutdown(
+            &ChunkShutdown {
+                cumulative_tsn_ack: a.my_next_tsn.wrapping_sub(1),
+            },
+            received_at,
+        )?;
+        assert!(!a.gather_outbound(received_at).0.is_empty());
+        assert_eq!(a.state(), AssociationState::ShutdownAckSent);
+        let deadline = received_at + interval;
+        assert_eq!(a.timers.get(Timer::T2Shutdown), Some(deadline));
+        a.handle_timeout(deadline);
+        assert_eq!(a.state(), AssociationState::Closed, "retries={retries}");
+        assert!(a.poll_timeout().is_none());
+    }
+    Ok(())
+}

@@ -2478,7 +2478,16 @@ fn graceful_shutdown_retries_lost_shutdown_and_ack() -> Result<()> {
         let mut packets = remote.gather_outbound(now).0;
         if lose_ack {
             assert!(!packets.is_empty());
-            now = remote.timers.get(Timer::T2Shutdown).unwrap();
+            let remote_deadline = remote.timers.get(Timer::T2Shutdown).unwrap();
+            now = remote_deadline.max(local.timers.get(Timer::T2Shutdown).unwrap());
+            local.handle_timeout(now);
+            let repeated = local.gather_outbound(now).0;
+            assert!(!repeated.is_empty());
+            for raw in repeated {
+                remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+            }
+            assert!(!remote.gather_outbound(now).0.is_empty());
+            assert_eq!(remote.timers.get(Timer::T2Shutdown), Some(remote_deadline));
             remote.handle_timeout(now);
             packets = remote.gather_outbound(now).0;
         }
