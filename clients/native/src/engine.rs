@@ -1,5 +1,8 @@
-//! WebRTC engine: one `RTCPeerConnection` per remote peer, two data channels
+//! WebRTC engine: one `RTCPeerConnection` per remote peer, required data channels
 //! per pair, trickle ICE relayed through the server's opaque `Signal` envelope.
+//!
+//! The opt-in [`ChannelProfile::Godot`] creates all three negotiated channels
+//! before offering or answering. The default reference profile uses the steps below.
 //!
 //! # Protocol steps implemented here (`docs/protocol.md`, ADR-0002)
 //!
@@ -51,8 +54,47 @@ use webrtc::runtime::{default_runtime, JoinHandle, Runtime};
 
 /// Label of the ordered, reliable data channel (commands / critical events).
 pub const RELIABLE_LABEL: &str = "reliable";
-/// Label of the unordered, no-retransmit channel (movement / state).
+/// Label of the unordered channel (zero retries in the reference profile).
 pub const UNRELIABLE_LABEL: &str = "unreliable";
+/// Godot's ordered, lifetime-limited channel.
+pub const ORDERED_LABEL: &str = "ordered";
+
+/// Channel layout selected before pairing. Both peers must agree on the layout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ChannelProfile {
+    /// Two in-band channels used by the reference clients.
+    #[default]
+    Reference,
+    /// Godot's reserved negotiated channels, with the intended 1 ms lifetime.
+    Godot,
+}
+
+impl ChannelProfile {
+    fn labels(self) -> &'static [&'static str] {
+        match self {
+            Self::Reference => &[RELIABLE_LABEL, UNRELIABLE_LABEL],
+            Self::Godot => &[RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL],
+        }
+    }
+
+    fn channel_init(self, label: &str) -> RTCDataChannelInit {
+        RTCDataChannelInit {
+            ordered: label != UNRELIABLE_LABEL,
+            max_retransmits: (self == Self::Reference && label == UNRELIABLE_LABEL).then_some(0),
+            max_packet_life_time: (self == Self::Godot && label != RELIABLE_LABEL).then_some(1),
+            negotiated: if self == Self::Godot {
+                Some(match label {
+                    RELIABLE_LABEL => 1,
+                    ORDERED_LABEL => 2,
+                    _ => 3,
+                })
+            } else {
+                None
+            },
+            ..RTCDataChannelInit::default()
+        }
+    }
+}
 
 // Per physical link, including candidates already passed to the WebRTC stack.
 // Keep aligned with the browser engine; draining the queue must not renew it.
@@ -137,7 +179,7 @@ impl ChannelReceipts {
 struct ChannelReceiveAdmission {
     #[cfg(test)]
     message_observed: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
-    receipts: [ChannelReceipts; 2],
+    receipts: [ChannelReceipts; 3],
     budget: Arc<MessageQueueBudget>,
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
@@ -150,6 +192,7 @@ impl ChannelReceiveAdmission {
         match label {
             RELIABLE_LABEL => Some(&self.receipts[0]),
             UNRELIABLE_LABEL => Some(&self.receipts[1]),
+            ORDERED_LABEL => Some(&self.receipts[2]),
             _ => None,
         }
     }
@@ -174,6 +217,10 @@ impl ChannelReceiveAdmission {
                 (
                     UNRELIABLE_LABEL,
                     channels.unreliable.as_ref().and_then(Weak::upgrade),
+                ),
+                (
+                    ORDERED_LABEL,
+                    channels.ordered.as_ref().and_then(Weak::upgrade),
                 ),
             ]
         };
@@ -208,6 +255,7 @@ impl ChannelReceiveAdmission {
         let bit = match label {
             RELIABLE_LABEL => 1,
             UNRELIABLE_LABEL => 2,
+            ORDERED_LABEL => 4,
             _ => return,
         };
         if self.closed_labels.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
@@ -402,6 +450,8 @@ impl IpFamily {
 /// every call site.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EngineSettings {
+    /// Channel contract; the Godot profile uses the intended 1 ms lifetime.
+    pub channel_profile: ChannelProfile,
     /// Deterministic ICE failure (`--cripple-ice`).
     pub crippled: bool,
     /// Disable multicast-DNS candidate obfuscation (`--disable-mdns`).
@@ -691,7 +741,7 @@ impl Engine {
             remote_candidate_bytes: 0,
             remote_description_set: false,
             pair_connected: false,
-            channel_tasks: Vec::with_capacity(2),
+            channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
         };
         self.peers.insert(peer, link);
         self.receipt_generations
@@ -699,59 +749,39 @@ impl Engine {
             .and_modify(|(_, last)| *last = generation)
             .or_insert((generation, generation));
         let result = async {
+            let profile = self.settings.channel_profile;
+            if initiate || profile == ChannelProfile::Godot {
+                for &label in profile.labels() {
+                    if label == RELIABLE_LABEL {
+                        negotiation_checkpoint!(negotiation_hold, "reliable");
+                    } else if label == UNRELIABLE_LABEL {
+                        negotiation_checkpoint!(negotiation_hold, "unreliable");
+                    }
+                    let channel = pc
+                        .create_data_channel(label, Some(profile.channel_init(label)))
+                        .await
+                        .context("create required data channel")?;
+                    channel_admission.lock().await.select(label, &channel);
+                    let task = spawn_channel_event_loop(
+                        &self.runtime,
+                        &self.events,
+                        peer,
+                        generation,
+                        label.to_string(),
+                        channel.clone(),
+                        receive_admission.clone(),
+                    );
+                    let link = self
+                        .peers
+                        .get_mut(&peer)
+                        .ok_or_else(|| anyhow!("peer link removed while pairing"))?;
+                    link.channel_tasks.push(task);
+                    link.channels.insert(label.to_string(), channel);
+                }
+            }
             if !initiate {
                 return Ok(None);
             }
-            // Both channels must exist before the offer so the SDP negotiates
-            // SCTP and the channels open as soon as DTLS completes.
-            negotiation_checkpoint!(negotiation_hold, "reliable");
-            let reliable = pc
-                .create_data_channel(RELIABLE_LABEL, None)
-                .await
-                .context("create reliable data channel")?;
-            negotiation_checkpoint!(negotiation_hold, "unreliable");
-            let unreliable = pc
-                .create_data_channel(
-                    UNRELIABLE_LABEL,
-                    Some(RTCDataChannelInit {
-                        ordered: false,
-                        max_retransmits: Some(0),
-                        ..RTCDataChannelInit::default()
-                    }),
-                )
-                .await
-                .context("create unreliable data channel")?;
-            {
-                let mut admission = channel_admission.lock().await;
-                admission.select(RELIABLE_LABEL, &reliable);
-                admission.select(UNRELIABLE_LABEL, &unreliable);
-            }
-            let reliable_task = spawn_channel_event_loop(
-                &self.runtime,
-                &self.events,
-                peer,
-                generation,
-                RELIABLE_LABEL.to_string(),
-                reliable.clone(),
-                receive_admission.clone(),
-            );
-            let unreliable_task = spawn_channel_event_loop(
-                &self.runtime,
-                &self.events,
-                peer,
-                generation,
-                UNRELIABLE_LABEL.to_string(),
-                unreliable.clone(),
-                receive_admission,
-            );
-            let link = self
-                .peers
-                .get_mut(&peer)
-                .ok_or_else(|| anyhow!("peer link removed while pairing"))?;
-            link.channel_tasks.extend([reliable_task, unreliable_task]);
-            link.channels.insert(RELIABLE_LABEL.to_string(), reliable);
-            link.channels
-                .insert(UNRELIABLE_LABEL.to_string(), unreliable);
 
             negotiation_checkpoint!(negotiation_hold, "offer");
             let offer = pc.create_offer(None).await.context("create offer")?;
@@ -936,8 +966,8 @@ impl Engine {
         ));
     }
 
-    /// Record an open callback and inspect both selected channels.
-    /// Returns `true` once per link when both channels are observed open.
+    /// Record an open callback and inspect every required channel.
+    /// Returns `true` once per link when all required channels are observed open.
     /// Callers must await this method. These observations do not prevent a
     /// later channel close; callers must still handle terminal channel events.
     pub async fn note_channel_open(&mut self, peer: PlayerId, label: &str) -> bool {
@@ -953,8 +983,8 @@ impl Engine {
             return false;
         }
         link.open_labels.insert(label.to_string());
-        let fully_open = link.open_labels.contains(RELIABLE_LABEL)
-            && link.open_labels.contains(UNRELIABLE_LABEL);
+        let labels = self.settings.channel_profile.labels();
+        let fully_open = labels.iter().all(|label| link.open_labels.contains(*label));
         if !fully_open || link.pair_connected {
             return false;
         }
@@ -962,7 +992,7 @@ impl Engine {
             Queued open callbacks can outlive their channels. Separate state
             observations cannot prevent a later close.
         */
-        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        for &label in labels {
             let Some(channel) = link.channels.get(label) else {
                 return false;
             };
@@ -1025,8 +1055,8 @@ impl Engine {
             return serde_json::Value::Null;
         };
         let channels: serde_json::Map<String, serde_json::Value> =
-            [RELIABLE_LABEL, UNRELIABLE_LABEL]
-                .into_iter()
+            self.settings.channel_profile.labels()
+                .iter().copied()
                 .map(|label| {
                     (
                         label.to_string(),
@@ -1167,6 +1197,7 @@ struct PeerHandler {
 struct RequiredChannelAdmission {
     reliable: Option<Weak<dyn DataChannel>>,
     unreliable: Option<Weak<dyn DataChannel>>,
+    ordered: Option<Weak<dyn DataChannel>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -1181,6 +1212,7 @@ impl RequiredChannelAdmission {
         let selected = match label {
             RELIABLE_LABEL => &self.reliable,
             UNRELIABLE_LABEL => &self.unreliable,
+            ORDERED_LABEL => &self.ordered,
             _ => return false,
         };
         selected
@@ -1192,6 +1224,7 @@ impl RequiredChannelAdmission {
         let selected = match label {
             RELIABLE_LABEL => &mut self.reliable,
             UNRELIABLE_LABEL => &mut self.unreliable,
+            ORDERED_LABEL => &mut self.ordered,
             _ => return ChannelSelection::Duplicate,
         };
         let candidate = Arc::downgrade(channel);
@@ -1755,6 +1788,10 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "engine_profile_tests.rs"]
+mod profile_tests;
 
 #[cfg(test)]
 #[path = "engine_task_tests.rs"]

@@ -1744,8 +1744,10 @@ pub fn summarize(
                     ..ArrivalEvidence::default()
                 }
             });
+        if stream.total == 0 {
+            stream.first = receipt.server_seq;
+        }
         stream.total += 1;
-        stream.first.get_or_insert(receipt.server_seq);
         // Opaque leaks still owe overlap, duplicate, and order evidence.
         stream.observe(receipt.server_seq);
         let Some(contract) = stream.contract else {
@@ -1951,7 +1953,7 @@ pub fn summarize(
                 // that the server must refuse. Counted only in the leak
                 // category: its verdict names the recipient and stream
                 // exactly, and a leak already invalidates the run.
-                let seq = stream.first.unwrap_or(0);
+                let seq = stream.first;
                 leaked.record(DeliveryKey {
                     recipient: recipient.clone(),
                     sender: (*sender).to_string(),
@@ -1961,7 +1963,7 @@ pub fn summarize(
                 continue;
             }
             if !expected_senders.contains(sender) {
-                let seq = stream.first.unwrap_or(0);
+                let seq = stream.first;
                 outcome.misrouted += stream.total;
                 misrouted.record(DeliveryKey {
                     recipient: recipient.clone(),
@@ -2348,7 +2350,7 @@ struct GapStreamEvidence {
 struct ArrivalEvidence {
     contract: Option<ArrivalContract>,
     total: u64,
-    first: Option<u64>,
+    first: u64,
     unique: u64,
     observed: ArrivalCoverage,
     violations: Option<Box<ArrivalViolations>>,
@@ -2386,7 +2388,8 @@ impl ArrivalEvidence {
 struct ArrivalCoverage {
     covered: StreamCoverage,
     zero_seen: bool,
-    previous: Option<u64>,
+    previous: u64,
+    has_previous: bool,
 }
 
 impl ArrivalCoverage {
@@ -2400,8 +2403,9 @@ impl ArrivalCoverage {
         if !fresh {
             return None;
         }
-        let out_of_order = self.previous.is_some_and(|previous| sequence <= previous);
-        self.previous = Some(sequence);
+        let out_of_order = self.has_previous && sequence <= self.previous;
+        self.previous = sequence;
+        self.has_previous = true;
         Some(out_of_order)
     }
 }
@@ -5053,6 +5057,41 @@ mod coverage_tests {
     }
 
     // Issue #775: the old per-position set retained a node per receipt.
+    #[test]
+    fn misrouted_stream_preserves_zero_and_full_width_first_sequence() {
+        let context = crate::unit_context_with_class(DeliveryClass::Reliable);
+        for first in [0, u64::MAX] {
+            let mut records = crate::complete_records(&context.plans);
+            let mut receipt = records.receipts[0].clone();
+            receipt.sender = "unknown-sender".into();
+            receipt.server_seq = first;
+            records.receipts.push(receipt.clone());
+            receipt.server_seq = 7;
+            records.receipts.push(receipt);
+            let summary = summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                1_000,
+                96,
+                DeliveryClass::Reliable,
+                &ChurnPlan::default(),
+                None,
+            );
+            let violation = summary
+                .reasons
+                .iter()
+                .find_map(|reason| match reason {
+                    InvalidReason::MisroutedDeliveries { count, first } => Some((*count, first)),
+                    _ => None,
+                })
+                .expect("unknown sender remains misroute evidence");
+            assert_eq!(violation.0, 1);
+            assert_eq!(violation.1.sender, "unknown-sender");
+            assert_eq!(violation.1.seq, first);
+        }
+    }
+
     #[test]
     fn compact_arrival_evidence_matches_independent_event_scan() {
         let values = [0, 1, 2, u64::MAX];

@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an experimental native reference-client profile for Godot negotiated channels (#1240).
 - Relay live room events and gameplay to read-only spectators (#1137).
 
 ### Changed
 
-- Bound active-session response storage and reduce memory use for session metrics and metrics response sizing (#636).
+- **Breaking:** Native reference-client settings literals must set `channel_profile`.
+- Bound active-session response storage and reduce memory use for session metrics, response sizing,
+  and game-name truncation (#636).
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
