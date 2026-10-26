@@ -9097,3 +9097,68 @@ Candidate sorting takes 3.35–5.93 seconds versus 1.37–2.29 seconds for basel
 The shared host and overlapping local checks limit timing attribution, but
 these samples do not support a speed improvement. This is a memory tradeoff
 for high-cardinality replay, not a live relay throughput improvement.
+
+### F194 — Queued native shutdown work precedes final completion
+
+Confirmed on `70f70d28`; tracked in #1237 under #1145/#826/#912. Both peers
+start graceful shutdown. The remote receives the local SHUTDOWN and sends
+its ACK. The local receives both that ACK and the remote SHUTDOWN before
+its next flush. Pending ACK work takes priority over SHUTDOWN COMPLETE,
+so the flush sends another ACK, rearms T2, and leaves the association live.
+The red paired regression fails its first-flush terminal assertion. Both
+inbound orders reproduce it. A separate paired control queues a T2 SHUTDOWN
+retry before accepting the ACK and checks the same final-packet priority.
+
+The writer now sends COMPLETE before either queued SHUTDOWN or ACK work.
+Both paired controls verify the exact final chunk, terminal states, cleared
+timers, one drain per endpoint, and no later transmit. Existing paired loss
+recovery and configured retry-history controls pass. This changes low-level
+graceful association behavior. The public WebRTC wrapper uses abort; no
+public gameplay incident or cause of #1120 is established.
+
+### Bounded active session snapshot storage (#636)
+
+The capped metrics view previously cloned every matching active record,
+selected the oldest prefix, and retained the original vector capacity. It
+now keeps at most the requested number of owned records plus a bounded
+heap of ordering keys. Each registry entry is examined under its existing
+DashMap guard; the implementation does not hold guards between entries or
+perform a second registry lookup. Full library snapshots remain complete.
+Filtering, timestamp/room-ID order, cursors, and pre-cap counts stay unchanged.
+The prefix comparison covers zero, one, 17, 512, and unlimited records with
+application filters and timestamp ties. It now checks retained capacity too.
+
+Two fresh-process pairs use 10,000 active rooms and the same 512-record JSON
+response. The baseline reproduces the old clone-all-then-truncate snapshot.
+Its record vector retains 16,384 slots (4,587,520 bytes); the candidate retains
+512 slots (143,360 bytes). Candidate selection also retains 512 heap keys;
+the record-vector figures exclude those keys, strings, and the registry.
+Process peaks are 27,592–27,608 KiB for baseline and 25,308–25,528 KiB for the
+candidate. JSON remains 264,332 bytes in every run. These are storage results,
+not relay throughput measurements. Heap replacement can still copy more than
+512 records over the scan; simultaneous retained snapshot storage is bounded.
+
+### Churn evidence sort scratch (#775)
+
+Churn evidence now sorts raw row positions in place. Raw position is the
+final tie key in both passes, preserving the previous stable sort's exact
+identity order. The retained two-word index stays the same size. This removes
+stable-sort scratch without changing raw records, workload, budgets, replay,
+or invalidation rules. A differential control covers empty and reversed
+inputs, repeated timestamps, duplicate epochs, invalid epochs, and the full
+epoch range. Existing delayed-cycle and missing/extra-event controls pass.
+
+Two alternating fresh-process debug pairs sort one million fixture rows.
+Baseline process peaks are 134,140–134,376 KiB; candidate peaks are
+126,084–126,444 KiB. Retained indexes are 16,000,000 bytes in both paths.
+Baseline sorting takes 7.53–14.39 seconds; candidate sorting takes
+11.36–28.35 seconds. Local lint work overlapped the first pair. The second
+pair still shows a debug sorting cost. This is a scratch-memory tradeoff,
+not a speed improvement or a repair of #1009. The full planned long workload
+and largest capacity sweep remain unqualified under #775.
+
+External Rust, .NET, and Godot clients need no changes for these repairs.
+Their current manifests or documentation confirm that they use their own
+WebSocket or peer-transport implementations, not these private vendored
+SCTP sources. Signal Fish protocol messages and metrics response content
+remain unchanged; capacity ordering storage is internal tooling.

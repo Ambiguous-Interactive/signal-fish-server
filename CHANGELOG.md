@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Complete native graceful shutdown before queued shutdown retries (#1237).
 - Preserve native graceful shutdown retry deadlines when a peer repeats its shutdown request (#1235).
 - Preserve native channel reset retry limits and deadlines when a peer reports a busy request (#1233).
 - Release native sent gameplay storage after selective acknowledgment or abandonment (#1230).

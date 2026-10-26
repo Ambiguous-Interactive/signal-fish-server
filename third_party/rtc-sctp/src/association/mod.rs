@@ -3190,7 +3190,32 @@ impl Association {
     ) -> (Vec<Bytes>, bool) {
         let mut ok = true;
 
-        if self.will_send_shutdown {
+        if self.will_send_shutdown_complete {
+            self.will_send_shutdown_complete = false;
+
+            let shutdown_complete = ChunkShutdownComplete::default();
+
+            if let Ok(raw) = self
+                .create_packet(vec![Box::new(shutdown_complete)])
+                .marshal()
+            {
+                raw_packets.push(raw);
+                /*
+                 * The final packet is now owned by the caller. Only now may
+                 * the endpoint remove the association's packet routing entry.
+                 */
+                if let Err(err) = self.close(AssociationError::AssociationClosed) {
+                    error!("[{}] failed to close association: {err}", self.side);
+                }
+                self.endpoint_events.push_back(EndpointEventInner::Drained);
+                ok = false;
+            } else {
+                warn!(
+                    "[{}] failed to serialize a ShutdownComplete packet",
+                    self.side
+                );
+            }
+        } else if self.will_send_shutdown {
             self.will_send_shutdown = false;
 
             let shutdown = ChunkShutdown {
@@ -3215,31 +3240,6 @@ impl Association {
                 raw_packets.push(raw);
             } else {
                 warn!("[{}] failed to serialize a ShutdownAck packet", self.side);
-            }
-        } else if self.will_send_shutdown_complete {
-            self.will_send_shutdown_complete = false;
-
-            let shutdown_complete = ChunkShutdownComplete::default();
-
-            if let Ok(raw) = self
-                .create_packet(vec![Box::new(shutdown_complete)])
-                .marshal()
-            {
-                raw_packets.push(raw);
-                /*
-                 * The final packet is now owned by the caller. Only now may
-                 * the endpoint remove the association's packet routing entry.
-                 */
-                if let Err(err) = self.close(AssociationError::AssociationClosed) {
-                    error!("[{}] failed to close association: {err}", self.side);
-                }
-                self.endpoint_events.push_back(EndpointEventInner::Drained);
-                ok = false;
-            } else {
-                warn!(
-                    "[{}] failed to serialize a ShutdownComplete packet",
-                    self.side
-                );
             }
         }
 
