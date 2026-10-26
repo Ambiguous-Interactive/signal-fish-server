@@ -9,14 +9,14 @@ use clap::{ArgGroup, Parser, ValueEnum};
 use signal_fish_server::protocol::{GameDataEncoding, Topology, Transport};
 use std::path::PathBuf;
 
-use crate::engine::{EngineSettings, IpFamily};
+use crate::engine::{ChannelProfile, EngineSettings, IpFamily};
 
 /// Native Rust reference client for the Signal Fish protocol v3.
 ///
 /// Connects to a Signal Fish server over WebSocket, walks the full v3 flow
 /// (Authenticate -> room -> ready barrier -> GameStarting -> SessionPlan), and
-/// establishes real WebRTC peer connections (one reliable + one unreliable
-/// data channel per peer) per the server-issued plan. stdout is a machine
+/// establishes real WebRTC peer connections with the selected channel profile
+/// per the server-issued plan. stdout is a machine
 /// interface: one JSON event object per line. All logging goes to stderr.
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -140,6 +140,10 @@ pub struct Cli {
     /// discovery traffic out of packet-loss experiments.
     #[arg(long)]
     pub disable_mdns: bool,
+
+    /// Peer channel contract. The Godot profile uses the intended 1 ms lifetime.
+    #[arg(long, value_enum, default_value = "reference")]
+    pub channel_profile: ChannelProfile,
 
     /// Restrict the ICE sockets this client binds to one address family, and
     /// therefore the family of every host candidate it advertises. `any` (the
@@ -379,6 +383,7 @@ impl Cli {
     /// The WebRTC engine configuration this invocation asks for.
     pub fn engine_settings(&self) -> EngineSettings {
         EngineSettings {
+            channel_profile: self.channel_profile,
             crippled: self.cripple_ice,
             disable_mdns: self.disable_mdns,
             relay_only: self.ice_transport_policy.is_relay_only(),
@@ -788,6 +793,41 @@ mod tests {
     }
 
     #[test]
+    fn channel_profile_selection_reaches_engine_settings() {
+        let default = Cli::parse_from([
+            "reference",
+            "--server-url",
+            "ws://localhost/v3/ws",
+            "--create-room",
+        ]);
+        assert_eq!(
+            default.engine_settings().channel_profile,
+            ChannelProfile::Reference
+        );
+        let godot = Cli::parse_from([
+            "reference",
+            "--server-url",
+            "ws://localhost/v3/ws",
+            "--create-room",
+            "--channel-profile",
+            "godot",
+        ]);
+        assert_eq!(
+            godot.engine_settings().channel_profile,
+            ChannelProfile::Godot
+        );
+        assert!(Cli::try_parse_from([
+            "reference",
+            "--server-url",
+            "ws://localhost/v3/ws",
+            "--create-room",
+            "--channel-profile",
+            "unknown",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn ip_family_selection_reaches_the_engine_settings() {
         let default = Cli::parse_from([
             "signal-fish-reference-native",
@@ -821,6 +861,7 @@ mod tests {
                 disable_mdns: true,
                 relay_only: true,
                 ip_family: IpFamily::Ipv6,
+                channel_profile: ChannelProfile::Reference,
             }
         );
 

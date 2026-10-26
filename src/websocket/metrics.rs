@@ -296,13 +296,20 @@ fn bounded_game_name_map(
     if map.len() <= METRICS_GAME_MAP_ENTRY_CAP {
         return (map, false);
     }
-    let mut names: Vec<String> = map.keys().cloned().collect();
-    names.sort_unstable();
-    let bounded = names
-        .into_iter()
-        .take(METRICS_GAME_MAP_ENTRY_CAP)
-        .filter_map(|name| map.remove(&name).map(|value| (name, value)))
-        .collect();
+    let mut prefix = std::collections::BinaryHeap::with_capacity(METRICS_GAME_MAP_ENTRY_CAP);
+    for name in map.keys() {
+        if prefix.len() < METRICS_GAME_MAP_ENTRY_CAP {
+            prefix.push(name.as_str());
+        } else if let Some(mut last) = prefix.peek_mut() {
+            if name.as_str() < *last {
+                *last = name;
+            }
+        }
+    }
+    let cutoff = prefix.peek().copied().unwrap_or_default().to_string();
+    drop(prefix);
+    map.retain(|name, _| name <= &cutoff);
+    let bounded = map;
     (bounded, true)
 }
 
@@ -1153,6 +1160,67 @@ mod tests {
             !bounded.contains_key(&format!("game-{:04}", METRICS_GAME_MAP_ENTRY_CAP)),
             "entries beyond the cap must be dropped"
         );
+    }
+
+    fn reference_game_name_prefix(
+        mut map: serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut names: Vec<String> = map.keys().cloned().collect();
+        names.sort_unstable();
+        names
+            .into_iter()
+            .take(METRICS_GAME_MAP_ENTRY_CAP)
+            .filter_map(|name| map.remove(&name).map(|value| (name, value)))
+            .collect()
+    }
+
+    #[test]
+    fn game_name_prefix_matches_sorted_reference_for_unicode_and_large_values() {
+        for count in [0, 1, 255, 256, 257, 1024] {
+            let map: serde_json::Map<String, serde_json::Value> = (0..count)
+                .rev()
+                .map(|index| {
+                    (
+                        format!("{}-{index:05}\n", ["鱼", "é", "", "a", "\\"][index % 5]),
+                        serde_json::json!({"index": index, "payload": "x".repeat(index % 32)}),
+                    )
+                })
+                .collect();
+            let expected = reference_game_name_prefix(map.clone());
+            let (actual, truncated) = bounded_game_name_map(map);
+            assert_eq!(actual, expected, "count={count}");
+            assert_eq!(truncated, count > METRICS_GAME_MAP_ENTRY_CAP);
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated game-name truncation memory profile; run in a fresh process"]
+    fn game_name_truncation_memory_profile() {
+        let map: serde_json::Map<String, serde_json::Value> = (0..50_000)
+            .rev()
+            .map(|index| {
+                (
+                    format!("{index:08}-{}", "鱼".repeat(340)),
+                    serde_json::json!(index),
+                )
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let bounded = if std::env::var_os("METRICS_NAME_PREFIX_BASELINE").is_some() {
+            reference_game_name_prefix(map)
+        } else {
+            bounded_game_name_map(map).0
+        };
+        assert_eq!(bounded.len(), METRICS_GAME_MAP_ENTRY_CAP);
+        for (index, (name, value)) in bounded.iter().enumerate() {
+            assert_eq!(name, &format!("{index:08}-{}", "鱼".repeat(340)));
+            assert_eq!(value, &serde_json::json!(index));
+        }
+        println!(
+            "GAME_NAME_PREFIX_PROFILE elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+        std::hint::black_box(bounded);
     }
 
     /// `bound_response_game_map` must replace the named field in place, add

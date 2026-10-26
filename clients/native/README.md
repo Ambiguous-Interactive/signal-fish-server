@@ -9,7 +9,7 @@ channels). It exists for **conformance and reference** — executable documentat
 Design rationale (standalone crate, direct webrtc-rs, path-dependency type reuse, supply-chain scope) lives in
 [ADR-0004](../../docs/adr/0004-native-reference-client.md).
 
-The reference engine accepts only `reliable` and `unreliable` data channels.
+The default reference profile accepts only `reliable` and `unreliable` data channels.
 `reliable` must be ordered with no retry or packet lifetime limit.
 `unreliable` must be unordered with `maxRetransmits: 0` and no packet lifetime limit.
 The engine closes channels with other delivery settings before admission.
@@ -21,7 +21,7 @@ relay fallback. A missing channel, failed send, or stalled exchange send uses
 the same cleanup and keeps the signaling session live. Each local exchange
 send has a one-second limit and respects the shorter active operation deadline.
 A failed or expired send keeps its exchange debt; a failed signaling write
-still ends the session. The engine observes both selected channels as open before
+still ends the session. The engine observes every required channel as open before
 reporting a connected pair. Delayed open callbacks do not revive channels
 that already closed. A channel can still close after its state check.
 **Migration:** Native library callers must now await `Engine::note_channel_open`.
@@ -38,6 +38,44 @@ It closes other remote labels without retaining them or starting callbacks.
 **Migration:** Applications that need extra channels must own their channel
 handling. This restriction belongs to these reference clients; the server
 continues to relay opaque signaling payloads.
+
+## Godot channel profile (experimental)
+
+Select `--channel-profile godot` or set `EngineSettings.channel_profile` to
+`ChannelProfile::Godot` before creating the engine. Both peers must select the
+same channel contract. Existing `EngineSettings` struct literals must add
+`channel_profile: ChannelProfile::Reference` to keep their prior behavior.
+The profile matches the reserved channels in
+[Godot 4.3 `WebRTCMultiplayerPeer.add_peer`](https://github.com/godotengine/godot/blob/4.3/modules/webrtc/webrtc_multiplayer_peer.cpp).
+It implements the intended `unreliable_lifetime=1` (milliseconds).
+Godot 4.3, 4.4.1, and 4.7.2 ignore their lifetime option because of an upstream
+spelling error. Their actual channels have no finite lifetime. This profile
+does not copy that error. Qualification against existing and repaired engines
+remains open in [Godot #433](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/433).
+This profile is a channel-layout implementation, not a supported Godot pairing.
+
+| Label | Negotiated SCTP ID | Ordered | Packet lifetime | Retry limit |
+| --- | --- | --- | --- | --- |
+| `reliable` | 1 | yes | none | none |
+| `ordered` | 2 | yes | 1 ms | none |
+| `unreliable` | 3 | no | 1 ms | none |
+
+Both offerer and answerer create and poll all three channels before SDP negotiation.
+All three must open before the engine reports a connected pair. Closure of any
+required channel stops new send selection and input admission until a fresh pair.
+The CLI's `--exchange` still sends its two reference probes on `reliable` and
+`unreliable`; it does not implement Godot multiplayer packet framing.
+The default `reference` profile keeps its existing in-band channel contract.
+
+Local native-stack controls verify channel properties, SCTP IDs, exact UTF-8
+payload bytes in both directions, every required channel's closure in both roles,
+and fresh-link recovery. These controls do not establish compatibility with a
+Godot application. Native Godot, Godot Web, full service sessions, queued-send
+retirement with Godot, and remote-network qualification remain open in
+[server #1240](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1240)
+and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
+
+## Shared transport behavior
 
 The native build uses qualified local RTC and SCTP source patches.
 A closed channel retains its stream ID until both reset directions finish.

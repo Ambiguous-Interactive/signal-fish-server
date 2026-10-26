@@ -5936,3 +5936,63 @@ for churn. Run each built binary in a fresh process. Baseline source is
 The registration, launcher, every raw attempt, and focused validation logs remain
 in ignored `progress/session-544-generator/`. Fixed executables remain in
 `/tmp/session544-capacity-*`.
+
+## Session 548: metrics names and arrival coordinates (#636, #775)
+
+Baseline: `14b56e22`. Metrics game-name truncation copied and sorted every name
+before keeping the first 256. The candidate keeps at most 256 borrowed names
+in a heap, copies one cutoff, and removes later names in place. Selection does
+not depend on the JSON map's iteration order. An independent full-sort control
+checks exact keys, values, Unicode, empty input, and counts around the cap.
+
+A matched ABBA cohort uses one debug binary in four fresh processes. Each
+process creates the same 50,000 names of 1,029 bytes and checks every retained
+key and value. The baseline branch uses the original full-copy algorithm.
+Peak RSS in KiB is 117,792 / 66,548 / 66,500 / 117,836, in run order
+baseline / candidate / candidate / baseline. The ignored
+`websocket::metrics::tests::game_name_truncation_memory_profile` probe reproduces
+the workload; set `METRICS_NAME_PREFIX_BASELINE=1` for the baseline branch.
+Binary SHA-256: `78f031b43d9637b66c1b5275fcad6ae261413b0f304c632637d3444a1e51715e`.
+
+Arrival evidence now uses its existing receipt count to distinguish an absent
+first sequence from sequence zero. Previous-arrival state uses an explicit
+presence bit beside the existing zero-seen bit. Full-width sequence values
+remain valid evidence. The per-stream layout falls from 152 to 136 bytes.
+Existing exhaustive differential sequence controls and exact artifact replay
+pass. A new control checks zero and full-width first misroute keys.
+
+The existing `generator_arrival_state_memory_profile` probe retains 239,760
+streams at 999 rooms, with 100 distinct sequences each. A second cell adds
+all three violation classes, including sequence zero. Each cell uses ABBA
+fresh-process order. No offered workload or raw evidence limit changes.
+
+| Stream cell | Baseline peak RSS KiB | Candidate peak RSS KiB |
+| --- | --- | --- |
+| Valid | 79,800 / 79,920 | 72,408 / 72,360 |
+| Three violation classes | 94,896 / 94,904 | 87,720 / 87,856 |
+
+Arrival binary SHA-256 hashes:
+
+- Baseline: `fedc8e0516bf0b3e4eb40bf416868adf5325da8dd6e83c022c93c2d2e27b3ff5`.
+- Candidate: `c121fbfe15bac8d4e3452ad8bce96f123866ad1bba3264812a4b054241df7dbe`.
+
+All attempts remain in ignored `progress/session-548/`. An initial launcher
+could not find `/usr/bin/time`. Its replacement first read all binary bytes
+before spawning probes; inherited parent peak RSS made every child peak
+140,872 KiB. Those peak values are invalid for comparison. The final cohort
+uses a fresh low-memory launcher and `wait4` without reading binaries first.
+It retains both peak and in-process RSS observations. Shared-host builds and
+checks overlap some attempts. These are memory observations, not throughput
+claims, whole-generator bounds, live capacity qualification, or repairs for
+historical generator stalls. The planned long live workload remains open.
+
+Final review also found #1243 in the unchanged unexpected-sender branch.
+The per-recipient misroute count included every receipt, but the reason counted
+each stream once. The first-key regression initially preserved that old count.
+The corrected regression fails red with two receipts and reason count one.
+The repair uses the existing weighted sequence accumulator to count all raw
+receipts while retaining the first key. Controls cover unknown, self, and
+cross-room senders; repeated arrivals; zero and full-width first sequences;
+and all three delivery classes. Each case writes and reads raw delivery
+artifacts and compares the complete recomputed summary and records.
+The valid/invalid verdict and server routing do not change.
