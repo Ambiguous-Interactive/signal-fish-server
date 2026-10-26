@@ -1745,7 +1745,6 @@ pub fn summarize(
                     ..ArrivalEvidence::default()
                 }
             });
-        stream.total += 1;
         // Opaque leaks still owe overlap, duplicate, and order evidence.
         stream.observe(receipt.server_seq);
         let Some(contract) = stream.contract else {
@@ -1941,8 +1940,8 @@ pub fn summarize(
         let mut recipient_receipts = 0_u64;
         for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
             // Count malformed, duplicate, opaque, and misrouted arrivals too.
-            recipient_receipts += stream.total;
-            if stream.total == 0 {
+            recipient_receipts += stream.total();
+            if stream.total() == 0 {
                 continue;
             }
             if opaque_senders.contains(sender) {
@@ -1967,7 +1966,7 @@ pub fn summarize(
                 continue;
             }
             if !expected_senders.contains(sender) {
-                outcome.misrouted += stream.total;
+                outcome.misrouted += stream.total();
                 stream
                     .violations
                     .as_deref()
@@ -2352,7 +2351,6 @@ struct GapStreamEvidence {
 #[derive(Default)]
 struct ArrivalEvidence<'a> {
     contract: Option<ArrivalContract<'a>>,
-    total: u64,
     unique: u64,
     observed: ArrivalCoverage,
     violations: Option<Box<ArrivalViolations>>,
@@ -2366,6 +2364,14 @@ struct ArrivalViolations {
 }
 
 impl ArrivalEvidence<'_> {
+    fn total(&self) -> u64 {
+        self.unique
+            + self
+                .violations
+                .as_deref()
+                .map_or(0, |violations| violations.duplicates.count)
+    }
+
     fn violations_mut(&mut self) -> &mut ArrivalViolations {
         self.violations.get_or_insert_with(Box::default)
     }
@@ -5377,6 +5383,11 @@ mod coverage_tests {
                 .map(|pair| pair[1])
                 .collect::<Vec<_>>();
             assert_eq!(evidence.unique, count_u64(unique.len()), "{sequences:?}");
+            assert_eq!(
+                evidence.total(),
+                count_u64(sequences.len()),
+                "{sequences:?}"
+            );
             let empty = ArrivalViolations::default();
             let violations = evidence.violations.as_deref().unwrap_or(&empty);
             assert_eq!(
