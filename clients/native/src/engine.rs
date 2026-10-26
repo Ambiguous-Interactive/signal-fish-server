@@ -177,6 +177,7 @@ impl ChannelReceipts {
 }
 
 struct ChannelReceiveAdmission {
+    preserve_binary_messages: bool,
     #[cfg(test)]
     message_observed: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     receipts: [ChannelReceipts; 3],
@@ -267,15 +268,19 @@ impl ChannelReceiveAdmission {
         }
     }
 
+    fn reserve_message(&self, bytes: usize) -> Option<MessageQueuePermit> {
+        if bytes > MAX_CHANNEL_MESSAGE_BYTES {
+            return None;
+        }
+        self.budget.reserve(bytes)
+    }
+
     fn decode_and_reserve(&self, data: &[u8]) -> Option<(String, MessageQueuePermit)> {
         if data.len() > MAX_CHANNEL_MESSAGE_BYTES {
             return None;
         }
         let text = String::from_utf8_lossy(data);
-        if text.len() > MAX_CHANNEL_MESSAGE_BYTES {
-            return None;
-        }
-        let permit = self.budget.reserve(text.len())?;
+        let permit = self.reserve_message(text.len())?;
         Some((text.into_owned(), permit))
     }
 }
@@ -320,7 +325,8 @@ pub enum EngineEvent {
         generation: u64,
         label: String,
     },
-    /// A text message arrived on an open data channel. Keep `queue_permit`
+    /// A text frame, or the Reference profile's text projection of a binary
+    /// frame, arrived on an open channel. Keep `queue_permit`
     /// until its text is consumed or discarded, including asynchronous output.
     /// `received_at` records the monotonic channel-poll completion time.
     ChannelMessage {
@@ -328,6 +334,16 @@ pub enum EngineEvent {
         generation: u64,
         label: String,
         text: String,
+        queue_permit: MessageQueuePermit,
+        received_at: tokio::time::Instant,
+    },
+    /// Exact binary packet in the Godot profile. Retain `queue_permit` until
+    /// the packet is handled or discarded, including asynchronous output.
+    ChannelBinaryMessage {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+        data: Vec<u8>,
         queue_permit: MessageQueuePermit,
         received_at: tokio::time::Instant,
     },
@@ -361,6 +377,9 @@ impl EngineEvent {
             | Self::ChannelMessage {
                 peer, generation, ..
             }
+            | Self::ChannelBinaryMessage {
+                peer, generation, ..
+            }
             | Self::ChannelReceiveRejected {
                 peer, generation, ..
             } => (*peer, *generation),
@@ -375,7 +394,7 @@ struct PeerLink {
     /// Channels by label, both locally created (initiator) and remotely
     /// announced (responder).
     channels: HashMap<String, Arc<dyn DataChannel>>,
-    /// Shared with the callback so unread announcements retain at most two channels.
+    /// Shared with the callback so unread announcements retain only required channels.
     channel_admission: Arc<Mutex<RequiredChannelAdmission>>,
     receive_admission: Arc<ChannelReceiveAdmission>,
     /// Labels observed open so far; the pair is connected when both labels are in.
@@ -692,6 +711,7 @@ impl Engine {
         }
         let channel_admission = Arc::new(Mutex::new(RequiredChannelAdmission::default()));
         let receive_admission = Arc::new(ChannelReceiveAdmission {
+            preserve_binary_messages: self.settings.channel_profile == ChannelProfile::Godot,
             #[cfg(test)]
             message_observed: std::sync::Mutex::new(None),
             receipts: Default::default(),
@@ -1704,8 +1724,17 @@ fn spawn_channel_event_loop(
                         }
                         continue;
                     }
-                    let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
-                    else {
+                    let binary = admission.preserve_binary_messages && !message.is_string;
+                    let decoded = if binary {
+                        admission
+                            .reserve_message(message.data.len())
+                            .map(|permit| (None, permit))
+                    } else {
+                        admission
+                            .decode_and_reserve(&message.data)
+                            .map(|(text, permit)| (Some(text), permit))
+                    };
+                    let Some((text, queue_permit)) = decoded else {
                         if let Some(receipts) = receipts {
                             ChannelReceipts::count(&receipts.rejected);
                         }
@@ -1720,17 +1749,25 @@ fn spawn_channel_event_loop(
                         let _ = channel.close().await;
                         return;
                     };
-                    if events
-                        .send(EngineEvent::ChannelMessage {
+                    let event = match text {
+                        Some(text) => EngineEvent::ChannelMessage {
                             peer,
                             generation,
                             label: label.clone(),
                             text,
                             queue_permit,
                             received_at,
-                        })
-                        .is_err()
-                    {
+                        },
+                        None => EngineEvent::ChannelBinaryMessage {
+                            peer,
+                            generation,
+                            label: label.clone(),
+                            data: message.data.to_vec(),
+                            queue_permit,
+                            received_at,
+                        },
+                    };
+                    if events.send(event).is_err() {
                         if let Some(receipts) = receipts {
                             ChannelReceipts::count(&receipts.discarded);
                         }

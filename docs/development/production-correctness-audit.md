@@ -9244,3 +9244,40 @@ and zero/full-width first keys, roster-first category ordering after churn,
 opaque leaks, misroutes, and exact raw/JSONL replay verdicts. External Rust,
 .NET, and Godot clients need no change: this is internal capacity-tool storage
 and does not change the protocol or server behavior.
+
+### Godot-profile binary packet ownership (#1240)
+
+On `c5272199`, the native Engine converts each channel message with lossy
+UTF-8 decoding. A real reliable packet `[0, 255, 128, 1, 192, 175, 0, 254]`
+therefore produces 18 text bytes instead of the eight offered bytes. The
+red regression compares the received bytes and fails. The channel-layout
+profile alone cannot preserve arbitrary Godot gameplay packets.
+
+The opt-in Godot profile now publishes binary frames through
+`EngineEvent::ChannelBinaryMessage`. The event owns exact bytes, the original
+arrival time, and the shared receive permit. The CLI emits standard-base64
+`data_base64` in a `channel_binary_message` event. Binary frames do not count
+as reference text exchange probes. Text frames and the default reference
+profile keep their prior event contract. Exhaustive Rust event matches must
+handle the added variant.
+
+Native-stack controls cover both send directions, empty packets, every byte
+value, malformed UTF-8, a full 64 KiB packet, exact permit charge and release,
+and text traffic after binary traffic. Mixed binary controls cover all three
+negotiated channels, both close roles, required-channel loss, held callback
+retirement, and fresh-link recovery. Lifetime-limited channels may lose packets;
+every receipt must match an exact offered packet and preserve its ordering mode.
+One local control history observes zero receipts from an eight-packet unreliable
+burst. Its actual loss cause is unproved. The previous per-burst positive
+requirement did not allow the mode's full loss contract. The control now retains
+all 576 offered packets and all burst counts, including zero. It requires
+positive delivery in each direction and mode, separately before and after
+replacement, across 12 cells of 48 offers. Every reliable burst must still
+deliver all eight packets. No history is retried or omitted.
+The regression does not prove Godot multiplayer framing, native or Web Godot
+application compatibility, full service sessions, or remote-network behavior.
+Those remain open in #1240 and Godot #355/#433.
+
+Rust and .NET external SDKs need no changes: their current READMEs assign peer
+networking to the application and do not use this reference Engine. Existing
+Godot tracking remains necessary. The server protocol is unchanged.

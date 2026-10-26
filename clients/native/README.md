@@ -67,8 +67,17 @@ The CLI's `--exchange` still sends its two reference probes on `reliable` and
 `unreliable`; it does not implement Godot multiplayer packet framing.
 The default `reference` profile keeps its existing in-band channel contract.
 
-Local native-stack controls verify channel properties, SCTP IDs, exact UTF-8
-payload bytes in both directions, every required channel's closure in both roles,
+Binary packets in this profile use `EngineEvent::ChannelBinaryMessage` with
+exact `data` bytes. The CLI emits `channel_binary_message` with standard-base64
+`data_base64`. Text messages still use `ChannelMessage`. Binary packets do not
+count as the CLI's text exchange probes. All messages share the same receive
+count and byte limits. Keep each event's `queue_permit` until processing ends.
+**Migration:** Native library consumers must handle `ChannelBinaryMessage` in
+both the engine and output event enums.
+The reference profile keeps its existing text projection for received packets.
+
+Local native-stack controls verify channel properties, SCTP IDs, exact binary
+payloads in both directions, every required channel's closure in both roles,
 and fresh-link recovery. These controls do not establish compatibility with a
 Godot application. Native Godot, Godot Web, full service sessions, queued-send
 retirement with Godot, and remote-network qualification remain open in
@@ -90,8 +99,8 @@ The patch scope and removal criteria are in
 [SCTP patch notes](../../third_party/rtc-sctp/PATCH.md).
 
 The client accepts at most 64 KiB per received data-channel message, measured
-as raw bytes and decoded UTF-8 text. Across all peers and link generations,
-pending messages retain at most 256 entries and 1 MiB of decoded text.
+as raw bytes and, for text events, decoded UTF-8 text. Across all peers and link
+generations, pending messages retain at most 256 entries and 1 MiB of payload.
 Exceeding either limit reports an error and closes the failed P2P link through
 relay fallback. The limits bound the application backlog, not WebRTC stack memory.
 The 64 KiB limit is a message size limit. It does not guarantee delivery on
@@ -100,8 +109,8 @@ messages can overflow the remote UDP receive buffer, including on localhost.
 Use `reliable` for data that must arrive. Use small, replaceable updates on
 `unreliable`. An open channel and zero `bufferedAmount` do not prove receipt.
 **Migration:** Split larger payloads into smaller messages and keep consuming
-output. Native library consumers must retain `EngineEvent::ChannelMessage`'s
-`queue_permit` until the message is handled or discarded, including output waits.
+output. Native library consumers must retain each message event's `queue_permit`
+until the message is handled or discarded, including output waits.
 Handle the new `EngineEvent::ChannelReceiveRejected` by retiring the failed link.
 
 The signaling WebSocket disables Nagle on its TCP socket for small relay frames.

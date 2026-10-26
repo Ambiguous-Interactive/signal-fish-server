@@ -1985,3 +1985,46 @@ async fn live_admitted_exchange_receipts_survive_negotiation_timeout() {
     sender.remove_peer(me).await.unwrap();
     state.remove_pair_obligation(peer).await;
 }
+
+#[tokio::test]
+async fn binary_packets_preserve_output_without_crediting_text_exchange_probes() {
+    let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        "ws://unused.invalid",
+        "--create-room",
+        "--exchange",
+        "--channel-profile",
+        "godot",
+    ]);
+    let me = PlayerId::from_u128(1);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+    state.engine.pair_with(peer, false, &[]).await.unwrap();
+    state.expected_peers.insert(peer);
+    state.exchange_ledger.note_connected(peer);
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL, "ordered"] {
+        let data = json!({"from": peer, "channel": label, "seq": 0})
+            .to_string()
+            .into_bytes();
+        let event = EngineEvent::ChannelBinaryMessage {
+            peer,
+            generation: 1,
+            label: label.into(),
+            data,
+            queue_permit: crate::engine::MessageQueuePermit::for_test(),
+            received_at: Instant::now(),
+        };
+        state.handle_engine_event(event).await.unwrap();
+        assert!(
+            !state
+                .exchange_ledger
+                .received
+                .get(&peer)
+                .is_some_and(|labels| labels.contains(label)),
+            "raw binary bytes must not count as a text probe"
+        );
+    }
+    state.engine.remove_peer(peer).await.unwrap();
+}

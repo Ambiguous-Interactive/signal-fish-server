@@ -125,9 +125,15 @@ pub enum Event {
         label: String,
         text: String,
     },
-    /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
+    /// Exact Godot-profile binary packet, encoded with standard base64.
+    ChannelBinaryMessage {
+        peer: PlayerId,
+        label: String,
+        data_base64: String,
+    },
+    /// All channels required by the selected profile are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
-    /// Both channels reopened for a retained logical pair, after PairRetry or
+    /// Required channels reopened for a retained logical pair, after PairRetry or
     /// an authoritative plan replacement, including after the P2P deadline.
     P2pPairReconnected { peer: PlayerId },
     /// Actual candidate types and addresses of the nominated ICE transport pair.
@@ -241,6 +247,31 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn binary_channel_event_preserves_the_base64_packet_contract() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let peer = PlayerId::from_u128(0x1240);
+        for bytes in [vec![], (0..=255).collect(), vec![0xff; 65_536]] {
+            let value = serde_json::to_value(Event::ChannelBinaryMessage {
+                peer,
+                label: "ordered".into(),
+                data_base64: STANDARD.encode(&bytes),
+            })
+            .unwrap();
+            assert_eq!(value["event"], "channel_binary_message");
+            assert_eq!(value["peer"], peer.to_string());
+            assert_eq!(value["label"], "ordered");
+            assert_eq!(
+                STANDARD
+                    .decode(value["data_base64"].as_str().unwrap())
+                    .unwrap(),
+                bytes
+            );
+            assert!(value.get("text").is_none());
+        }
+    }
 
     #[test]
     fn event_tags_are_snake_case() {

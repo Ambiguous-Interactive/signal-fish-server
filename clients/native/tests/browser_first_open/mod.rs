@@ -209,6 +209,7 @@ async fn first_open_exchange(burst: bool) {
                                 assert!(native_receipts.insert((label, binary)));
                                 None
                             }
+                            EngineEvent::ChannelBinaryMessage { .. } => panic!("the reference profile keeps its text event contract"),
                             EngineEvent::ChannelClosed { .. } | EngineEvent::ChannelReceiveRejected { .. } => panic!("first-open gameplay must keep the pair live"),
                             EngineEvent::PcState { state, .. } => {
                                 assert!(!matches!(state, webrtc::peer_connection::RTCPeerConnectionState::Failed | webrtc::peer_connection::RTCPeerConnectionState::Closed));

@@ -2951,8 +2951,10 @@ impl Orchestrator<'_> {
 
     async fn handle_engine_event(&mut self, event: EngineEvent) -> Result<(), FatalError> {
         let (event_peer, generation) = event.peer_generation();
-        let pending_receipt = matches!(event, EngineEvent::ChannelMessage { .. })
-            && self.engine.owns_pending_receipt(event_peer, generation);
+        let pending_receipt = matches!(
+            event,
+            EngineEvent::ChannelMessage { .. } | EngineEvent::ChannelBinaryMessage { .. }
+        ) && self.engine.owns_pending_receipt(event_peer, generation);
         if !pending_receipt && !self.engine.is_current_event(&event) {
             tracing::debug!(%event_peer, generation, "discarding stale peer-link callback");
             return Ok(());
@@ -3032,6 +3034,20 @@ impl Orchestrator<'_> {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
                 emit(&Event::ChannelMessage { peer, label, text });
+                drop(queue_permit);
+            }
+            EngineEvent::ChannelBinaryMessage {
+                peer,
+                label,
+                data,
+                queue_permit,
+                ..
+            } => {
+                emit(&Event::ChannelBinaryMessage {
+                    peer,
+                    label,
+                    data_base64: BASE64_STANDARD.encode(data),
+                });
                 drop(queue_permit);
             }
             EngineEvent::ChannelReceiveRejected { peer, label, .. } => {
