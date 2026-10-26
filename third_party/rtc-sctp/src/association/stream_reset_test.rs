@@ -5180,3 +5180,82 @@ fn shutdown_receive_credit_keeps_large_accepted_tail_until_read() -> Result<()> 
     assert!(receiver.stream(1)?.read_sctp()?.is_none());
     Ok(())
 }
+
+#[test]
+fn simultaneous_shutdown_completes_before_queued_ack_replay() -> Result<()> {
+    for replay_after_ack in [false, true] {
+        let (mut local, mut remote) = reset_pair();
+        let now = Instant::now();
+        local.shutdown()?;
+        remote.shutdown()?;
+        let local_shutdown = local.gather_outbound(now).0;
+        let remote_shutdown = remote.gather_outbound(now).0;
+        for raw in &local_shutdown {
+            remote.handle_inbound(Packet::unmarshal(raw)?, now)?;
+        }
+        let remote_ack = remote.gather_outbound(now).0;
+        assert_eq!(remote.state(), AssociationState::ShutdownAckSent);
+        if !replay_after_ack {
+            for raw in &remote_shutdown {
+                local.handle_inbound(Packet::unmarshal(raw)?, now)?;
+            }
+        }
+        for raw in remote_ack {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        if replay_after_ack {
+            for raw in &remote_shutdown {
+                local.handle_inbound(Packet::unmarshal(raw)?, now)?;
+            }
+        }
+        let (complete, live) = local.gather_outbound(now);
+        assert!(
+            !live,
+            "the first flush must complete the accepted shutdown ACK"
+        );
+        assert_eq!(complete.len(), 1);
+        let packet = Packet::unmarshal(&complete[0])?;
+        assert_eq!(packet.chunks.len(), 1);
+        assert!(packet.chunks[0].as_any().is::<ChunkShutdownComplete>());
+        remote.handle_inbound(packet, now)?;
+        for endpoint in [&mut local, &mut remote] {
+            assert_eq!(endpoint.state(), AssociationState::Closed);
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(endpoint.poll_endpoint_event().is_some());
+            assert!(endpoint.poll_endpoint_event().is_none());
+            assert!(endpoint.poll_transmit(now).is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shutdown_ack_completes_before_queued_timeout_retransmission() -> Result<()> {
+    let (mut local, mut remote) = reset_pair();
+    let now = Instant::now();
+    local.shutdown()?;
+    for raw in local.gather_outbound(now).0 {
+        remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    let ack = remote.gather_outbound(now).0;
+    let retry = local.poll_timeout().expect("shutdown retry armed");
+    local.handle_timeout(retry);
+    assert!(local.will_send_shutdown);
+    for raw in ack {
+        local.handle_inbound(Packet::unmarshal(&raw)?, retry)?;
+    }
+    let (complete, live) = local.gather_outbound(retry);
+    assert!(!live);
+    assert_eq!(complete.len(), 1);
+    let packet = Packet::unmarshal(&complete[0])?;
+    assert!(packet.chunks[0].as_any().is::<ChunkShutdownComplete>());
+    remote.handle_inbound(packet, retry)?;
+    for endpoint in [&mut local, &mut remote] {
+        assert_eq!(endpoint.state(), AssociationState::Closed);
+        assert!(endpoint.poll_timeout().is_none());
+        assert!(endpoint.poll_endpoint_event().is_some());
+        assert!(endpoint.poll_endpoint_event().is_none());
+        assert!(endpoint.poll_transmit(retry).is_none());
+    }
+    Ok(())
+}

@@ -11,7 +11,7 @@
 //! that drops the oldest entry. The surface is JSON-only; session cardinality
 //! makes Prometheus labels a poor fit.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -409,22 +409,35 @@ impl SessionRecords {
         let matches_application = |record: &SessionRecord| {
             application_id.is_none_or(|id| record.application_id == Some(id))
         };
-        let mut active: Vec<SessionRecord> = self
-            .active
-            .iter()
-            .filter(|entry| matches_application(entry.value()))
-            .map(|entry| entry.value().clone())
-            .collect();
-        let active_count = active.len();
+        let mut active = Vec::new();
+        let mut selected = BinaryHeap::new();
+        let mut active_count = 0_usize;
+        for entry in self.active.iter() {
+            let record = entry.value();
+            if !matches_application(record) {
+                continue;
+            }
+            active_count = active_count.saturating_add(1);
+            if active_limit == usize::MAX {
+                active.push(record.clone());
+            } else if active.len() < active_limit {
+                selected.push((record.created_at_ms, record.room_id, active.len()));
+                active.push(record.clone());
+            } else if let Some(mut newest) = selected.peek_mut() {
+                if (record.created_at_ms, record.room_id) < (newest.0, newest.1) {
+                    let position = newest.2;
+                    if let Some(selected_record) = active.get_mut(position) {
+                        selected_record.clone_from(record);
+                        *newest = (record.created_at_ms, record.room_id, position);
+                    }
+                }
+            }
+        }
         let order = |a: &SessionRecord, b: &SessionRecord| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
                 .then_with(|| a.room_id.cmp(&b.room_id))
         };
-        if active.len() > active_limit {
-            active.select_nth_unstable_by(active_limit, order);
-            active.truncate(active_limit);
-        }
         active.sort_unstable_by(order);
         // Poisoning recovers the guarded data: the ring is a plain queue, so
         // a panicked writer leaves element-consistent state behind.
@@ -1012,6 +1025,13 @@ mod tests {
                 let full = records.snapshot_view(since, application_id);
                 for limit in [0, 1, 17, SESSION_RECORDS_ACTIVE_RESPONSE_CAP, usize::MAX] {
                     let limited = records.snapshot_with_active_limit(since, application_id, limit);
+                    if limit != usize::MAX {
+                        assert!(
+                            limited.active.capacity() <= limit.max(4).next_power_of_two(),
+                            "limit={limit}: retained capacity {}",
+                            limited.active.capacity()
+                        );
+                    }
                     let mut expected = serde_json::to_value(&full).expect("full view");
                     expected["active"].as_array_mut().unwrap().truncate(limit);
                     assert_eq!(
@@ -1038,11 +1058,24 @@ mod tests {
             let room = room_fixture(Uuid::from_u128(index), "ROOM");
             records.record_created(&room, true);
         }
-        let snapshot = if std::env::var_os("SESSION_RESPONSE_LEGACY").is_some() {
+        let snapshot = if std::env::var_os("SESSION_RESPONSE_SNAPSHOT_BASELINE").is_some() {
+            let mut snapshot = records.snapshot();
+            snapshot
+                .active
+                .truncate(SESSION_RECORDS_ACTIVE_RESPONSE_CAP);
+            snapshot
+        } else if std::env::var_os("SESSION_RESPONSE_LEGACY").is_some() {
             records.snapshot()
         } else {
             records.response_snapshot(None, None)
         };
+        println!(
+            "SESSION_SNAPSHOT_PROFILE active={} count={} capacity={} record_storage_bytes={}",
+            snapshot.active.len(),
+            snapshot.active_count,
+            snapshot.active.capacity(),
+            snapshot.active.capacity() * std::mem::size_of::<SessionRecord>()
+        );
         let mut value = serde_json::to_value(&snapshot).unwrap();
         let materialized_records = value["active"].as_array().unwrap().len();
         let materialized_bytes = serde_json::to_vec(&value).unwrap().len();

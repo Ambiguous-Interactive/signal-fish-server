@@ -637,6 +637,45 @@ impl<'a> SendIndex<'a> {
     }
 }
 
+fn ordered_churn_events(records: &RunRecords) -> Vec<(usize, usize)> {
+    let mut events: Vec<_> = (0..records.churn.len())
+        .map(|position| (position, 0_usize))
+        .collect();
+    events.sort_unstable_by_key(|&(position, _)| {
+        let event = &records.churn[position];
+        (event.recipient.as_str(), event.at_us, position)
+    });
+    /*
+        Delayed cycles can share a microsecond. Disconnect ordinals and rejoin
+        epochs recover their alternating order only within that timestamp.
+    */
+    let mut disconnect_ordinals: BTreeMap<&str, usize> = BTreeMap::new();
+    for (position, ordinal) in &mut events {
+        let event = &records.churn[*position];
+        *ordinal = match event.phase {
+            ChurnPhase::Disconnect => {
+                let next = disconnect_ordinals
+                    .entry(event.recipient.as_str())
+                    .or_default();
+                let ordinal = next.saturating_mul(2);
+                *next = next.saturating_add(1);
+                ordinal
+            }
+            ChurnPhase::Rejoined => event
+                .epoch
+                .and_then(|epoch| usize::try_from(epoch.checked_sub(2)?).ok())
+                .map_or(usize::MAX, |epoch| {
+                    epoch.saturating_mul(2).saturating_add(1)
+                }),
+        };
+    }
+    events.sort_unstable_by_key(|&(position, ordinal)| {
+        let event = &records.churn[position];
+        (event.recipient.as_str(), event.at_us, ordinal, position)
+    });
+    events
+}
+
 fn churn_evidence(
     churn: &ChurnPlan,
     roster: &[(String, u32)],
@@ -660,36 +699,12 @@ fn churn_evidence(
         .values()
         .map(|(peer, epoch)| (peer.as_str(), *epoch))
         .collect();
-    let mut events: Vec<_> = records.churn.iter().map(|event| (event, 0_usize)).collect();
-    events.sort_by_key(|(event, _)| (event.recipient.as_str(), event.at_us));
-    /*
-        Delayed cycles can share a microsecond. Disconnect ordinals and rejoin
-        epochs recover their alternating order only within that timestamp.
-    */
-    let mut disconnect_ordinals: BTreeMap<&str, usize> = BTreeMap::new();
-    for (event, ordinal) in &mut events {
-        *ordinal = match event.phase {
-            ChurnPhase::Disconnect => {
-                let next = disconnect_ordinals
-                    .entry(event.recipient.as_str())
-                    .or_default();
-                let ordinal = next.saturating_mul(2);
-                *next = next.saturating_add(1);
-                ordinal
-            }
-            ChurnPhase::Rejoined => event
-                .epoch
-                .and_then(|epoch| usize::try_from(epoch.checked_sub(2)?).ok())
-                .map_or(usize::MAX, |epoch| {
-                    epoch.saturating_mul(2).saturating_add(1)
-                }),
-        };
-    }
-    events.sort_by_key(|(event, ordinal)| (event.recipient.as_str(), event.at_us, *ordinal));
+    let events = ordered_churn_events(records);
     let mut positions: BTreeMap<&str, usize> = BTreeMap::new();
     let mut count = 0_u64;
     let mut first = None;
-    for (event, _) in events {
+    for (raw_position, _) in events {
+        let event = &records.churn[raw_position];
         let position = positions.entry(event.recipient.as_str()).or_default();
         let expected_phase = if position.is_multiple_of(2) {
             ChurnPhase::Disconnect
@@ -3878,6 +3893,102 @@ mod coverage_tests {
                 }
             }
         }
+    }
+
+    fn stable_churn_order(records: &RunRecords) -> Vec<(usize, usize)> {
+        let mut events: Vec<_> = (0..records.churn.len())
+            .map(|position| (position, 0))
+            .collect();
+        events.sort_by_key(|&(position, _)| {
+            let event = &records.churn[position];
+            (event.recipient.as_str(), event.at_us)
+        });
+        let mut disconnects = BTreeMap::<&str, usize>::new();
+        for (position, ordinal) in &mut events {
+            let event = &records.churn[*position];
+            *ordinal = match event.phase {
+                ChurnPhase::Disconnect => {
+                    let next = disconnects.entry(event.recipient.as_str()).or_default();
+                    let ordinal = next.saturating_mul(2);
+                    *next = next.saturating_add(1);
+                    ordinal
+                }
+                ChurnPhase::Rejoined => event
+                    .epoch
+                    .and_then(|epoch| usize::try_from(epoch.checked_sub(2)?).ok())
+                    .map_or(usize::MAX, |epoch| {
+                        epoch.saturating_mul(2).saturating_add(1)
+                    }),
+            };
+        }
+        events.sort_by_key(|&(position, ordinal)| {
+            let event = &records.churn[position];
+            (event.recipient.as_str(), event.at_us, ordinal)
+        });
+        events
+    }
+
+    fn churn_sort_fixture(count: usize) -> RunRecords {
+        let mut records = RunRecords::default();
+        for position in 0..count {
+            records.churn.push(ChurnEvent {
+                recipient: format!("peer-{}", position % 17),
+                phase: if position.is_multiple_of(3) {
+                    ChurnPhase::Disconnect
+                } else {
+                    ChurnPhase::Rejoined
+                },
+                at_us: (position % 7) as u64,
+                epoch: [None, Some(0), Some(1), Some(2), Some(3), Some(u32::MAX)][position % 6],
+                tails: BTreeMap::new(),
+            });
+        }
+        records
+    }
+
+    #[test]
+    fn churn_order_preserves_stable_raw_identity_for_ties_and_invalid_epochs() {
+        for count in [0, 1, 2, 17, 257, 4096] {
+            let mut records = churn_sort_fixture(count);
+            for reversed in [false, true] {
+                if reversed {
+                    records.churn.reverse();
+                }
+                assert_eq!(
+                    ordered_churn_events(&records),
+                    stable_churn_order(&records),
+                    "count={count}, reversed={reversed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated churn sort memory comparison; run in a fresh process"]
+    fn generator_churn_sort_memory_profile() {
+        let records = churn_sort_fixture(1_000_000);
+        let stable = std::env::var_os("CAPACITY_CHURN_SORT_STABLE").is_some();
+        let start = std::time::Instant::now();
+        let ordered = if stable {
+            stable_churn_order(&records)
+        } else {
+            ordered_churn_events(&records)
+        };
+        assert_eq!(ordered.len(), records.churn.len());
+        assert!(ordered.windows(2).all(|pair| {
+            let key = |(position, ordinal): (usize, usize)| {
+                let event = &records.churn[position];
+                (event.recipient.as_str(), event.at_us, ordinal, position)
+            };
+            key(pair[0]) <= key(pair[1])
+        }));
+        println!(
+            "CHURN_SORT_PROFILE stable={stable} rows={} index_bytes={} elapsed_ms={}",
+            ordered.len(),
+            ordered.capacity() * std::mem::size_of::<(usize, usize)>(),
+            start.elapsed().as_millis()
+        );
+        std::hint::black_box((records, ordered));
     }
 
     #[test]
