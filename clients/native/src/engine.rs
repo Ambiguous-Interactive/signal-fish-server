@@ -48,7 +48,6 @@ use webrtc::peer_connection::{
     RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCIceTransportPolicy,
     RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, SettingEngineBuilder,
 };
-#[cfg(test)]
 use webrtc::peer_connection::{RTCStatsReportEntry, StatsSelector};
 use webrtc::runtime::{default_runtime, JoinHandle, Runtime};
 
@@ -1095,6 +1094,46 @@ impl Engine {
             "pending_remote_candidates": link.pending_candidates.len(),
             "channels": channels,
         })
+    }
+
+    /// Add RTC channel counters to the local callback observations for one
+    /// physical generation. Returns null for an unknown peer. RTC receive
+    /// counters advance after message reassembly, before Engine channel polling;
+    /// they do not count raw SCTP fragments. Samples are not atomic across layers.
+    /// Transport entries retain their own IDs, labels, and states, including
+    /// retained closed channels; labels alone do not identify a channel.
+    pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
+        let Some(link) = self.peers.get(&peer) else {
+            return serde_json::Value::Null;
+        };
+        let reports = link
+            .pc
+            .get_stats(std::time::Instant::now(), StatsSelector::None)
+            .await;
+        let channels: Vec<_> = reports
+            .iter()
+            .filter_map(|entry| match entry {
+                RTCStatsReportEntry::DataChannel(channel) => Some(serde_json::json!({
+                    "id": channel.stats.id,
+                    "stream_id": channel.data_channel_identifier,
+                    "label": channel.label,
+                    "state": channel.state,
+                    "messages_sent": channel.messages_sent,
+                    "bytes_sent": channel.bytes_sent,
+                    "messages_received": channel.messages_received,
+                    "bytes_received": channel.bytes_received,
+                })),
+                _ => None,
+            })
+            .collect();
+        let mut snapshot = self.diagnostic_snapshot(peer);
+        if let Some(fields) = snapshot.as_object_mut() {
+            fields.insert(
+                "transport_channels".to_string(),
+                serde_json::Value::Array(channels),
+            );
+        }
+        snapshot
     }
 
     /// Start a detached nominated-pair probe for the current physical

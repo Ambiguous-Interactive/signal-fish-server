@@ -9370,3 +9370,73 @@ fixture and workload are unchanged. The capacity audit records matched
 retained-memory observations and their limits. This does not establish a
 whole-generator memory bound or qualify the planned ten-minute workload.
 External client APIs and server behavior do not change.
+
+### Capacity receipt coordinates beyond the recorded stream (#1252)
+
+A raw-arrival control on base `67725d67` finds that completeness accounting
+uses every observed sequence as its upper boundary. A receipt beyond the
+sender's recorded tail invents missing positions. An opaque receipt at
+`u64::MAX` can overflow the aggregate missing count and stop report generation.
+This is oracle and artifact-replay correctness. It does not prove live relay loss.
+
+Completeness now intersects coverage with `(adopted floor, recorded tail]`.
+The full observed ranges remain available for duplicate, order, and gap-overlap
+checks. Invalid receipts keep their original bytes, sequence, and first-offender
+classification. They cannot extend the delivery obligation. Two new controls
+fail with the former unbounded accounting: one checks regular deliveries in
+all three classes; the other checks opaque receipts and raw first-arrival order.
+Both round-trip artifact records and require exact summary equality after replay.
+A position-set control checks 6,400 floor/ceiling windows, plus full-width limits.
+
+First rejected-arrival coordinates also move into the existing rejection
+accumulator. Valid streams no longer retain that unused field. The ARM64
+arrival record falls from 96 to 88 bytes. This storage change does not change
+raw evidence or the number of offered events. The capacity audit records
+component memory measurements; whole-generator and long-cell qualification
+remain open under #775 and #636.
+
+### Native RTC and callback receipt observations (#1244)
+
+`Engine::transport_diagnostic_snapshot` adds RTC channel identities, states,
+and message/byte totals to the local callback counts for one physical generation.
+RTC receive counts advance after message reassembly and before Engine polling.
+They are not raw SCTP packet counters. Samples across layers are not atomic.
+Retained closed channels keep their own identities; labels alone are not keys.
+
+A live control holds the Engine's channel pollers, sends four exact binary
+packets, and requires RTC to record all four while Engine raw/admitted counts
+remain zero. Resuming the reliable poller must deliver the exact prefix in order
+and bring both callback counts to four. Both receiver roles and two physical
+generations run this history. Removed peers return null. Fresh-link counters
+must start empty. This adds evidence for locating future #1244 reproductions;
+it does not establish the historical missing-prefix cause or repair it.
+
+The Godot 4.7.2 retirement matrix uses official Linux ARM64 Godot, Chromium
+154, `webrtc-native` 1.2.2-stable, and the portable driver at
+`1a23f8fb28b9583507bab6538fa1306cf66a1d80`. It runs native and Web Godot,
+both offer roles, and each of `reliable`, `ordered`, and `unreliable` closed
+from either seat. All 24 cases pass both physical generations. Every phase
+requires 128 exact reliable snapshot chunks in each direction, mixed gameplay,
+selected-packet retirement, required-channel closure, and fresh-link recovery.
+All 12,288 reliable snapshot receipts pass. The 48 retained native RTC snapshots
+cover 144 channel comparisons; RTC received-message and Engine raw counts agree
+at these teardown observations. This does not make live samples atomic.
+
+The probe's snapshot operation awaits the new diagnostic method. It preserves
+the existing checked binary-event handling and exact gameplay assertions.
+Its SHA-256 is `9673048737abf952d239537e32efe559b3f0ed2186cbda8d5c50c164ae0942a6`.
+Reproduce with the portable driver's `--native-reference-probe`,
+`--safe-receive --mixed-traffic --retirement-matrix --require-gameplay` options,
+using both offer roles and both runtimes. Point `XDG_DATA_HOME` at the installed
+Godot export templates for Web exports. The probe's known UTF-8 drill packets
+do not replace the native opaque-binary ownership controls.
+
+All attempts remain retained. An initial shared-filesystem cohort passes two
+cases, then records a phase-2 teardown timeout and a separate 120-second editor
+import timeout. The local-output cohort passes all 12 native cases. Its first
+12 Web attempts stop before gameplay because the template-directory environment
+was omitted; the corrected Web-only cohort passes all 12 cases. No reliable
+receipt assertion or deadline changes. The passing cohort does not explain the
+earlier teardown timeout or the historical Godot 4.3 prefix loss in #1244.
+Full service coverage, larger meshes, remote networks, and repaired Godot
+packet lifetimes remain open under #1240 and Godot #355/#433.

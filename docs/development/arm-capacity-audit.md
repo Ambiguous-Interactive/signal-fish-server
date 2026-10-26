@@ -6106,3 +6106,40 @@ controls pass, including exact replay, churn, malformed-stream classification,
 duplicate/order checks, and full-width sequence cases. This isolates arrival
 storage; it does not bound the whole generator, qualify the long live cell,
 or explain the historical generator stalls.
+
+## Retain first-arrival keys only for rejected streams (#775, #636)
+
+Base `67725d67` stores the first raw sequence in every arrival record. Only
+opaque and unexpected-sender classifications use that field. These streams now
+record each rejection in the existing violation accumulator, which retains
+its exact raw first key. Normal streams keep no extra first-key field.
+The ARM64 record falls from 96 to 88 bytes. Ordered streams still allocate
+no violation state. All raw evidence remains available for artifact replay.
+
+The unchanged arrival-state fixture runs in fresh debug processes in
+baseline/candidate/candidate/baseline order. Every cell retains 239,760 streams
+at 999 rooms and 100 distinct positive arrivals per stream. The invalid cell
+adds three violation classes. The sparse cell retains 100 ranges per stream.
+These are in-process retained RSS observations, not peaks.
+
+| Cell | Baseline retained bytes | Candidate retained bytes |
+| --- | --- | --- |
+| Ordered | 56,229,888 / 56,225,792 | 52,727,808 / 52,731,904 |
+| Three violation classes | 71,766,016 / 71,757,824 | 68,272,128 / 68,268,032 |
+| 100 sparse ranges per stream | 981,008,384 / 980,992,000 | 977,510,400 / 977,510,400 |
+
+The sparse cell is larger than the prior session's 100-room cell; compare only
+the matched rows above. Range storage dominates that cell. Compiler work and
+other shared-host activity overlap parts of this cohort, so no timing or live
+throughput conclusion follows. Binary SHA-256 values:
+
+- Baseline: `973aa685b3a14e42f61f29c58d50daeca9f1d025da4c709e05aa2bbfd71dc393`.
+- Candidate: `3367f2511e8709826f85cfa838657bf1224d4327bbdc45bb144088df9e78ed9b`.
+
+The candidate also bounds completeness to the recorded sender tail (#1252).
+That separate correctness repair preserves raw invalid arrivals and their
+exact duplicate, ordering, and first-offender evidence. All 46 focused oracle
+and artifact controls pass. The former unbounded accounting fails both new
+full-summary controls; a full-width opaque sequence panics during aggregation.
+This is component progress. It does not bound the whole generator, qualify the
+planned long live workload, or explain the historical generator stalls.

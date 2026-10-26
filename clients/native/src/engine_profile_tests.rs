@@ -327,6 +327,146 @@ async fn godot_profile_preserves_non_utf8_gameplay_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_polling() {
+    for receiver_offers in [false, true] {
+        let mut pair = unconnected_negotiated_pair();
+        assert!(pair
+            .receiver
+            .transport_diagnostic_snapshot(pair.sender_id)
+            .await
+            .is_null());
+        for generation in 0u8..2 {
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let peer = pair.sender_id;
+            let link = &pair.receiver.peers[&peer];
+            for task in &link.channel_tasks {
+                task.abort();
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let admission = link.receive_admission.clone();
+            let physical_generation = link.generation;
+            let initial = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            let initial_stats = initial["transport_channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["label"] == RELIABLE_LABEL)
+                .unwrap();
+            assert_eq!(initial_stats["messages_received"], 0);
+            assert_eq!(initial_stats["bytes_received"], 0);
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            let packets: Vec<Vec<u8>> = (0u8..4)
+                .map(|sequence| {
+                    let mut packet = vec![0xff; 1024];
+                    packet[..3].copy_from_slice(&[generation, sequence, 0]);
+                    packet
+                })
+                .collect();
+            for packet in &packets {
+                channel.send(packet.as_slice().into()).await.unwrap();
+            }
+            let held = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                    let stats = snapshot["transport_channels"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|entry| entry["label"] == RELIABLE_LABEL)
+                        .unwrap();
+                    if stats["messages_received"] == 4 {
+                        assert_eq!(stats["bytes_received"], 4096);
+                        break snapshot;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("RTC receives the whole snapshot while callback polling is held");
+            assert_eq!(held["generation"], physical_generation);
+            assert_eq!(
+                held["channels"][RELIABLE_LABEL]["receipts"],
+                serde_json::json!({"raw":0,"admitted":0,"rejected":0,"discarded":0})
+            );
+            let resumed = spawn_channel_event_loop(
+                &pair.receiver.runtime,
+                &pair.receiver.events,
+                peer,
+                physical_generation,
+                RELIABLE_LABEL.into(),
+                pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
+                admission,
+            );
+            pair.receiver
+                .peers
+                .get_mut(&peer)
+                .unwrap()
+                .channel_tasks
+                .push(resumed);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut received = 0;
+                while received < packets.len() {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if !pair.receiver.is_current_event(&event) {
+                        continue;
+                    }
+                    match event {
+                        EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(data, packets[received]);
+                            received += 1;
+                        }
+                        EngineEvent::ChannelReceiveRejected { .. }
+                        | EngineEvent::ChannelClosed { .. } => {
+                            panic!("held polling must retain reliable input")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let drained = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                    if snapshot["channels"][RELIABLE_LABEL]["receipts"]["admitted"] == 4 {
+                        break snapshot;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("receipt counters settle after callback publication");
+            assert_eq!(
+                drained["channels"][RELIABLE_LABEL]["receipts"],
+                serde_json::json!({"raw":4,"admitted":4,"rejected":0,"discarded":0})
+            );
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            assert!(pair
+                .receiver
+                .transport_diagnostic_snapshot(peer)
+                .await
+                .is_null());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generations() {
     let mut pair = unconnected_negotiated_pair();
     for generation in 0u8..2 {

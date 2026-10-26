@@ -1745,13 +1745,11 @@ pub fn summarize(
                     ..ArrivalEvidence::default()
                 }
             });
-        if stream.total == 0 {
-            stream.first = receipt.server_seq;
-        }
         stream.total += 1;
         // Opaque leaks still owe overlap, duplicate, and order evidence.
         stream.observe(receipt.server_seq);
         let Some(contract) = stream.contract else {
+            stream.violations_mut().misrouted.record(receipt.server_seq);
             continue;
         };
         let stale = contract
@@ -1954,7 +1952,12 @@ pub fn summarize(
                 // that the server must refuse. Counted only in the leak
                 // category: its verdict names the recipient and stream
                 // exactly, and a leak already invalidates the run.
-                let seq = stream.first;
+                let seq = stream
+                    .violations
+                    .as_deref()
+                    .expect("opaque arrivals retain rejection evidence")
+                    .misrouted
+                    .first;
                 leaked.record(DeliveryKey {
                     recipient: recipient.clone(),
                     sender: (*sender).to_string(),
@@ -1965,11 +1968,12 @@ pub fn summarize(
             }
             if !expected_senders.contains(sender) {
                 outcome.misrouted += stream.total;
-                SequenceViolations {
-                    count: stream.total,
-                    first: stream.first,
-                }
-                .append_to(&mut misrouted, recipient, sender, *epoch);
+                stream
+                    .violations
+                    .as_deref()
+                    .expect("unexpected senders retain rejection evidence")
+                    .misrouted
+                    .append_to(&mut misrouted, recipient, sender, *epoch);
                 continue;
             }
             // Closed-stream and invalid-sequence arrivals still count as evidence.
@@ -2056,7 +2060,7 @@ pub fn summarize(
                     outcome.gap_covered += gaps.covered;
                 }
                 // Count covered positions and holes above the seat's floor.
-                let accounting = covered.above(owed_floor);
+                let accounting = covered.within(owed_floor, total_owed);
                 let owed_total = total_owed.saturating_sub(owed_floor);
                 let holes = accounting.holes;
                 let first_hole = accounting.first_hole;
@@ -2349,7 +2353,6 @@ struct GapStreamEvidence {
 struct ArrivalEvidence<'a> {
     contract: Option<ArrivalContract<'a>>,
     total: u64,
-    first: u64,
     unique: u64,
     observed: ArrivalCoverage,
     violations: Option<Box<ArrivalViolations>>,
@@ -2496,7 +2499,7 @@ impl StreamCoverage {
         true
     }
 
-    fn above(&self, floor: u64) -> CoverageAccounting {
+    fn within(&self, floor: u64, ceiling: u64) -> CoverageAccounting {
         let mut result = CoverageAccounting {
             covered: 0,
             holes: 0,
@@ -2514,6 +2517,10 @@ impl StreamCoverage {
                     .map(|(&start, &end)| (start, end)),
             )
         {
+            if end <= floor || start > ceiling {
+                continue;
+            }
+            let end = end.min(ceiling);
             if end <= floor {
                 continue;
             }
@@ -2528,6 +2535,11 @@ impl StreamCoverage {
             result.highest = end;
         }
         result
+    }
+
+    #[cfg(test)]
+    fn above(&self, floor: u64) -> CoverageAccounting {
+        self.within(floor, u64::MAX)
     }
 
     #[cfg(test)]
@@ -5152,6 +5164,188 @@ mod coverage_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn out_of_range_arrivals_do_not_invent_missing_deliveries() {
+        for class in [
+            DeliveryClass::Reliable,
+            DeliveryClass::Latest,
+            DeliveryClass::Volatile,
+        ] {
+            let context = crate::unit_context_with_class(class);
+            for sequence in [9, u64::MAX] {
+                let mut records = crate::complete_records(&context.plans);
+                let mut receipt = records.receipts[0].clone();
+                receipt.server_seq = sequence;
+                records.receipts.extend([receipt.clone(), receipt.clone()]);
+                let summarize = |records: &RunRecords| {
+                    super::summarize(
+                        &context.plans,
+                        &context.roster,
+                        records,
+                        1_000,
+                        96,
+                        class,
+                        &ChurnPlan::default(),
+                        None,
+                    )
+                };
+                let summary = summarize(&records);
+                let key = DeliveryKey {
+                    recipient: receipt.recipient.to_string(),
+                    sender: receipt.sender.to_string(),
+                    epoch: receipt.epoch,
+                    seq: sequence,
+                };
+                assert!(
+                    summary
+                        .reasons
+                        .contains(&InvalidReason::MisroutedDeliveries {
+                            count: 2,
+                            first: key.clone(),
+                        }),
+                    "class={class:?} sequence={sequence}: {:?}",
+                    summary.reasons
+                );
+                assert!(summary
+                    .reasons
+                    .contains(&InvalidReason::DuplicateDeliveries {
+                        count: 1,
+                        first: key,
+                    }));
+                assert_eq!(summary.totals.outstanding, 0, "{class:?} {sequence}");
+                assert!(summary
+                    .per_recipient
+                    .iter()
+                    .all(|recipient| recipient.missing == 0));
+                assert!(!summary.reasons.iter().any(|reason| matches!(
+                    reason,
+                    InvalidReason::MissingDeliveries { .. }
+                        | InvalidReason::OutstandingAtEnd { .. }
+                )));
+                let directory = tempfile::tempdir().unwrap();
+                crate::artifacts::write_deliveries(directory.path(), &records).unwrap();
+                let replayed = crate::artifacts::read_records(directory.path()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(summarize(&replayed)).unwrap(),
+                    serde_json::to_value(summary).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(replayed).unwrap(),
+                    serde_json::to_value(records).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coverage_window_matches_position_set_without_counting_unsent_sequences() {
+        for first in 1..=8 {
+            for second in 1..=8 {
+                let mut coverage = StreamCoverage::default();
+                coverage.insert(first, first);
+                coverage.insert(second, second);
+                coverage.insert(u64::MAX, u64::MAX);
+                for floor in 0..=9 {
+                    for ceiling in 0..=9 {
+                        let seen: BTreeSet<_> = [first, second]
+                            .into_iter()
+                            .filter(|&sequence| sequence > floor && sequence <= ceiling)
+                            .collect();
+                        let highest = seen.last().copied().unwrap_or(floor);
+                        let missing: Vec<_> = (floor + 1..=highest)
+                            .filter(|sequence| !seen.contains(sequence))
+                            .collect();
+                        assert_eq!(
+                            coverage.within(floor, ceiling),
+                            CoverageAccounting {
+                                covered: count_u64(seen.len()),
+                                holes: count_u64(missing.len()),
+                                first_hole: missing.first().copied(),
+                                highest,
+                            },
+                            "first={first} second={second} floor={floor} ceiling={ceiling}",
+                        );
+                    }
+                }
+            }
+        }
+        let mut coverage = StreamCoverage::default();
+        coverage.insert(1, u64::MAX);
+        assert_eq!(coverage.within(2, 4).covered, 2);
+        assert_eq!(coverage.within(u64::MAX - 1, u64::MAX).covered, 1);
+        assert_eq!(coverage.within(u64::MAX, u64::MAX).covered, 0);
+    }
+
+    #[test]
+    fn opaque_rejection_preserves_raw_first_arrival_and_artifact_replay() {
+        let context = crate::unit_context_with_experiment();
+        for first in [0, 9, u64::MAX] {
+            let mut records = crate::complete_records(&context.plans);
+            let mut receipt = records.receipts[0].clone();
+            receipt.recipient = "r0p1".into();
+            receipt.sender = "r0p0".into();
+            records.receipts.retain(|event| event.sender != "r0p0");
+            for sequence in [first, first, 1] {
+                receipt.server_seq = sequence;
+                records.receipts.push(receipt.clone());
+            }
+            let summarize = |records: &RunRecords| {
+                super::summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    1_000,
+                    96,
+                    context.delivery_class,
+                    &ChurnPlan::default(),
+                    context.experiment,
+                )
+            };
+            let summary = summarize(&records);
+            assert!(
+                summary
+                    .reasons
+                    .contains(&InvalidReason::UnsupportedFormatLeak {
+                        count: 1,
+                        first: DeliveryKey {
+                            recipient: "r0p1".into(),
+                            sender: "r0p0".into(),
+                            epoch: 1,
+                            seq: first,
+                        },
+                    }),
+                "first={first}: {:?}",
+                summary.reasons
+            );
+            assert!(
+                summary
+                    .reasons
+                    .contains(&InvalidReason::DuplicateDeliveries {
+                        count: 1,
+                        first: DeliveryKey {
+                            recipient: "r0p1".into(),
+                            sender: "r0p0".into(),
+                            epoch: 1,
+                            seq: first,
+                        },
+                    }),
+                "first={first}: {:?}",
+                summary.reasons
+            );
+            let directory = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(directory.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(directory.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(summarize(&replayed)).unwrap(),
+                serde_json::to_value(summary).unwrap(),
+            );
+            assert_eq!(
+                serde_json::to_value(records).unwrap(),
+                serde_json::to_value(replayed).unwrap(),
+            );
         }
     }
 

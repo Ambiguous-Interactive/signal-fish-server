@@ -81,11 +81,23 @@ payloads in both directions, every required channel's closure in both roles,
 and fresh-link recovery. Startup controls also send 128 exact reliable packets
 as soon as either endpoint opens its channel, then repeat on a fresh link.
 The native stack initializes negotiated channels before consuming following
-startup DATA (#1250). These controls do not establish compatibility with a
-Godot application. Native Godot, Godot Web, full service sessions, queued-send
-retirement with Godot, and remote-network qualification remain open in
+startup DATA (#1250). A local Godot 4.7.2 matrix also qualifies native and Web
+runtimes, both offer roles, and each required channel closed by either seat.
+All 24 cases preserve mixed gameplay, reliable snapshots, retained-packet
+retirement, and fresh-link recovery across two physical generations.
+Broader service sessions, larger meshes, corrected Godot packet lifetimes,
+remote networks, and the historical Godot 4.3 loss remain open in
 [server #1240](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1240)
 and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
+
+For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
+It adds RTC channel IDs, states, and sent/received message and byte counts to
+the local callback snapshot. RTC receive counts advance after message reassembly,
+before Engine callback polling. They do not count raw SCTP fragments.
+The two layers are sampled separately. A count difference can reflect queued
+callbacks, so compare it again after draining callbacks. Entries keep their own
+IDs because retained closed channels can share a label. An unknown or removed
+peer returns null. Each fresh physical generation starts new counters.
 
 ## Shared transport behavior
 
