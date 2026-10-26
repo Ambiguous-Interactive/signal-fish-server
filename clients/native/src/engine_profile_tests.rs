@@ -60,7 +60,8 @@ async fn godot_profile_registers_exact_reserved_contract_before_both_roles_negot
     );
 }
 
-async fn exchange(pair: &mut LivePair) {
+async fn exchange(pair: &mut LivePair) -> HashMap<(bool, &'static str), usize> {
+    let mut receipts = HashMap::new();
     for sender_offers in [true, false] {
         let (sender, peer, events) = if sender_offers {
             (&pair.sender, pair.receiver_id, &mut pair.receiver_events)
@@ -77,10 +78,14 @@ async fn exchange(pair: &mut LivePair) {
                     if stats.label == label && stats.data_channel_identifier == id)));
             let channel = sender.channel(peer, label).unwrap();
             let payloads: Vec<_> = (0..8)
-                .map(|seq| format!("{label}: exact 鱼 bytes\0 {seq}"))
+                .map(|seq| {
+                    let mut bytes = format!("{label}: exact 鱼 bytes\0 {seq}").into_bytes();
+                    bytes.extend_from_slice(&[0xff, 0x80, 0]);
+                    bytes
+                })
                 .collect();
             for payload in &payloads {
-                channel.send(payload.as_bytes().into()).await.unwrap();
+                channel.send(payload.as_slice().into()).await.unwrap();
                 tokio::task::yield_now().await;
             }
             let drain = if label == "reliable" {
@@ -95,15 +100,15 @@ async fn exchange(pair: &mut LivePair) {
                     break;
                 };
                 match event.unwrap() {
-                    EngineEvent::ChannelMessage {
+                    EngineEvent::ChannelBinaryMessage {
                         label: actual,
-                        text,
+                        data,
                         ..
                     } => {
                         assert_eq!(actual, label);
                         let seq = payloads
                             .iter()
-                            .position(|payload| payload.as_bytes() == text.as_bytes())
+                            .position(|payload| payload == &data)
                             .expect("every received payload retains its exact offered bytes");
                         if label != "unreliable" {
                             assert!(
@@ -112,6 +117,9 @@ async fn exchange(pair: &mut LivePair) {
                             );
                         }
                         assert!(seen.insert(seq), "no duplicate gameplay receipt");
+                    }
+                    EngineEvent::ChannelMessage { .. } => {
+                        panic!("binary traffic must not become a text event")
                     }
                     EngineEvent::ChannelClosed { label, .. } => {
                         panic!("unexpected channel loss: {label}")
@@ -122,22 +130,22 @@ async fn exchange(pair: &mut LivePair) {
             println!("GODOT_PROFILE_RECEIPTS offerer_sends={sender_offers} label={label} offered=8 received={}", seen.len());
             if label == "reliable" {
                 assert_eq!(seen.len(), 8, "reliable gameplay must arrive in full");
-            } else {
-                assert!(
-                    !seen.is_empty(),
-                    "lifetime-limited gameplay must produce an exact receipt"
-                );
             }
+            receipts.insert((sender_offers, label), seen.len());
         }
     }
+    receipts
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn godot_profile_exchanges_and_retires_every_required_channel_before_fresh_pair() {
+    let mut receipts = HashMap::<_, usize>::new();
     for closer_offers in [true, false] {
         for label in ["reliable", "ordered", "unreliable"] {
             let mut pair = negotiated_pair().await;
-            exchange(&mut pair).await;
+            for (key, count) in exchange(&mut pair).await {
+                *receipts.entry((false, key)).or_default() += count;
+            }
             for (engine, peer) in [
                 (&mut pair.sender, pair.receiver_id),
                 (&mut pair.receiver, pair.sender_id),
@@ -153,12 +161,12 @@ async fn godot_profile_exchanges_and_retires_every_required_channel_before_fresh
             pair.sender
                 .channel(pair.receiver_id, "reliable")
                 .unwrap()
-                .send_text("queued-before-loss")
+                .send(b"queued-before-loss\xff".as_slice().into())
                 .await
                 .unwrap();
             let queued = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    if let event @ EngineEvent::ChannelMessage { .. } =
+                    if let event @ EngineEvent::ChannelBinaryMessage { .. } =
                         pair.receiver_events.recv().await.unwrap()
                     {
                         break event;
@@ -207,8 +215,109 @@ async fn godot_profile_exchanges_and_retires_every_required_channel_before_fresh
             assert_ne!(pair.receiver.peers[&pair.sender_id].generation, generation);
             assert!(!pair.receiver.is_current_event(&queued));
             drop(queued);
-            exchange(&mut pair).await;
+            for (key, count) in exchange(&mut pair).await {
+                *receipts.entry((true, key)).or_default() += count;
+            }
             pair.cleanup().await;
         }
     }
+    for fresh in [false, true] {
+        for sender_offers in [false, true] {
+            for label in ["reliable", "ordered", "unreliable"] {
+                let received = receipts[&(fresh, (sender_offers, label))];
+                println!("GODOT_PROFILE_TOTAL fresh={fresh} offerer_sends={sender_offers} label={label} offered=48 received={received}");
+                assert!(received > 0, "fresh={fresh}, offerer_sends={sender_offers}, label={label}: the complete control history must prove exact delivery in each mode");
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_profile_preserves_non_utf8_gameplay_bytes() {
+    let mut pair = negotiated_pair().await;
+    for sender_offers in [true, false] {
+        let (sender, peer, receiver, events) = if sender_offers {
+            (
+                &pair.sender,
+                pair.receiver_id,
+                &pair.receiver,
+                &mut pair.receiver_events,
+            )
+        } else {
+            (
+                &pair.receiver,
+                pair.sender_id,
+                &pair.sender,
+                &mut pair.sender_events,
+            )
+        };
+        for payload in [
+            vec![],
+            "binary UTF-8 鱼\0".as_bytes().to_vec(),
+            vec![0, 0xff, 0x80, 1, 0xc0, 0xaf, 0, 0xfe],
+            (0..=255).collect(),
+            vec![0xff; MAX_CHANNEL_MESSAGE_BYTES],
+        ] {
+            sender
+                .channel(peer, RELIABLE_LABEL)
+                .unwrap()
+                .send(payload.as_slice().into())
+                .await
+                .unwrap();
+            let receipt = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match events.recv().await.unwrap() {
+                        event @ EngineEvent::ChannelBinaryMessage { .. } => break event,
+                        EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("an admitted binary packet must retain raw bytes")
+                        }
+                        EngineEvent::ChannelMessage { .. } => {
+                            panic!("binary packets must not be converted to text")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert!(receiver.is_current_event(&receipt));
+            let EngineEvent::ChannelBinaryMessage {
+                data, queue_permit, ..
+            } = receipt
+            else {
+                unreachable!()
+            };
+            assert_eq!(data, payload);
+            assert_eq!(
+                receiver.message_budget.messages.available_permits(),
+                MAX_PENDING_CHANNEL_MESSAGES - 1
+            );
+            assert_eq!(
+                receiver.message_budget.bytes.available_permits(),
+                MAX_PENDING_CHANNEL_BYTES - payload.len()
+            );
+            drop(queue_permit);
+            assert_eq!(
+                receiver.message_budget.bytes.available_permits(),
+                MAX_PENDING_CHANNEL_BYTES
+            );
+            sender
+                .channel(peer, RELIABLE_LABEL)
+                .unwrap()
+                .send_text("text after binary")
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let EngineEvent::ChannelMessage { text, .. } = events.recv().await.unwrap() {
+                        assert_eq!(text, "text after binary");
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+    pair.cleanup().await;
 }

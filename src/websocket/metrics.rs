@@ -190,14 +190,12 @@ fn bounded_metrics_response(
         return response;
     }
 
-    // First lever: drop the oldest dashboard-history samples. Per-sample
-    // sizes are measured once, so the keep point is computed, not searched.
+    // Size only the newest suffix and its first excluded sample.
     let history_taken = response
         .get_mut("dashboardCache")
         .and_then(|cache| cache.get_mut("history"))
         .map(std::mem::take);
     if let Some(serde_json::Value::Array(samples)) = history_taken {
-        let sample_sizes: Vec<usize> = samples.iter().map(&measured).collect();
         // The envelope is measured with an empty history and BOTH markers in
         // place (placeholder dropped count), so the kept suffix accounts for
         // everything around it.
@@ -222,13 +220,13 @@ fn bounded_metrics_response(
         // the empty array already in the envelope.
         let mut suffix_bytes = 0usize;
         let mut any_kept = false;
-        let kept_count: usize = sample_sizes
+        let kept_count: usize = samples
             .iter()
             .rev()
-            .take_while(|size| {
+            .take_while(|sample| {
                 let separator = usize::from(any_kept);
                 let next = suffix_bytes
-                    .saturating_add(**size)
+                    .saturating_add(measured(sample))
                     .saturating_add(separator);
                 if next > budget_for_history {
                     false
@@ -239,7 +237,7 @@ fn bounded_metrics_response(
                 }
             })
             .count();
-        let dropped = sample_sizes.len().saturating_sub(kept_count);
+        let dropped = samples.len().saturating_sub(kept_count);
         let kept: Vec<serde_json::Value> = samples.into_iter().skip(dropped).collect();
         if let Some(cache) = response
             .get_mut("dashboardCache")
@@ -257,13 +255,13 @@ fn bounded_metrics_response(
         );
     }
 
-    if measured(&response) <= METRICS_RESPONSE_MAX_BYTES {
+    let size_bytes = measured(&response);
+    if size_bytes <= METRICS_RESPONSE_MAX_BYTES {
         return response;
     }
 
     // Still oversized (pathological per-sample size): fail visibly, the same
     // way an oversized snapshot does.
-    let size_bytes = measured(&response);
     server.metrics_truncation_log().record(
         "Metrics response truncated",
         "response exceeded the byte budget even without history",
@@ -766,6 +764,85 @@ mod tests {
         println!(
             "METRICS_JSON_SIZE_PROFILE baseline={baseline} samples=720 bytes={size} elapsed_us={}",
             started.elapsed().as_micros()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn history_truncation_matches_independent_serialized_suffixes() {
+        let server = build_metrics_test_server(ServerConfig::default()).await;
+        for (count, padding, envelope_padding) in [
+            (0, 0, 0),
+            (1, 7, 0),
+            (3, 524_288, 0),
+            (8, 196_608, 0),
+            (720, 1407, 0),
+            (720, 1500, 0),
+            (3, 7, METRICS_RESPONSE_MAX_BYTES),
+        ] {
+            let samples: Vec<_> = (0..count)
+                .map(|index| {
+                    serde_json::json!({
+                        "index": index,
+                        "padding": "x".repeat(padding),
+                        "escaped": "鱼\n\"\\\0",
+                        "mixed": [null, true, -123, index],
+                    })
+                })
+                .collect();
+            let original = serde_json::json!({
+                "current": "y".repeat(envelope_padding),
+                "dashboardCache": {"history": samples},
+            });
+            let mut expected = original.clone();
+            if serde_json::to_vec(&original).unwrap().len() > METRICS_RESPONSE_MAX_BYTES {
+                expected["dashboardCache"] = serde_json::json!({
+                    "history": [], "historyTruncated": true, "historySamplesDropped": 0,
+                });
+                let empty_bytes = serde_json::to_vec(&expected).unwrap().len() + 4;
+                let dropped = (0..=count)
+                    .find(|&dropped| {
+                        empty_bytes + serde_json::to_vec(&samples[dropped..]).unwrap().len() - 2
+                            <= METRICS_RESPONSE_MAX_BYTES
+                    })
+                    .unwrap_or(count);
+                expected["dashboardCache"]["history"] = serde_json::json!(&samples[dropped..]);
+                expected["dashboardCache"]["historySamplesDropped"] = serde_json::json!(dropped);
+                let size = serde_json::to_vec(&expected).unwrap().len();
+                if size > METRICS_RESPONSE_MAX_BYTES {
+                    expected = serde_json::json!({"truncated": true, "sizeBytes": size, "capBytes": METRICS_RESPONSE_MAX_BYTES});
+                }
+            }
+            assert_eq!(
+                bounded_metrics_response(&server, original),
+                expected,
+                "count={count}, padding={padding}, envelope={envelope_padding}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated dashboard-history truncation profile; run in a fresh process"]
+    async fn metrics_history_truncation_profile() {
+        let server = build_metrics_test_server(ServerConfig::default()).await;
+        let response = serde_json::json!({
+            "activeRooms": 7,
+            "dashboardCache": {"history": (0..720).map(|index| serde_json::json!({
+                "sample": index, "padding": "x".repeat(65_536)
+            })).collect::<Vec<_>>()},
+        });
+        let started = Instant::now();
+        let bounded = bounded_metrics_response(&server, response);
+        let elapsed = started.elapsed().as_micros();
+        let history = bounded["dashboardCache"]["history"].as_array().unwrap();
+        assert_eq!(history.last().unwrap()["sample"], 719);
+        let bytes = serde_json::to_vec(&bounded).unwrap();
+        assert!(bytes.len() <= METRICS_RESPONSE_MAX_BYTES);
+        println!(
+            "METRICS_HISTORY_PROFILE kept={} dropped={} bytes={} elapsed_us={elapsed}",
+            history.len(),
+            bounded["dashboardCache"]["historySamplesDropped"],
+            bytes.len()
         );
     }
 

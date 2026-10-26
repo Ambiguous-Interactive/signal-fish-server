@@ -5996,3 +5996,75 @@ cross-room senders; repeated arrivals; zero and full-width first sequences;
 and all three delivery classes. Each case writes and reads raw delivery
 artifacts and compares the complete recomputed summary and records.
 The valid/invalid verdict and server routing do not change.
+
+## Lazy sparse coverage and metrics history sizing (#775, #636)
+
+On base `c5272199`, each arrival stream retains an empty tree header even when
+its receipts form one contiguous range. The candidate stores that header only
+after the first hole. Positive inline coordinates use `NonZeroU64`; zero is
+still recorded separately for duplicate and ordering checks. A repaired hole
+returns to inline coverage and retains the allocated tree for later reuse.
+Arrival state falls from 136 to 112 bytes on this ARM64 host. Sparse streams
+pay one extra allocation for their tree header.
+
+Matched fresh debug processes use the same profiling fixture and run in
+baseline/candidate/candidate/baseline order. Each cell retains 999 rooms,
+239,760 streams, and 100 distinct arrivals per stream. The invalid cell adds
+all three violation classes to every stream. The fragmented cell offers
+only even sequences, retaining 100 ranges per stream. No workload, raw-event
+budget, verdict, or replay rule changes.
+
+| Cell | Baseline peak RSS KiB | Candidate peak RSS KiB |
+| --- | --- | --- |
+| Ordered | 72,648 / 72,808 | 61,996 / 62,572 |
+| Three violation classes | 87,852 / 87,980 | 77,868 / 77,804 |
+| 100 sparse ranges per stream | 967,596 / 967,852 | 965,348 / 965,228 |
+
+The sparse case shows little total-memory benefit. All ranges remain exact;
+the candidate does not discard holes to get its result. Ordered insertion
+takes 1.51–1.70 seconds in the baseline and 1.54–2.25 seconds in the candidate.
+Invalid insertion takes 1.43–1.97 versus 1.69–1.97 seconds. Fragmented insertion
+takes 54.95–65.93 versus 47.83–51.61 seconds. Shared-host timing and debug code
+limit these observations. This is a memory tradeoff, not a general speed claim.
+
+Independent range-triple and position-set controls preserve overlap rejection,
+adjacent bridges, zero and full-width sequences, duplicates, ordering, first
+holes, and repeated fragment/repair cycles. The unexpected-sender matrix still
+compares complete raw-artifact replay summaries. Whole-generator bounds and
+the planned long live cell remain open under #775.
+
+The metrics response path now sizes history from newest to oldest and stops
+after the first excluded sample. It no longer sizes every discarded sample
+or retains a sample-size vector. The initial full-response count and the
+exact truncation policy remain. A still-oversized response reuses its final
+count for the fallback marker. Independent serialized-suffix controls check
+complete response equality, including escapes, Unicode, mixed values, near-cap
+histories, and an oversized envelope.
+
+The matched metrics fixture has 720 history samples with 65,536 padding bytes
+each. Every arm retains the newest 15 samples, reports 705 dropped samples,
+and produces 983,560 JSON bytes. Baseline truncation takes 4.438 / 3.479 seconds;
+the candidate takes 1.669 / 1.610 seconds. Process peaks are 115,648 / 115,416
+versus 114,776 / 115,024 KiB. These debug measurements show less sizing work
+on this fixture. They do not establish live relay throughput or a meaningful
+whole-response memory reduction.
+
+Source and binary evidence:
+
+- Baseline source: `c5272199` with the common isolated profiling fixtures.
+- Arrival baseline SHA-256: `bbbddb8ee52d8e15026b4fef3579087edd8376e4e8e25b019539381827f77e8a`.
+- Arrival candidate SHA-256: `b5754343c942d15ef58a3c12ef9bf154fbf0af5fbb4d38bea3d9a8669347ba4f`.
+- Metrics baseline SHA-256: `f20d2ede74c7262fc14857517b895ab22df98417d57a84d117c19651a294d49a`.
+- Metrics candidate SHA-256: `8a03894967d6840be8dd8db4444c16a3f1c6f5b10c1284f20da4418d49135eba`.
+
+The qualified cohort uses a bounded-memory launcher and `wait4`. All attempts
+remain in ignored `progress/session-549/`. The first launcher hashed whole
+binaries into memory before spawning children; inherited peak RSS invalidates
+its 140,120 KiB small-cell peaks. Those raw attempts remain retained. Initial
+insertion times span 1.43–1.74 seconds for ordered streams, 1.66–1.90 seconds
+for invalid streams, and 41.82–66.76 seconds for fragmented streams. Initial
+history truncation takes 5.152–7.528 seconds in the baseline and 2.238–2.258
+seconds in the candidate. No local cargo work overlaps either measurement
+cohort. The host is shared; these are component experiments, not server
+capacity qualification. External Rust, .NET, and Godot SDKs need no changes
+for these internal metrics and capacity-tool changes.

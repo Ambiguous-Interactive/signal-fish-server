@@ -16,6 +16,7 @@
 //! replay (`artifacts::replay`) run the same code and must agree exactly.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use hdrhistogram::{Counter, Histogram};
@@ -2414,8 +2415,12 @@ impl ArrivalCoverage {
 #[derive(Default)]
 struct StreamCoverage {
     // Ordered deliveries and compact gap reports need no tree allocation.
-    inline: Option<(u64, u64)>,
-    ranges: BTreeMap<u64, u64>,
+    inline: Option<(NonZeroU64, u64)>,
+    #[allow(
+        clippy::box_collection,
+        reason = "contiguous streams need no tree header"
+    )]
+    ranges: Option<Box<BTreeMap<u64, u64>>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2428,32 +2433,39 @@ struct CoverageAccounting {
 
 impl StreamCoverage {
     fn insert(&mut self, from: u64, mut to: u64) -> bool {
-        if from == 0 || from > to {
+        let Some(nonzero_from) = NonZeroU64::new(from) else {
+            return false;
+        };
+        if from > to {
             return false;
         }
-        if self.ranges.is_empty() {
-            let Some((start, end)) = self.inline else {
-                self.inline = Some((from, to));
+        if self.ranges.as_ref().is_none_or(|ranges| ranges.is_empty()) {
+            let Some((nonzero_start, end)) = self.inline else {
+                self.inline = Some((nonzero_from, to));
                 return true;
             };
+            let start = nonzero_start.get();
             if from <= end && to >= start {
                 return false;
             }
             if end.checked_add(1) == Some(from) {
-                self.inline = Some((start, to));
+                self.inline = Some((nonzero_start, to));
             } else if to.checked_add(1) == Some(start) {
-                self.inline = Some((from, end));
+                self.inline = Some((nonzero_from, end));
             } else {
                 self.inline = None;
-                self.ranges.insert(start, end);
-                self.ranges.insert(from, to);
+                let ranges = self.ranges.get_or_insert_with(Box::default);
+                ranges.insert(start, end);
+                ranges.insert(from, to);
             }
             return true;
         }
+        let Some(ranges) = self.ranges.as_mut() else {
+            return false;
+        };
         // The last range beginning at or below `to` is the only candidate
         // needed to prove overlap in this disjoint, ordered map.
-        if self
-            .ranges
+        if ranges
             .range(..=to)
             .next_back()
             .is_some_and(|(_, end)| *end >= from)
@@ -2461,22 +2473,24 @@ impl StreamCoverage {
             return false;
         }
         if let Some(next) = to.checked_add(1) {
-            if let Some(end) = self.ranges.remove(&next) {
+            if let Some(end) = ranges.remove(&next) {
                 to = end;
             }
         }
         // Extend an existing range in place without removing its key.
-        if let Some((_, end)) = self.ranges.range_mut(..from).next_back() {
+        if let Some((_, end)) = ranges.range_mut(..from).next_back() {
             if end.checked_add(1) == Some(from) {
                 *end = to;
             } else {
-                self.ranges.insert(from, to);
+                ranges.insert(from, to);
             }
         } else {
-            self.ranges.insert(from, to);
+            ranges.insert(from, to);
         }
-        if self.ranges.len() == 1 {
-            self.inline = self.ranges.pop_first();
+        if ranges.len() == 1 {
+            self.inline = ranges
+                .pop_first()
+                .and_then(|(start, end)| NonZeroU64::new(start).map(|start| (start, end)));
             // Keep the empty root to reuse it across fragment/repair cycles.
         }
         true
@@ -2492,8 +2506,13 @@ impl StreamCoverage {
         for (start, end) in self
             .inline
             .iter()
-            .copied()
-            .chain(self.ranges.iter().map(|(&start, &end)| (start, end)))
+            .map(|(start, end)| (start.get(), *end))
+            .chain(
+                self.ranges
+                    .iter()
+                    .flat_map(|ranges| ranges.iter())
+                    .map(|(&start, &end)| (start, end)),
+            )
         {
             if end <= floor {
                 continue;
@@ -2513,7 +2532,7 @@ impl StreamCoverage {
 
     #[cfg(test)]
     fn stored_ranges(&self) -> usize {
-        self.ranges.len() + usize::from(self.inline.is_some())
+        self.ranges.as_ref().map_or(0, |ranges| ranges.len()) + usize::from(self.inline.is_some())
     }
 }
 
@@ -4987,6 +5006,7 @@ mod coverage_tests {
             .expect("probe rooms");
         assert!((1..=999).contains(&rooms));
         let invalid = std::env::var_os("CAPACITY_ARRIVAL_PROBE_INVALID").is_some();
+        let fragmented = std::env::var_os("CAPACITY_ARRIVAL_PROBE_FRAGMENTED").is_some();
         let started = std::time::Instant::now();
         let mut arrivals = BTreeMap::new();
         for room in 0..rooms {
@@ -4997,11 +5017,11 @@ mod coverage_tests {
                     }
                     let mut stream = ArrivalEvidence::default();
                     for sequence in 1..=100 {
-                        stream.observe(sequence);
+                        stream.observe(if fragmented { sequence * 2 } else { sequence });
                     }
                     if invalid {
                         for sequence in [100, 0, 0] {
-                            stream.observe(sequence);
+                            stream.observe(if fragmented { sequence * 2 } else { sequence });
                         }
                         stream.violations_mut().misrouted.record(0);
                     }
@@ -5017,7 +5037,7 @@ mod coverage_tests {
         println!(
             "ARRIVAL_STATE_PROFILE {}",
             serde_json::json!({
-                "rooms": rooms, "streams": arrivals.len(), "invalid": invalid,
+                "rooms": rooms, "streams": arrivals.len(), "invalid": invalid, "fragmented": fragmented,
                 "stream_bytes": std::mem::size_of::<ArrivalEvidence>(),
                 "retained_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
                 "unique": unique, "elapsed_us": started.elapsed().as_micros(),
@@ -5222,26 +5242,44 @@ mod coverage_tests {
                 };
                 assert!(coverage.insert(seq, seq));
                 assert!(
-                    coverage.ranges.is_empty(),
+                    coverage
+                        .ranges
+                        .as_ref()
+                        .is_none_or(|ranges| ranges.is_empty()),
                     "seq={seq} descending={descending}"
                 );
             }
-            assert_eq!(coverage.inline, Some((1, 100_000)));
+            assert_eq!(
+                coverage.inline.map(|(start, end)| (start.get(), end)),
+                Some((1, 100_000))
+            );
             assert!(!coverage.insert(50_000, 100_001));
-            assert_eq!(coverage.inline, Some((1, 100_000)));
+            assert_eq!(
+                coverage.inline.map(|(start, end)| (start.get(), end)),
+                Some((1, 100_000))
+            );
             assert!(coverage.insert(100_002, 100_002));
             assert!(coverage.inline.is_none());
-            assert_eq!(coverage.ranges.len(), 2);
+            assert_eq!(coverage.ranges.as_ref().map_or(0, |ranges| ranges.len()), 2);
             assert!(coverage.insert(100_001, 100_001));
-            assert!(coverage.ranges.is_empty());
-            assert_eq!(coverage.inline, Some((1, 100_002)));
+            assert!(coverage
+                .ranges
+                .as_ref()
+                .is_none_or(|ranges| ranges.is_empty()));
+            assert_eq!(
+                coverage.inline.map(|(start, end)| (start.get(), end)),
+                Some((1, 100_002))
+            );
             assert_eq!(coverage.above(99_999).covered, 3);
         }
         let mut fragmented = StreamCoverage::default();
         assert!(fragmented.insert(1, 1));
         for seq in 3..=100_000 {
             assert!(fragmented.insert(seq, seq));
-            assert_eq!(fragmented.ranges.len(), 2);
+            assert_eq!(
+                fragmented.ranges.as_ref().map_or(0, |ranges| ranges.len()),
+                2
+            );
             assert!(fragmented.inline.is_none());
         }
         assert_eq!(
@@ -5254,15 +5292,27 @@ mod coverage_tests {
             }
         );
         assert!(fragmented.insert(2, 2));
-        assert!(fragmented.ranges.is_empty());
-        assert_eq!(fragmented.inline, Some((1, 100_000)));
+        assert!(fragmented
+            .ranges
+            .as_ref()
+            .is_none_or(|ranges| ranges.is_empty()));
+        assert_eq!(
+            fragmented.inline.map(|(start, end)| (start.get(), end)),
+            Some((1, 100_000))
+        );
         for cycle in 0..2_000 {
             let base = 100_000 + cycle * 3;
             for seq in [base + 1, base + 3, base + 2] {
                 assert!(fragmented.insert(seq, seq));
             }
-            assert_eq!(fragmented.inline, Some((1, base + 3)));
-            assert!(fragmented.ranges.is_empty());
+            assert_eq!(
+                fragmented.inline.map(|(start, end)| (start.get(), end)),
+                Some((1, base + 3))
+            );
+            assert!(fragmented
+                .ranges
+                .as_ref()
+                .is_none_or(|ranges| ranges.is_empty()));
             assert!(!fragmented.insert(base + 2, base + 4));
             assert_eq!(fragmented.above(base).covered, 3);
         }

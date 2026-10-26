@@ -189,6 +189,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
     let (events, _receiver) = mpsc::unbounded_channel();
     let engine = Engine::new(EngineSettings::default(), events).unwrap();
     let links = [0, 1].map(|_| ChannelReceiveAdmission {
+        preserve_binary_messages: false,
         message_observed: std::sync::Mutex::new(None),
         receipts: Default::default(),
         budget: engine.message_budget.clone(),

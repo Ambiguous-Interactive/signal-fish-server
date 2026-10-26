@@ -9,14 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add an experimental native reference-client profile for Godot negotiated channels (#1240).
+- Add an experimental native reference-client profile for Godot negotiated channels with exact binary packet events (#1240).
 - Relay live room events and gameplay to read-only spectators (#1137).
 
 ### Changed
 
-- **Breaking:** Native reference-client settings literals must set `channel_profile`.
-- Bound active-session response storage and reduce memory use for session metrics, response sizing,
-  and game-name truncation (#636).
+- **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
+  and handle binary channel events.
+- Bound active-session response storage and reduce metrics memory and dashboard-history sizing work (#636).
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
@@ -36,7 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
-- Reduce memory and lookup work in capacity collection, churn schedules, artifact export, and replay (#636, #775).
+- Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
+  (#636, #775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
 
 ### Fixed
