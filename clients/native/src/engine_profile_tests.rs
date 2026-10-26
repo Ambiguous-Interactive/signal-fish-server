@@ -335,6 +335,7 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             .transport_diagnostic_snapshot(pair.sender_id)
             .await
             .is_null());
+        let mut previous_transport = None;
         for generation in 0u8..2 {
             pair.negotiate().await;
             if receiver_offers {
@@ -357,6 +358,23 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             let admission = link.receive_admission.clone();
             let physical_generation = link.generation;
             let initial = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            let initial_transport = initial["transports"].as_array().unwrap();
+            assert_eq!(initial_transport.len(), 1);
+            let initial_transport = &initial_transport[0];
+            let transport_id = initial_transport["id"].as_str().unwrap();
+            assert!(!transport_id.is_empty());
+            let identity = (physical_generation, transport_id.to_owned());
+            assert_ne!(previous_transport.as_ref(), Some(&identity));
+            previous_transport = Some(identity);
+            assert!(matches!(
+                initial_transport["ice_state"].as_str(),
+                Some("connected" | "completed")
+            ));
+            assert_eq!(initial_transport["dtls_state"], "connected");
+            let initial_packets = initial_transport["packets_received"].as_u64().unwrap();
+            let initial_bytes = initial_transport["bytes_received"].as_u64().unwrap();
+            assert!(initial_packets > 0);
+            assert!(initial_bytes > 0);
             let initial_stats = initial["transport_channels"]
                 .as_array()
                 .unwrap()
@@ -398,6 +416,10 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             .await
             .expect("RTC receives the whole snapshot while callback polling is held");
             assert_eq!(held["generation"], physical_generation);
+            let held_transport = &held["transports"][0];
+            assert_eq!(held_transport["id"], initial_transport["id"]);
+            assert!(held_transport["packets_received"].as_u64().unwrap() > initial_packets);
+            assert!(held_transport["bytes_received"].as_u64().unwrap() >= initial_bytes + 4096);
             assert_eq!(
                 held["channels"][RELIABLE_LABEL]["receipts"],
                 serde_json::json!({"raw":0,"admitted":0,"rejected":0,"discarded":0})

@@ -1096,12 +1096,15 @@ impl Engine {
         })
     }
 
-    /// Add RTC channel counters to the local callback observations for one
-    /// physical generation. Returns null for an unknown peer. RTC receive
+    /// Add RTC packet and channel counters to the local callback observations for one
+    /// physical generation. Returns null for an unknown peer. RTC channel receive
     /// counters advance after message reassembly, before Engine channel polling;
     /// they do not count raw SCTP fragments. Samples are not atomic across layers.
-    /// Transport entries retain their own IDs, labels, and states, including
+    /// Channel entries retain their own IDs, labels, and states, including
     /// retained closed channels; labels alone do not identify a channel.
+    /// Transport packet counts include control traffic and protocol overhead;
+    /// they do not prove SCTP DATA acceptance or application delivery.
+    /// Transport IDs are scoped to this physical generation.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
@@ -1126,8 +1129,27 @@ impl Engine {
                 _ => None,
             })
             .collect();
+        let transports: Vec<_> = reports
+            .iter()
+            .filter_map(|entry| match entry {
+                RTCStatsReportEntry::Transport(transport) => Some(serde_json::json!({
+                    "id": transport.stats.id,
+                    "ice_state": transport.ice_state,
+                    "dtls_state": transport.dtls_state,
+                    "packets_sent": transport.packets_sent,
+                    "packets_received": transport.packets_received,
+                    "bytes_sent": transport.bytes_sent,
+                    "bytes_received": transport.bytes_received,
+                })),
+                _ => None,
+            })
+            .collect();
         let mut snapshot = self.diagnostic_snapshot(peer);
         if let Some(fields) = snapshot.as_object_mut() {
+            fields.insert(
+                "transports".to_string(),
+                serde_json::Value::Array(transports),
+            );
             fields.insert(
                 "transport_channels".to_string(),
                 serde_json::Value::Array(channels),

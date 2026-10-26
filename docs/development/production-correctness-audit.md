@@ -9440,3 +9440,78 @@ receipt assertion or deadline changes. The passing cohort does not explain the
 earlier teardown timeout or the historical Godot 4.3 prefix loss in #1244.
 Full service coverage, larger meshes, remote networks, and repaired Godot
 packet lifetimes remain open under #1240 and Godot #355/#433.
+
+### Native packet ingress observations (#1244)
+
+The diagnostic snapshot now includes transport IDs, ICE/DTLS states, and
+sent/received packet and byte counts from the same RTC stats report as the
+channel counters. The counters advance at the raw transport demultiplexer.
+They include control traffic and protocol overhead. They do not prove SCTP
+DATA acceptance, message completion, or application delivery. Compare changes
+within one physical generation, then inspect channel and callback counts.
+Transport stats IDs are scoped to that generation and can repeat on a new peer.
+
+The held-poller control fails on the former snapshot because it lacks transport
+observations. The new snapshot records packet and byte growth while all four
+exact 1,024-byte binary packets reach channel reassembly and callbacks remain
+held. Resuming polling delivers the exact reliable prefix. Both receiver roles
+and both physical generations pass, including unknown/removed null snapshots,
+initial empty channel counters, stable transport identity within a generation,
+and distinct generation/transport identities after replacement.
+
+One initial test incorrectly required the RTC stats ID alone to change across
+peer replacement. RTC uses the report-local ID `RTCTransport`. The corrected
+control compares the physical generation and stats ID together. This is a test
+assumption correction, not an RTC transport identity defect. Both failed
+attempts remain retained. All five scoped native profile controls pass.
+
+The snapshot change is additive. Existing callback and channel fields remain.
+Rust and .NET SDKs delegate peer networking to applications and do not use this
+Engine. Godot #355 tracks optional probe adoption. The server protocol does not
+change. Historical Godot 4.3 missing-prefix cause #1244 remains open.
+
+### Native Godot service rejoin and delayed consumption (#1240, #1244)
+
+The portable Godot driver at `1a23f8fb28b9583507bab6538fa1306cf66a1d80`
+now has a local native-runtime service control. The only driver edit removes
+`args.runtime != "web" or` from its service CLI restriction. Reference-offer,
+service identity, signaling, room-leave, and rejoin verdict rules remain.
+The server route is `/v2/ws`. The initial `/ws` attempt fails before login;
+its evidence remains retained. No gameplay conclusion follows from it.
+
+Godot 4.7.2 native completes two service generations with the native Engine
+offering. Both seats join the same service room. The reference leaves with a
+selected packet, then rejoins at epoch 2 with a new plan and physical peer.
+Both phases preserve exact mixed gameplay, all 128 reliable chunks in each
+direction, retired old input, required-channel closure, and final room leave.
+The HTTP coordinator records zero signaling payload attempts. A second cohort
+also passes native and Web Godot service rejoin with a 1.5-second reference
+consumption pause and credit sent over WebRTC. These are local two-seat controls.
+
+The final probe includes transport packet observations. Its SHA-256 is
+`0ab096160269253ca0979a6118cff2969c392d5453eb9720b45bfe5ee5355960`.
+Four final pairings run concurrently on the Linux ARM64 host: native and Web
+Godot 4.7.2 service rejoin with the reference offering, plus native Godot 4.3
+with both offer roles and four added CPU workers. All use `--safe-receive
+--mixed-traffic --slow-reference-receiver --credit-transport webrtc
+--require-gameplay`. The native extension is `webrtc-native` 1.2.2-stable.
+Web uses Chromium 154. Native snapshots retain all three channel contracts
+and transport packet/byte counts in both physical generations.
+
+All four final histories preserve all 2,048 reliable snapshot receipts across
+directions and generations. Exact mixed-mode predicates, complete heartbeat
+tails, selected-packet retirement, and required-channel closure pass. Both
+service histories also pass room and signaling qualification. Two stronger
+pause checks fail: phase 1 of Godot 4.3 with the native Engine offering,
+and both phases of Web Godot service rejoin. Their final overall gameplay verdicts stay false.
+At pause/resume, sent/echoed heartbeat counts are 2/0 then 15/2, and 3/0 then
+17/2. Web phase 2 records 1/0 then 14/1. None proves a new round trip
+during its pause. All later heartbeats arrive. A passing earlier cohort does not repair or explain these failures.
+
+[Godot #440](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/440)
+tracks command-bridge, native-send, Godot-echo, and callback timing needed to
+locate that delay. All attempts and full verdicts remain retained in ignored
+`progress/session-552/`. No deadline or receipt rule changes. The reliable
+prefix loss in #1244 is not reproduced. Other service offer roles, larger
+meshes, remote networks, and corrected Godot packet lifetimes remain open in
+issue #1240 and Godot #355/#433. Rust and .NET SDKs do not own this peer stack.

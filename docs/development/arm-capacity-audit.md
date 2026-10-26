@@ -6143,3 +6143,39 @@ and artifact controls pass. The former unbounded accounting fails both new
 full-summary controls; a full-width opaque sequence panics during aggregation.
 This is component progress. It does not bound the whole generator, qualify the
 planned long live workload, or explain the historical generator stalls.
+
+## Derive receipt totals from exact arrival evidence (#775, #636)
+
+Base `a3b34167` retains both total and unique receipt counts in each arrival
+record. The exact duplicate accumulator already supplies their difference.
+The oracle now derives each stream's total as unique plus duplicate arrivals.
+Gap-only streams still have zero receipts. Zero, full-width, opaque, unknown,
+and repeated coordinates retain their original classification and first keys.
+Raw records and replay formats do not change.
+
+The ARM64 arrival record falls from 88 to 80 bytes. The existing independent
+arrival-order control also checks each derived total against its raw input
+length. All 60 scoped oracle and artifact controls pass, including malformed
+senders, gap-only streams, churn, receipt bounds, and exact summary replay.
+
+The unchanged arrival-state fixture runs in fresh debug processes in
+baseline/candidate/candidate/baseline order. Each cell retains 239,760 streams
+at 999 rooms and 100 positive arrivals per stream. The invalid cell adds
+three violation classes. The sparse cell retains 100 ranges per stream.
+These are retained RSS observations, not peak or whole-generator bounds.
+
+| Cell | Baseline retained bytes | Candidate retained bytes |
+| --- | --- | --- |
+| Ordered | 52,727,808 / 52,731,904 | 51,429,376 / 51,560,448 |
+| Three violation classes | 68,268,032 / 68,272,128 | 67,297,280 / 67,235,840 |
+| 100 sparse ranges per stream | 977,506,304 / 977,510,400 | 976,195,584 / 975,880,192 |
+
+Binary SHA-256 values:
+
+- Baseline: `3367f2511e8709826f85cfa838657bf1224d4327bbdc45bb144088df9e78ed9b`.
+- Candidate: `7914419d74947cffd30499b3d4dcd3d690bf251523894dbf8a67242bd7281bac`.
+
+All attempts remain in ignored `progress/session-552/`. Live gameplay probes
+and compiler work overlap this cohort. No timing or throughput claim follows.
+Sparse range storage still dominates the largest cell. Whole-generator memory
+qualification and the planned ten-minute live workload remain open in #775.
