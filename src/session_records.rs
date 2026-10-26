@@ -411,13 +411,13 @@ impl SessionRecords {
         };
         let mut active = Vec::new();
         let mut selected = BinaryHeap::new();
-        let mut active_count = 0;
+        let mut active_count = 0_usize;
         for entry in self.active.iter() {
             let record = entry.value();
             if !matches_application(record) {
                 continue;
             }
-            active_count += 1;
+            active_count = active_count.saturating_add(1);
             if active_limit == usize::MAX {
                 active.push(record.clone());
             } else if active.len() < active_limit {
@@ -426,8 +426,10 @@ impl SessionRecords {
             } else if let Some(mut newest) = selected.peek_mut() {
                 if (record.created_at_ms, record.room_id) < (newest.0, newest.1) {
                     let position = newest.2;
-                    active[position].clone_from(record);
-                    *newest = (record.created_at_ms, record.room_id, position);
+                    if let Some(selected_record) = active.get_mut(position) {
+                        selected_record.clone_from(record);
+                        *newest = (record.created_at_ms, record.room_id, position);
+                    }
                 }
             }
         }

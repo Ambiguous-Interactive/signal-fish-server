@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce memory use for filtered session metrics and large active-session responses (#636).
+- Bound active-session response storage and reduce memory use for filtered session metrics (#636).
 - Reduce capacity-run analysis work for room changes by sharing event ordering across players (#636).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
