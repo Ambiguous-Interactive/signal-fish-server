@@ -78,7 +78,8 @@ The reference profile keeps its existing text projection for received packets.
 
 Local native-stack controls verify channel properties, SCTP IDs, exact binary
 payloads in both directions, every required channel's closure in both roles,
-and fresh-link recovery. Startup controls also send 128 exact reliable packets
+and fresh-link recovery. Reliable controls use fragmented 4 KiB packets.
+Startup controls also send 128 exact reliable packets
 as soon as either endpoint opens its channel, then repeat on a fresh link.
 The native stack initializes negotiated channels before consuming following
 startup DATA (#1250). A local Godot 4.7.2 matrix also qualifies native and Web
@@ -93,13 +94,18 @@ Godot packet lifetimes, remote networks, and the historical Godot 4.3 loss remai
 and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
 
 For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
+Its `sctp` entry records received DATA and SACK chunks, local retransmission
+and delayed-acknowledgment timeouts, and fast retransmissions. DATA counts
+advance before message reassembly and include duplicate and refused chunks.
+They do not prove acceptance or identify the affected channel. An absent
+association returns null. Sampling errors also set `sctp_error`.
 It adds transport IDs, ICE/DTLS states, sent/received packet and byte counts,
 and RTC channel IDs, states, and message/byte counts to the local callback snapshot.
 Transport counts include control traffic and protocol overhead. They do not
 prove SCTP DATA acceptance or application delivery. Transport IDs are scoped
 to the physical generation. RTC receive counts advance after message reassembly,
 before Engine callback polling. They do not count raw SCTP fragments.
-The two layers are sampled separately. A count difference can reflect queued
+The layers are sampled separately. A count difference can reflect queued
 callbacks, so compare it again after draining callbacks. Entries keep their own
 IDs because retained closed channels can share a label. An unknown or removed
 peer returns null. Each fresh physical generation starts new counters.

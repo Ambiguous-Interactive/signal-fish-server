@@ -386,7 +386,50 @@ pub struct RTCSctpTransport<'a> {
     pub(crate) peer_connection: &'a RTCPeerConnection,
 }
 
+/// Local SCTP association counters, before data-channel message reassembly.
+/// Received chunks include retransmissions and refused DATA. They do not prove
+/// acceptance, identify a stream, or count delivered application messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RTCSctpAssociationStats {
+    /// DATA chunks received, including duplicates and refused chunks.
+    pub data_chunks_received: u64,
+    /// SACK chunks received from the peer.
+    pub sack_chunks_received: u64,
+    /// Local DATA retransmission timer expirations.
+    pub retransmission_timeouts: u64,
+    /// Local delayed-acknowledgment timer expirations.
+    pub acknowledgement_timeouts: u64,
+    /// Local fast retransmissions triggered by acknowledgment gaps.
+    pub fast_retransmissions: u64,
+}
+
+impl From<::sctp::AssociationStats> for RTCSctpAssociationStats {
+    fn from(mut stats: ::sctp::AssociationStats) -> Self {
+        Self {
+            data_chunks_received: stats.get_num_datas(),
+            sack_chunks_received: stats.get_num_sacks(),
+            retransmission_timeouts: stats.get_num_t3timeouts(),
+            acknowledgement_timeouts: stats.get_num_ack_timeouts(),
+            fast_retransmissions: stats.get_num_fast_retrans(),
+        }
+    }
+}
+
 impl<'a> RTCSctpTransport<'a> {
+    /// Snapshot the negotiated association's local counters.
+    /// Returns `None` before an association exists or after it is removed.
+    /// Counters belong to this physical transport, not a logical peer identity.
+    pub fn association_stats(&self) -> Option<RTCSctpAssociationStats> {
+        let stats = self
+            .peer_connection
+            .sctp_transport()
+            .sctp_associations
+            .values()
+            .next()?
+            .stats();
+        Some(stats.into())
+    }
+
     /// This transport's identity. See [`RTCTransportId`].
     pub fn id(&self) -> RTCTransportId {
         self.peer_connection.sctp_transport().id
@@ -421,6 +464,9 @@ impl<'a> RTCSctpTransport<'a> {
         self.peer_connection.sctp_transport().max_channels()
     }
 }
+
+#[cfg(test)]
+mod association_stats_tests;
 
 #[cfg(test)]
 mod tests {

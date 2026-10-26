@@ -1,5 +1,12 @@
 # Signal Fish RTC patch
 
+`RTCSctpTransport::association_stats` exposes local SCTP DATA/SACK counts and
+retransmission/acknowledgment timer observations for #1244. DATA counts precede
+reassembly and include duplicates and refusals. An absent association returns
+`None`. This adds no counters or retained per-packet state to the receive path.
+The transport controls preserve distinct counters, repeatable reads, and absence.
+Replacement qualification in #912 must retain this diagnostic API or migrate it.
+
 Source: published `rtc` 0.21.1, MIT/Apache-2.0.
 Upstream commit: `2a732df55ca4bcf26b80914fa0f570cfaf74cfcb`.
 Crates.io package checksum:

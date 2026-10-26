@@ -85,6 +85,7 @@ async fn exchange(pair: &mut LivePair) -> HashMap<(bool, &'static str), usize> {
                 .map(|seq| {
                     let mut bytes = format!("{label}: exact 鱼 bytes\0 {seq}").into_bytes();
                     bytes.extend_from_slice(&[0xff, 0x80, 0]);
+                    bytes.resize(if label == RELIABLE_LABEL { 4096 } else { 128 }, 0xff);
                     bytes
                 })
                 .collect();
@@ -358,6 +359,7 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             let admission = link.receive_admission.clone();
             let physical_generation = link.generation;
             let initial = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            assert_eq!(initial["sctp"]["data_chunks_received"], 0);
             let initial_transport = initial["transports"].as_array().unwrap();
             assert_eq!(initial_transport.len(), 1);
             let initial_transport = &initial_transport[0];
@@ -389,7 +391,7 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
                 .unwrap();
             let packets: Vec<Vec<u8>> = (0u8..4)
                 .map(|sequence| {
-                    let mut packet = vec![0xff; 1024];
+                    let mut packet = vec![0xff; 4096];
                     packet[..3].copy_from_slice(&[generation, sequence, 0]);
                     packet
                 })
@@ -407,7 +409,7 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
                         .find(|entry| entry["label"] == RELIABLE_LABEL)
                         .unwrap();
                     if stats["messages_received"] == 4 {
-                        assert_eq!(stats["bytes_received"], 4096);
+                        assert_eq!(stats["bytes_received"], 16384);
                         break snapshot;
                     }
                     tokio::task::yield_now().await;
@@ -416,10 +418,11 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             .await
             .expect("RTC receives the whole snapshot while callback polling is held");
             assert_eq!(held["generation"], physical_generation);
+            assert!(held["sctp"]["data_chunks_received"].as_u64().unwrap() > 4);
             let held_transport = &held["transports"][0];
             assert_eq!(held_transport["id"], initial_transport["id"]);
             assert!(held_transport["packets_received"].as_u64().unwrap() > initial_packets);
-            assert!(held_transport["bytes_received"].as_u64().unwrap() >= initial_bytes + 4096);
+            assert!(held_transport["bytes_received"].as_u64().unwrap() >= initial_bytes + 16384);
             assert_eq!(
                 held["channels"][RELIABLE_LABEL]["receipts"],
                 serde_json::json!({"raw":0,"admitted":0,"rejected":0,"discarded":0})
@@ -513,7 +516,7 @@ async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generatio
             .unwrap();
         let payloads: Vec<Vec<u8>> = (0u8..128)
             .map(|sequence| {
-                let mut packet = vec![0xff; 1024];
+                let mut packet = vec![0xff; 4096];
                 packet[..3].copy_from_slice(&[generation, sequence, 0]);
                 packet
             })

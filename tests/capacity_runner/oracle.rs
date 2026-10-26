@@ -1073,8 +1073,71 @@ fn recipient_latency_counter_bytes(receipts: u64) -> usize {
     }
 }
 
+enum RecipientLatency {
+    Byte(LatencyAccumulator<u8>),
+    Short(LatencyAccumulator<u16>),
+    Word(LatencyAccumulator<u32>),
+    Wide(LatencyAccumulator<u64>),
+}
+
+impl RecipientLatency {
+    fn new(receipts: u64) -> Self {
+        match recipient_latency_counter_bytes(receipts) {
+            1 => Self::Byte(LatencyAccumulator::default()),
+            2 => Self::Short(LatencyAccumulator::default()),
+            4 => Self::Word(LatencyAccumulator::default()),
+            _ => Self::Wide(LatencyAccumulator::default()),
+        }
+    }
+
+    fn record(&mut self, sample: u64) {
+        match self {
+            Self::Byte(histogram) => histogram.record(sample),
+            Self::Short(histogram) => histogram.record(sample),
+            Self::Word(histogram) => histogram.record(sample),
+            Self::Wide(histogram) => histogram.record(sample),
+        }
+    }
+
+    fn stats(&self) -> LatencyStats {
+        match self {
+            Self::Byte(histogram) => histogram.stats(),
+            Self::Short(histogram) => histogram.stats(),
+            Self::Word(histogram) => histogram.stats(),
+            Self::Wide(histogram) => histogram.stats(),
+        }
+    }
+}
+
+fn individual_recipient_latency_statistics(
+    records: &RunRecords,
+    sent_by_key: &SendIndex<'_>,
+    receipt_counts: &BTreeMap<&str, u64>,
+    per_recipient: &mut [RecipientOutcome],
+) -> LatencyStats {
+    let mut latency = LatencyAccumulator::<u64>::default();
+    let mut by_recipient = BTreeMap::<&str, RecipientLatency>::new();
+    for (recipient, sample) in indexed_latency_pairs(records, sent_by_key) {
+        latency.record(sample);
+        if let Some(&receipts) = receipt_counts.get(recipient) {
+            by_recipient
+                .entry(recipient)
+                .or_insert_with(|| RecipientLatency::new(receipts))
+                .record(sample);
+        }
+    }
+    for outcome in per_recipient {
+        outcome.latency_us = by_recipient
+            .get(outcome.recipient.as_str())
+            .map(RecipientLatency::stats)
+            .unwrap_or_default();
+    }
+    latency.stats()
+}
+
 /// Preserve each recipient's tail while bounding each histogram counter by
 /// the caller's proven sample limit. The aggregate still uses u64 counters.
+#[cfg(test)]
 fn recipient_latency_statistics<T: Counter>(
     records: &RunRecords,
     sent_by_key: &SendIndex<'_>,
@@ -1900,7 +1963,7 @@ pub fn summarize(
     // summaries outlive their raw run records without changing artifact JSON.
     let mut summary_sender_names: BTreeMap<&str, ReceiptName> = BTreeMap::new();
     let mut per_recipient = Vec::with_capacity(roster.len());
-    let mut maximum_recipient_receipts = 0_u64;
+    let mut recipient_receipt_counts = BTreeMap::new();
     for (recipient, room) in roster {
         let view = views
             .get(recipient.as_str())
@@ -1985,7 +2048,7 @@ pub fn summarize(
             }
         }
 
-        maximum_recipient_receipts = maximum_recipient_receipts.max(recipient_receipts);
+        recipient_receipt_counts.insert(recipient.as_str(), recipient_receipts);
 
         // (b) Validate all observed gaps, then check completeness only for
         // streams this seat still owes. Closed epochs keep their evidence.
@@ -2105,38 +2168,15 @@ pub fn summarize(
         per_recipient.push(outcome);
     }
 
-    // Duplicate, opaque, and misrouted arrivals also count toward this bound.
-    // The aggregate always retains u64 counters, even when each peer fits u8.
-    let latency_us = match recipient_latency_counter_bytes(maximum_recipient_receipts) {
-        1 => recipient_latency_statistics::<u8>(
-            records,
-            &sent_by_key,
-            &member_names,
-            &mut per_recipient,
-            maximum_recipient_receipts,
-        ),
-        2 => recipient_latency_statistics::<u16>(
-            records,
-            &sent_by_key,
-            &member_names,
-            &mut per_recipient,
-            maximum_recipient_receipts,
-        ),
-        4 => recipient_latency_statistics::<u32>(
-            records,
-            &sent_by_key,
-            &member_names,
-            &mut per_recipient,
-            maximum_recipient_receipts,
-        ),
-        _ => recipient_latency_statistics::<u64>(
-            records,
-            &sent_by_key,
-            &member_names,
-            &mut per_recipient,
-            maximum_recipient_receipts,
-        ),
-    };
+    drop(arrivals);
+    drop(gap_streams);
+    drop(views);
+    let latency_us = individual_recipient_latency_statistics(
+        records,
+        &sent_by_key,
+        &recipient_receipt_counts,
+        &mut per_recipient,
+    );
 
     if let Some(reason) =
         missing.into_reason(|count, first| InvalidReason::MissingDeliveries { count, first })
@@ -3303,6 +3343,123 @@ mod coverage_tests {
             })
         );
         std::hint::black_box(views);
+    }
+
+    #[test]
+    fn individual_latency_widths_preserve_skewed_raw_and_measured_populations() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let template = records.receipts[0].clone();
+        records.receipts.clear();
+        let counts = [255_usize, 256, 65_535, 65_536];
+        assert_eq!(context.roster.len(), counts.len());
+        for ((recipient, _), count) in context.roster.iter().zip(counts) {
+            let mut receipt = template.clone();
+            receipt.recipient = recipient.as_str().into();
+            receipt.server_seq = 0;
+            receipt.epoch = u32::MAX;
+            receipt.received_us = u64::MAX;
+            records.receipts.extend(std::iter::repeat_n(receipt, count));
+        }
+        let summary = summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        let mut wide_peers = summary.per_recipient.clone();
+        let members = context
+            .roster
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let wide = recipient_latency_statistics::<u64>(
+            &records,
+            &SendIndex::new(&records.sent),
+            &members,
+            &mut wide_peers,
+            count_u64(records.receipts.len()),
+        );
+        assert_eq!(
+            summary.latency_us.samples,
+            counts.into_iter().map(count_u64).sum::<u64>()
+        );
+        for (peer, count) in summary.per_recipient.iter().zip(counts) {
+            assert_eq!(peer.latency_us.samples, count_u64(count));
+        }
+        assert_eq!(
+            serde_json::to_value(summary.latency_us).unwrap(),
+            serde_json::to_value(wide).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(summary.per_recipient).unwrap(),
+            serde_json::to_value(wide_peers).unwrap()
+        );
+        for (count, bytes) in [(255, 1), (256, 2), (65_535, 2), (65_536, 4), (u64::MAX, 8)] {
+            let histogram = RecipientLatency::new(count);
+            let actual = match histogram {
+                RecipientLatency::Byte(_) => 1,
+                RecipientLatency::Short(_) => 2,
+                RecipientLatency::Word(_) => 4,
+                RecipientLatency::Wide(_) => 8,
+            };
+            assert_eq!(actual, bytes, "raw receipt bound {count}");
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated skewed-recipient memory profile; run in a fresh process"]
+    fn generator_skewed_latency_memory_profile() {
+        let peers = std::env::var("CAPACITY_SKEW_PROBE_PEERS")
+            .unwrap_or_else(|_| "1000".into())
+            .parse::<usize>()
+            .unwrap();
+        assert!((1..=16000).contains(&peers));
+        let individual = std::env::var("CAPACITY_SKEW_PROBE_INDIVIDUAL").as_deref() == Ok("1");
+        let started = std::time::Instant::now();
+        let mut histograms: Vec<_> = (0..peers)
+            .map(|peer| {
+                RecipientLatency::new(if !individual || peer == 0 {
+                    65_536
+                } else {
+                    255
+                })
+            })
+            .collect();
+        for (peer, histogram) in histograms.iter_mut().enumerate() {
+            for sample in 0..if peer == 0 { 65_536 } else { 255 } {
+                histogram.record((sample % 255) * 4096);
+            }
+        }
+        let checksum: u64 = histograms
+            .iter()
+            .map(|histogram| {
+                let stats = histogram.stats();
+                stats.samples + stats.max_us + stats.p50_us + stats.p95_us + stats.p99_us
+            })
+            .sum();
+        let bucket_bytes: usize = histograms
+            .iter()
+            .map(|histogram| match histogram {
+                RecipientLatency::Byte(value) => value.histogram.distinct_values(),
+                RecipientLatency::Short(value) => value.histogram.distinct_values() * 2,
+                RecipientLatency::Word(value) => value.histogram.distinct_values() * 4,
+                RecipientLatency::Wide(value) => value.histogram.distinct_values() * 8,
+            })
+            .sum();
+        println!(
+            "SKEWED_LATENCY_PROFILE {}",
+            serde_json::json!({
+                "peers":peers,"individual":individual,"checksum":checksum,"bucket_bytes":bucket_bytes,
+                "rss_bytes":crate::diagnostics::resident_memory_bytes(std::process::id()),
+                "elapsed_us":started.elapsed().as_micros(),
+            })
+        );
+        std::hint::black_box(histograms);
     }
 
     #[test]

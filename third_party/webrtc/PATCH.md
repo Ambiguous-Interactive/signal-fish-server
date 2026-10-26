@@ -1,5 +1,12 @@
 # Signal Fish WebRTC wrapper patch
 
+`SctpTransport::association_stats` exposes the RTC association observations
+through the existing core lock for #1244. It returns no association after
+removal and preserves stale-handle errors. Native fragmented-packet controls
+separate SCTP ingress, reassembled messages, and held callback polling across
+both offer roles and fresh generations. Replacement qualification in #912
+must retain this diagnostic API or migrate it.
+
 Source: published `webrtc` 0.21.1, MIT/Apache-2.0.
 Upstream commit: `d658b5a803dd8dc389547450e245877310c9cbed`.
 Crates.io package checksum:
