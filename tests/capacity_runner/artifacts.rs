@@ -742,13 +742,104 @@ fn read_delivery_event(line: &[u8], path: &Path) -> Result<DeliveryEvent<String>
 /// Borrow ordinary JSON names from the current line. Escaped JSON names own
 /// their decoded value until the run-local pool shares it. The pool copies
 /// each distinct identity once and does not keep the line buffer alive.
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ReplayName<'a>(#[serde(borrow)] std::borrow::Cow<'a, str>);
 
 impl AsRef<str> for ReplayName<'_> {
     fn as_ref(&self) -> &str {
         self.0.as_ref()
     }
+}
+
+/// Decode canonical tagged rows without the enum's temporary field buffer.
+/// Extended or reordered rows keep the historical tagged decoder and fallback.
+fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, serde_json::Error> {
+    const SENT: u8 = 1;
+    const RECEIPT: u8 = 2;
+    const GAP: u8 = 4;
+
+    struct KnownFields<M> {
+        map: M,
+        kind: u8,
+    }
+
+    impl<'de, M: serde::de::MapAccess<'de>> serde::de::MapAccess<'de> for KnownFields<M> {
+        type Error = M::Error;
+
+        fn next_key_seed<K: serde::de::DeserializeSeed<'de>>(
+            &mut self,
+            seed: K,
+        ) -> Result<Option<K::Value>, Self::Error> {
+            let Some(key) = self.map.next_key::<ReplayName<'de>>()? else {
+                return Ok(None);
+            };
+            let compatible = match key.as_ref() {
+                "sender" | "epoch" => SENT | RECEIPT | GAP,
+                "recipient" => RECEIPT | GAP,
+                "room" | "intended_us" | "sent_us" | "phase" => SENT,
+                "seq" | "application_bytes" | "encoded_frame_body_bytes" => SENT | RECEIPT,
+                "server_seq" | "received_us" => RECEIPT,
+                "from_seq" | "to_seq" | "reason" => GAP,
+                _ => 0,
+            };
+            if compatible & self.kind == 0 {
+                return Err(serde::de::Error::custom("extended delivery event"));
+            }
+            seed.deserialize(serde::de::value::CowStrDeserializer::new(key.0))
+                .map(Some)
+        }
+
+        fn next_value_seed<V: serde::de::DeserializeSeed<'de>>(
+            &mut self,
+            seed: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.map.next_value_seed(seed)
+        }
+    }
+
+    struct Event;
+
+    impl<'de> serde::de::Visitor<'de> for Event {
+        type Value = DeliveryEvent<ReplayName<'de>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a delivery event with its tag first")
+        }
+
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
+            let key = map.next_key::<ReplayName<'de>>()?;
+            if key.as_ref().map(AsRef::as_ref) != Some("event_kind") {
+                return Err(serde::de::Error::custom("delivery tag is not first"));
+            }
+            let kind = map.next_value::<ReplayName<'de>>()?;
+            let selected = match kind.as_ref() {
+                "sent" => SENT,
+                "receipt" => RECEIPT,
+                "gap" => GAP,
+                _ => return Err(serde::de::Error::custom("other delivery event")),
+            };
+            let fields = serde::de::value::MapAccessDeserializer::new(KnownFields {
+                map,
+                kind: selected,
+            });
+            match selected {
+                SENT => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Sent),
+                RECEIPT => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Receipt),
+                _ => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Gap),
+            }
+        }
+    }
+
+    let direct = || {
+        let mut deserializer = serde_json::Deserializer::from_slice(line);
+        let event = serde::Deserializer::deserialize_map(&mut deserializer, Event)?;
+        deserializer.end()?;
+        Ok(event)
+    };
+    direct().or_else(|_: serde_json::Error| serde_json::from_slice(line))
 }
 
 fn append_delivery_event(
@@ -781,7 +872,7 @@ fn read_records_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<R
     let mut records = RunRecords::default();
     let mut receipt_names = crate::records::ReceiptNames::default();
     visit_jsonl_with_limits(BufReader::new(file), &path, limits, |line| {
-        if let Ok(event) = serde_json::from_slice::<DeliveryEvent<ReplayName<'_>>>(line) {
+        if let Ok(event) = decode_replay_event(line) {
             append_delivery_event(&mut records, &mut receipt_names, event);
         } else {
             // Keep historical last-key-wins decoding and precise error text.
@@ -866,6 +957,42 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    #[ignore = "isolated replay decoder profile; run in a fresh process"]
+    fn generator_replay_decoder_profile() {
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        let lines: Vec<_> = records
+            .events()
+            .filter(|event| matches!(event, crate::records::DeliveryEventRef::Receipt(_)))
+            .take(16)
+            .map(|event| serde_json::to_vec(&event).expect("profile receipt"))
+            .collect();
+        let count = 1_000_000;
+        let started = std::time::Instant::now();
+        let mut checksum = 0_u64;
+        for index in 0..count {
+            let line = std::hint::black_box(&lines[index % lines.len()]);
+            let event = decode_replay_event(line).expect("profile decode");
+            let DeliveryEvent::Receipt(event) = event else {
+                panic!("profile requires receipts")
+            };
+            checksum = checksum
+                .wrapping_add(event.seq)
+                .wrapping_add(event.sender.as_ref().len() as u64)
+                .wrapping_add(event.recipient.as_ref().len() as u64)
+                .wrapping_add(event.received_us);
+            std::hint::black_box(event);
+        }
+        println!(
+            "REPLAY_DECODER_PROFILE {}",
+            serde_json::json!({
+                "records": count, "checksum": checksum,
+                "elapsed_us": started.elapsed().as_micros(),
+            })
+        );
+    }
 
     #[test]
     fn replay_input_budgets_refuse_crossing_rows_before_visiting() {
@@ -1412,8 +1539,7 @@ mod tests {
                         .replace("未知", "\\u672a\\u77e5")
                         .into_bytes();
                 }
-                let borrowed: DeliveryEvent<ReplayName<'_>> =
-                    serde_json::from_slice(&line).expect("borrowed event");
+                let borrowed = decode_replay_event(&line).expect("borrowed event");
                 let names = match &borrowed {
                     DeliveryEvent::Sent(event) => vec![&event.sender],
                     DeliveryEvent::Receipt(event) => vec![&event.sender, &event.recipient],
@@ -1434,6 +1560,54 @@ mod tests {
                         .expect("pooled JSON"),
                     value
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn replay_direct_dispatch_preserves_historical_values_and_errors() {
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        let path = Path::new("fixture.jsonl");
+        for event in records.events() {
+            let canonical = serde_json::to_string(&event).expect("canonical event");
+            let mut cases = vec![canonical.clone()];
+            for extra in [
+                r#""extension":{"nested":[null,true,"鱼",1.5]}"#,
+                r#""extension":1e400"#,
+                r#""recipient":1e400"#,
+                r#""room":1e400"#,
+                r#""server_seq":1e400"#,
+                r#""reason":1e400"#,
+                r#""event_kind":"receipt""#,
+                r#""event_kind":"unknown""#,
+                r#""sender":"quote\"\\\n""#,
+                r#""seq":18446744073709551615"#,
+                r#""seq":-1"#,
+                r#""epoch":4294967296"#,
+                r#""received_us":null"#,
+            ] {
+                cases.push(format!(
+                    "{},{}{}",
+                    &canonical[..canonical.len() - 1],
+                    extra,
+                    "}"
+                ));
+            }
+            let sorted: Value = serde_json::from_str(&canonical).expect("canonical value");
+            cases.push(serde_json::to_string(&sorted).expect("reordered tag"));
+            cases.push(canonical.replace("event_kind", "event_kin\\u0064"));
+            cases.push(canonical.replace("receipt", "recei\\u0070t"));
+            cases.push(format!("{canonical} garbage"));
+            for line in cases {
+                let expected = read_delivery_event(line.as_bytes(), path)
+                    .map(|event| serde_json::to_value(event).expect("historical value"));
+                let actual = match decode_replay_event(line.as_bytes()) {
+                    Ok(event) => Ok(serde_json::to_value(event).expect("direct value")),
+                    Err(_) => read_delivery_event(line.as_bytes(), path)
+                        .map(|event| serde_json::to_value(event).expect("fallback value")),
+                };
+                assert_eq!(actual, expected, "artifact line: {line}");
             }
         }
     }
