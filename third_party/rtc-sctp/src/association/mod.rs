@@ -69,8 +69,13 @@ pub(crate) mod stats;
 pub(crate) mod stream;
 pub(crate) mod timer;
 
+const MAX_TSN_ADVANCE: u32 = (1 << 15) - 1;
+
 #[cfg(test)]
 mod association_test;
+
+#[cfg(test)]
+mod drain_state_test;
 
 /*
     DCEP releases wire storage without releasing application send capacity.
@@ -738,10 +743,11 @@ impl Association {
 
     /// Whether there is no longer any need to keep the association around
     ///
-    /// Closed associations become drained after a brief timeout to absorb any remaining in-flight
-    /// packets from the peer. All drained associations have been closed.
+    /// Retired associations become drained after the application reads or stops
+    /// accepted messages and takes any final packets with [`Self::poll_transmit`].
+    /// Live shutdown states and unstarted associations are not drained.
     pub fn is_drained(&self) -> bool {
-        self.state.is_drained()
+        self.retired && !self.has_readable_data() && self.control_queue.is_empty()
     }
 
     /// Look up whether we're the client or server of this Association
@@ -3671,11 +3677,6 @@ impl Association {
                     return (vec![], vec![]);
                 }
 
-                // RFC 3758 timed reliability: a message whose lifetime has run
-                // out must be abandoned even if it was never transmitted. Doing
-                // this here, ahead of the window checks and before a TSN is
-                // allocated, means there is no gap for the peer to reconcile and
-                // no ForwardTSN to send.
                 if self.pending_message_expired(c, now) {
                     match self
                         .pending_message_to_abandon()
@@ -3689,6 +3690,10 @@ impl Association {
                         }
                     }
                     continue;
+                }
+
+                if !self.can_assign_data_tsn() {
+                    break;
                 }
 
                 if self.inflight_queue.get_num_bytes() + data_len > self.cwnd as usize {
@@ -3715,7 +3720,10 @@ impl Association {
             }
 
             // the data sender can always have one DATA chunk in flight to the receiver
-            if chunks.is_empty() && self.earliest_outstanding_tsn().is_none() {
+            if chunks.is_empty()
+                && self.earliest_outstanding_tsn().is_none()
+                && self.can_assign_data_tsn()
+            {
                 // Send zero window probe
                 if let Some(c) = self.pending_queue.peek() {
                     let (beginning_fragment, unordered) = (c.beginning_fragment, c.unordered);
@@ -3888,6 +3896,12 @@ impl Association {
     }
 
     fn forward_tsn_boundary(&self) -> u32 {
+        let serial_boundary = self.cumulative_tsn_ack_point.wrapping_add(MAX_TSN_ADVANCE);
+        let boundary = if sna32gt(self.advanced_peer_tsn_ack_point, serial_boundary) {
+            serial_boundary
+        } else {
+            self.advanced_peer_tsn_ack_point
+        };
         self.reconfigs
             .values()
             .filter_map(|c| {
@@ -3897,7 +3911,7 @@ impl Association {
                     .downcast_ref::<ParamOutgoingResetRequest>()
                     .map(|p| p.sender_last_tsn)
             })
-            .fold(self.advanced_peer_tsn_ack_point, |current, reset| {
+            .fold(boundary, |current, reset| {
                 if sna32lt(reset, current) {
                     reset
                 } else {
@@ -3997,6 +4011,12 @@ impl Association {
         );
 
         fwd_tsn
+    }
+
+    /* An ordered SSN has only 16 bits. Neither DATA nor a skipped prefix may
+    outrun the peer's confirmed progress by half that sequence space. */
+    fn can_assign_data_tsn(&self) -> bool {
+        self.my_next_tsn.wrapping_sub(self.cumulative_tsn_ack_point) <= MAX_TSN_ADVANCE
     }
 
     /// Move the chunk peeked with self.pending_queue.peek() to the inflight_queue.

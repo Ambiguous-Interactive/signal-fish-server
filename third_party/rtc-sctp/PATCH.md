@@ -541,3 +541,29 @@ TSN wraparound, exact reliable successor bytes and send-buffer release.
 `transmission_selected=false` on an abandonment means no fragment was selected
 for send before retirement. A true value also covers acknowledged fragment
 prefixes; it does not prove packet emission or remote receipt.
+
+## Bounded ordered sequence progress
+
+Issue [#1271](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1271)
+repairs reliable successors lost after large ordered expiry backlogs. New DATA
+and each FORWARD TSN step stay within 32,767 TSNs of the peer's cumulative
+acknowledgment. This keeps ordered stream sequence comparisons below their
+16-bit half range. The zero-window probe uses the same limit. Retransmissions
+keep their assigned TSNs. Expired fragmented messages still retire as a whole;
+acknowledgments unlock further sequence progress without widening byte budgets.
+
+Replacement qualification in #912 must retain `expired_ordered_backlog` and
+`serial_window` controls beside the existing lifetime, reset and shutdown tests.
+These are native paired-wire controls. They do not establish the cause of the
+historical Godot #1244 prefix loss or qualify a remote network.
+
+## Public association drain readiness
+
+Issue [#1272](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1272)
+repairs the public `Association::is_drained` predicate. Live shutdown states are
+not drained. A retired association remains needed while accepted gameplay is
+unread or final control packets have not been handed to `poll_transmit`.
+Internal stream write refusal and reset suppression still use shutdown state.
+Replacement qualification must retain `drain_readiness` controls for admitted
+DATA, final reads/stops, abrupt closure and packet handoff. The public WebRTC
+wrapper uses abort and does not consume this association predicate.

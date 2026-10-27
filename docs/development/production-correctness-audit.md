@@ -10057,3 +10057,58 @@ All attempts remain under local `progress/session-564/`. Both 4.3 cohorts use
 CPUs 0/1, and the loaded cohort adds one busy worker per CPU. Other checks share
 the host; the baseline is not an isolated benchmark. No result attributes the
 older #1244 reliable gap, #1264 event, or #458 binary, or qualifies remote networks.
+
+### Large ordered expiry backlogs and public drain readiness (#1271, #1272)
+
+At main `e8a2d969`, a paired native history queues 32,770 one-byte ordered
+Timed(1) messages and a reliable successor on the same stream. At +2 ms, the
+expired prefix consumes more than half the 16-bit SSN space in one poll. The
+receiver acknowledges the successor but cannot read it. A 32,768-message control
+passes. The red regression fails at the exact successor-read assertion.
+
+The #1271 repair bounds each FORWARD TSN step and new DATA assignment to 32,767
+TSNs beyond cumulative acknowledgment. The normal sender and zero-window probe
+both enforce the fence. Expired fragmented messages still retire atomically;
+the peer acknowledges bounded forward reports before farther DATA can proceed.
+This is a conservative association-wide sequence limit, including unordered
+DATA. It does not change byte budgets or retransmission policies. It adds a
+constant-time check to selection; capped forward reports use the existing
+retained-prefix map reconstruction. This is correctness evidence, not a measured
+throughput improvement.
+
+The paired backlog matrix covers the half-range boundary, full SSN wrap, TSN
+wrap, lost first FORWARD TSN with actual timeout recovery, a stale repeated
+report, and zero-window probing. Separate controls check a fragmented expired
+message spanning more than one report and exact ordered live gameplay across
+the new fence. They require exact successor bytes, no extra receipt, exact
+abandonment totals and released send credit. These low-level histories change
+one stream's reliability policy through the public SCTP API. They do not claim
+that the Godot Engine changes a channel policy after negotiation.
+
+A separate public API regression confirms #1272. `Association::is_drained`
+returned true in all live shutdown states and false in Closed. All four new
+drain controls fail on the old predicate. The repair separates internal
+shutdown classification from public retirement. It preserves stream write
+refusal and reset suppression while requiring terminal retirement, final
+application read/stop and final packet handoff before reporting drained.
+Paired controls retain exact admitted gameplay through shutdown, unread closed
+tails, read/stop cleanup, abrupt closure and fresh/live associations.
+
+The native WebRTC wrapper does not call the public association drain predicate.
+The deterministic defect does not establish the cause of #1120 or the original
+issue #1184 history. The new sequence defect likewise does not attribute the
+historical Godot #1244 reliable-prefix gap or #1264 terminal event. The broader
+issues #1145, #1184, #1240, #1244 and #826 remain open. Replacement-package qualification
+under #912 must retain the new serial-window, backlog and drain selectors.
+
+The external Rust manifest at `da8f2d16` and .NET project at `e467c871` do not
+consume this native SCTP stack. Their wire protocol and APIs are unchanged.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks native reference-stack adoption and qualification. These paired native
+controls do not qualify Godot runtime, service sessions or remote networks.
+
+Local final controls pass: the four-cell backlog matrix, two serial-window
+controls, 73 selected shutdown/expiry/drain tests, and the native Engine startup,
+lifetime-expiry and active-consumer recovery controls. Strict root and native
+all-target/all-feature lint pass. Independent adversarial review found no
+blocking issue. These scoped results leave full hosted qualification to CI.

@@ -337,7 +337,7 @@ impl Stream<'_> {
     /// Whether this stream can currently accept more data.
     /// Returns false once graceful association shutdown starts.
     pub fn is_writable(&self) -> bool {
-        if self.association.is_drained() {
+        if self.association.state().is_shutting_down() {
             return false;
         }
         if let Some(s) = self
@@ -387,7 +387,7 @@ impl Stream<'_> {
                         RecvSendState::Readable | RecvSendState::ReadWritable
                     )
             });
-        if reset && !self.association.is_drained() {
+        if reset && !self.association.state().is_shutting_down() {
             self.association
                 .send_reset_request(now, self.stream_identifier)?;
         }

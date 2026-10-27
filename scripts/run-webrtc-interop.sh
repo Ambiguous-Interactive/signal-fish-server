@@ -171,6 +171,12 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.tom
     --target-dir "${CLIENT_DIR}/target" --lib outbound_evidence
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib expired_ordered_prefix
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib serial_window
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib expired_ordered_backlog
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib drain_readiness
 
 echo "==> Verifying graceful SCTP shutdown and final packet recovery"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
