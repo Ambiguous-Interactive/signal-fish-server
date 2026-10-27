@@ -9719,3 +9719,50 @@ implementation. Godot `92e3b545` uses separate Godot/browser channels. None requ
 a wire or API migration. [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
 tracks the native reference-peer assessment. The new profile controls use two
 native Engines; they do not establish new Godot runtime or remote-network results.
+
+### Paired deferred-reset sequence progress during shutdown (#1184, #1145)
+
+The new `graceful_shutdown_cross_stream_reset_reaches_forwarded_future_sequence`
+control reaches the #1184 ordering through two real association packet histories.
+One endpoint retains old unread data on stream 1. Its outgoing reset completes,
+but the reciprocal incoming reset waits for that read. A stream 2 reset carries
+the reciprocal request's response sequence and releases the sender's stream 1
+reset fence. The sender then reuses stream 1, expires sequence 0, and transmits
+FORWARD TSN before the old application read completes.
+
+The receiver starts graceful shutdown, reads the exact old body, and accepts
+reliable sequence 1. Both associations close before the final exact body is read.
+The control requires write refusal, cleared reset markers, no remaining timers,
+and one endpoint drain event per association. Removing the #1184 marker retention
+leaves accepted sequence 1 unreadable after expired sequence 0. The final control
+fails its successor-readability assertion before terminal closure.
+
+The cross-stream acknowledgment matches
+[RFC 6525 section 5.2.2](https://www.rfc-editor.org/rfc/rfc6525.html#section-5.2.2).
+The application-unread reset delay is this implementation's behavior. This proves
+paired implementation reachability; it does not establish independent-peer
+conformance or explain the historical #1120 close timeout. Those limits keep #1184
+open. The shipped WebRTC wrapper uses association abort, not this graceful API.
+
+### Godot profile lifetime expiry beside reliable snapshots (#1240, #1244)
+
+The new `godot_lifetime_expiry_releases_credit_without_losing_reliable_prefix`
+control covers both offer roles and both finite-lifetime Godot labels. It holds
+the receiver reactor and drops one encrypted DTLS application transmit. The
+socket observation does not identify its SCTP chunks. The control requires an
+observed retransmission timeout and release of a fragmented 4 KiB finite-lifetime
+send without peer output. All 16 KiB of reliable prefix data stays outstanding until
+the receiver resumes, then arrives as four exact ordered bodies.
+
+A later reliable barrier arrives exactly. The finite channel stays open and
+releases all credit. A fresh finite packet may arrive or expire under its 1 ms
+lifetime; any observed body must match exactly, with no duplicate or stale body.
+Disabling the Godot lifetime makes the no-peer-acknowledgment expiry check fail.
+
+These are two native reference Engines. No new Godot runtime result, full service
+qualification, or historical #1244 cause is claimed. Godot
+[#355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+and [#433](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/433)
+retain runtime assessment. Rust `da8f2d16` supplies a separate peer backend;
+.NET `e467c871` has no peer-stack dependency; Godot `2cb9ac39` uses Godot/browser
+channels. Server messages and SDK migration requirements remain unchanged.

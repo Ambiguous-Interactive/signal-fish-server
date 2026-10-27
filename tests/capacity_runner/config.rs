@@ -305,7 +305,7 @@ pub struct RunConfig {
         skip_serializing_if = "planned_record_budget_is_default"
     )]
     pub planned_record_budget: u64,
-    /// Sum of configured application payload bytes for one in-flight send
+    /// Sum of configured application payload bytes for one retained payload
     /// per sender. This admission budget excludes serialization copies,
     /// socket queues, server buffers, and retained validation records.
     #[serde(

@@ -6583,3 +6583,34 @@ The unchanged release server SHA-256 is
 Registrations, source snapshots, all raw lag reports, process and worker samples,
 manifest, ledger, replay result, and audits remain in ignored
 `progress/session-557/two-room-candidate/`. Earlier invalid attempts remain invalid.
+
+## Reuse outgoing capacity payload storage (#775, #636)
+
+The live sender now retains one canonical application payload per sender. It
+updates sequence and ASCII padding in place and still uses the protocol
+serializer. Application-byte accounting measures the actual serialized frame;
+it does not assume the configured target size. The sender-payload admission
+budget still covers one application payload per sender, excluding serialization
+copies, socket queues, server buffers, and validation records.
+
+A same-binary release component control encodes one million 96-byte reliable
+JSON frames through the old path and the reused path. Both checksums are
+228,000,000. `libmemusage` records 9,000,629 versus 2,000,629 malloc calls and
+864,207,175 versus 152,096,065 malloc bytes. Both paths record 1,000,031 realloc
+calls and 128,006,523 realloc bytes. Reuse removes exactly seven million malloc
+calls and 712,111,110 malloc bytes in this component. These are allocation-churn
+measurements, not peak RSS or whole-generator throughput results.
+
+The component binary SHA-256 is
+`25ee1ca640012bc65b32668332e3c4bd319f1245bda6f802bda7e87d90a966ed`.
+The temporary profiling test is not shipped. Its source, binary, hashes, raw
+allocation logs, and results remain in ignored
+`progress/session-559/capacity-ledger/`.
+
+Differential controls preserve exact canonical frames across escaped and Unicode
+sender names, decimal sequence boundaries through `u64::MAX`, backward sequence
+changes, delivery classes, keys, JSON and opaque payloads, and payload sizes from
+96 bytes to 16 KiB. A body-extension control requires actual byte accounting even
+when the serialized body exceeds the target. Live exact-size/replay, opaque,
+reconnect, and stopped-send controls pass. This does not attribute historical
+stalls (#1009, #1127) to allocation work. Previous invalid runs remain invalid.

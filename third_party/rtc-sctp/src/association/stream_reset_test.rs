@@ -1085,6 +1085,161 @@ fn graceful_shutdown_reset_preserves_forwarded_future_sequence_without_data() ->
     Ok(())
 }
 
+// Issue #1184: another SID's reset can release the reciprocal-reset fence.
+#[test]
+fn graceful_shutdown_cross_stream_reset_reaches_forwarded_future_sequence() -> Result<()> {
+    let (mut sender, mut receiver) = reset_pair();
+    let now = Instant::now();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    receiver.ack_mode = AckMode::NoDelay;
+    receiver.open_stream(2, ppi)?;
+    let old = Bytes::from_static(b"old unread gameplay");
+    sender.stream(1)?.write_sctp(now, &old, ppi)?;
+    for raw in sender.gather_outbound(now).0 {
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+
+    receiver.send_reset_request(now, 1)?;
+    for raw in receiver.gather_outbound(now).0 {
+        sender.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    for raw in sender.gather_outbound(now).0 {
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert!(receiver.streams.get(&1).unwrap().outgoing_reset_complete);
+    assert!(!receiver.streams.get(&1).unwrap().incoming_reset_complete);
+    assert_eq!(receiver.reconfig_requests.len(), 1);
+    assert_eq!(sender.reconfigs.len(), 1);
+    let reciprocal_rsn = *sender.reconfigs.keys().next().unwrap();
+
+    receiver.send_reset_request(now, 2)?;
+    let independent_reset = receiver.gather_outbound(now).0;
+    assert!(independent_reset.iter().any(|raw| {
+        Packet::unmarshal(raw)
+            .unwrap()
+            .chunks
+            .iter()
+            .filter_map(|chunk| chunk.as_any().downcast_ref::<ChunkReconfig>())
+            .filter_map(|chunk| chunk.param_a.as_ref())
+            .filter_map(|param| param.as_any().downcast_ref::<ParamOutgoingResetRequest>())
+            .any(|reset| {
+                reset.stream_identifiers == [2]
+                    && reset.reconfig_response_sequence_number == reciprocal_rsn
+            })
+    }));
+    for raw in independent_reset {
+        sender.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    assert!(!sender.streams.contains_key(&1));
+    sender
+        .open_stream(1, ppi)?
+        .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+    sender
+        .stream(1)?
+        .write_sctp(now, &Bytes::from_static(b"lost future zero"), ppi)?;
+    let dropped = sender.gather_outbound(now).0;
+    let lost = transmitted_data(&dropped);
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].stream_sequence_number, 0);
+    for raw in dropped {
+        let packet = Packet::unmarshal(&raw)?;
+        if !packet
+            .chunks
+            .iter()
+            .any(|chunk| chunk.as_any().is::<ChunkPayloadData>())
+        {
+            receiver.handle_inbound(packet, now)?;
+        }
+    }
+    let later = now + Duration::from_secs(2);
+    sender.handle_timeout(later);
+    let retry = sender.gather_outbound(later).0;
+    let forward = retry
+        .iter()
+        .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+        .find_map(|chunk| chunk.as_any().downcast_ref::<ChunkForwardTsn>().cloned())
+        .expect("the actual sender must skip expired future SSN 0");
+    assert_eq!(forward.new_cumulative_tsn, lost[0].tsn);
+    assert_eq!(forward.streams.len(), 1);
+    assert_eq!(forward.streams[0].identifier, 1);
+    assert_eq!(forward.streams[0].sequence, 0);
+    for raw in retry {
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+    }
+    assert_eq!(
+        receiver.streams.get(&1).unwrap().deferred_reset_next_ssn,
+        Some(1)
+    );
+    receiver.shutdown()?;
+    assert_eq!(receiver.state(), AssociationState::ShutdownSent);
+    assert_eq!(
+        receiver
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(100)?
+            .freeze(),
+        old
+    );
+    assert!(!receiver.streams.contains_key(&1));
+
+    let next = Bytes::from_static(b"future one survives graceful drain");
+    sender
+        .stream(1)?
+        .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+    sender.stream(1)?.write_sctp(later, &next, ppi)?;
+    let successor = sender.gather_outbound(later).0;
+    let successor_data = transmitted_data(&successor);
+    assert_eq!(successor_data.len(), 1);
+    assert_eq!(successor_data[0].stream_sequence_number, 1);
+    for raw in successor {
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+    }
+    assert_eq!(receiver.peer_last_tsn, successor_data[0].tsn);
+    assert!(
+        receiver.streams[&1].reassembly_queue.is_readable(),
+        "accepted future SSN 1 must be readable after expired SSN 0"
+    );
+    for _ in 0..8 {
+        for raw in receiver.gather_outbound(later).0 {
+            sender.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+        }
+        for raw in sender.gather_outbound(later).0 {
+            receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+        }
+    }
+    assert_eq!(receiver.state(), AssociationState::Closed);
+    assert_eq!(sender.state(), AssociationState::Closed);
+    assert!(receiver.poll_endpoint_event().is_none());
+    assert!(!receiver.stream(1)?.is_writable());
+    assert_eq!(
+        receiver.stream(1)?.write_sctp(later, &next, ppi),
+        Err(Error::ErrStreamClosed)
+    );
+    assert_eq!(
+        receiver
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(100)?
+            .freeze(),
+        next
+    );
+    for endpoint in [&mut sender, &mut receiver] {
+        assert!(endpoint.streams.is_empty());
+        assert!(endpoint.reset_ssn_markers.is_empty());
+        assert!(endpoint.poll_timeout().is_none());
+        assert!(
+            endpoint
+                .poll_endpoint_event()
+                .expect("one terminal endpoint event")
+                .is_drained()
+        );
+        assert!(endpoint.poll_endpoint_event().is_none());
+    }
+    Ok(())
+}
+
 #[test]
 fn stream_reset_pending_old_drain_forwards_future_ordered_queue() -> Result<()> {
     for future_id in [1, 2] {
