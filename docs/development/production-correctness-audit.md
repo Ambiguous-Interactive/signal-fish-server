@@ -9654,8 +9654,8 @@ bytes and sequences, final credits, mixed modes, selected-packet retirement,
 required closure, same-room rejoin, and the original receipt deadlines.
 
 Six final local pairings pass: official Godot 4.7.2 native/Web and Godot 4.3 native,
-both initial offer roles, on Linux ARM64 with webrtc-native 1.2.2-stable and
-Chromium 154. All 3,072 required reliable snapshot receipts pass. The 12 physical
+both initial offer roles, on Linux ARM64 with Chromium 156.0.8078.4.
+All 3,072 required reliable snapshot receipts pass. The 12 physical
 generations retain all 24 injected drops, each 1,101-1,141 UDP payload bytes.
 At reliable snapshot 127, native SCTP samples report one or two fast
 retransmissions per generation. Snapshot bodies remain 1 KiB, with 32 outstanding
