@@ -815,6 +815,18 @@ async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_r
                 .await
                 .expect("published receipt counters settle");
                 assert_eq!(
+                    snapshot["receive_rejection"],
+                    if release_one {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!(if packet_bytes == 8192 {
+                            "pending_bytes"
+                        } else {
+                            "pending_messages"
+                        })
+                    }
+                );
+                assert_eq!(
                     snapshot["channels"][RELIABLE_LABEL]["receipts"],
                     serde_json::json!({
                         "raw": retained_packets + 1, "admitted": admitted,
@@ -896,6 +908,193 @@ async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_r
                 }
                 println!("GODOT_RECEIVE_CREDIT receiver_offers={receiver_offers} bytes={packet_bytes} retained={retained_packets} release_one={release_one} admitted={admitted} rejected={}", usize::from(!release_one));
             }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_links() {
+    for receiver_offers in [false, true] {
+        for (packet_bytes, admitted_packets, reason) in [
+            (4096, 256, "pending_messages"),
+            (8192, 128, "pending_bytes"),
+        ] {
+            let mut pair = unconnected_negotiated_pair();
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            assert_eq!(
+                pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp_type,
+                if receiver_offers {
+                    rtc::peer_connection::sdp::RTCSdpType::Offer
+                } else {
+                    rtc::peer_connection::sdp::RTCSdpType::Answer
+                },
+                "the receiver keeps its selected offer role"
+            );
+            let peer = pair.sender_id;
+            let link = pair.receiver.peers.get_mut(&peer).unwrap();
+            for task in &link.channel_tasks {
+                task.abort();
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let generation = link.generation;
+            let admission = link.receive_admission.clone();
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            let mut payload = vec![0xff; packet_bytes];
+            tokio::time::timeout(Duration::from_secs(15), async {
+                for sequence in 0u32..2048 {
+                    payload[..4].copy_from_slice(&sequence.to_be_bytes());
+                    channel.send(payload.as_slice().into()).await.unwrap();
+                }
+                loop {
+                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                    if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+                        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
+                        assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+                        assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+                        println!("GODOT_ENGINE_HELD receiver_offers={receiver_offers} packet_bytes={packet_bytes} snapshot={snapshot}");
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("held callbacks exhaust actual SCTP receive credit");
+            let resumed = spawn_channel_event_loop(
+                &pair.receiver.runtime,
+                &pair.receiver.events,
+                peer,
+                generation,
+                RELIABLE_LABEL.into(),
+                pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
+                admission,
+            );
+            pair.receiver
+                .peers
+                .get_mut(&peer)
+                .unwrap()
+                .channel_tasks
+                .push(resumed);
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while pair.receiver.diagnostic_snapshot(peer)["receive_rejection"] != reason {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("held application events reach the unchanged receive limit");
+            let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            assert_eq!(
+                snapshot["receive_budget"]["pending_messages"],
+                admitted_packets
+            );
+            assert_eq!(snapshot["receive_budget"]["pending_bytes"], 1024 * 1024);
+            assert_eq!(
+                snapshot["channels"][RELIABLE_LABEL]["receipts"],
+                serde_json::json!({
+                    "raw": admitted_packets + 1, "admitted": admitted_packets, "rejected": 1, "discarded": 0,
+                })
+            );
+            let mut retained = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if !pair.receiver.is_current_event(&event) {
+                        continue;
+                    }
+                    match event {
+                        event @ EngineEvent::ChannelBinaryMessage { .. } => {
+                            let EngineEvent::ChannelBinaryMessage { label, data, .. } = &event
+                            else {
+                                unreachable!()
+                            };
+                            payload[..4].copy_from_slice(
+                                &u32::try_from(retained.len()).unwrap().to_be_bytes(),
+                            );
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(
+                                data, &payload,
+                                "no reliable prefix may be silently skipped"
+                            );
+                            retained.push(event);
+                        }
+                        EngineEvent::ChannelReceiveRejected { label, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(retained.len(), admitted_packets);
+                            break;
+                        }
+                        EngineEvent::ChannelClosed { label, .. } => {
+                            panic!("closure cannot replace the limit verdict: {label}; {snapshot}")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            for label in [RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL] {
+                assert!(pair.receiver.send_channel(peer, label).await.is_none());
+            }
+            println!("GODOT_ENGINE_REJECTION receiver_offers={receiver_offers} packet_bytes={packet_bytes} sender_debt={} snapshot={snapshot}", channel.outstanding_bytes().await.unwrap());
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            assert_eq!(
+                pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp_type,
+                if receiver_offers {
+                    rtc::peer_connection::sdp::RTCSdpType::Offer
+                } else {
+                    rtc::peer_connection::sdp::RTCSdpType::Answer
+                },
+                "the receiver keeps its selected offer role"
+            );
+            assert_ne!(pair.receiver.peers[&peer].generation, generation);
+            assert!(retained
+                .iter()
+                .all(|event| !pair.receiver.is_current_event(event)));
+            let fresh = pair.receiver.diagnostic_snapshot(peer);
+            assert!(fresh["receive_rejection"].is_null());
+            assert_eq!(
+                fresh["receive_budget"]["pending_messages"],
+                admitted_packets
+            );
+            assert_eq!(fresh["receive_budget"]["pending_bytes"], 1024 * 1024);
+            drop(retained);
+            let fresh = pair.receiver.diagnostic_snapshot(peer);
+            assert_eq!(fresh["receive_budget"]["pending_messages"], 0);
+            assert_eq!(fresh["receive_budget"]["pending_bytes"], 0);
+            exchange(&mut pair).await;
+            pair.cleanup().await;
         }
     }
 }

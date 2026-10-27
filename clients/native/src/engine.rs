@@ -31,7 +31,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use crate::deadline::Deadline;
@@ -120,17 +120,40 @@ impl Default for MessageQueueBudget {
 }
 
 impl MessageQueueBudget {
-    fn reserve(&self, bytes: usize) -> Option<MessageQueuePermit> {
-        let message = self.messages.clone().try_acquire_owned().ok()?;
+    fn reserve(&self, bytes: usize) -> Result<MessageQueuePermit, ReceiveRejection> {
+        let message = self
+            .messages
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ReceiveRejection::PendingMessages)?;
         let bytes = self
             .bytes
             .clone()
-            .try_acquire_many_owned(u32::try_from(bytes).ok()?)
-            .ok()?;
-        Some(MessageQueuePermit {
+            .try_acquire_many_owned(
+                u32::try_from(bytes).map_err(|_| ReceiveRejection::MessageBytes)?,
+            )
+            .map_err(|_| ReceiveRejection::PendingBytes)?;
+        Ok(MessageQueuePermit {
             _message: message,
             _bytes: bytes,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiveRejection {
+    MessageBytes,
+    PendingMessages,
+    PendingBytes,
+}
+
+impl ReceiveRejection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MessageBytes => "message_bytes",
+            Self::PendingMessages => "pending_messages",
+            Self::PendingBytes => "pending_bytes",
+        }
     }
 }
 
@@ -184,6 +207,7 @@ struct ChannelReceiveAdmission {
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
     rejected: Mutex<bool>,
+    rejection_reason: OnceLock<ReceiveRejection>,
     terminal: AtomicBool,
 }
 
@@ -267,20 +291,23 @@ impl ChannelReceiveAdmission {
         }
     }
 
-    fn reserve_message(&self, bytes: usize) -> Option<MessageQueuePermit> {
+    fn reserve_message(&self, bytes: usize) -> Result<MessageQueuePermit, ReceiveRejection> {
         if bytes > MAX_CHANNEL_MESSAGE_BYTES {
-            return None;
+            return Err(ReceiveRejection::MessageBytes);
         }
         self.budget.reserve(bytes)
     }
 
-    fn decode_and_reserve(&self, data: &[u8]) -> Option<(String, MessageQueuePermit)> {
+    fn decode_and_reserve(
+        &self,
+        data: &[u8],
+    ) -> Result<(String, MessageQueuePermit), ReceiveRejection> {
         if data.len() > MAX_CHANNEL_MESSAGE_BYTES {
-            return None;
+            return Err(ReceiveRejection::MessageBytes);
         }
         let text = String::from_utf8_lossy(data);
         let permit = self.reserve_message(text.len())?;
-        Some((text.into_owned(), permit))
+        Ok((text.into_owned(), permit))
     }
 }
 
@@ -718,6 +745,7 @@ impl Engine {
             channels: channel_admission.clone(),
             closed_labels: AtomicU8::new(0),
             rejected: Mutex::new(false),
+            rejection_reason: OnceLock::new(),
             terminal: AtomicBool::new(false),
         });
         let handler = Arc::new(PeerHandler {
@@ -1068,6 +1096,9 @@ impl Engine {
     /// waiting on the driver. Returns null for an unknown peer; otherwise it
     /// includes the generation, per-label registration, observed opens, and
     /// raw/admitted/rejected/discarded receipt counts.
+    /// Receive rejection identifies the first failed limit. Budget counts span
+    /// the Engine, including retained events from retired links, and are sampled
+    /// separately. They are current counts, not a frozen rejection-time sample.
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
@@ -1092,6 +1123,15 @@ impl Engine {
             "remote_description_set": link.remote_description_set,
             "remote_candidate_count": link.remote_candidate_count,
             "pending_remote_candidates": link.pending_candidates.len(),
+            "receive_rejection": link.receive_admission.rejection_reason.get().map(|reason| reason.as_str()),
+            "receive_budget": {
+                "scope": "engine",
+                "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
+                "pending_bytes": MAX_PENDING_CHANNEL_BYTES.saturating_sub(self.message_budget.bytes.available_permits()),
+                "max_pending_messages": MAX_PENDING_CHANNEL_MESSAGES,
+                "max_pending_bytes": MAX_PENDING_CHANNEL_BYTES,
+                "max_message_bytes": MAX_CHANNEL_MESSAGE_BYTES,
+            },
             "channels": channels,
         })
     }
@@ -1809,20 +1849,30 @@ fn spawn_channel_event_loop(
                             .decode_and_reserve(&message.data)
                             .map(|(text, permit)| (Some(text), permit))
                     };
-                    let Some((text, queue_permit)) = decoded else {
-                        if let Some(receipts) = receipts {
-                            ChannelReceipts::count(&receipts.rejected);
+                    let (text, queue_permit) = match decoded {
+                        Ok(decoded) => decoded,
+                        Err(reason) => {
+                            if let Some(receipts) = receipts {
+                                ChannelReceipts::count(&receipts.rejected);
+                            }
+                            *rejected = true;
+                            let _ = admission.rejection_reason.set(reason);
+                            admission.terminal.store(true, Ordering::Relaxed);
+                            tracing::warn!(%peer, generation, %label,
+                                reason = reason.as_str(),
+                                message_bytes = message.data.len(),
+                                pending_messages = MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(admission.budget.messages.available_permits()),
+                                pending_bytes = MAX_PENDING_CHANNEL_BYTES.saturating_sub(admission.budget.bytes.available_permits()),
+                                "data-channel receive limit reached");
+                            let _ = events.send(EngineEvent::ChannelReceiveRejected {
+                                peer,
+                                generation,
+                                label: label.clone(),
+                            });
+                            drop(rejected);
+                            let _ = channel.close().await;
+                            return;
                         }
-                        *rejected = true;
-                        admission.terminal.store(true, Ordering::Relaxed);
-                        let _ = events.send(EngineEvent::ChannelReceiveRejected {
-                            peer,
-                            generation,
-                            label: label.clone(),
-                        });
-                        drop(rejected);
-                        let _ = channel.close().await;
-                        return;
                     };
                     let event = match text {
                         Some(text) => EngineEvent::ChannelMessage {

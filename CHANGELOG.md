@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce relay queue scan work when batching is enabled (#1155).
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
+- Report the first native reference-client receive-limit failure and shared pending gameplay (#1264).
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
 - Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
   (#636, #775).

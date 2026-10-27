@@ -196,19 +196,28 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
         channels: Arc::new(Mutex::new(RequiredChannelAdmission::default())),
         closed_labels: AtomicU8::new(0),
         rejected: Mutex::new(false),
+        rejection_reason: OnceLock::new(),
         terminal: AtomicBool::new(false),
     });
     // The default SCTP message cap prevents live raw-oversize delivery.
-    assert!(links[0]
-        .decode_and_reserve(&vec![b'x'; 64 * 1024 + 1])
-        .is_none());
+    assert!(matches!(
+        links[0].decode_and_reserve(&vec![b'x'; 64 * 1024 + 1]),
+        Err(ReceiveRejection::MessageBytes)
+    ));
+    assert!(matches!(
+        links[0].decode_and_reserve(&vec![0xff; 32 * 1024]),
+        Err(ReceiveRejection::MessageBytes)
+    ));
     let mut held = Vec::new();
     for index in 0..256 {
         // Empty messages still occupy one count slot across both peer links.
         held.push(links[index % 2].decode_and_reserve(b"").unwrap());
     }
     for link in &links {
-        assert!(link.decode_and_reserve(b"").is_none());
+        assert!(matches!(
+            link.decode_and_reserve(b""),
+            Err(ReceiveRejection::PendingMessages)
+        ));
     }
     assert_eq!(engine.message_budget.bytes.available_permits(), 1024 * 1024);
     drop(held);
@@ -219,7 +228,10 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
         .map(|index| links[index % 2].decode_and_reserve(&data).unwrap())
         .collect();
     for link in &links {
-        assert!(link.decode_and_reserve(b"x").is_none());
+        assert!(matches!(
+            link.decode_and_reserve(b"x"),
+            Err(ReceiveRejection::PendingBytes)
+        ));
     }
     assert_eq!(
         engine.message_budget.messages.available_permits(),
@@ -599,6 +611,14 @@ async fn flood_until_rejected(
         );
     }
     let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+    let expected_reason = if binary && bytes * 3 > MAX_CHANNEL_MESSAGE_BYTES {
+        "message_bytes"
+    } else if snapshot["receive_budget"]["pending_messages"] == MAX_PENDING_CHANNEL_MESSAGES {
+        "pending_messages"
+    } else {
+        "pending_bytes"
+    };
+    assert_eq!(snapshot["receive_rejection"], expected_reason);
     assert_eq!(
         snapshot["channels"][RELIABLE_LABEL]["receipts"],
         serde_json::json!({
