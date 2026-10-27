@@ -2033,6 +2033,46 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
 // catch each contract violation with its exact, named reason.
 // ---------------------------------------------------------------------------
 
+#[test]
+fn borrowed_ledger_fields_keep_exact_identity_without_copying() {
+    for data in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!({"ledger_sender": "r0p0"}),
+        serde_json::json!({"ledger_sender": 4, "seq": 0}),
+        serde_json::json!({"ledger_sender": "r0p0", "seq": -1}),
+        serde_json::json!({"ledger_sender": "r0p0", "seq": 1.5}),
+        serde_json::json!({"ledger_sender": "r0p0", "seq": "1"}),
+        serde_json::json!({"ledger_sender": "", "seq": 0}),
+        serde_json::json!({"ledger_sender": "r0p0", "seq": u64::MAX}),
+        serde_json::json!({"ledger_sender": "未知\"\\\n", "seq": 1, "padding": null}),
+    ] {
+        let expected = (|| {
+            let sender = data.get("ledger_sender")?.as_str()?.to_string();
+            let seq = data.get("seq")?.as_u64()?;
+            Some((sender, seq))
+        })();
+        let borrowed = websocket_test_helpers::delivery_ledger::extract_borrowed(&data);
+        assert_eq!(
+            borrowed.map(|(sender, seq)| (sender.to_string(), seq)),
+            expected,
+            "{data}"
+        );
+        assert_eq!(
+            websocket_test_helpers::delivery_ledger::extract(&data),
+            expected,
+            "owned extraction: {data}"
+        );
+        if let Some((sender, _)) = borrowed {
+            assert!(std::ptr::eq(
+                sender,
+                data["ledger_sender"].as_str().expect("source identity")
+            ));
+        }
+    }
+}
+
 /// Profile real event collection and oracle scratch in a fresh process.
 /// This synthetic complete workload measures the generator, not the server.
 /// CAPACITY_MEMORY_PROBE_WRITE_DIR writes fixtures outside measured replay processes.

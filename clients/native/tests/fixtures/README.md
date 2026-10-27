@@ -60,6 +60,14 @@ flowing. `udp-loss.json` records original and observed endpoints, forwarded and
 dropped totals, each dropped datagram's size, position, and monotonic time, and
 relay errors.
 The wrapper requires two generations and the exact drop budget in each direction.
+Add `--reorders-per-direction 1` to hold the next large application datagram
+until a later large application datagram from that seat arrives. The relay sends
+the later datagram first, then releases the held bytes. Small application packets,
+STUN, and handshake traffic continue to flow. Each reorder record retains both
+receive positions, byte counts, and hold/release times. The held datagram is
+released after one second if no later large datagram arrives; that path records
+an error and cannot pass. Each generation must meet both direction budgets with
+no held tail.
 The normal driver still requires every reliable snapshot, credits, exact modes,
 selected-packet retirement, required-channel closure, and fresh-link recovery.
 
@@ -83,6 +91,7 @@ Run the local socket controls with:
 python -m unittest discover -s clients/native/tests/fixtures -p 'test_webrtc_loss_control.py'
 ```
 
-This is a local loss control. It does not identify the encrypted SCTP chunk in
-a dropped datagram or establish the cause of the historical Godot 4.3 prefix loss.
+This is a local loss and reordering control. It does not identify the encrypted
+SCTP chunk in a dropped or reordered datagram. It does not establish the cause of
+the historical Godot 4.3 prefix loss.
 It does not qualify remote networks or repaired Godot packet lifetimes.

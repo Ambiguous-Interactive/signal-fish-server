@@ -6359,3 +6359,43 @@ All evidence remains in `progress/session-555/release-long-worker/`.
 Neither attempt qualifies the full planned ten-minute cell. The physical stall
 cause, task-level scheduling evidence, and whole-workload memory acceptance remain
 open in #1009/#775.
+
+## Borrow capacity receipt identities (#775, #636)
+
+The capacity receiver previously copied `ledger_sender` from each parsed JSON
+value, compared it with the shared sender registry, then dropped the copy. It
+now borrows that field for the comparison. Recorded receipts still retain the
+registry's shared identity. The owned ledger helper keeps its existing API.
+The detector preserves unknown senders, malformed identities, incarnation
+lookup, sequence limits, raw events, and exact replay.
+
+A focused table compares the borrowed reader with the original algorithm and
+checks that valid names point into the source value. Cases include malformed
+fields, empty and Unicode names, escaped text, and `u64::MAX`. The existing
+inbound control also checks forged senders, unknown players, absent ledger
+fields, and v2 sequence overflow.
+
+An isolated allocation probe calls the actual helper one million times with
+three fixed parsed values. Each value supplies a valid name and sequence; the
+probe uses the original owned extraction as its control. Each fresh process
+checks the same checksum, 5,999,998. The probe uses `stats_alloc`, an optimized
+probe body, and the existing debug dependency artifacts on the shared ARM64
+WSL2 host. ABBA run order is owned, borrowed, borrowed, owned.
+
+| Reader | Allocation calls | Allocated bytes | Elapsed us |
+| --- | --- | --- | --- |
+| Owned | 1,000,000 | 5,999,998 | 190,857 / 184,570 |
+| Borrowed | 0 | 0 | 157,400 / 168,304 |
+
+This measures field extraction only. It does not measure whole-frame parsing,
+live relay throughput, whole-generator memory, or the cause of #1009 stalls.
+The original planned workload owes 10,368,480 receipts; removing one transient
+name copy per valid receipt does not prove that workload can finish. Offered
+work, exact receipt requirements, durations, and the lag bound stay unchanged.
+
+The probe source, executable, and all four observations remain in ignored
+`progress/session-556/extract-profile{.rs,-abba.log}`. Probe SHA-256 is
+`3428ed236e578dc2ad923e5400abacb52bcb73acda94aac69d80e36478f0046c`.
+Run `borrowed_ledger_fields_keep_exact_identity_without_copying` and
+`unidentified_game_data_keeps_byte_evidence_without_invented_receipts` in the
+`capacity_runner` target for the retained semantic controls.

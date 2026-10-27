@@ -23,8 +23,14 @@ def without_direct_candidates(sdp: str) -> tuple[str, int]:
 
 
 class UdpLossPath:
-    def __init__(self, drops: int, minimum_application_bytes: int = 1000) -> None:
+    def __init__(
+        self,
+        drops: int,
+        minimum_application_bytes: int = 1000,
+        reorders: int = 0,
+    ) -> None:
         self.drops = drops
+        self.reorders = reorders
         self.minimum_application_bytes = minimum_application_bytes
         self.started_ns = time.monotonic_ns()
         self.armed_ns = None
@@ -37,6 +43,9 @@ class UdpLossPath:
         self.received = {"native": 0, "godot": 0}
         self.forwarded = {"native": 0, "godot": 0}
         self.dropped = {"native": 0, "godot": 0}
+        self.reordered = {"native": 0, "godot": 0}
+        self.held: dict[str, tuple[bytes, int, int]] = {}
+        self.reorder_records: list[dict[str, object]] = []
         self.ignored_candidates = {"native": 0, "godot": 0}
         self.sdp_candidates_removed = {"native": 0, "godot": 0}
         self.drop_records: list[dict[str, object]] = []
@@ -101,8 +110,13 @@ class UdpLossPath:
             self.sdp_candidates_removed[seat] += removed
         return value
 
+    def _forward(self, seat: str, data: bytes) -> None:
+        other = "godot" if seat == "native" else "native"
+        self.sockets[other].sendto(data, self.targets[other])
+        self.forwarded[seat] += 1
+
     def _relay(self) -> None:
-        pending: list[tuple[str, bytes]] = []
+        pending: list[tuple[str, bytes, int]] = []
         try:
             while not self.stop.is_set():
                 ready, _, _ = select.select(list(self.sockets.values()), [], [], 0.05)
@@ -117,33 +131,60 @@ class UdpLossPath:
                         if seat in self.candidates and seat not in self.targets:
                             self.targets[seat] = source
                         self.received[seat] += 1
-                    pending.append((seat, data))
+                        ordinal = self.received[seat]
+                    pending.append((seat, data, ordinal))
                 retained = []
-                for seat, data in pending:
+                for seat, data, ordinal in pending:
                     other = "godot" if seat == "native" else "native"
                     with self.lock:
-                        target = self.targets.get(other)
-                        if target is None:
-                            retained.append((seat, data))
+                        if other not in self.targets:
+                            retained.append((seat, data, ordinal))
                             continue
-                        if (
+                        application = (
                             self.armed
                             and len(data) >= self.minimum_application_bytes
                             and data[0] == 23
-                            and self.dropped[seat] < self.drops
-                        ):
+                        )
+                        if application and self.dropped[seat] < self.drops:
                             self.dropped[seat] += 1
                             self.drop_records.append(
                                 {
                                     "from": seat,
                                     "bytes": len(data),
-                                    "datagram": self.received[seat],
+                                    "datagram": ordinal,
                                     "monotonic_ns": time.monotonic_ns(),
                                 }
                             )
                             continue
-                        self.sockets[other].sendto(data, target)
-                        self.forwarded[seat] += 1
+                        if application and seat in self.held:
+                            held, held_ordinal, held_ns = self.held.pop(seat)
+                            self._forward(seat, data)
+                            self._forward(seat, held)
+                            self.reordered[seat] += 1
+                            self.reorder_records.append(
+                                {
+                                    "from": seat,
+                                    "held_bytes": len(held),
+                                    "held_datagram": held_ordinal,
+                                    "overtaking_bytes": len(data),
+                                    "overtaking_datagram": ordinal,
+                                    "held_monotonic_ns": held_ns,
+                                    "released_monotonic_ns": time.monotonic_ns(),
+                                }
+                            )
+                            continue
+                        if application and self.reordered[seat] < self.reorders:
+                            self.held[seat] = (data, ordinal, time.monotonic_ns())
+                            continue
+                        self._forward(seat, data)
+                with self.lock:
+                    for seat, (data, _, held_ns) in list(self.held.items()):
+                        if time.monotonic_ns() - held_ns >= 1_000_000_000:
+                            self._forward(seat, data)
+                            del self.held[seat]
+                            self.errors.append(
+                                f"{seat} reorder had no overtaking datagram"
+                            )
                 if len(retained) > 64:
                     raise RuntimeError(
                         "loss control candidate queue exceeded 64 datagrams"
@@ -171,6 +212,9 @@ class UdpLossPath:
                 "received": self.received,
                 "forwarded": self.forwarded,
                 "dropped": self.dropped,
+                "reordered": self.reordered,
+                "reorder_records": self.reorder_records,
+                "held_datagrams": len(self.held),
                 "drop_records": self.drop_records,
                 "ignored_candidates": self.ignored_candidates,
                 "sdp_candidate_lines_removed": self.sdp_candidates_removed,
@@ -178,7 +222,9 @@ class UdpLossPath:
             }
 
 
-def loss_histories_passed(histories: list[dict[str, object]], drops: int) -> bool:
+def loss_histories_passed(
+    histories: list[dict[str, object]], drops: int, reorders: int = 0
+) -> bool:
     if len(histories) != 2:
         return False
     generations = [history.get("generation") for history in histories]
@@ -189,6 +235,13 @@ def loss_histories_passed(histories: list[dict[str, object]], drops: int) -> boo
             history.get("armed") is True
             and history.get("errors") == []
             and history.get("dropped") == {"native": drops, "godot": drops}
+            and (
+                reorders == 0
+                or (
+                    history.get("reordered") == {"native": reorders, "godot": reorders}
+                    and history.get("held_datagrams") == 0
+                )
+            )
             for history in histories
         )
     )
@@ -198,10 +251,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--driver", type=Path, required=True)
     parser.add_argument("--drops-per-direction", type=int, default=1)
+    parser.add_argument("--reorders-per-direction", type=int, default=0)
     parser.add_argument("--minimum-application-bytes", type=int, default=1000)
     options, remaining = parser.parse_known_args()
     if not 1 <= options.drops_per_direction <= 8:
         parser.error("--drops-per-direction must be in 1..8")
+    if not 0 <= options.reorders_per_direction <= 8:
+        parser.error("--reorders-per-direction must be in 0..8")
     if not 13 <= options.minimum_application_bytes <= 65535:
         parser.error("--minimum-application-bytes must be in 13..65535")
     spec = importlib.util.spec_from_file_location(
@@ -239,7 +295,9 @@ def main() -> None:
                 self.finish_path()
                 self.generation = None
                 self.path = UdpLossPath(
-                    options.drops_per_direction, options.minimum_application_bytes
+                    options.drops_per_direction,
+                    options.minimum_application_bytes,
+                    options.reorders_per_direction,
                 )
             if value.get("op") == "candidate":
                 candidate = self.path.candidate("godot", str(value["candidate"]))
@@ -292,11 +350,15 @@ def main() -> None:
     sys.argv = [str(options.driver), *remaining]
     driver.main()
     if not instances or any(
-        not loss_histories_passed(instance.histories, options.drops_per_direction)
+        not loss_histories_passed(
+            instance.histories,
+            options.drops_per_direction,
+            options.reorders_per_direction,
+        )
         for instance in instances
     ):
         raise SystemExit(
-            "loss control did not observe every required two-generation drop"
+            "loss control did not observe every required two-generation fault"
         )
 
 
