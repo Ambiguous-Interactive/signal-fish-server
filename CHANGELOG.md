@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
 - Preserve native reference-client receive-limit details in terminal events and logs after link removal (#1264).
+- Show which native peer channels retain application messages in shared receive-budget diagnostics (#1264).
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
 - Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
   (#636, #775).

@@ -10130,3 +10130,55 @@ drops that receiver before sending completion. This closes admission and release
 queued receive permits before notification. The existing error and late-emission
 assertions and five-second deadline stay unchanged. This is a qualification-probe
 lifecycle repair, not evidence of native SCTP loss or the historical #1264 cause.
+
+### Native shared receive-capacity owners (#1264, #1244, #1240)
+
+The previous live overload controls use one peer link per Engine. A new
+three-Engine, two-link workload retains application events from both senders
+in the same receiving Engine. Both offer roles separately fill the unchanged
+256-message limit with 16-byte packets and the 1 MiB limit with 8 KiB packets.
+Each sender owns half the retained messages. The next reliable packet on the
+second link must produce the exact typed refusal. Closure cannot substitute
+for that event. Neither link's local retained count may include the refusal.
+
+The first link must still permit work on all three required channels. Dropping
+one of its retained events restores exactly one slot for an exact reliable
+successor. The refused link remains terminal. Replacing both physical links
+must produce empty local ownership counts while all retained old-generation
+events still charge the same Engine budget. Those events must be stale. After
+they drop, both fresh links carry exact reliable binary gameplay toward the
+center and exact reliable text gameplay in reverse. This is a two-link local
+workload, not a complete three-player mesh or a Godot runtime assessment.
+
+Each diagnostic channel now exposes `pending_application.messages` and
+`pending_application.bytes`. The message permit owns these counts until the
+event drops, including after peer removal. Binary uses raw bytes; text uses
+its decoded UTF-8 size. Empty messages count against message capacity. Each
+fresh physical generation owns new counters. Samples are separate and do not
+form an atomic ledger. Transport callbacks that the Engine has not published
+are excluded. Existing receipt totals and shared-budget fields keep their
+meanings. No receive limit, negotiation setting or refusal behavior changes.
+
+The red-first control on main `d0d10f20` fails with null ownership observations
+instead of 128 messages and 2,048 bytes. Candidate run `d61c7309` passes all
+four role/limit cases. Run `a126e68c` also passes the new text/binary observation
+control and existing held-consumer, active-consumer and shared-budget controls.
+Final run `c879c741` adds reverse gameplay and a closed application receiver;
+all three selected tests pass. Failed publication must release local and global
+receive capacity. The projection control retains empty, invalid-UTF8 and Unicode
+binary input under both Reference and Godot profiles. Local logs remain in
+`progress/session-566/`; portable source is in the native Engine test modules.
+
+This adds capacity-owner evidence for future #1264 and #1244 reproductions and
+multi-peer admission/recovery qualification for #1240. It does not attribute
+the historical terminal event or reliable-prefix loss. Those issues remain
+open. [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks optional probe use of the additive snapshot field and separate native/Web
+runtime, service and remote-network qualification. Existing readers can ignore
+it. The inspected Rust manifest at `da8f2d16` and .NET project at `e467c871` do
+not consume the reference Engine. Their APIs and signaling wire are unchanged.
+
+Final-source run `2c7a7cd1-d3e0-428c-85b2-f056bbda8ac4` passes the three new controls.
+Strict root/native all-target/all-feature lint and documentation checks pass.
+The CI configuration validator reports only its bundled dependency-audit failure;
+that result stays visible under the GOAL audit exception.

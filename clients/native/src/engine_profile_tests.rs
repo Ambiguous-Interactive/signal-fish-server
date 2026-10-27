@@ -1313,3 +1313,113 @@ async fn godot_active_consumer_classifies_saturated_recovery_without_silent_pref
         pair.cleanup().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_pending_application_counts_retained_empty_binary_and_projected_text() {
+    for godot in [false, true] {
+        let mut pair = if godot {
+            negotiated_pair().await
+        } else {
+            LivePair::connect().await
+        };
+        let mut retained = Vec::new();
+        let mut pending_bytes = 0;
+        for raw in [Vec::new(), vec![0xff; 16], "雪".as_bytes().to_vec()] {
+            pair.sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap()
+                .send(raw.as_slice().into())
+                .await
+                .unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if !pair.receiver.is_current_event(&event) {
+                        continue;
+                    }
+                    match &event {
+                        EngineEvent::ChannelBinaryMessage { data, label, .. } => {
+                            assert!(godot);
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(data, &raw);
+                            pending_bytes += raw.len();
+                            break event;
+                        }
+                        EngineEvent::ChannelMessage { text, label, .. } => {
+                            assert!(!godot);
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(text, &String::from_utf8_lossy(&raw));
+                            pending_bytes += text.len();
+                            break event;
+                        }
+                        EngineEvent::ChannelReceiveRejected { .. }
+                        | EngineEvent::ChannelClosed { .. } => {
+                            panic!("small retained messages must remain admitted")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("empty and non-UTF8 application receipts");
+            retained.push(event);
+            let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+            assert_eq!(
+                snapshot["channels"][RELIABLE_LABEL]["pending_application"],
+                serde_json::json!({
+                    "messages": retained.len(), "bytes": pending_bytes,
+                })
+            );
+            assert_eq!(
+                snapshot["receive_budget"]["pending_messages"],
+                retained.len()
+            );
+            assert_eq!(snapshot["receive_budget"]["pending_bytes"], pending_bytes);
+        }
+        drop(retained.remove(0));
+        let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+        assert_eq!(
+            snapshot["channels"][RELIABLE_LABEL]["pending_application"],
+            serde_json::json!({"messages":2,"bytes":pending_bytes})
+        );
+        drop(retained);
+        let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+        assert_eq!(
+            snapshot["channels"][RELIABLE_LABEL]["pending_application"],
+            serde_json::json!({"messages":0,"bytes":0})
+        );
+        assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+        assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+        pair.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_application_receiver_releases_channel_pending_usage() {
+    let mut pair = negotiated_pair().await;
+    pair.receiver_events.close();
+    pair.sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap()
+        .send(b"cannot-publish".as_slice().into())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = pair.receiver.diagnostic_snapshot(pair.sender_id);
+            if snapshot["channels"][RELIABLE_LABEL]["receipts"]["discarded"] == 1 {
+                assert_eq!(
+                    snapshot["channels"][RELIABLE_LABEL]["pending_application"],
+                    serde_json::json!({"messages":0,"bytes":0})
+                );
+                assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+                assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed publication returns all receive credit");
+    pair.cleanup().await;
+}
