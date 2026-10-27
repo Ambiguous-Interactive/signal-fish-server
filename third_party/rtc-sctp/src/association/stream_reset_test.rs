@@ -1085,9 +1085,7 @@ fn graceful_shutdown_reset_preserves_forwarded_future_sequence_without_data() ->
     Ok(())
 }
 
-// Issue #1184: another SID's reset can release the reciprocal-reset fence.
-#[test]
-fn graceful_shutdown_cross_stream_reset_reaches_forwarded_future_sequence() -> Result<()> {
+fn cross_stream_reset_with_unread_gameplay() -> Result<(Association, Association, Instant, Bytes)> {
     let (mut sender, mut receiver) = reset_pair();
     let now = Instant::now();
     let ppi = PayloadProtocolIdentifier::Binary;
@@ -1131,6 +1129,14 @@ fn graceful_shutdown_cross_stream_reset_reaches_forwarded_future_sequence() -> R
         sender.handle_inbound(Packet::unmarshal(&raw)?, now)?;
     }
     assert!(!sender.streams.contains_key(&1));
+    Ok((sender, receiver, now, old))
+}
+
+// Issue #1184: another SID's reset can release the reciprocal-reset fence.
+#[test]
+fn graceful_shutdown_cross_stream_reset_reaches_forwarded_future_sequence() -> Result<()> {
+    let (mut sender, mut receiver, now, old) = cross_stream_reset_with_unread_gameplay()?;
+    let ppi = PayloadProtocolIdentifier::Binary;
     sender
         .open_stream(1, ppi)?
         .set_reliability_params(false, ReliabilityType::Timed, 1)?;
@@ -1236,6 +1242,102 @@ fn graceful_shutdown_cross_stream_reset_reaches_forwarded_future_sequence() -> R
                 .is_drained()
         );
         assert!(endpoint.poll_endpoint_event().is_none());
+    }
+    Ok(())
+}
+
+// Issue #1263: final old-generation drain cannot revive retired sequence metadata.
+#[test]
+fn graceful_shutdown_retires_expired_future_reset_sequence_after_final_old_read() -> Result<()> {
+    for stop in [false, true] {
+        let (mut sender, mut receiver, now, old) = cross_stream_reset_with_unread_gameplay()?;
+        let ppi = PayloadProtocolIdentifier::Binary;
+        let future = Bytes::from(vec![0xa5; sender.max_payload_size as usize * 2 + 17]);
+        sender
+            .open_stream(1, ppi)?
+            .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        sender.stream(1)?.write_sctp(now, &future, ppi)?;
+        let pending = sender.gather_outbound(now).0;
+        let fragments = transmitted_data(&pending);
+        assert!(fragments.len() > 1);
+        for raw in pending {
+            let packet = Packet::unmarshal(&raw)?;
+            let loses_tail = packet.chunks.iter().any(|chunk| {
+                chunk
+                    .as_any()
+                    .downcast_ref::<ChunkPayloadData>()
+                    .is_some_and(|data| !data.beginning_fragment)
+            });
+            if !loses_tail {
+                receiver.handle_inbound(packet, now)?;
+            }
+        }
+        assert_eq!(receiver.deferred_reset_data.len(), 1);
+        assert!(!receiver.deferred_reset_reassembly[&1].is_readable());
+        let later = now + Duration::from_secs(2);
+        sender.handle_timeout(later);
+        let expired = sender.gather_outbound(later).0;
+        assert!(expired.iter().any(|raw| {
+            Packet::unmarshal(raw)
+                .unwrap()
+                .chunks
+                .iter()
+                .any(|chunk| chunk.as_any().is::<ChunkForwardTsn>())
+        }));
+        for raw in expired {
+            receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+        }
+        assert!(receiver.deferred_reset_data.is_empty());
+        assert_eq!(receiver.deferred_reset_reassembly[&1].next_ssn, 1);
+        assert!(!receiver.deferred_reset_reassembly[&1].is_readable());
+        receiver.shutdown()?;
+        for _ in 0..8 {
+            for raw in receiver.gather_outbound(later).0 {
+                sender.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+            }
+            for raw in sender.gather_outbound(later).0 {
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+            }
+        }
+        assert_eq!(receiver.state(), AssociationState::Closed);
+        assert_eq!(sender.state(), AssociationState::Closed);
+        assert!(receiver.retired);
+        assert!(sender.retired);
+        assert!(receiver.poll_endpoint_event().is_none());
+        {
+            let mut old_stream = receiver.stream(1)?;
+            if stop {
+                old_stream.stop(later)?;
+            } else {
+                assert_eq!(
+                    old_stream.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+                    old
+                );
+            }
+            assert!(old_stream.read_sctp()?.is_none());
+            old_stream.stop(later)?;
+            old_stream.stop(later)?;
+            assert_eq!(
+                old_stream.write_sctp(later, &old, ppi),
+                Err(Error::ErrStreamClosed)
+            );
+        }
+        assert!(receiver.streams.is_empty());
+        assert!(receiver.stream(1).is_err());
+        assert!(receiver.open_stream(1, ppi).is_err());
+        assert!(receiver.deferred_reset_data.is_empty());
+        assert!(receiver.deferred_reset_reassembly.is_empty());
+        assert_eq!(receiver.deferred_reset_bytes, 0);
+        assert!(
+            receiver.reset_ssn_markers.is_empty(),
+            "stop={stop}: a retired association cannot retain a future sequence marker"
+        );
+        for endpoint in [&mut sender, &mut receiver] {
+            assert!(endpoint.poll_timeout().is_none());
+            assert!(endpoint.poll_endpoint_event().unwrap().is_drained());
+            assert!(endpoint.poll_endpoint_event().is_none());
+            assert!(endpoint.poll_transmit(later).is_none());
+        }
     }
     Ok(())
 }

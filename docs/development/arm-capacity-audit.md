@@ -6614,3 +6614,94 @@ changes, delivery classes, keys, JSON and opaque payloads, and payload sizes fro
 when the serialized body exceeds the target. Live exact-size/replay, opaque,
 reconnect, and stopped-send controls pass. This does not attribute historical
 stalls (#1009, #1127) to allocation work. Previous invalid runs remain invalid.
+
+## Share receipt admission and budget observation (#636, #775, #1009)
+
+The live collector now returns the receive-budget state from receipt admission
+under the existing event-log mutex. A valid receipt no longer reacquires that
+mutex just to inspect the same sticky budget. The result describes that admission;
+another producer can cross the budget after unlock. Every later admission still
+checks the budget, and the existing notification and joined-producer shutdown
+remain active. The first crossing record and exact unretained count remain intact.
+
+The release component profile uses four pre-spawned barrier workers and one
+million preallocated receipt slots. Each fresh process retains every sequence
+from 0 through 999,999 exactly once, with checksum 499,999,500,000. The same binary
+compares the fused path with an additional separate budget check. The latter
+measures the incremental second-lock cost; it also executes the new in-lock
+budget observation, so it is not the exact old implementation.
+
+The quiet ABBA/BAAB cohort records separate-check times of
+173,362 / 163,459 / 181,650 / 163,233 us and fused times of
+127,004 / 128,576 / 130,261 / 137,162 us. Median component time falls from
+168,410.5 to 129,418.5 us, or 23.2%. All runs retain one million slots. The
+binary SHA-256 is
+`e7c57faa7ea4a88ff668de4f38939f3606edd8763b58b01f4806a453748d1662`.
+The host remains shared. An earlier cohort that overlaps native lint compilation
+is retained separately and does not support the quiet timing claim.
+
+The checked-in ignored `receipt_collection_lock_profile` control reproduces
+this component comparison. Set `CAPACITY_RECEIPT_SEPARATE_CHECK=1` for the extra
+lock. Raw results and the fixed binary remain in ignored
+`progress/session-560/receipt-cohort-quiet/` and `progress/session-560/receipt-profile`.
+Focused budget, timed-collection, concurrent-stop, live exact-size/replay,
+reconnect, and opaque-format controls pass. This reduces collection work; it
+does not reduce retained receipt memory, prove full-generator throughput, or
+explain historical stalls. Previous invalid attempts remain invalid.
+
+## First-breach receipt timing in a two-room diagnostic (#1009, #775)
+
+Run `93bcd905-ed1f-42e3-9409-5700f653df50` enables the existing opt-in receipt
+stage timing and first accepted lag-prefix capture. It retains two rooms of
+16 players, 60 sends/s/player, 96-byte reliable v3 JSON bodies, seed 1, four
+runtime workers, 120 s warm-up, 600 s measurement, the default budgets, and the
+250,000 us lag bound. Timing adds clock reads and bookkeeping. This diagnostic
+is not a matched throughput comparison with earlier timing-disabled attempts.
+
+The run is **INVALID**. It completes 263,328 of 1,382,464 scheduled sends and
+retains 1,119,136 unsent sends. All 3,949,920 owed receipts arrive, with zero
+outstanding or gap-covered deliveries. Thirty-two before-write reports and one
+completed-write report span 137.499–138.680 s, with lag from 348,628 to
+1,519,293 us. Both invalidation reasons are generator saturation. No workload
+reduction, threshold change, or replacement retry makes this attempt valid.
+
+The first accepted prefix captures 3,949,440 completed receipt admissions at
+137.499518 s relative to the workload epoch, before its warning serialization.
+Its longest measured acquisition wait is 47,465,533 ns. Its longest measured
+lock hold is 29,395,113 ns, and its longest push is 29,393,312 ns. Those maxima
+occur much earlier, near 30–32 s after EventLog construction. The capture
+request-to-acquisition interval is 900 ns. Final aggregates cover all 3,949,920
+receipts and retain the same maxima.
+
+No completed measured receipt acquisition or hold in that prefix reaches the
+250 ms bound. This narrows the single-long-receipt-stage hypothesis for this
+attempt. It does not exclude cumulative shorter waits, unfinished operations
+at capture, other mutex owners, unmeasured final bookkeeping, or scheduling and
+host pauses. Every stage duration includes descheduling. The first accepted
+capture is not guaranteed to be the earliest request or exact lag crossing.
+
+The report clock brackets share a 36,548 ns origin interval. In the wider
+3.346 s observer bracket, wall/monotonic offset variation is 1,201 ns and the
+largest observer gap is 515.490 ms. Process CPU advances 86 ticks, minor faults
+advance 439, and major faults do not advance. Sampled cgroup throttle and
+memory-event counters do not advance. Reporting worker identities match earlier
+interval samples. These observations do not identify the physical cause.
+
+Normal lifecycle, export, and exact replay finish in 774.24 s. An independent
+full ledger scan verifies all 480 streams, exact completed-send receipt counts,
+order, epochs, routing, and recorded sizes. Peak RSS is 281,920 KiB for this
+incomplete offer; it does not bound full two-room memory or server capacity.
+The ledger is 745,729,248 bytes with SHA-256
+`7425cc0a4d0e91550a001f06e1e1b8b594d76e6b64560eddf3502a6c5032978b`.
+The receipt timing sidecar SHA-256 is
+`df1f937e806cc88c96e6827c60f938160924db7b83cd40874e985c723c913032`.
+The generator is the fixed component binary above; the unchanged server SHA-256
+is `82dddf9125488a570943073b9f9cccbd706595c47030f31dd3abbc61d6717c68`.
+
+Registration, source snapshots, raw reports, 7,307 observer samples, timings,
+manifest, ledger, replay, and audit remain in ignored
+`progress/session-560/two-room-final/`. No session builds or other local live
+workloads overlap. Brief docs, lint, hook, git, and network operations do overlap;
+the host remains shared. Native admission tests start only after this process
+exits. Earlier failed attempts remain unchanged. Historical causes and the full
+memory bound remain open.

@@ -755,11 +755,15 @@ impl EventLog {
             .push(event);
     }
 
-    pub fn push_receipt(&self, event: ReceiptEvent) {
+    /// Record a receipt and report whether the budget remains active at this admission.
+    pub fn push_receipt(&self, event: ReceiptEvent) -> bool {
         let Some(start) = self.receipt_timing_start else {
             let mut state = self.state.lock().expect("event log poisoned");
             self.retain_event(&mut state, "receipt", 0, event, |state| &mut state.receipts);
-            return;
+            return state
+                .budget
+                .as_ref()
+                .is_none_or(|budget| budget.first_excess_kind.is_none());
         };
         let waiting = elapsed_ns(start);
         #[cfg(test)]
@@ -774,7 +778,7 @@ impl EventLog {
         #[cfg(test)]
         pause_receipt_timing(self.receipt_timing_hooks.push_delay);
         if !self.retain_event(&mut state, "receipt", 0, event, |state| &mut state.receipts) {
-            return;
+            return false;
         }
         let pushed = elapsed_ns(start);
         let len_after = state.receipts.len();
@@ -843,6 +847,10 @@ impl EventLog {
                     timings.slow_observations_not_retained.saturating_add(1);
             }
         }
+        state
+            .budget
+            .as_ref()
+            .is_none_or(|budget| budget.first_excess_kind.is_none())
     }
 
     pub fn push_gap(&self, event: GapEvent) {
@@ -1881,7 +1889,9 @@ mod tests {
     fn push_test_event(log: &EventLog, event: DeliveryEvent) {
         match event {
             DeliveryEvent::Sent(event) => log.push_sent(event),
-            DeliveryEvent::Receipt(event) => log.push_receipt(event),
+            DeliveryEvent::Receipt(event) => {
+                log.push_receipt(event);
+            }
             DeliveryEvent::Gap(event) => log.push_gap(event),
             DeliveryEvent::UnsupportedNotice(event) => log.push_unsupported_notice(event),
             DeliveryEvent::Disconnect(event) => log.push_disconnect(event),
@@ -1990,6 +2000,92 @@ mod tests {
                     serde_json::to_value(summary).unwrap(),
                     serde_json::to_value(summarize(&replayed)).unwrap()
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "receipt collection component profile; run in a fresh process"]
+    fn receipt_collection_lock_profile() {
+        let separate_check = std::env::var_os("CAPACITY_RECEIPT_SEPARATE_CHECK").is_some();
+        let workers = 4;
+        let per_worker = 250_000;
+        let mut log = bounded_test_log(workers * per_worker, usize::MAX, false);
+        log.state
+            .get_mut()
+            .unwrap()
+            .receipts
+            .reserve_exact(workers * per_worker);
+        let log = Arc::new(log);
+        let barrier = Arc::new(std::sync::Barrier::new(workers + 1));
+        let receipt = timing_receipt(0);
+        let threads: Vec<_> = (0..workers)
+            .map(|worker| {
+                let log = Arc::clone(&log);
+                let barrier = Arc::clone(&barrier);
+                let receipt = receipt.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for position in 0..per_worker {
+                        let mut receipt = receipt.clone();
+                        receipt.seq = crate::config::count_u64(worker * per_worker + position);
+                        let active = log.push_receipt(receipt);
+                        if separate_check {
+                            assert!(!log.record_budget_exhausted());
+                        } else {
+                            assert!(active);
+                        }
+                    }
+                })
+            })
+            .collect();
+        let started = Instant::now();
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let elapsed = started.elapsed();
+        let records = log.take_records();
+        assert_eq!(records.receipts.len(), workers * per_worker);
+        assert!(records.faults.is_empty());
+        let mut sequences: Vec<_> = records.receipts.iter().map(|receipt| receipt.seq).collect();
+        sequences.sort_unstable();
+        assert!(sequences
+            .iter()
+            .copied()
+            .eq(0..crate::config::count_u64(workers * per_worker)));
+        println!(
+            "RECEIPT_LOCK_PROFILE {}",
+            serde_json::json!({
+                "separate_check": separate_check, "workers": workers,
+                "receipts": records.receipts.len(), "elapsed_us": elapsed.as_micros(),
+                "checksum": sequences.iter().sum::<u64>(),
+                "receipt_capacity": records.receipts.capacity(),
+            })
+        );
+    }
+
+    #[test]
+    fn receipt_admission_reports_the_exact_budget_crossing() {
+        for timings in [false, true] {
+            let log = bounded_test_log(2, usize::MAX, timings);
+            for (seq, expected) in [(0, true), (1, true), (2, false), (3, false)] {
+                assert_eq!(log.push_receipt(timing_receipt(seq)), expected);
+                assert_eq!(log.record_budget_exhausted(), !expected);
+            }
+            let records = log.take_records();
+            assert_eq!(records.receipts.len(), 3);
+            assert_eq!(records.receipts.last().unwrap().seq, 2);
+            assert!(matches!(
+                records.faults.as_slice(),
+                [InvalidReason::GeneratorRecordBudgetExceeded {
+                    retained_events: 3,
+                    unretained_events: 1,
+                    ..
+                }]
+            ));
+            if let Some(timings) = log.take_receipt_timings() {
+                assert_eq!(timings.receipt_push.count, 3);
             }
         }
     }

@@ -9766,3 +9766,77 @@ and [#433](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/iss
 retain runtime assessment. Rust `da8f2d16` supplies a separate peer backend;
 .NET `e467c871` has no peer-stack dependency; Godot `2cb9ac39` uses Godot/browser
 channels. Server messages and SDK migration requirements remain unchanged.
+
+### Retired reset sequence cleanup (#1263, #1184, #1145)
+
+A new paired history exposes a terminal cleanup gap. A cross-stream reset leaves
+old reliable gameplay unread. The sender starts a fragmented future-generation
+message with a finite lifetime. The fixture drops complete packets containing
+its later fragments, then delivers the actual timed FORWARD TSN. Both associations
+complete graceful shutdown before the old reader drains.
+
+The final old read or stop used to restore the expired future sequence marker
+after retirement. The repair preserves markers only while the association is
+live. The red control fails at the terminal marker assertion. Restored controls
+retain exact old payload bytes, repeated EOF and stop behavior, refused writes
+and stream creation, empty deferred storage and markers, stopped timers, and one
+endpoint drain event each. Existing live-state and accepted-future-DATA controls
+still pass.
+
+This repairs the terminal-cleanup acceptance condition. It does not demonstrate
+payload loss, an independent peer's conformance, or the cause of #1120. The public
+WebRTC wrapper uses abort rather than this graceful association API.
+
+### Godot-profile reliable recovery after transport queue saturation (#1240, #1244)
+
+The new native control holds channel application pollers while two native Engines
+continue their transport reactors. It sends 2,048 distinct 4 KiB reliable bodies,
+including sequence and physical-generation stamps. Each cell requires observed
+SCTP receive-credit refusal, at least 256 reassembled messages retained downstream,
+an upstream tail, zero Engine raw receipts, and outstanding sender bytes.
+
+The receiver then polls its public data channel directly. Every body must arrive
+in exact order and all sender debt must clear. Both offer roles repeat after
+removing the old physical peers and creating fresh links. The four cells preserve
+8,192 packets, or 32 MiB. This exercises transport backpressure beyond the earlier
+four-packet held-poller controls.
+
+Direct channel polling does not qualify the Engine's separate application-event
+admission queue. An earlier fixture that released this burst into that queue
+encountered a terminal event without distinguishing receive rejection from channel
+closure. That failed attempt is retained locally; #1264 tracks its unproven cause.
+Direct polling separates transport retention from the 1 MiB admission budget.
+No queue limit or deadline changed. These are two native Engines, not new Godot
+runtime, full-service, or remote-network results. The historical missing-prefix
+cause remains unknown.
+
+External-client assessment: Rust main `da8f2d16` has no dependency on this SCTP
+package. The .NET client project has no peer-stack dependency. Godot main
+`a5728f62` uses Godot's native or browser peer channels. None requires a signaling
+or API migration. Godot [#355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+retains reference-profile runtime qualification. The capacity collector changes
+are local workload-tool behavior and do not change any client contract.
+
+### Separate Godot binary receive-credit limits (#1264)
+
+The initial 4 KiB fixture reaches both application-event limits together:
+256 retained messages occupy 1 MiB. Admission reserves capacity immediately;
+it does not wait for the consumer. An active consumer alone cannot guarantee
+that a burst remains below those limits. This explains a possible refusal path,
+not the cause of the retained ambiguous attempt.
+
+The new Godot-profile control separates the binary path from the existing
+Reference/text limit controls. It retains actual `EngineEvent` permits for
+128 exact 8 KiB bodies to fill bytes only, or 256 exact 2 KiB bodies to fill
+message slots only. The next body must produce `ChannelReceiveRejected`, with
+exact raw, admitted, rejected, and discarded totals. A physical `ChannelClosed`
+event is not accepted as that verdict. Failed byte admission must return its
+reserved message slot, and releasing all retained events must restore both
+budgets.
+
+Fresh physical links use the same previously terminal Engine and budget owner.
+Dropping exactly one retained receipt before the next send must admit that exact
+successor, keep the channel open, and release all sender debt. Both offer roles
+exercise both dimensions. This qualifies intentional binary admission and fresh
+recovery. It does not classify the original combined terminal event or prove
+Godot runtime or remote-network behavior. The unresolved attempt stays in #1264.

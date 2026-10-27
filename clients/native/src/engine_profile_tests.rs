@@ -585,3 +585,317 @@ async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generatio
         pair.receiver.remove_peer(pair.sender_id).await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair() {
+    const PACKETS: u32 = 2048;
+    const PACKET_BYTES: usize = 4096;
+    for receiver_offers in [false, true] {
+        let mut pair = unconnected_negotiated_pair();
+        for generation in 0u8..2 {
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let peer = pair.sender_id;
+            let link = pair.receiver.peers.get_mut(&peer).unwrap();
+            link.stop_channel_tasks();
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            let mut payload = vec![0xff; PACKET_BYTES];
+            payload[4] = generation;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                for sequence in 0..PACKETS {
+                    payload[..4].copy_from_slice(&sequence.to_be_bytes());
+                    channel.send(payload.as_slice().into()).await.unwrap();
+                }
+            })
+            .await
+            .expect("unbounded send admission retains the complete offered burst");
+            let held = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                    if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+                        break snapshot;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect(
+                "held application polling fills downstream queues and exhausts SCTP receive credit",
+            );
+            let received = held["transport_channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["label"] == RELIABLE_LABEL)
+                .unwrap()["messages_received"]
+                .as_u64()
+                .unwrap();
+            assert!(
+                (256..u64::from(PACKETS)).contains(&received),
+                "the reliable callback queue is full while a tail stays upstream: {held}"
+            );
+            assert!(channel.outstanding_bytes().await.unwrap() > 0);
+            assert_eq!(held["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
+            let receiver = pair.receiver.channel(peer, RELIABLE_LABEL).unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let mut received = 0;
+                while received < PACKETS {
+                    match receiver.poll().await.expect("the channel remains readable") {
+                        DataChannelEvent::OnMessage(message) => {
+                            assert!(!message.is_string);
+                            payload[..4].copy_from_slice(&received.to_be_bytes());
+                            assert_eq!(message.data.as_ref(), payload.as_slice(), "generation={generation}, receiver_offers={receiver_offers}, sequence={received}");
+                            received += 1;
+                        }
+                        DataChannelEvent::OnError | DataChannelEvent::OnClosing | DataChannelEvent::OnClose => panic!("resumed reliable transport must drain without loss"),
+                        _ => {}
+                    }
+                }
+                while channel.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("resuming channel polling drains every exact reliable packet and sender credit");
+            assert_eq!(
+                pair.receiver
+                    .channel_received_messages(peer, RELIABLE_LABEL)
+                    .await,
+                PACKETS
+            );
+            assert_eq!(
+                receiver.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Open
+            );
+            println!("GODOT_CALLBACK_SATURATION receiver_offers={receiver_offers} generation={generation} packets={PACKETS} bytes={} reassembled_while_held={received} refused_chunks={}", u64::from(PACKETS) * u64::try_from(PACKET_BYTES).unwrap(), held["sctp"]["data_chunks_refused"]);
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_recovery() {
+    for receiver_offers in [false, true] {
+        for (packet_bytes, retained_packets) in [(8192, 128), (2048, 256)] {
+            let mut pair = unconnected_negotiated_pair();
+            let receiver_budget = if receiver_offers {
+                pair.sender.message_budget.clone()
+            } else {
+                pair.receiver.message_budget.clone()
+            };
+            let mut previous_generation = None;
+            for release_one in [false, true] {
+                pair.negotiate().await;
+                if receiver_offers {
+                    std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                    std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                    std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                }
+                assert!(Arc::ptr_eq(&receiver_budget, &pair.receiver.message_budget));
+                let peer = pair.sender_id;
+                let generation = pair.receiver.peers[&peer].generation;
+                assert_ne!(previous_generation, Some(generation));
+                previous_generation = Some(generation);
+                let channel = pair
+                    .sender
+                    .channel(pair.receiver_id, RELIABLE_LABEL)
+                    .unwrap();
+                let mut payload = vec![0xff; packet_bytes];
+                payload[4] = u8::from(release_one);
+                let mut retained = Vec::new();
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    for sequence in 0..retained_packets {
+                        payload[..4]
+                            .copy_from_slice(&u32::try_from(sequence).unwrap().to_be_bytes());
+                        channel.send(payload.as_slice().into()).await.unwrap();
+                        loop {
+                            let event = pair.receiver_events.recv().await.unwrap();
+                            if !pair.receiver.is_current_event(&event) {
+                                continue;
+                            }
+                            match event {
+                                event @ EngineEvent::ChannelBinaryMessage { .. } => {
+                                    let EngineEvent::ChannelBinaryMessage { label, data, .. } =
+                                        &event
+                                    else {
+                                        unreachable!()
+                                    };
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert_eq!(data, &payload);
+                                    retained.push(event);
+                                    break;
+                                }
+                                EngineEvent::ChannelReceiveRejected { .. }
+                                | EngineEvent::ChannelClosed { .. } => panic!(
+                                    "all packets within both receive limits must remain admitted"
+                                ),
+                                _ => {}
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("exact binary receipts fill one receive-credit dimension");
+                assert_eq!(retained.len(), retained_packets);
+                assert_eq!(
+                    pair.receiver.message_budget.messages.available_permits(),
+                    MAX_PENDING_CHANNEL_MESSAGES - retained_packets
+                );
+                assert_eq!(
+                    pair.receiver.message_budget.bytes.available_permits(),
+                    MAX_PENDING_CHANNEL_BYTES - packet_bytes * retained_packets
+                );
+                if release_one {
+                    drop(retained.pop().unwrap());
+                }
+                payload[..4]
+                    .copy_from_slice(&u32::try_from(retained_packets).unwrap().to_be_bytes());
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    channel.send(payload.as_slice().into()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let event = pair.receiver_events.recv().await.unwrap();
+                        if !pair.receiver.is_current_event(&event) {
+                            continue;
+                        }
+                        match event {
+                            event @ EngineEvent::ChannelBinaryMessage { .. } => {
+                                assert!(
+                                    release_one,
+                                    "an exhausted application budget cannot admit another receipt"
+                                );
+                                let EngineEvent::ChannelBinaryMessage { label, data, .. } = &event
+                                else {
+                                    unreachable!()
+                                };
+                                assert_eq!(label, RELIABLE_LABEL);
+                                assert_eq!(data, &payload);
+                                retained.push(event);
+                                break;
+                            }
+                            EngineEvent::ChannelReceiveRejected { label, .. } => {
+                                assert!(
+                                    !release_one,
+                                    "releasing one real receipt restores capacity"
+                                );
+                                assert_eq!(label, RELIABLE_LABEL);
+                                break;
+                            }
+                            EngineEvent::ChannelClosed { label, .. } => {
+                                panic!("a physical close is not a receive-limit verdict: {label}")
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("the next receipt has an exact admission or rejection verdict");
+                let admitted = retained_packets + usize::from(release_one);
+                let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let snapshot = pair.receiver.diagnostic_snapshot(peer);
+                        if snapshot["channels"][RELIABLE_LABEL]["receipts"]["admitted"] == admitted
+                        {
+                            break snapshot;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("published receipt counters settle");
+                assert_eq!(
+                    snapshot["channels"][RELIABLE_LABEL]["receipts"],
+                    serde_json::json!({
+                        "raw": retained_packets + 1, "admitted": admitted,
+                        "rejected": usize::from(!release_one), "discarded": 0,
+                    })
+                );
+                assert_eq!(
+                    *pair.receiver.peers[&peer]
+                        .receive_admission
+                        .rejected
+                        .lock()
+                        .await,
+                    !release_one
+                );
+                assert_eq!(
+                    pair.receiver.peers[&peer]
+                        .receive_admission
+                        .terminal
+                        .load(Ordering::Relaxed),
+                    !release_one
+                );
+                assert_eq!(retained.len(), retained_packets);
+                assert_eq!(
+                    pair.receiver.message_budget.messages.available_permits(),
+                    MAX_PENDING_CHANNEL_MESSAGES - retained_packets
+                );
+                assert_eq!(
+                    pair.receiver.message_budget.bytes.available_permits(),
+                    MAX_PENDING_CHANNEL_BYTES - packet_bytes * retained_packets
+                );
+                if release_one {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while channel.outstanding_bytes().await.unwrap() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("all accepted reliable packets release sender credit");
+                    assert_eq!(
+                        channel.ready_state().await.unwrap(),
+                        rtc::data_channel::RTCDataChannelState::Open
+                    );
+                    assert_eq!(pair.receiver.peers[&peer].generation, generation);
+                } else {
+                    assert!(pair
+                        .receiver
+                        .send_channel(peer, RELIABLE_LABEL)
+                        .await
+                        .is_none());
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            if let EngineEvent::ChannelClosed { peer, label, .. } =
+                                pair.sender_events.recv().await.unwrap()
+                            {
+                                assert_eq!(peer, pair.receiver_id);
+                                assert_eq!(label, RELIABLE_LABEL);
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("intentional admission refusal closes the remote reliable channel");
+                }
+                drop(retained);
+                assert_eq!(
+                    pair.receiver.message_budget.messages.available_permits(),
+                    MAX_PENDING_CHANNEL_MESSAGES
+                );
+                assert_eq!(
+                    pair.receiver.message_budget.bytes.available_permits(),
+                    MAX_PENDING_CHANNEL_BYTES
+                );
+                pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                pair.receiver.remove_peer(peer).await.unwrap();
+                if receiver_offers {
+                    std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                    std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                    std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                }
+                println!("GODOT_RECEIVE_CREDIT receiver_offers={receiver_offers} bytes={packet_bytes} retained={retained_packets} release_one={release_one} admitted={admitted} rejected={}", usize::from(!release_one));
+            }
+        }
+    }
+}
