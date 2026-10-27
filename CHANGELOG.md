@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Preserve reliable native gameplay after large ordered expiry backlogs (#1271).
+- Preserve reliable and ordered native gameplay after large expiry backlogs (#1271).
 - Report native associations as drained only after shutdown work and unread gameplay finish (#1272).
 - Stop expired ordered native gameplay before its first transmission (#1269).
 - Clear native graceful-shutdown reset state after final reads and stops (#1263).

@@ -710,12 +710,14 @@ fn outbound_evidence_retains_first_abandonment_and_distinguishes_retry_policy() 
 }
 
 #[test]
-fn expired_ordered_backlog_larger_than_half_ssn_space_preserves_reliable_successor() -> Result<()> {
-    for (expired_count, first_tsn, zero_window, lose_first_forward) in [
-        (32_768usize, 1234u32, false, false),
-        (32_770, 1234, false, false),
-        (65_538, u32::MAX - 3, false, true),
-        (32_770, u32::MAX - 3, true, true),
+fn expired_ordered_backlog_preserves_exact_reliable_and_fixed_lifetime_successors() -> Result<()> {
+    for (expired_count, first_tsn, zero_window, lose_first_forward, fixed_lifetime) in [
+        (32_768usize, 1234u32, false, false, false),
+        (32_770, 1234, false, false, false),
+        (65_538, u32::MAX - 3, false, true, false),
+        (32_770, u32::MAX - 3, true, true, false),
+        (32_770, 1234, false, false, true),
+        (65_538, u32::MAX - 3, true, false, true),
     ] {
         let now = Instant::now();
         let mut at = now + Duration::from_millis(2);
@@ -736,10 +738,12 @@ fn expired_ordered_backlog_larger_than_half_ssn_space_preserves_reliable_success
         for _ in 0..expired_count {
             stream.write_sctp(now, &Bytes::from_static(b"x"), ppi)?;
         }
-        sender
-            .stream(2)?
-            .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
-        let expected = Bytes::from_static(b"reliable successor after expired ordered backlog");
+        if !fixed_lifetime {
+            sender
+                .stream(2)?
+                .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+        }
+        let expected = Bytes::from_static(b"exact successor after expired ordered backlog");
         sender.stream(2)?.write_sctp(at, &expected, ppi)?;
         let mut stale_forward = None;
         for round in 0..8 {
@@ -774,7 +778,7 @@ fn expired_ordered_backlog_larger_than_half_ssn_space_preserves_reliable_success
             }
         }
         let actual = receiver.stream(2)?.read_sctp()?.unwrap_or_else(|| {
-            panic!("expired_count={expired_count}: reliable successor must remain readable")
+            panic!("expired_count={expired_count}, fixed_lifetime={fixed_lifetime}: successor must remain readable")
         });
         assert_eq!(actual.to_payload(expected.len())?.freeze(), expected);
         assert!(receiver.stream(2)?.read_sctp()?.is_none());

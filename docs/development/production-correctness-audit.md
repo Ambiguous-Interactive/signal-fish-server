@@ -10065,6 +10065,11 @@ Timed(1) messages and a reliable successor on the same stream. At +2 ms, the
 expired prefix consumes more than half the 16-bit SSN space in one poll. The
 receiver acknowledges the successor but cannot read it. A 32,768-message control
 passes. The red regression fails at the exact successor-read assertion.
+An isolated `git archive e8a2d969` control directly confirms the successor's
+cumulative SACK, zero sender buffered bytes and absent receiver read, both for
+the reliable successor and for an unchanged Timed(1) channel. The full-wrap
+65,538-message case already passes on that baseline; it is a positive wrap
+control, not a red proof.
 
 The #1271 repair bounds each FORWARD TSN step and new DATA assignment to 32,767
 TSNs beyond cumulative acknowledgment. The normal sender and zero-window probe
@@ -10081,9 +10086,13 @@ wrap, lost first FORWARD TSN with actual timeout recovery, a stale repeated
 report, and zero-window probing. Separate controls check a fragmented expired
 message spanning more than one report and exact ordered live gameplay across
 the new fence. They require exact successor bytes, no extra receipt, exact
-abandonment totals and released send credit. These low-level histories change
-one stream's reliability policy through the public SCTP API. They do not claim
-that the Godot Engine changes a channel policy after negotiation.
+abandonment totals and released send credit. Four low-level cases change one
+stream's reliability policy through the public SCTP API. Two further cases keep
+Timed(1) throughout: after the old prefix expires, a fresh message arrives with
+exact bytes before its own deadline. They cover normal and zero-window paths,
+including full SSN and TSN wrap. They require no Godot channel policy change.
+The virtual clock remains fixed during this fresh finite-message exchange;
+these cases do not promise finite delivery after a real scheduling delay.
 
 A separate public API regression confirms #1272. `Association::is_drained`
 returned true in all live shutdown states and false in Closed. All four new
@@ -10107,7 +10116,7 @@ consume this native SCTP stack. Their wire protocol and APIs are unchanged.
 tracks native reference-stack adoption and qualification. These paired native
 controls do not qualify Godot runtime, service sessions or remote networks.
 
-Local final controls pass: the four-cell backlog matrix, two serial-window
+Local final controls pass: the six-cell backlog matrix, two serial-window
 controls, 73 selected shutdown/expiry/drain tests, and the native Engine startup,
 lifetime-expiry and active-consumer recovery controls. Strict root and native
 all-target/all-feature lint pass. Independent adversarial review found no

@@ -556,6 +556,8 @@ Replacement qualification in #912 must retain `expired_ordered_backlog` and
 `serial_window` controls beside the existing lifetime, reset and shutdown tests.
 These are native paired-wire controls. They do not establish the cause of the
 historical Godot #1244 prefix loss or qualify a remote network.
+The backlog matrix also keeps Timed(1) unchanged while fresh exact gameplay
+follows expired messages. Its fixed virtual clock excludes later finite expiry.
 
 ## Public association drain readiness
 
