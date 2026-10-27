@@ -9804,7 +9804,7 @@ four-packet held-poller controls.
 Direct channel polling does not qualify the Engine's separate application-event
 admission queue. An earlier fixture that released this burst into that queue
 encountered a terminal event without distinguishing receive rejection from channel
-closure. That failed attempt is retained locally; its cause remains unproven.
+closure. That failed attempt is retained locally; #1264 tracks its unproven cause.
 Direct polling separates transport retention from the 1 MiB admission budget.
 No queue limit or deadline changed. These are two native Engines, not new Godot
 runtime, full-service, or remote-network results. The historical missing-prefix
@@ -9816,3 +9816,27 @@ package. The .NET client project has no peer-stack dependency. Godot main
 or API migration. Godot [#355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
 retains reference-profile runtime qualification. The capacity collector changes
 are local workload-tool behavior and do not change any client contract.
+
+### Separate Godot binary receive-credit limits (#1264)
+
+The initial 4 KiB fixture reaches both application-event limits together:
+256 retained messages occupy 1 MiB. Admission reserves capacity immediately;
+it does not wait for the consumer. An active consumer alone cannot guarantee
+that a burst remains below those limits. This explains a possible refusal path,
+not the cause of the retained ambiguous attempt.
+
+The new Godot-profile control separates the binary path from the existing
+Reference/text limit controls. It retains actual `EngineEvent` permits for
+128 exact 8 KiB bodies to fill bytes only, or 256 exact 2 KiB bodies to fill
+message slots only. The next body must produce `ChannelReceiveRejected`, with
+exact raw, admitted, rejected, and discarded totals. A physical `ChannelClosed`
+event is not accepted as that verdict. Failed byte admission must return its
+reserved message slot, and releasing all retained events must restore both
+budgets.
+
+Fresh physical links use the same previously terminal Engine and budget owner.
+Dropping exactly one retained receipt before the next send must admit that exact
+successor, keep the channel open, and release all sender debt. Both offer roles
+exercise both dimensions. This qualifies intentional binary admission and fresh
+recovery. It does not classify the original combined terminal event or prove
+Godot runtime or remote-network behavior. The unresolved attempt stays in #1264.
