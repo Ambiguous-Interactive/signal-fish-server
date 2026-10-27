@@ -162,6 +162,16 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.tom
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib packetization_reserves_only_the_required_fragment_slots
 
+echo "==> Verifying RTC SCTP snapshot conversion"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib association_stats_
+
+echo "==> Verifying SCTP outbound evidence and ordered lifetime expiry"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib outbound_evidence
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib expired_ordered_prefix
+
 echo "==> Verifying graceful SCTP shutdown and final packet recovery"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib shutdown

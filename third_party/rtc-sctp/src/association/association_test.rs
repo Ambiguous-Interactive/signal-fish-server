@@ -603,7 +603,7 @@ fn bundle_split_decides_on_padded_wire_sizes() {
     // Payloads of 1147 + 16 bytes pass a payload-only boundary check at
     // exactly an MTU of 1191, but the two chunks marshal to
     // 12 + 1164 + 32 = 1208 bytes — past the MTU the association promised.
-    let a = create_association_with_mtu(1191);
+    let mut a = create_association_with_mtu(1191);
     let chunks = vec![payload_chunk(1, 1147), payload_chunk(2, 16)];
     let mut raw_packets = vec![];
     a.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
@@ -625,7 +625,8 @@ fn bundle_split_decides_on_padded_wire_sizes() {
 #[test]
 fn single_maximum_size_chunk_marshals_within_initial_mtu() {
     let max_payload = EndpointConfig::default().get_max_payload_size();
-    let a = create_association_with_mtu(max_payload + COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE);
+    let mut a =
+        create_association_with_mtu(max_payload + COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE);
     let chunks = vec![payload_chunk(1, max_payload as usize)];
     let mut raw_packets = vec![];
     a.bundle_data_chunks_into_packets(chunks, &mut raw_packets);
@@ -649,7 +650,7 @@ fn single_maximum_size_chunk_marshals_within_a_custom_mtu() {
     // path MTU (1500, fully used).
     for (mtu, expected) in [(32u32, 32usize), (1201, 1200), (1500, 1500)] {
         let max_payload = max_payload_size_for_mtu(mtu);
-        let a =
+        let mut a =
             create_association_with_mtu(max_payload + COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE);
         let chunks = vec![payload_chunk(1, max_payload as usize)];
         let mut raw_packets = vec![];
@@ -698,7 +699,7 @@ fn many_small_chunks_bundle_within_mtu() {
     // Per-chunk padding (17-byte payloads: 33 raw, 36 padded) compounds; a
     // payload-only accounting packed bundles that marshalled well past the
     // MTU once dozens of small chunks rode one flight.
-    let a = create_association_with_mtu(1191);
+    let mut a = create_association_with_mtu(1191);
     let chunks: Vec<ChunkPayloadData> = (0..60).map(|i| payload_chunk(i, 17)).collect();
     let mut raw_packets = vec![];
     a.bundle_data_chunks_into_packets(chunks, &mut raw_packets);

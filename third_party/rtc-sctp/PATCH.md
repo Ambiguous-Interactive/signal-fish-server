@@ -517,3 +517,27 @@ and closes both associations before the old reader drains. It checks exact old
 payload retention, read and stop cleanup, cleared timers, and one drain event.
 This repairs terminal metadata cleanup. It does not establish gameplay payload
 loss, independent-peer conformance, or the cause of the historical reset timeout.
+
+## Ordered expiry and outbound evidence
+
+Issue [#1269](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1269)
+repairs positive-lifetime ordered messages that expire before their first send.
+They retire without DATA. FORWARD TSN advances their ordered sequence so the next
+reliable message remains readable. Timed(0) still permits the first transmission.
+
+Association snapshots count DATA serialized into SCTP output, emitted retries,
+and messages abandoned by partial reliability. They retain the last queued and
+first/last abandoned identities, stream incarnations, wire SSNs, ordering and
+captured policies. These constant-size records retain no payload. Unordered
+SSNs are not message identities. SCTP output does not prove UDP transmission or
+remote receipt; enqueue is a separate boundary. Snapshots can miss intermediate
+identities and do not establish per-message transmission from aggregate totals.
+
+Replacement qualification must preserve `outbound_evidence_` and
+`expired_ordered_prefix_`: whole/fragmented messages, ordered/unordered expiry,
+retry-limit retirement, repeated retirement, reliable retries, counter reset,
+TSN wraparound, exact reliable successor bytes and send-buffer release.
+
+`transmission_selected=false` on an abandonment means no fragment was selected
+for send before retirement. A true value also covers acknowledged fragment
+prefixes; it does not prove packet emission or remote receipt.

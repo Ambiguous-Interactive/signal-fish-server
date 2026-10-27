@@ -201,6 +201,18 @@ def run_case(bridge, probe, directory, receiver_offers, packet_bytes):
             for channel in snapshot["transport_channels"]
         } == {(1, "reliable"), (2, "ordered"), (3, "unreliable")}, snapshot
         assert snapshot["sctp"]["data_chunks_accepted"] > 0, snapshot
+        assert snapshot["sctp"]["messages_abandoned"] == 0, snapshot
+        assert snapshot["sctp"]["first_abandoned_message"] is None, snapshot
+        assert snapshot["sctp"]["last_abandoned_message"] is None, snapshot
+        sender_snapshot = report["sender_before_resume"]
+        assert sender_snapshot["sctp"]["data_chunks_emitted"] > 0, sender_snapshot
+        assert sender_snapshot["sctp"]["messages_abandoned"] == 0, sender_snapshot
+        assert sender_snapshot["sctp"]["last_enqueued_message"]["stream_id"] == 1, (
+            sender_snapshot
+        )
+        assert sender_snapshot["sctp"]["last_enqueued_message"]["reliability"] == "reliable", (
+            sender_snapshot
+        )
         report["exact_receipts"] = len(receipts)
         report["passed"] = True
     except Exception:

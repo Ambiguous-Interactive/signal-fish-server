@@ -1175,6 +1175,9 @@ impl Engine {
     /// Acceptance means receive-TSN admission, including saved reset DATA and
     /// stopped readers; it does not prove reassembly or application delivery.
     /// Redundant TSNs include positions passed by FORWARD TSN.
+    /// Outbound SCTP emission counts serialized DATA, not UDP transmission or
+    /// remote receipt. Enqueue and first/last abandonment identities retain no
+    /// payload and use constant space; unordered SSNs are not unique identities.
     /// Missing associations return null; sampling failures also set `sctp_error`.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {

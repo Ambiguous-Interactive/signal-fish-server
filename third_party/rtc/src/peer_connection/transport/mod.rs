@@ -386,6 +386,39 @@ pub struct RTCSctpTransport<'a> {
     pub(crate) peer_connection: &'a RTCPeerConnection,
 }
 
+/// Association-local identity of a queued or abandoned message; no payload is retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RTCSctpOutboundMessageInfo {
+    /// Zero-based identity, scoped to the physical association.
+    pub message_id: u64,
+    /// Wire stream ID, not the wrapper's channel ID.
+    pub stream_id: u16,
+    /// Local stream incarnation.
+    pub stream_generation: u64,
+    /// Wire SSN; unordered messages can share this value.
+    pub sequence_number: u16,
+    /// Whether delivery is unordered.
+    pub unordered: bool,
+    /// Captured policy: reliable, lifetime, or retransmits.
+    pub reliability: &'static str,
+    /// A fragment was selected for send; this is not packet emission or UDP proof.
+    pub transmission_selected: bool,
+}
+
+impl From<::sctp::OutboundMessageInfo> for RTCSctpOutboundMessageInfo {
+    fn from(message: ::sctp::OutboundMessageInfo) -> Self {
+        Self {
+            message_id: message.message_id,
+            stream_id: message.stream_id,
+            stream_generation: message.stream_generation,
+            sequence_number: message.sequence_number,
+            unordered: message.unordered,
+            reliability: message.reliability,
+            transmission_selected: message.transmission_selected,
+        }
+    }
+}
+
 /// Local SCTP association counters, before data-channel message reassembly.
 /// Received chunks split into accepted, redundant, and refused attempts.
 /// These counters do not identify streams or count delivered application messages.
@@ -393,6 +426,18 @@ pub struct RTCSctpTransport<'a> {
 pub struct RTCSctpAssociationStats {
     /// DATA chunks received, including duplicates and refused chunks.
     pub data_chunks_received: u64,
+    /// DATA chunks serialized into SCTP output, including retries; not UDP receipt proof.
+    pub data_chunks_emitted: u64,
+    /// Emitted DATA chunks selected for retransmission.
+    pub data_chunks_retransmitted: u64,
+    /// Messages retired by partial reliability, once per identity.
+    pub messages_abandoned: u64,
+    /// Last locally queued message, retained in constant space.
+    pub last_enqueued_message: Option<RTCSctpOutboundMessageInfo>,
+    /// First partial-reliability retirement, retained across later retirements.
+    pub first_abandoned_message: Option<RTCSctpOutboundMessageInfo>,
+    /// Last partial-reliability retirement, retained in constant space.
+    pub last_abandoned_message: Option<RTCSctpOutboundMessageInfo>,
     /// New DATA chunks admitted to the receive TSN space, including saved reset DATA.
     /// Acceptance does not prove message reassembly or application delivery.
     pub data_chunks_accepted: u64,
@@ -414,6 +459,12 @@ impl From<::sctp::AssociationStats> for RTCSctpAssociationStats {
     fn from(mut stats: ::sctp::AssociationStats) -> Self {
         Self {
             data_chunks_received: stats.get_num_datas(),
+            data_chunks_emitted: stats.get_num_emitted_datas(),
+            data_chunks_retransmitted: stats.get_num_emitted_retransmissions(),
+            messages_abandoned: stats.get_num_abandoned_messages(),
+            last_enqueued_message: stats.last_enqueued_message().map(Into::into),
+            first_abandoned_message: stats.first_abandoned_message().map(Into::into),
+            last_abandoned_message: stats.last_abandoned_message().map(Into::into),
             data_chunks_accepted: stats.get_num_accepted_datas(),
             data_chunks_redundant: stats.get_num_redundant_datas(),
             data_chunks_refused: stats.get_num_refused_datas(),
