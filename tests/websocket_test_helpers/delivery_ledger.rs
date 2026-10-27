@@ -74,7 +74,12 @@ impl LedgerPayload {
 /// Extract the `(ledger_sender, seq)` pair from a received `GameData`
 /// payload, or `None` for payloads that do not carry ledger fields.
 pub fn extract(data: &serde_json::Value) -> Option<(String, u64)> {
-    let sender = data.get("ledger_sender")?.as_str()?.to_string();
+    extract_borrowed(data).map(|(sender, seq)| (sender.to_string(), seq))
+}
+
+/// Read ledger fields while the received application value remains available.
+pub fn extract_borrowed(data: &serde_json::Value) -> Option<(&str, u64)> {
+    let sender = data.get("ledger_sender")?.as_str()?;
     let seq = data.get("seq")?.as_u64()?;
     Some((sender, seq))
 }

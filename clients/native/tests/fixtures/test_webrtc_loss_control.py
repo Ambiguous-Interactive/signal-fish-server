@@ -77,6 +77,114 @@ class LossPathTests(unittest.TestCase):
                 changed = [histories[0], {**histories[1], key: value}]
                 self.assertFalse(loss_histories_passed(changed, 1))
 
+    def test_reorder_verdict_requires_every_direction_and_no_held_tail(self) -> None:
+        histories = [
+            {
+                "generation": generation,
+                "armed": True,
+                "errors": [],
+                "dropped": {"native": 1, "godot": 1},
+                "reordered": {"native": 1, "godot": 1},
+                "held_datagrams": 0,
+            }
+            for generation in (1, 2)
+        ]
+        self.assertTrue(loss_histories_passed(histories, 1, 1))
+        for key, value in [
+            ("reordered", {"native": 0, "godot": 1}),
+            ("reordered", {"native": 1, "godot": 0}),
+            ("reordered", {"native": 2, "godot": 1}),
+            ("reordered", None),
+            ("held_datagrams", 1),
+            ("held_datagrams", None),
+        ]:
+            with self.subTest(key=key, value=value):
+                changed = [histories[0], {**histories[1], key: value}]
+                self.assertFalse(loss_histories_passed(changed, 1, 1))
+
+    def test_reordering_releases_exact_bytes_after_a_later_application_datagram(
+        self,
+    ) -> None:
+        path = UdpLossPath(1, reorders=1)
+        native = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        godot = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for connection in (native, godot):
+                connection.bind(("127.0.0.1", 0))
+                connection.settimeout(1)
+            to_native = path.candidate("native", candidate(native))
+            to_godot = path.candidate("godot", candidate(godot))
+            path.arm()
+            for sender, receiver, target in (
+                (native, godot, destination(to_godot)),
+                (godot, native, destination(to_native)),
+            ):
+                first = bytes([23]) + bytes([1]) * 1100
+                second = bytes([23]) + bytes([2]) * 1200
+                third = bytes([23]) + bytes([3]) * 1300
+                sender.sendto(bytes([23]) + bytes(1400), target)
+                sender.sendto(first, target)
+                sender.sendto(bytes([23]) + b"small", target)
+                sender.sendto(b"control", target)
+                self.assertEqual(receiver.recvfrom(65536)[0], bytes([23]) + b"small")
+                self.assertEqual(receiver.recvfrom(65536)[0], b"control")
+                sender.sendto(second, target)
+                self.assertEqual(receiver.recvfrom(65536)[0], second)
+                self.assertEqual(receiver.recvfrom(65536)[0], first)
+                sender.sendto(third, target)
+                self.assertEqual(receiver.recvfrom(65536)[0], third)
+            proof = path.close()
+            self.assertEqual(proof["dropped"], {"native": 1, "godot": 1})
+            self.assertEqual(proof["reordered"], {"native": 1, "godot": 1})
+            self.assertEqual(proof["forwarded"], {"native": 5, "godot": 5})
+            self.assertEqual(proof["held_datagrams"], 0)
+            self.assertEqual(proof["errors"], [])
+            self.assertEqual(len(proof["reorder_records"]), 2)
+            for record in proof["reorder_records"]:
+                self.assertEqual(record["held_bytes"], 1101)
+                self.assertEqual(record["held_datagram"], 2)
+                self.assertEqual(record["overtaking_bytes"], 1201)
+                self.assertEqual(record["overtaking_datagram"], 5)
+                self.assertLessEqual(
+                    record["held_monotonic_ns"], record["released_monotonic_ns"]
+                )
+        finally:
+            path.close()
+            native.close()
+            godot.close()
+
+    def test_missing_overtaking_datagram_releases_bytes_and_invalidates_path(
+        self,
+    ) -> None:
+        path = UdpLossPath(0, reorders=1)
+        native = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        godot = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for connection in (native, godot):
+                connection.bind(("127.0.0.1", 0))
+                connection.settimeout(2)
+            path.candidate("native", candidate(native))
+            to_godot = path.candidate("godot", candidate(godot))
+            path.arm()
+            application = bytes([23]) + bytes(range(253)) * 8
+            native.sendto(application, destination(to_godot))
+            self.assertEqual(godot.recvfrom(65536)[0], application)
+            proof = path.close()
+            self.assertEqual(proof["reordered"], {"native": 0, "godot": 0})
+            self.assertEqual(proof["held_datagrams"], 0)
+            self.assertEqual(
+                proof["errors"], ["native reorder had no overtaking datagram"]
+            )
+            self.assertFalse(
+                loss_histories_passed(
+                    [{**proof, "generation": 1}, {**proof, "generation": 2}], 0, 1
+                )
+            )
+        finally:
+            path.close()
+            native.close()
+            godot.close()
+
     def test_mdns_target_is_learned_without_losing_queued_packets(self) -> None:
         path = UdpLossPath(1)
         native = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

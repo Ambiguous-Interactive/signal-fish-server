@@ -1773,7 +1773,7 @@ pub(crate) async fn handle_inbound(
                     count_u64(json_byte_count(&data).expect("received JSON value serializes"));
                 let encoded_frame_body_bytes = count_u64(text.len());
                 if let Some((ledger_sender, ledger_seq)) =
-                    websocket_test_helpers::delivery_ledger::extract(&data)
+                    websocket_test_helpers::delivery_ledger::extract_borrowed(&data)
                 {
                     // The sending incarnation comes from the registry (the
                     // sender's own join registration), keyed by the exact
