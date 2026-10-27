@@ -9643,8 +9643,8 @@ Godot driver at `f3d3f8611e2c85290f222074da6d40807099e4ec` (Godot PR #445).
 It removes inline SDP candidates and selects one IPv4 UDP host candidate per seat.
 Both advertised addresses point to a local relay. Web mDNS endpoints are learned
 from their first UDP packet. Each physical generation gets fresh sockets and a
-fresh loss budget. Original candidates, omitted candidates, endpoints, counts,
-packet sizes, monotonic timestamps, and relay errors remain in `udp-loss.json`.
+fresh loss budget. Selected candidates, omitted-candidate totals, endpoints,
+packet counts and sizes, monotonic timestamps, and relay errors remain in `udp-loss.json`.
 
 After native channel open, the relay drops one DTLS application datagram of at
 least 1,000 bytes in each direction. It forwards smaller application packets,

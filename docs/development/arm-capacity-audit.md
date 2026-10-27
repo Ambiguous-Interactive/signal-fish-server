@@ -6323,3 +6323,39 @@ It identifies the worker executing the report, not that task's earlier worker
 residency. Live controls match the reporting thread to the interval identity.
 The original long attempt predates this added warning field. Its failed history
 and all artifacts remain in `progress/session-555/release-long/`.
+
+### Final-source attempt with reporting-worker evidence
+
+Run `dc8f6a13-dd52-4075-9e7f-53e96e9eb3fd` repeats the original shape and bound
+with the new warning fields. It is also invalid. It completes 375,549 sends,
+retains 315,683 unsent, and receives all 5,633,235 owed deliveries with zero
+outstanding. Replay and the independent streaming audit again match every raw
+send and all 240 ordered recipient/sender prefixes. All registered source and
+binary identities match. The run takes 793.974 seconds, including export/replay.
+
+Ten before-write and two completed-write warnings span
+194,150,214-194,260,075 us. The first before-write breach is 251,590 us for
+`r0p8` sequence 11,633. Recorded lag later reaches 361,600 us. All four reporting
+worker identities match collected interval snapshots by TID and start-time ticks.
+The first reporting worker is TID 1595153. In the broad aligned crossing window,
+it adds 132.391 ms of runtime and 77.263 ms of runqueue wait. These observations
+do not establish where that async task waited. Snapshot and warning work follows
+a confirmed breach and can affect later reports; its counters are not atomic with
+`observed_us`.
+
+The observer retains 7,603 samples, with a largest gap of 461.359 ms and no
+observed Cargo/rustc/clippy process. CPU-tick alignment brackets the workload
+epoch within 118.137 ms. Child peak RSS is 393,932 KiB. The two attempts retain
+different completed prefixes, so their peaks do not prove a memory reduction.
+Both preserve their original offered schedules and explicit unsent work.
+
+The ledger is 1,075,370,640 bytes, SHA-256
+`e0416ae85cb414b53b1927a10fb7ec8be1b80a6277ee229ddedfa2bb9f20ac01`.
+Generator binary:
+`b91bd568f07c36889279b3551769d402657eeb18d18b9e58510006be4d4e8688`.
+Server binary:
+`82dddf9125488a570943073b9f9cccbd706595c47030f31dd3abbc61d6717c68`.
+All evidence remains in `progress/session-555/release-long-worker/`.
+Neither attempt qualifies the full planned ten-minute cell. The physical stall
+cause, task-level scheduling evidence, and whole-workload memory acceptance remain
+open in #1009/#775.
