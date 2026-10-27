@@ -2566,3 +2566,151 @@ async fn empty_channel_sends_respect_backpressure_and_resume_exact_receipts() {
         }
     }
 }
+
+// Issues #1240/#1244: finite-lifetime loss must not consume reliable snapshots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_lifetime_expiry_releases_credit_without_losing_reliable_prefix() {
+    for initiator_sends in [true, false] {
+        for expired_label in [ORDERED_LABEL, UNRELIABLE_LABEL] {
+            eprintln!("Godot expiry: initiator_sends={initiator_sends}, label={expired_label}");
+            let (mut pair, remote, local) =
+                backpressure_profile_pair(Some(16384), initiator_sends, ChannelProfile::Godot)
+                    .await;
+            let expired = pair
+                .sender
+                .channel(pair.receiver_id, expired_label)
+                .unwrap();
+            let reliable = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            remote.pause().await;
+            local.pause().await;
+            let remote_before = remote.progress.snapshot();
+            local
+                .progress
+                .drop_next_application
+                .store(true, Ordering::SeqCst);
+            let expired_body = vec![0xaa; 4096];
+            expired.send(expired_body.as_slice().into()).await.unwrap();
+            assert_eq!(expired.outstanding_bytes().await.unwrap(), 4096);
+            local.resume();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while local.progress.dropped_transmits.load(Ordering::SeqCst) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the initial finite-lifetime transmit reaches the loss boundary");
+            let payloads: Vec<Vec<u8>> = (0u8..4)
+                .map(|sequence| {
+                    let mut bytes = vec![0xff; 4096];
+                    bytes[..2].copy_from_slice(&[sequence, u8::from(initiator_sends)]);
+                    bytes
+                })
+                .collect();
+            for payload in &payloads {
+                reliable.send(payload.as_slice().into()).await.unwrap();
+            }
+            assert_eq!(reliable.outstanding_bytes().await.unwrap(), 16384);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while expired.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the sender expires finite-lifetime fragments without any peer ACK");
+            assert_eq!(remote.progress.snapshot()["sent"], remote_before["sent"]);
+            assert_eq!(
+                reliable.outstanding_bytes().await.unwrap(),
+                16384,
+                "reliable data must remain retained while finite-lifetime data expires"
+            );
+            let sender_snapshot = pair
+                .sender
+                .transport_diagnostic_snapshot(pair.receiver_id)
+                .await;
+            assert!(
+                sender_snapshot["sctp"]["retransmission_timeouts"]
+                    .as_u64()
+                    .unwrap()
+                    > 0,
+                "expiry control requires an observed retransmission timer: {sender_snapshot}"
+            );
+            remote.resume();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut received = 0;
+                while received < payloads.len() {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL, "the dropped fragment prevents the expired message from reassembling");
+                            assert_eq!(data, payloads[received]);
+                            received += 1;
+                        }
+                        EngineEvent::ChannelReceiveRejected { .. } | EngineEvent::ChannelClosed { .. } => panic!("lifetime expiry must not retire the physical link"),
+                        _ => {}
+                    }
+                }
+                while reliable.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("every reliable prefix byte survives finite-lifetime loss");
+            expired
+                .try_send(b"fresh-after-expiry".as_slice().into())
+                .await
+                .unwrap();
+            reliable
+                .send(b"reliable-after-expiry".as_slice().into())
+                .await
+                .unwrap();
+            let mut fresh_observed = false;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelBinaryMessage { label, data, .. } if label == expired_label => {
+                            assert!(!fresh_observed, "one finite send permits at most one callback");
+                            assert_eq!(data, b"fresh-after-expiry");
+                            fresh_observed = true;
+                        }
+                        EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(data, b"reliable-after-expiry");
+                            break;
+                        }
+                        EngineEvent::ChannelReceiveRejected { .. } | EngineEvent::ChannelClosed { .. } => panic!("expiry must leave the physical link usable"),
+                        _ => {}
+                    }
+                }
+                while reliable.outstanding_bytes().await.unwrap() != 0 || expired.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+                let snapshot = pair.receiver.transport_diagnostic_snapshot(pair.sender_id).await;
+                let finite_received = snapshot["transport_channels"].as_array().unwrap().iter()
+                    .find(|channel| channel["label"] == expired_label).unwrap()["messages_received"].as_u64().unwrap();
+                assert!(finite_received <= 1, "the expired fragmented body never reassembles: {snapshot}");
+                if finite_received == 1 && !fresh_observed {
+                    loop {
+                        match pair.receiver_events.recv().await.unwrap() {
+                            EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                                assert_eq!(label, expired_label);
+                                assert_eq!(data, b"fresh-after-expiry");
+                                fresh_observed = true;
+                                break;
+                            }
+                            EngineEvent::ChannelReceiveRejected { .. } | EngineEvent::ChannelClosed { .. } => panic!("expiry must leave the physical link usable"),
+                            _ => {}
+                        }
+                    }
+                }
+                assert_eq!(finite_received, u64::from(fresh_observed));
+            }).await.unwrap_or_else(|error| panic!("initiator_sends={initiator_sends}, expired_label={expired_label}: exact reliable barrier and released credit: {error}"));
+            assert_eq!(
+                expired.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Open
+            );
+            println!("GODOT_EXPIRY initiator_sends={initiator_sends} label={expired_label} dropped_transmits=1 expired_bytes=4096 reliable_bytes=16384 fresh_finite_observed={fresh_observed}");
+            assert_eq!(local.progress.snapshot()["dropped_transmits"], 1);
+            pair.cleanup().await;
+        }
+    }
+}

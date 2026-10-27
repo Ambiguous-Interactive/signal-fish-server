@@ -1291,6 +1291,96 @@ fn encode_application_frame(
     Ok((Message::Text(frame.into()), count_u64(application_bytes)))
 }
 
+struct OutgoingLedger {
+    message: ClientMessage,
+    payload_bytes: u32,
+    metadata_bytes_at_zero: usize,
+}
+
+impl OutgoingLedger {
+    fn new(sender: &str, payload_bytes: u32) -> Result<Self, String> {
+        let data = ledger_application_data(sender, 0, payload_bytes)?;
+        let padding_bytes = data["padding"].as_str().expect("ledger padding").len();
+        Ok(Self {
+            message: ClientMessage::GameData {
+                data,
+                class: None,
+                key: None,
+            },
+            payload_bytes,
+            metadata_bytes_at_zero: count_usize(payload_bytes) - padding_bytes,
+        })
+    }
+
+    fn encode(
+        &mut self,
+        seq: u64,
+        class: Option<WireDeliveryClass>,
+        key: Option<u32>,
+        opaque: bool,
+    ) -> Result<(Message, u64), String> {
+        let metadata_bytes = self.metadata_bytes_at_zero
+            + usize::try_from(seq.checked_ilog10().unwrap_or(0))
+                .expect("sequence digit count fits");
+        let padding_bytes = count_usize(self.payload_bytes)
+            .checked_sub(metadata_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "payload_bytes ({}) is below ledger metadata size ({metadata_bytes})",
+                    self.payload_bytes
+                )
+            })?;
+        let ClientMessage::GameData {
+            data,
+            class: message_class,
+            key: message_key,
+        } = &mut self.message
+        else {
+            unreachable!("outgoing ledger contains GameData")
+        };
+        *data.get_mut("seq").expect("ledger sequence") = seq.into();
+        let serde_json::Value::String(padding) = data.get_mut("padding").expect("ledger padding")
+        else {
+            unreachable!("ledger padding is text")
+        };
+        padding.truncate(padding_bytes);
+        padding.extend(std::iter::repeat_n('x', padding_bytes - padding.len()));
+        *message_class = class;
+        *message_key = key;
+        let frame = if opaque {
+            Message::Binary(
+                serde_json::to_vec(data)
+                    .map_err(|error| format!("serialize: {error}"))?
+                    .into(),
+            )
+        } else {
+            Message::Text(
+                serde_json::to_string(&self.message)
+                    .map_err(|error| format!("serialize: {error}"))?
+                    .into(),
+            )
+        };
+        let application_bytes = if opaque {
+            frame.len()
+        } else {
+            let envelope_bytes = json_byte_count(&ClientMessage::GameData {
+                data: serde_json::Value::Null,
+                class,
+                key,
+            })
+            .map_err(|error| format!("serialize envelope: {error}"))?;
+            frame
+                .len()
+                .checked_add(4)
+                .and_then(|bytes| bytes.checked_sub(envelope_bytes))
+                .ok_or_else(|| {
+                    "serialized GameData frame is smaller than its envelope".to_string()
+                })?
+        };
+        Ok((frame, count_u64(application_bytes)))
+    }
+}
+
 /// Reject an undersized target for any scheduled sequence before run effects.
 pub(crate) fn validate_payload_size(
     plans: &[SenderPlan],
@@ -1410,6 +1500,7 @@ async fn peer_task(
     // Generator failure stops sends for every later incarnation. Keep the
     // socket and its inbound evidence alive through the normal lifecycle.
     let mut outbound_stopped = false;
+    let mut outgoing_ledger = None;
     let epoch = match ready_for_epoch(ready, &mut start).await {
         Ok(epoch) => epoch,
         Err(error) => {
@@ -1527,17 +1618,6 @@ async fn peer_task(
                         });
                         return SendOutcome::Stopped;
                     }
-                    let data =
-                        match ledger_application_data(&plan.name, send.seq, facts.payload_bytes) {
-                            Ok(data) => data,
-                            Err(detail) => {
-                                log.push_fault(InvalidReason::SendFailed {
-                                    sender: plan.name.clone(),
-                                    detail,
-                                });
-                                return SendOutcome::Stopped;
-                            }
-                        };
                     let (class, key) = if facts.experiment.opaque_sender {
                         (None, None)
                     } else {
@@ -1563,12 +1643,16 @@ async fn peer_task(
                             DeliveryClass::Volatile => (Some(WireDeliveryClass::Volatile), None),
                         }
                     };
-                    let (frame, application_bytes) = match encode_application_frame(
-                        data,
-                        class,
-                        key,
-                        facts.experiment.opaque_sender,
-                    ) {
+                    let ledger = outgoing_ledger.get_or_insert_with(|| {
+                        OutgoingLedger::new(&plan.name, facts.payload_bytes)
+                    });
+                    let encoded = match ledger {
+                        Ok(ledger) => {
+                            ledger.encode(send.seq, class, key, facts.experiment.opaque_sender)
+                        }
+                        Err(detail) => Err(detail.clone()),
+                    };
+                    let (frame, application_bytes) = match encoded {
                         Ok(encoded) => encoded,
                         Err(detail) => {
                             log.push_fault(InvalidReason::SendFailed {
@@ -2607,6 +2691,92 @@ mod session_poll_tests {
                 encode_application_frame(data, None, None, true).expect("opaque frame");
             assert_eq!(bytes, count_u64(reference_body.len()));
             assert_eq!(frame, Message::Binary(reference_body.into()));
+        }
+    }
+
+    #[test]
+    fn reused_ledger_matches_canonical_frames_at_sequence_and_payload_boundaries() {
+        for sender in ["r0p0", "r998p15", "r\"鱼\\\n"] {
+            for payload_bytes in [96, 1024, 16_384] {
+                let mut ledger = OutgoingLedger::new(sender, payload_bytes).unwrap();
+                for seq in [0, 9, 10, 99, 100, 43_201, u64::MAX, 0, u64::MAX] {
+                    for (class, key) in [
+                        (None, None),
+                        (Some(WireDeliveryClass::Reliable), None),
+                        (Some(WireDeliveryClass::Volatile), None),
+                        (Some(WireDeliveryClass::Latest), Some(0)),
+                        (Some(WireDeliveryClass::Latest), Some(u32::MAX)),
+                    ] {
+                        for opaque in [false, true] {
+                            let data = ledger_application_data(sender, seq, payload_bytes).unwrap();
+                            let expected =
+                                encode_application_frame(data, class, key, opaque).unwrap();
+                            let actual = ledger.encode(seq, class, key, opaque).unwrap();
+                            assert_eq!(
+                                actual, expected,
+                                "{sender:?} {payload_bytes} {seq} {class:?} {key:?} {opaque}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(OutgoingLedger::new("r0p0", 0).is_err());
+        let mut ledger = OutgoingLedger::new("r0p0", 45).unwrap();
+        assert!(ledger.encode(10, None, None, false).is_err());
+        assert!(ledger.encode(0, None, None, false).is_ok());
+    }
+
+    #[test]
+    fn reused_ledger_keeps_sender_keys_and_padding_allocations() {
+        let mut ledger = OutgoingLedger::new("r0p0", 96).unwrap();
+        let pointers = |ledger: &OutgoingLedger| {
+            let ClientMessage::GameData { data, .. } = &ledger.message else {
+                unreachable!()
+            };
+            let mut pointers: Vec<_> = data
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|key| key.as_ptr())
+                .collect();
+            pointers.push(data["ledger_sender"].as_str().unwrap().as_ptr());
+            pointers.push(data["padding"].as_str().unwrap().as_ptr());
+            pointers
+        };
+        let original = pointers(&ledger);
+        for seq in [0, 9, 10, 99, 100, u64::MAX, 0] {
+            ledger.encode(seq, None, None, false).unwrap();
+            assert_eq!(pointers(&ledger), original);
+        }
+    }
+
+    #[test]
+    fn reused_ledger_records_serialized_bytes_instead_of_the_requested_size() {
+        let mut ledger = OutgoingLedger::new("r0p0", 96).unwrap();
+        let ClientMessage::GameData { data, .. } = &mut ledger.message else {
+            unreachable!()
+        };
+        data["additional"] = json!("雪\\\"\n");
+        for opaque in [false, true] {
+            let (frame, application_bytes) = ledger
+                .encode(10, Some(WireDeliveryClass::Latest), Some(u32::MAX), opaque)
+                .unwrap();
+            let body = match frame {
+                Message::Text(text) => {
+                    match serde_json::from_str::<ClientMessage>(&text).unwrap() {
+                        ClientMessage::GameData { data, .. } => serde_json::to_vec(&data).unwrap(),
+                        _ => unreachable!(),
+                    }
+                }
+                Message::Binary(bytes) => bytes.to_vec(),
+                _ => unreachable!(),
+            };
+            assert_eq!(application_bytes, count_u64(body.len()));
+            assert!(
+                application_bytes > 96,
+                "extra serialized bytes must stay visible"
+            );
         }
     }
 
