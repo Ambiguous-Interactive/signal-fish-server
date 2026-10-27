@@ -116,6 +116,25 @@ callbacks, so compare it again after draining callbacks. Entries keep their own
 IDs because retained closed channels can share a label. An unknown or removed
 peer returns null. Each fresh physical generation starts new counters.
 
+The snapshot's `receive_rejection` is null until this link refuses a message.
+It then records `message_bytes`, `pending_messages`, or `pending_bytes`.
+The first failed reservation determines the reason; the count check precedes
+the pending-byte check. Rejection logs also record the raw message size.
+`receive_budget` reports pending message and byte counts and their limits.
+Its scope is the whole Engine, across peers and retired generations. Retained
+events keep their permits after link removal. Drop those events to release
+capacity before handling fresh traffic. Budget counts are current observations,
+not frozen rejection-time values, and are sampled separately.
+
+The held-callback Engine control in `engine_profile_tests.rs` fills actual SCTP
+receive credit before it resumes Engine polling. Holding application events
+then admits an exact reliable prefix and produces one explicit budget refusal.
+Both offer roles cover count and byte limits, stale-event retirement, and mixed
+traffic on fresh links in the same Engines. This control does not identify the
+cause of the earlier ambiguous terminal event in
+[server #1264](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1264)
+or the historical Godot reliable-prefix loss.
+
 ## Shared transport behavior
 
 The native build uses qualified local RTC and SCTP source patches.
