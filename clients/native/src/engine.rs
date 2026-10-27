@@ -1126,8 +1126,8 @@ impl Engine {
             "receive_rejection": link.receive_admission.rejection_reason.get().map(|reason| reason.as_str()),
             "receive_budget": {
                 "scope": "engine",
-                "pending_messages": MAX_PENDING_CHANNEL_MESSAGES - self.message_budget.messages.available_permits(),
-                "pending_bytes": MAX_PENDING_CHANNEL_BYTES - self.message_budget.bytes.available_permits(),
+                "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
+                "pending_bytes": MAX_PENDING_CHANNEL_BYTES.saturating_sub(self.message_budget.bytes.available_permits()),
                 "max_pending_messages": MAX_PENDING_CHANNEL_MESSAGES,
                 "max_pending_bytes": MAX_PENDING_CHANNEL_BYTES,
                 "max_message_bytes": MAX_CHANNEL_MESSAGE_BYTES,
@@ -1861,8 +1861,8 @@ fn spawn_channel_event_loop(
                             tracing::warn!(%peer, generation, %label,
                                 reason = reason.as_str(),
                                 message_bytes = message.data.len(),
-                                pending_messages = MAX_PENDING_CHANNEL_MESSAGES - admission.budget.messages.available_permits(),
-                                pending_bytes = MAX_PENDING_CHANNEL_BYTES - admission.budget.bytes.available_permits(),
+                                pending_messages = MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(admission.budget.messages.available_permits()),
+                                pending_bytes = MAX_PENDING_CHANNEL_BYTES.saturating_sub(admission.budget.bytes.available_permits()),
                                 "data-channel receive limit reached");
                             let _ = events.send(EngineEvent::ChannelReceiveRejected {
                                 peer,
