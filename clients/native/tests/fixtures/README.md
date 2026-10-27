@@ -95,3 +95,40 @@ This is a local loss and reordering control. It does not identify the encrypted
 SCTP chunk in a dropped or reordered datagram. It does not establish the cause of
 the historical Godot 4.3 prefix loss.
 It does not qualify remote networks or repaired Godot packet lifetimes.
+
+## Loss and reordering service result
+
+Session 556 ran this control with one drop and one reorder per direction and
+generation. Six final local Linux ARM64 pairings pass: Godot 4.7.2 native and Web, and
+Godot 4.3 native, each with both initial offer roles. All 3,072 required reliable
+snapshot receipts pass across 12 physical generations. The relay records 24 drops
+and 24 reorder releases. Held datagrams are 1,101–1,113 bytes. No relay error or
+held tail remains. The control keeps the original snapshot bytes, sequence checks,
+32-credit window, mixed modes, selected-packet retirement, required-channel close,
+and same-room rejoin checks.
+
+All six final cases use the retained release server with SHA-256
+`82dddf9125488a570943073b9f9cccbd706595c47030f31dd3abbc61d6717c68`.
+The first Web Godot-offer attempt stopped before pairing because Chromium could
+not create its temporary directory (`ENOSPC`). Its separate retry used a workspace
+`TMPDIR` and passed. This launch failure is not a gameplay failure. Three initial
+successful 4.7.2 cases used an existing debug server whose hash was not retained
+before build-cache cleanup. Those attempts remain separate. Repeating those three
+cases with the pinned release server passed. The repeated cases overlap a read-only
+capacity-ledger audit. The runs do not establish isolated load or performance.
+
+The driver remains pinned to `f3d3f8611e2c85290f222074da6d40807099e4ec`.
+The native probe SHA-256 is
+`777bc6c066e799001732d97021dea81f11569c0848de10c1257cccec040222fd`.
+The final wrapper SHA-256 is
+`255fd92df1d9be81bf9df77b900ea0c389921598388d749a64322a6664e18ec8`.
+The initial four-cell attempt used wrapper SHA-256
+`381072159236b1c6a880d6877a78f5cb5a6856a4f513ea777ccf0aebfdc774c1`;
+its only difference is a Ruff line wrap, with the same Python syntax tree.
+All six final cases use the final wrapper. Eight socket and verdict controls
+pass. Disabling reordering or suppressing its fallback error makes them fail.
+
+These results qualify the observed local encrypted-datagram fault boundary.
+They do not identify reliable SCTP DATA inside the encrypted records, explain the
+historical 4.3 missing prefix, or qualify remote networks or corrected Godot
+lifetimes. Keep server #1240/#1244 and Godot #355/#433 open.
