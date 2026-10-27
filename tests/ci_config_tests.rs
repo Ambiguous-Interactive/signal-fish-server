@@ -32346,6 +32346,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("rtc", "peer_connection::handler::sctp::tests"),
         ("rtc", "stream_reset_"),
         ("rtc", "transport_control_ack_preserves_pending_gameplay_accounting"),
+        ("rtc", "empty_message_credit_preserves_unreleased_successor_bytes"),
         ("rtc", "timer_abandonment_"),
         ("rtc", "sctp_handshake_failure_"),
         ("rtc", "dtls_retry_exhaustion_"),
