@@ -926,6 +926,20 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
                 std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
                 std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
             }
+            assert_eq!(
+                pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp_type,
+                if receiver_offers {
+                    rtc::peer_connection::sdp::RTCSdpType::Offer
+                } else {
+                    rtc::peer_connection::sdp::RTCSdpType::Answer
+                },
+                "the receiver keeps its selected offer role"
+            );
             let peer = pair.sender_id;
             let link = pair.receiver.peers.get_mut(&peer).unwrap();
             for task in &link.channel_tasks {
@@ -953,6 +967,9 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
                 loop {
                     let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
                     if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+                        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
+                        assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+                        assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
                         println!("GODOT_ENGINE_HELD receiver_offers={receiver_offers} packet_bytes={packet_bytes} snapshot={snapshot}");
                         break;
                     }
@@ -1036,7 +1053,31 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
             println!("GODOT_ENGINE_REJECTION receiver_offers={receiver_offers} packet_bytes={packet_bytes} sender_debt={} snapshot={snapshot}", channel.outstanding_bytes().await.unwrap());
             pair.sender.remove_peer(pair.receiver_id).await.unwrap();
             pair.receiver.remove_peer(peer).await.unwrap();
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
             pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            assert_eq!(
+                pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp_type,
+                if receiver_offers {
+                    rtc::peer_connection::sdp::RTCSdpType::Offer
+                } else {
+                    rtc::peer_connection::sdp::RTCSdpType::Answer
+                },
+                "the receiver keeps its selected offer role"
+            );
             assert_ne!(pair.receiver.peers[&peer].generation, generation);
             assert!(retained
                 .iter()
