@@ -585,3 +585,96 @@ async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generatio
         pair.receiver.remove_peer(pair.sender_id).await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair() {
+    const PACKETS: u32 = 2048;
+    const PACKET_BYTES: usize = 4096;
+    for receiver_offers in [false, true] {
+        let mut pair = unconnected_negotiated_pair();
+        for generation in 0u8..2 {
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let peer = pair.sender_id;
+            let link = pair.receiver.peers.get_mut(&peer).unwrap();
+            link.stop_channel_tasks();
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            let mut payload = vec![0xff; PACKET_BYTES];
+            payload[4] = generation;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                for sequence in 0..PACKETS {
+                    payload[..4].copy_from_slice(&sequence.to_be_bytes());
+                    channel.send(payload.as_slice().into()).await.unwrap();
+                }
+            })
+            .await
+            .expect("unbounded send admission retains the complete offered burst");
+            let held = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                    if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+                        break snapshot;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect(
+                "held application polling fills downstream queues and exhausts SCTP receive credit",
+            );
+            let received = held["transport_channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["label"] == RELIABLE_LABEL)
+                .unwrap()["messages_received"]
+                .as_u64()
+                .unwrap();
+            assert!(
+                (256..u64::from(PACKETS)).contains(&received),
+                "the reliable callback queue is full while a tail stays upstream: {held}"
+            );
+            assert!(channel.outstanding_bytes().await.unwrap() > 0);
+            assert_eq!(held["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
+            let receiver = pair.receiver.channel(peer, RELIABLE_LABEL).unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let mut received = 0;
+                while received < PACKETS {
+                    match receiver.poll().await.expect("the channel remains readable") {
+                        DataChannelEvent::OnMessage(message) => {
+                            assert!(!message.is_string);
+                            payload[..4].copy_from_slice(&received.to_be_bytes());
+                            assert_eq!(message.data.as_ref(), payload.as_slice(), "generation={generation}, receiver_offers={receiver_offers}, sequence={received}");
+                            received += 1;
+                        }
+                        DataChannelEvent::OnError | DataChannelEvent::OnClosing | DataChannelEvent::OnClose => panic!("resumed reliable transport must drain without loss"),
+                        _ => {}
+                    }
+                }
+                while channel.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("resuming channel polling drains every exact reliable packet and sender credit");
+            assert_eq!(
+                pair.receiver
+                    .channel_received_messages(peer, RELIABLE_LABEL)
+                    .await,
+                PACKETS
+            );
+            assert_eq!(
+                receiver.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Open
+            );
+            println!("GODOT_CALLBACK_SATURATION receiver_offers={receiver_offers} generation={generation} packets={PACKETS} bytes={} reassembled_while_held={received} refused_chunks={}", u64::from(PACKETS) * u64::try_from(PACKET_BYTES).unwrap(), held["sctp"]["data_chunks_refused"]);
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+        }
+    }
+}

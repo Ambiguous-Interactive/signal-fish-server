@@ -1913,7 +1913,7 @@ pub(crate) async fn handle_inbound(
                             });
                             return !log.record_budget_exhausted();
                         };
-                        log.push_receipt(ReceiptEvent {
+                        return log.push_receipt(ReceiptEvent {
                             recipient: recipient.clone(),
                             sender,
                             seq: ledger_seq,

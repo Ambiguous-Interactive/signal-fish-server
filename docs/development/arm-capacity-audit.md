@@ -6614,3 +6614,37 @@ changes, delivery classes, keys, JSON and opaque payloads, and payload sizes fro
 when the serialized body exceeds the target. Live exact-size/replay, opaque,
 reconnect, and stopped-send controls pass. This does not attribute historical
 stalls (#1009, #1127) to allocation work. Previous invalid runs remain invalid.
+
+## Share receipt admission and budget observation (#636, #775, #1009)
+
+The live collector now returns the receive-budget state from receipt admission
+under the existing event-log mutex. A valid receipt no longer reacquires that
+mutex just to inspect the same sticky budget. The result describes that admission;
+another producer can cross the budget after unlock. Every later admission still
+checks the budget, and the existing notification and joined-producer shutdown
+remain active. The first crossing record and exact unretained count remain intact.
+
+The release component profile uses four pre-spawned barrier workers and one
+million preallocated receipt slots. Each fresh process retains every sequence
+from 0 through 999,999 exactly once, with checksum 499,999,500,000. The same binary
+compares the fused path with an additional separate budget check. The latter
+measures the incremental second-lock cost; it also executes the new in-lock
+budget observation, so it is not the exact old implementation.
+
+The quiet ABBA/BAAB cohort records separate-check times of
+173,362 / 163,459 / 181,650 / 163,233 us and fused times of
+127,004 / 128,576 / 130,261 / 137,162 us. Median component time falls from
+168,410.5 to 129,418.5 us, or 23.2%. All runs retain one million slots. The
+binary SHA-256 is
+`e7c57faa7ea4a88ff668de4f38939f3606edd8763b58b01f4806a453748d1662`.
+The host remains shared. An earlier cohort that overlaps native lint compilation
+is retained separately and does not support the quiet timing claim.
+
+The checked-in ignored `receipt_collection_lock_profile` control reproduces
+this component comparison. Set `CAPACITY_RECEIPT_SEPARATE_CHECK=1` for the extra
+lock. Raw results and the fixed binary remain in ignored
+`progress/session-560/receipt-cohort-quiet/` and `progress/session-560/receipt-profile`.
+Focused budget, timed-collection, concurrent-stop, live exact-size/replay,
+reconnect, and opaque-format controls pass. This reduces collection work; it
+does not reduce retained receipt memory, prove full-generator throughput, or
+explain historical stalls. Previous invalid attempts remain invalid.

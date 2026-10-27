@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
   and handle binary channel events.
 - Bound active-session response storage and reduce metrics memory and dashboard-history sizing work (#636).
-- Reduce capacity-run send preparation, analysis work, receipt and replay allocations, and retained stream memory
+- Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, and retained stream memory
   (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).
 - Add native SCTP acceptance, refusal, transport packet, and RTC channel counters to gameplay diagnostic snapshots (#1244).
@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clear native graceful-shutdown reset state after final reads and stops (#1263).
 - Apply native send-buffer limits to empty text and binary messages (#1260).
 - Keep capacity missing-delivery counts within recorded sends when a receipt has an out-of-range sequence (#1252).
 - Preserve native negotiated-channel reliable packets that arrive during startup (#1250).

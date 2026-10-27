@@ -503,3 +503,17 @@ Application traffic statistics still count zero bytes for empty messages.
 Replacement qualification in #912 must retain exact acknowledgment and expiry
 release, DCEP isolation, duplicate/gap acknowledgment, and the public stalled-reactor
 controls for both sender roles, reference/Godot profiles, closure, and fresh links.
+
+## Retired reset sequence cleanup
+
+Final old-generation reads and stops no longer restore a future SSN marker after
+graceful association closure. Live associations still retain that progress when
+all saved future fragments expire. See [#1263](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1263).
+
+Replacement qualification must retain
+`graceful_shutdown_retires_expired_future_reset_sequence_after_final_old_read`.
+The paired history drops future fragment packets, accepts timed FORWARD TSN,
+and closes both associations before the old reader drains. It checks exact old
+payload retention, read and stop cleanup, cleared timers, and one drain event.
+This repairs terminal metadata cleanup. It does not establish gameplay payload
+loss, independent-peer conformance, or the cause of the historical reset timeout.

@@ -2252,7 +2252,7 @@ impl Association {
             {
                 // All held fragments were abandoned. Preserve ordered progress
                 // without emitting an Open event or reserving the now-free SID.
-                if queue.next_ssn != 0 {
+                if !self.retired && queue.next_ssn != 0 {
                     self.reset_ssn_markers.insert(id, queue.next_ssn);
                 }
                 continue;
