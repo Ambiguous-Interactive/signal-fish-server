@@ -120,6 +120,8 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
 echo "==> Verifying RTC application send accounting"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib transport_control_ack_preserves_pending_gameplay_accounting
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib empty_message_credit_preserves_unreleased_successor_bytes
 
 echo "==> Verifying RTC timer-only send credit release"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \

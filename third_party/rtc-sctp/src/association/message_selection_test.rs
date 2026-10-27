@@ -387,20 +387,28 @@ fn data_channel_credit_tracks_ppid_through_fragment_ack_and_abandonment() -> Res
         };
         let mut wire_released = 0;
         let mut gameplay_released = 0;
+        let mut buffer_released = 0;
         while let Some(event) = sender.poll() {
             if let Event::Stream(StreamEvent::BufferedAmountReleased {
                 n_bytes,
                 data_channel_bytes,
+                data_channel_buffer_bytes,
                 ..
             }) = event
             {
                 wire_released += n_bytes;
                 gameplay_released += data_channel_bytes;
+                buffer_released += data_channel_buffer_bytes;
             }
         }
         assert_eq!(
             gameplay_released, expected_gameplay,
             "abandon={abandon}: exact application credit"
+        );
+        assert_eq!(
+            buffer_released,
+            expected_gameplay + 2,
+            "abandon={abandon}: empty fillers release their buffer charge once"
         );
         if !abandon {
             assert_eq!(
@@ -418,10 +426,15 @@ fn data_channel_credit_tracks_ppid_through_fragment_ack_and_abandonment() -> Res
             while let Some(event) = sender.poll() {
                 if let Event::Stream(StreamEvent::BufferedAmountReleased {
                     data_channel_bytes,
+                    data_channel_buffer_bytes,
                     ..
                 }) = event
                 {
                     control_credit += data_channel_bytes;
+                    assert_eq!(
+                        data_channel_buffer_bytes, 0,
+                        "DCEP releases no buffer charge"
+                    );
                 }
             }
             assert_eq!(

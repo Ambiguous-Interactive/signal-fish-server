@@ -73,13 +73,14 @@ pub(crate) mod timer;
 mod association_test;
 
 /*
-    SCTP buffers wire payloads; RTC charges only nonempty application payloads.
-    Keep both deltas at the chunk boundary, where PPID and generation are known.
+    DCEP releases wire storage without releasing application send capacity.
+    Empty-message fillers consume capacity but do not count as application bytes.
 */
 #[derive(Debug, Default)]
 struct ReleasedBytes {
     wire: i64,
     data_channel: usize,
+    data_channel_buffer: usize,
 }
 
 impl ReleasedBytes {
@@ -90,6 +91,15 @@ impl ReleasedBytes {
             PayloadProtocolIdentifier::String | PayloadProtocolIdentifier::Binary
         ) {
             self.data_channel += bytes as usize;
+        }
+        if matches!(
+            ppi,
+            PayloadProtocolIdentifier::String
+                | PayloadProtocolIdentifier::Binary
+                | PayloadProtocolIdentifier::StringEmpty
+                | PayloadProtocolIdentifier::BinaryEmpty
+        ) {
+            self.data_channel_buffer += bytes as usize;
         }
     }
 }
@@ -3360,6 +3370,7 @@ impl Association {
                         id: *si,
                         n_bytes: *n_bytes_acked as usize,
                         data_channel_bytes: released.data_channel,
+                        data_channel_buffer_bytes: released.data_channel_buffer,
                     }));
             }
             if let Some(s) = self.streams.get_mut(si)

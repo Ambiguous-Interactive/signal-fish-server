@@ -118,10 +118,10 @@ pub trait DataChannel: crate::sealed::Sealed + Send + Sync + 'static {
     async fn buffered_amount_low_threshold(&self) -> Result<u32>;
     /// Sets the buffered amount low threshold in bytes.
     async fn set_buffered_amount_low_threshold(&self, threshold: u32) -> Result<()>;
-    /// Returns the bytes handed to [`send`](Self::send)/[`send_text`](Self::send_text)
-    /// that SCTP has not yet released (acknowledged or abandoned) — the true
-    /// outstanding send-side memory, including bytes still queued in the send
+    /// Returns the send-buffer bytes charged by [`send`](Self::send)/[`send_text`](Self::send_text)
+    /// that SCTP has not yet released (acknowledged or abandoned), including bytes queued in the send
     /// pipeline (unlike `bufferedAmount`, which counts only post-packetization).
+    /// Empty messages charge one filler byte; application statistics exclude it.
     ///
     /// Has a default so that adding it did not have to touch every implementation; the
     /// built-in channel overrides it with the real counter that drives send back-pressure.
@@ -562,7 +562,7 @@ impl DataChannel for DataChannelImpl {
             // always admit onto an empty buffer, so a lone message larger than the limit can
             // still be sent. saturating_add so an unbounded (`usize::MAX`) limit can't
             // overflow.
-            if outstanding != 0 && outstanding.saturating_add(data.len()) > limit {
+            if outstanding != 0 && outstanding.saturating_add(data.len().max(1)) > limit {
                 return Err(Error::ErrSendBufferFull);
             }
             dc.send(self.inner.runtime.now(), data)?;
@@ -593,7 +593,7 @@ impl DataChannel for DataChannelImpl {
                 return Err(Error::ErrDataChannelClosed);
             }
             let outstanding = dc.outstanding_bytes();
-            if outstanding != 0 && outstanding.saturating_add(text.len()) > limit {
+            if outstanding != 0 && outstanding.saturating_add(text.len().max(1)) > limit {
                 return Err(Error::ErrSendBufferFull);
             }
             dc.send_text(self.inner.runtime.now(), text)?;

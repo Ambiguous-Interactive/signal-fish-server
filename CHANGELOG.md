@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply native send-buffer limits to empty text and binary messages (#1260).
 - Keep capacity missing-delivery counts within recorded sends when a receipt has an out-of-range sequence (#1252).
 - Preserve native negotiated-channel reliable packets that arrive during startup (#1250).
 - Count every misrouted delivery from unexpected senders in capacity reports (#1243).

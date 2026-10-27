@@ -122,3 +122,13 @@ Real paired controls cover both initiating roles, reliable and zero-retry
 unordered channels, repeated close during and after reset, and peer cleanup.
 Replacement qualification in #912 must retain this idempotent close behavior.
 See [#1214](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1214).
+
+The [#1260](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1260)
+repair charges one send-buffer byte for an empty text or binary message.
+SCTP retains separate application-byte and data-channel-buffer release totals.
+The latter includes empty-message fillers and excludes DCEP. RTC consumes that
+buffer credit, and nonblocking wrapper sends check the padded message length.
+Application traffic statistics still count zero bytes for empty messages.
+Replacement qualification in #912 must retain exact acknowledgment and expiry
+release, DCEP isolation, duplicate/gap acknowledgment, and the public stalled-reactor
+controls for both sender roles, reference/Godot profiles, closure, and fresh links.

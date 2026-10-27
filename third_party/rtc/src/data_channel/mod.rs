@@ -359,7 +359,7 @@ impl RTCDataChannel<'_> {
         // counter upward (those bytes never entered the SCTP send pipeline). This
         // is the synchronous send-boundary accounting used for back-pressure.
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
-            dc.outstanding_bytes += data_len;
+            dc.outstanding_bytes = dc.outstanding_bytes.saturating_add(data_len.max(1));
         }
         Ok(())
     }
@@ -385,16 +385,16 @@ impl RTCDataChannel<'_> {
             ),
         })?;
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
-            dc.outstanding_bytes += data_len;
+            dc.outstanding_bytes = dc.outstanding_bytes.saturating_add(data_len.max(1));
         }
         Ok(())
     }
 
-    /// Bytes handed to [`send`](Self::send)/[`send_text`](Self::send_text) that
-    /// SCTP has not yet released (acknowledged or abandoned) — the true amount of
-    /// outstanding send-side memory for this channel, including bytes still queued
+    /// Send-buffer bytes charged by [`send`](Self::send)/[`send_text`](Self::send_text)
+    /// that SCTP has not yet released (acknowledged or abandoned), including bytes queued
     /// in the app→core→SCTP pipeline (the SCTP stream's own `buffered_amount`
-    /// counts only post-packetization). Used for synchronous send back-pressure.
+    /// counts only post-packetization). Empty messages charge one filler byte.
+    /// Used for synchronous send back-pressure; application statistics exclude filler.
     pub fn outstanding_bytes(&self) -> usize {
         self.peer_connection
             .data_channels

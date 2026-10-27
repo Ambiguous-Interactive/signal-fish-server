@@ -9683,3 +9683,39 @@ missing prefix. Remote networks, larger meshes, and corrected Godot lifetimes
 remain open under #1240/#1244 and Godot #355/#433. Rust and .NET SDK behavior and
 all server messages remain unchanged. The Godot production adapter also stays
 unchanged; its assessment issue tracks this optional reference control.
+
+### Empty native message send capacity (#1260, #912, #1240)
+
+Main `eb01c98f` admits empty text and binary packets without charging send capacity.
+The new `empty_channel_sends_respect_backpressure_and_resume_exact_receipts`
+control holds both real reactors. Its first empty binary send leaves outstanding
+bytes at zero instead of one. `empty_message_credit_preserves_unreleased_successor_bytes`
+also fails before repair. These are send-admission failures, not observed packet loss.
+The existing #1095 application-byte release remains correct.
+
+The repair charges at least one buffer byte per admitted message. SCTP preserves
+three release totals: wire bytes, application bytes, and data-channel buffer bytes.
+Buffer credit includes empty fillers and excludes DCEP. The wrapper checks the
+padded length in `try_send` and `try_send_text`. Empty traffic still contributes
+zero application bytes to sent and received statistics.
+
+The public control covers both sender roles and both reference/Godot profiles,
+with a held reactor in each of two physical generations. It checks empty binary
+and text admission, full-buffer refusal, suspended sends and writable operations,
+exact empty and nonempty receipts, final zero debt, closed-handle refusal, and
+fresh-link gameplay. It uses fresh runtime fixtures because each pausable runtime
+wraps one driver. The first candidate's second-generation fixture failure remains
+retained in the local session record.
+
+Paired SCTP acknowledgments preserve a queued nonempty successor after the empty
+packet is acknowledged. Fragmented gap/duplicate acknowledgment and abandonment
+controls check all three release totals. Timer-only expiry covers reliable,
+zero-retry, and unsent timed empty and nonempty text/binary packets. These controls
+are required when qualifying published replacements under #912. They do not
+qualify a replacement release or explain the historical #1244 prefix loss.
+
+Rust `da8f2d16` supplies its own WebRTC backend. .NET `e467c871` has no data-channel
+implementation. Godot `92e3b545` uses separate Godot/browser channels. None requires
+a wire or API migration. [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks the native reference-peer assessment. The new profile controls use two
+native Engines; they do not establish new Godot runtime or remote-network results.
