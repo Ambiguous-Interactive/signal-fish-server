@@ -6529,3 +6529,57 @@ it does not explain the historical #1009 stall or identify Tokio task history.
 Both controls have no observed build process. A short read-only ledger audit
 and documentation work overlap the later two-room attempt; no other session
 live workload or build overlaps that attempt.
+
+## Retained two-room generator saturation (#775, #1009)
+
+Session 557 registers one new two-room attempt on the shared ARM64 WSL2 host.
+Each room has 16 players at 60 sends/s, 96-byte values, seed 1, v3 JSON reliable
+delivery, 120 seconds of warm-up, and 600 measured seconds. The lag bound remains
+250,000 us. This doubles the original room count; it does not replace the
+original one-room workload. The planned offer is 1,382,464 sends and 20,736,960
+recipient deliveries. Default record and replay-byte budgets stay unchanged.
+
+Run `8ba7b3e5-92ee-4f90-a63f-7cc1ef87dcfe` remains invalid. It completes
+1,022,090 sends and 15,331,350 receipts, retains 360,374 unsent sends, and has
+zero outstanding deliveries. Its only summary invalidation is generator
+saturation. All 32 senders report lag before a write near run offsets 532–534 s.
+Reported lag ranges from 273,143 to 1,540,171 us. Completed sends have a separate
+maximum lag of 224,348 us; that statistic excludes the failed before-write
+attempts and must not be used to call this run valid.
+
+Exact artifact replay matches the invalid summary. The process completes in
+1,035.82 s, including collection, export, and replay. Peak generator RSS is
+1,043,156 KiB. The ledger has 2,931,199,156 bytes. This incomplete offer does not
+bound the memory needed for a completed two-room cell and is not a capacity point.
+No passing replacement attempt is substituted for this failure.
+
+A separate full ledger scan checks all 480 sender-recipient streams. It finds
+every receipt owed by each completed send, in order, with no duplicate or
+cross-room delivery. It also verifies epochs, stream stamps, byte sizes,
+source and binary identities, and the actual registered workload. The ledger
+SHA-256 is `52d4cf367911ffc9da1a809c753d8d3aad2f17fc8c2db33bc31502428dea5fce`.
+
+The new report anchors have a common run-origin interval of 54,257 ns.
+Each of the 32 reporting workers matches an earlier interval by TID and
+start-time ticks. Report capture takes 54–354 us; these brackets do not include
+subsequent stderr writes. The kernel schedstats enable switch is unavailable,
+so the audit retains raw counters without claiming task-level scheduling history.
+The independent observer has gaps of 549,447, 470,886, and 561,331 us in the
+inspected window. Generator worker counters continue to advance. Across a wider
+3.24 s bracket, process CPU advances by 68 ticks.
+
+The sampled root cgroup has `cpu.max = max`, no throttle increments, and no
+memory-event or memory-pressure increments in that bracket. Those observations
+do not identify the initial delay. They do not exclude VM or host pauses,
+page-fault work, lock waits, socket work, or later warning-output amplification.
+The independent observer runs in the same VM. No session build or other live
+session workload overlaps the attempt; read-only audits, docs, hooks, and network
+operations do overlap. The host remains shared and unconstrained.
+
+The fixed generator SHA-256 is
+`bb4ef4f2ebfe8cf25e0dc785d01ef5edd0b7e13eda7069d102086063ee5c29db`.
+The unchanged release server SHA-256 is
+`82dddf9125488a570943073b9f9cccbd706595c47030f31dd3abbc61d6717c68`.
+Registrations, source snapshots, all raw lag reports, process and worker samples,
+manifest, ledger, replay result, and audits remain in ignored
+`progress/session-557/two-room-candidate/`. Earlier invalid attempts remain invalid.
