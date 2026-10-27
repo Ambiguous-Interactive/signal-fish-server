@@ -206,3 +206,32 @@ These results qualify the observed local encrypted-datagram fault boundary.
 They do not identify reliable SCTP DATA inside the encrypted records, explain the
 historical 4.3 missing prefix, or qualify remote networks or corrected Godot
 lifetimes. Keep server #1240/#1244 and Godot #355/#433 open.
+
+## Sender expiry evidence
+
+Initial `reference:<phase>:<label>` sends include `send_boundary`, sampled after
+the successful enqueue. Its `sctp.last_enqueued_message` identifies the local
+message, stream incarnation, SSN, ordering and captured reliability policy.
+Compare its ID with `first_abandoned_message` and `last_abandoned_message` in
+later live snapshots. IDs belong to one physical association; unordered SSNs
+can repeat. Only first/last abandonment records are retained, so an absent ID
+cannot exclude an intermediate abandonment. No message payload is retained.
+
+`data_chunks_emitted` counts serialized SCTP DATA, including retries;
+`data_chunks_retransmitted` counts the retry subset. These aggregate counters
+prove neither UDP delivery nor per-message receipt. `messages_abandoned` counts
+partial-reliability retirement once per message. A send row remains an enqueue
+result. The extra samples can affect scheduling; retain source and binary hashes
+and keep strict gameplay failures visible. This evidence does not attribute the
+historical #1244, #1264, or Godot #458 failures.
+
+`transmission_selected=false` on an abandonment means no fragment was selected
+for send before retirement. A true value also covers acknowledged fragment
+prefixes; it does not prove packet emission or remote receipt.
+
+The pinned driver's native profile can accept an absent initial unreliable
+probe. Its `gameplay_passed` flag alone does not prove the strict initial-probe
+requirement. Inspect `received` in both phase lists: each direction and physical
+generation must contain both `reliable` and `unreliable`. Keep missing-initial
+results failed even when the driver accepts finite loss. Preserve the original
+assessment beside any independent verdict.

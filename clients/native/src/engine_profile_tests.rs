@@ -361,6 +361,20 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             let initial = pair.receiver.transport_diagnostic_snapshot(peer).await;
             assert_eq!(initial["sctp"]["data_chunks_received"], 0);
             for field in [
+                "data_chunks_emitted",
+                "data_chunks_retransmitted",
+                "messages_abandoned",
+            ] {
+                assert_eq!(initial["sctp"][field], 0);
+            }
+            for field in [
+                "last_enqueued_message",
+                "first_abandoned_message",
+                "last_abandoned_message",
+            ] {
+                assert!(initial["sctp"][field].is_null());
+            }
+            for field in [
                 "data_chunks_accepted",
                 "data_chunks_redundant",
                 "data_chunks_refused",
@@ -497,6 +511,26 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
             assert_eq!(
                 drained["channels"][RELIABLE_LABEL]["receipts"],
                 serde_json::json!({"raw":4,"admitted":4,"rejected":0,"discarded":0})
+            );
+            let sender_snapshot = pair
+                .sender
+                .transport_diagnostic_snapshot(pair.receiver_id)
+                .await;
+            assert_eq!(sender_snapshot["sctp"]["messages_abandoned"], 0);
+            assert!(sender_snapshot["sctp"]["first_abandoned_message"].is_null());
+            assert_eq!(
+                sender_snapshot["sctp"]["last_enqueued_message"]["stream_id"],
+                1
+            );
+            assert_eq!(
+                sender_snapshot["sctp"]["last_enqueued_message"]["reliability"],
+                "reliable"
+            );
+            assert!(
+                sender_snapshot["sctp"]["data_chunks_emitted"]
+                    .as_u64()
+                    .unwrap()
+                    >= packets.len() as u64
             );
             pair.sender.remove_peer(pair.receiver_id).await.unwrap();
             pair.receiver.remove_peer(peer).await.unwrap();

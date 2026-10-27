@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, and retained stream memory
   (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).
-- Add native SCTP acceptance, refusal, transport packet, and RTC channel counters to gameplay diagnostic snapshots (#1244).
+- Add native SCTP send, expiry, acceptance, refusal, transport, and channel evidence to gameplay diagnostic snapshots (#1244).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop expired ordered native gameplay before its first transmission (#1269).
 - Clear native graceful-shutdown reset state after final reads and stops (#1263).
 - Apply native send-buffer limits to empty text and binary messages (#1260).
 - Keep capacity missing-delivery counts within recorded sends when a receipt has an out-of-range sequence (#1252).

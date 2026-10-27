@@ -271,6 +271,14 @@ fn reset_follows_expired_pending_tail_after_partial_ack() -> Result<()> {
             assert_eq!(AssociationState::Established, sender.state());
             assert!(transmitted_data(&packets).is_empty());
             assert!(sender.pending_queue.is_empty());
+            assert!(
+                sender
+                    .stats()
+                    .last_abandoned_message()
+                    .unwrap()
+                    .transmission_selected,
+                "already acknowledged prefixes must retain selection evidence"
+            );
             assert_eq!(0, sender.pending_queue.get_num_bytes());
             assert_eq!(0, sender.inflight_queue.get_num_bytes());
             assert_eq!(1, sender.reconfigs.len());
@@ -508,5 +516,195 @@ fn reassembly_tail_first_gameplay_preserves_exact_payload_and_release() -> Resul
             assert_eq!(released, expected.len());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn outbound_evidence_separates_unsent_expiry_retries_and_reliable_delivery() -> Result<()> {
+    for unordered in [false, true] {
+        for fragmented in [false, true] {
+            let now = Instant::now();
+            let mut a = timed_test_association();
+            let ppi = PayloadProtocolIdentifier::Binary;
+            a.max_payload_size = 4;
+            a.cwnd = u32::MAX;
+            a.rwnd = u32::MAX;
+            let body = Bytes::from_static(if fragmented { b"fragmented" } else { b"one" });
+            let mut stream = a.open_stream(3, ppi)?;
+            stream.set_reliability_params(unordered, ReliabilityType::Timed, 1)?;
+            stream.write_sctp(now, &body, ppi)?;
+            let queued = a.stats().last_enqueued_message().unwrap();
+            assert_eq!(queued.message_id, 0);
+            assert_eq!(queued.stream_id, 3);
+            assert_eq!(queued.unordered, unordered);
+            assert_eq!(queued.reliability, "lifetime");
+            let expired_at = now + Duration::from_millis(2);
+            let expired_packets = a.gather_outbound(expired_at).0;
+            assert!(transmitted_data(&expired_packets).is_empty());
+            assert_eq!(a.stats().get_num_emitted_datas(), 0);
+            assert_eq!(a.stats().get_num_abandoned_messages(), 1);
+            assert_eq!(a.stats().last_abandoned_message(), Some(queued));
+            a.gather_outbound(expired_at);
+            assert_eq!(a.stats().get_num_abandoned_messages(), 1);
+
+            let mut stream = a.stream(3)?;
+            stream.set_reliability_params(unordered, ReliabilityType::Reliable, 0)?;
+            stream.write_sctp(expired_at, &body, ppi)?;
+            let reliable = a.stats().last_enqueued_message().unwrap();
+            assert_eq!(reliable.message_id, 1);
+            assert_eq!(reliable.reliability, "reliable");
+            let packets = a.gather_outbound(expired_at + Duration::from_secs(1)).0;
+            let chunks = transmitted_data(&packets);
+            assert_eq!(
+                chunks
+                    .iter()
+                    .flat_map(|c| c.user_data.iter())
+                    .copied()
+                    .collect::<Vec<_>>(),
+                body
+            );
+            assert_eq!(a.stats().get_num_emitted_datas(), chunks.len() as u64);
+            assert_eq!(a.stats().get_num_emitted_retransmissions(), 0);
+            assert_eq!(a.stats().get_num_abandoned_messages(), 1);
+            assert_eq!(a.stats().last_abandoned_message(), Some(queued));
+
+            for c in &chunks {
+                a.inflight_queue.get_mut(c.tsn).unwrap().retransmit = true;
+            }
+            let mut retry = vec![];
+            a.get_data_packets_to_retransmit(expired_at + Duration::from_secs(2), &mut retry)?;
+            let retried = transmitted_data(&retry);
+            assert_eq!(retried.len(), chunks.len());
+            assert_eq!(
+                a.stats().get_num_emitted_datas(),
+                (chunks.len() + retried.len()) as u64
+            );
+            assert_eq!(
+                a.stats().get_num_emitted_retransmissions(),
+                retried.len() as u64
+            );
+            assert_eq!(a.stats().get_num_abandoned_messages(), 1);
+            a.stats.reset();
+            assert_eq!(a.stats().get_num_emitted_datas(), 0);
+            assert_eq!(a.stats().get_num_emitted_retransmissions(), 0);
+            assert_eq!(a.stats().get_num_abandoned_messages(), 0);
+            assert_eq!(a.stats().last_enqueued_message(), None);
+            assert_eq!(a.stats().last_abandoned_message(), None);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn expired_ordered_prefix_forwards_sequence_and_preserves_exact_reliable_successor() -> Result<()> {
+    for fragmented in [false, true] {
+        for first_tsn in [1234u32, u32::MAX] {
+            let now = Instant::now();
+            let mut sender = timed_test_association();
+            let mut receiver = timed_test_association();
+            sender.my_next_tsn = first_tsn;
+            sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+            sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+            receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+            sender.max_payload_size = 4;
+            sender.cwnd = u32::MAX;
+            let ppi = PayloadProtocolIdentifier::Binary;
+            receiver.open_stream(2, ppi)?;
+            let mut stream = sender.open_stream(2, ppi)?;
+            stream.set_reliability_params(false, ReliabilityType::Timed, 1)?;
+            let expired = Bytes::from_static(if fragmented {
+                b"expired fragmented prefix"
+            } else {
+                b"old"
+            });
+            stream.write_sctp(now, &expired, ppi)?;
+            let later = now + Duration::from_millis(2);
+            let skipped = sender.gather_outbound(later).0;
+            assert!(
+                transmitted_data(&skipped).is_empty(),
+                "#1269: expired ordered DATA must not reach the wire"
+            );
+            assert!(
+                skipped
+                    .iter()
+                    .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                    .any(|chunk| chunk.as_any().is::<ChunkForwardTsn>())
+            );
+            for raw in skipped {
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+            }
+            assert!(receiver.stream(2)?.read_sctp()?.is_none());
+            for raw in receiver.gather_outbound(later).0 {
+                sender.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+            }
+            assert_eq!(sender.stream(2)?.buffered_amount()?, 0);
+            let expected = Bytes::from_static(b"exact reliable successor after expiry");
+            sender
+                .stream(2)?
+                .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+            sender.stream(2)?.write_sctp(later, &expected, ppi)?;
+            let sent = sender.gather_outbound(later).0;
+            for raw in sent {
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+            }
+            assert_eq!(
+                receiver
+                    .stream(2)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(128)?
+                    .freeze(),
+                expected
+            );
+            assert!(receiver.stream(2)?.read_sctp()?.is_none());
+            assert_eq!(sender.stats().get_num_abandoned_messages(), 1);
+            assert_eq!(
+                sender.stats().last_abandoned_message().unwrap().message_id,
+                0
+            );
+            assert_eq!(
+                sender.stats().last_enqueued_message().unwrap().message_id,
+                1
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn outbound_evidence_retains_first_abandonment_and_distinguishes_retry_policy() -> Result<()> {
+    let now = Instant::now();
+    let mut sender = timed_test_association();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    let mut stream = sender.open_stream(3, ppi)?;
+    stream.set_reliability_params(true, ReliabilityType::Timed, 1)?;
+    stream.write_sctp(now, &Bytes::from_static(b"expires before send"), ppi)?;
+    let first = sender.stats().last_enqueued_message().unwrap();
+    let later = now + Duration::from_millis(2);
+    sender.gather_outbound(later);
+    sender
+        .stream(3)?
+        .set_reliability_params(true, ReliabilityType::Rexmit, 0)?;
+    sender
+        .stream(3)?
+        .write_sctp(later, &Bytes::from_static(b"no retries"), ppi)?;
+    let mut last = sender.stats().last_enqueued_message().unwrap();
+    assert!(!first.transmission_selected && !last.transmission_selected);
+    assert_eq!(
+        first.sequence_number, last.sequence_number,
+        "unordered SSN is not message identity"
+    );
+    assert_ne!(first.message_id, last.message_id);
+    sender.gather_outbound(later);
+    let retry_at = later + Duration::from_secs(2);
+    sender.handle_timeout(retry_at);
+    sender.gather_outbound(retry_at);
+    assert_eq!(sender.stats().get_num_abandoned_messages(), 2);
+    last.transmission_selected = true;
+    assert_eq!(sender.stats().first_abandoned_message(), Some(first));
+    assert_eq!(sender.stats().last_abandoned_message(), Some(last));
+    assert_eq!(last.reliability, "retransmits");
+    assert_eq!(sender.stats().get_num_emitted_datas(), 1);
+    assert_eq!(sender.stats().get_num_emitted_retransmissions(), 0);
     Ok(())
 }

@@ -1,7 +1,33 @@
+/// Identity and policy of a locally queued message. IDs belong to one association.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct OutboundMessageInfo {
+    /// Zero-based local message identity; independent of wire TSN and SSN reuse.
+    pub message_id: u64,
+    /// Wire stream identifier.
+    pub stream_id: u16,
+    /// Local stream incarnation.
+    pub stream_generation: u64,
+    /// Wire stream sequence number (not a unique identity for unordered messages).
+    pub sequence_number: u16,
+    /// Whether the message uses unordered delivery.
+    pub unordered: bool,
+    /// Captured policy: reliable, lifetime, or retransmits.
+    pub reliability: &'static str,
+    /// A fragment was selected for transmission before this observation.
+    /// Selection is not proof of packet serialization or UDP delivery.
+    pub transmission_selected: bool,
+}
+
 /// Association statistics
 #[derive(Default, Debug, Copy, Clone)]
 pub struct AssociationStats {
     n_datas: u64,
+    n_emitted_datas: u64,
+    n_emitted_retransmissions: u64,
+    n_abandoned_messages: u64,
+    last_enqueued_message: Option<OutboundMessageInfo>,
+    first_abandoned_message: Option<OutboundMessageInfo>,
+    last_abandoned_message: Option<OutboundMessageInfo>,
     n_accepted_datas: u64,
     n_redundant_datas: u64,
     n_refused_datas: u64,
@@ -12,6 +38,54 @@ pub struct AssociationStats {
 }
 
 impl AssociationStats {
+    pub(crate) fn note_enqueued_message(&mut self, message: OutboundMessageInfo) {
+        self.last_enqueued_message = Some(message);
+    }
+
+    pub(crate) fn note_abandoned_message(&mut self, message: OutboundMessageInfo) {
+        self.n_abandoned_messages = self.n_abandoned_messages.saturating_add(1);
+        self.first_abandoned_message.get_or_insert(message);
+        self.last_abandoned_message = Some(message);
+    }
+
+    pub(crate) fn note_emitted_data(&mut self, retransmission: bool) {
+        self.n_emitted_datas = self.n_emitted_datas.saturating_add(1);
+        if retransmission {
+            self.n_emitted_retransmissions = self.n_emitted_retransmissions.saturating_add(1);
+        }
+    }
+
+    /// DATA chunks serialized into outbound SCTP packets, including retries.
+    /// This does not prove UDP transmission or remote receipt.
+    pub fn get_num_emitted_datas(&self) -> u64 {
+        self.n_emitted_datas
+    }
+
+    /// Emitted DATA chunks selected for retransmission.
+    pub fn get_num_emitted_retransmissions(&self) -> u64 {
+        self.n_emitted_retransmissions
+    }
+
+    /// Messages retired by partial reliability, counted once per identity.
+    pub fn get_num_abandoned_messages(&self) -> u64 {
+        self.n_abandoned_messages
+    }
+
+    /// Most recently enqueued message. No payload is retained.
+    pub fn last_enqueued_message(&self) -> Option<OutboundMessageInfo> {
+        self.last_enqueued_message
+    }
+
+    /// First abandoned message, retained even after later retirements.
+    pub fn first_abandoned_message(&self) -> Option<OutboundMessageInfo> {
+        self.first_abandoned_message
+    }
+
+    /// Most recently abandoned message. No payload is retained.
+    pub fn last_abandoned_message(&self) -> Option<OutboundMessageInfo> {
+        self.last_abandoned_message
+    }
+
     /// Counts one DATA chunk received.
     pub fn inc_datas(&mut self) {
         self.n_datas += 1;
@@ -94,13 +168,6 @@ impl AssociationStats {
 
     /// Zeroes every counter.
     pub fn reset(&mut self) {
-        self.n_datas = 0;
-        self.n_accepted_datas = 0;
-        self.n_redundant_datas = 0;
-        self.n_refused_datas = 0;
-        self.n_sacks = 0;
-        self.n_t3timeouts = 0;
-        self.n_ack_timeouts = 0;
-        self.n_fast_retrans = 0;
+        *self = Self::default();
     }
 }

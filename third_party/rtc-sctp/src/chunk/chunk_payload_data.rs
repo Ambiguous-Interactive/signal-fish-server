@@ -67,6 +67,10 @@ impl From<u32> for PayloadProtocolIdentifier {
 pub(crate) struct MessageId(NonZeroU64);
 
 impl MessageId {
+    pub(crate) fn sequence(self) -> u64 {
+        self.0.get() - 1
+    }
+
     /// Encode a zero-based association sequence with a niche for decoded DATA,
     /// which has no local identity. Option<MessageId> stays one machine word.
     /// Returns None when the sequence is exhausted.

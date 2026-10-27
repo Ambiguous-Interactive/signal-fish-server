@@ -290,3 +290,9 @@ Application traffic statistics still count zero bytes for empty messages.
 Replacement qualification in #912 must retain exact acknowledgment and expiry
 release, DCEP isolation, duplicate/gap acknowledgment, and the public stalled-reactor
 controls for both sender roles, reference/Godot profiles, closure, and fresh links.
+
+SCTP snapshots also preserve outbound packet-emission and retry totals,
+partial-reliability abandonment totals, and bounded queued/abandoned identities.
+Native consumers can compare an initial probe's local message ID with the first
+abandonment. A successful send enqueue alone does not prove SCTP output or remote
+receipt. The emission counters advance only after SCTP serialization succeeds.

@@ -86,9 +86,15 @@ async fn send_packet(
         }
         _ => anyhow::bail!("invalid packet operation"),
     }
+    let send_boundary = match value["text"].as_str() {
+        Some(text) if text.starts_with("reference:") => {
+            Some(transport_snapshot(engine, peer).await)
+        }
+        _ => None,
+    };
     emit(
         output,
-        json!({"event":"sent", "generation":engine.diagnostic_snapshot(peer)["generation"], "label":value["label"],
+        json!({"event":"sent", "send_boundary":send_boundary, "generation":engine.diagnostic_snapshot(peer)["generation"], "label":value["label"],
         "marker":value["text"].as_str().map(|text| text.split(':').take(4).collect::<Vec<_>>().join(":"))}),
     )?;
     Ok(())

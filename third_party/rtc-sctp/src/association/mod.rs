@@ -1,6 +1,6 @@
 use crate::association::{
     state::{AckMode, AckState, AssociationState},
-    stats::AssociationStats,
+    stats::{AssociationStats, OutboundMessageInfo},
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
@@ -3512,6 +3512,11 @@ impl Association {
         let mut released_per_stream: FxHashMap<u16, ReleasedBytes> = FxHashMap::default();
         let mut changed = false;
         let tail = self.pending_queue.drain_message(message.id)?;
+        let mut message_info = inflight
+            .first()
+            .and_then(|tsn| self.inflight_queue.get(*tsn))
+            .or_else(|| tail.first())
+            .and_then(Self::outbound_message_info);
         let assign_tsns = !inflight.is_empty()
             || tail
                 .first()
@@ -3533,6 +3538,9 @@ impl Association {
         }
         for tsn in inflight {
             if let Some(c) = self.inflight_queue.get_mut(tsn) {
+                if let Some(info) = &mut message_info {
+                    info.transmission_selected |= c.nsent > 0;
+                }
                 changed |= !c.abandoned();
                 c.mark_abandoned();
                 let (si, generation, ppi) =
@@ -3552,6 +3560,9 @@ impl Association {
             }
         }
         self.release_stream_buffers(&released_per_stream);
+        if changed && let Some(message_info) = message_info {
+            self.stats.note_abandoned_message(message_info);
+        }
         Ok(changed)
     }
 
@@ -3591,13 +3602,11 @@ impl Association {
         Ok(())
     }
 
-    /// An unsent unordered message can be dropped without assigning TSNs.
-    /// A selected fragment tail instead needs the whole-message abandonment path.
+    /// Expired ordered messages assign TSNs so FORWARD TSN can advance their SSN.
+    /// Entirely unsent unordered messages need no wire sequence progress.
     /// Timed(0) permits first transmissions until an actual retry is considered.
     fn pending_message_expired(&self, c: &ChunkPayloadData, now: Instant) -> bool {
-        (!c.beginning_fragment || c.unordered)
-            && c.reliability.deadline() != c.created_at
-            && self.timed_data_expired(c, now)
+        c.reliability.deadline() != c.created_at && self.timed_data_expired(c, now)
     }
 
     fn pending_message_to_abandon(&self) -> Result<MessageToAbandon> {
@@ -3734,7 +3743,7 @@ impl Association {
     /// DATA chunks into a packet so long as the resulting packet size does not exceed
     /// the path MTU.
     fn bundle_data_chunks_into_packets(
-        &self,
+        &mut self,
         chunks: Vec<ChunkPayloadData>,
         raw_packets: &mut Vec<Bytes>,
     ) {
@@ -3801,6 +3810,9 @@ impl Association {
                 Ok(_) => {
                     let plen = buf.len();
                     raw_packets.push(buf.split_to(plen).freeze());
+                    for chunk in &chunks[start..end] {
+                        self.stats.note_emitted_data(chunk.nsent > 1);
+                    }
                 }
                 Err(_) => {
                     warn!("[{}] failed to serialize a DATA packet", self.side);
@@ -4071,6 +4083,22 @@ impl Association {
         Ok(id)
     }
 
+    fn outbound_message_info(chunk: &ChunkPayloadData) -> Option<OutboundMessageInfo> {
+        Some(OutboundMessageInfo {
+            message_id: chunk.message_id?.sequence(),
+            stream_id: chunk.stream_identifier,
+            stream_generation: chunk.stream_generation,
+            sequence_number: chunk.stream_sequence_number,
+            unordered: chunk.unordered,
+            transmission_selected: chunk.nsent > 0 || !chunk.beginning_fragment,
+            reliability: match chunk.reliability {
+                MessageReliability::Reliable => "reliable",
+                MessageReliability::Timed { .. } => "lifetime",
+                MessageReliability::Rexmit { .. } => "retransmits",
+            },
+        })
+    }
+
     /// send_payload_data sends the data chunks with their allocated identity.
     ///
     /// The queueing instant is already recorded on each chunk by `Stream::packetize`, so this
@@ -4078,6 +4106,9 @@ impl Association {
     pub(crate) fn send_payload_data(&mut self, id: MessageId, mut chunks: Vec<ChunkPayloadData>) {
         for c in &mut chunks {
             c.message_id = Some(id);
+        }
+        if let Some(message) = chunks.first().and_then(Self::outbound_message_info) {
+            self.stats.note_enqueued_message(message);
         }
         self.pending_queue.push_message(chunks);
 

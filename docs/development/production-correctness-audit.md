@@ -9965,3 +9965,95 @@ tracks lifetime repair.
 The Rust client manifest and .NET project have no reference-Engine dependency.
 Their public APIs and signaling behavior are unchanged. This is internal probe
 and qualification work, so it needs no changelog entry.
+
+### Ordered expiry before first native transmission (#1269)
+
+At main `485e11da`, `pending_message_expired` exempts the first ordered
+fragment. A positive-lifetime ordered message can therefore emit DATA after
+its deadline. The new `outbound_evidence_separates_unsent_expiry_retries_and_reliable_delivery`
+control fails its no-DATA assertion before the repair. Removing that exemption
+makes the control pass. Timed(0) still permits first transmission.
+
+`expired_ordered_prefix_forwards_sequence_and_preserves_exact_reliable_successor`
+uses paired wire histories. Whole and fragmented expired prefixes emit no DATA.
+FORWARD TSN advances their ordered SSN. The sender releases their buffer bytes,
+and the next reliable message arrives exactly once with exact bytes. The cases
+also cross TSN wraparound. Existing lifetime, retry and shutdown controls pass.
+This repairs a confirmed native ordered-send contract. It does not explain the
+historical reliable-prefix loss in #1244 or terminal event in #1264.
+
+SCTP snapshots now separate local enqueue, packet serialization and
+partial-reliability abandonment. They retain the last queued and first/last
+abandoned message identities, stream incarnations, SSNs, ordering and captured
+policies in constant space without payloads. Unordered SSNs can repeat; compare
+message IDs only within the same physical association. Aggregate emitted DATA
+includes retries and does not prove UDP transmission or per-message receipt.
+First/last records can omit intermediate retirements. An absent matching record
+cannot exclude abandonment.
+
+`transmission_selected=false` in an abandonment record proves no fragment was
+selected before retirement. A true value includes acknowledged fragment prefixes
+and is not proof of packet serialization or remote receipt. Controls distinguish
+unsent lifetime expiry from retry-limit retirement, retain the first record after
+later retirements, prevent duplicate counts, preserve reliable retries, and clear
+all metadata on statistics reset. The partial-ACK reset control also preserves
+selection evidence after the acknowledged prefix leaves the in-flight queue.
+RTC conversion preserves these fields and serializes real association expiry.
+The hosted native runner executes the new low-level and conversion controls.
+
+Initial native probe rows now sample the queued identity after a successful
+`reference:<phase>:<label>` send. Live first/last reliable receipt samples retain
+later abandonment evidence. These cross-layer observations are not atomic and
+can affect scheduling. A successful enqueue is not a transmission verdict.
+
+Both blocked-stdout offer roles still preserve every exact admitted reliable
+packet before one typed count/byte refusal. The sender shows SCTP output with
+zero message abandonment; the receiver's retained pre-removal snapshot also
+shows zero abandonment. Each count case preserves 264 packets, and each byte
+case preserves 134. These controls distinguish application-budget refusal from
+finite sender expiry without changing receive budgets or failure handling.
+
+Godot [#355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks diagnostic adoption and qualification. The external Rust manifest at
+`da8f2d16` and .NET project at `e467c871` do not depend on this native SCTP stack.
+Their signaling, relay behavior and APIs are unchanged. Native ordered expiry
+and diagnostic API changes have user-visible changelog entries.
+
+The final eight local service pairings cover Godot 4.3 native baseline and added
+CPU contention, plus Godot 4.7.2 native/Web, with both offer roles and two physical
+generations each. Every exact reliable snapshot and startup receipt survives:
+4,096 snapshot receipts and 1,024 startup receipts. The independent artifact
+audit checks native bytes/order, outgoing markers, driver receipt checks,
+physical generations, live samples and frozen probe hashes. It also verifies
+that the runtime diff's 11 changed Rust files match the final source.
+
+Six pairings pass the strict initial-probe verdict. Two Godot 4.3 cases fail:
+baseline Godot-offer phase 1 and loaded reference-offer phase 2 each miss the
+initial unreliable probe. Each send row and first-abandonment record identifies
+message 33, stream 3, stream incarnation 2 in the same physical generation.
+Each abandonment has `reliability=lifetime` and `transmission_selected=false`.
+These two fresh missing probes expired locally before first selection. All
+reliable traffic, service rejoin and retirement checks pass. The 1 ms native
+finite-channel lifetime is unchanged. These are failed strict qualifications,
+not successful initial-probe delivery. They are not rerun until green.
+
+The pinned driver's native-profile rule can accept `received=[reliable]`.
+Its `gameplay_passed` flag alone is therefore weaker than the strict initial-probe
+requirement. The independent audit requires both labels in both phase lists and
+retains the original driver result alongside the stricter failed verdict.
+[Godot #458](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/458)
+records both the new causal boundary and this qualification distinction.
+
+Final probe SHA-256 is
+`e36e4d4df4796b87863357c4e25e633713b56dee2ba8ddeb89c1bdea044ea822`;
+probe source SHA-256 is
+`eeff7311ee8d605585dd6263fe33da120e6eed1344e5ca72b697badcdb25fe70`.
+The driver remains `f3d3f8611e2c85290f222074da6d40807099e4ec`.
+An earlier cohort also preserves all reliable receipts and matches three missing
+initial probes to lifetime abandonment. It lacks selection evidence and has
+five strict passes. Its manifest records a transient arithmetic spelling edit
+after compilation; it is supporting evidence, not the final-source claim.
+All attempts remain under local `progress/session-564/`. Both 4.3 cohorts use
+CPUs 0/1, and the loaded cohort adds one busy worker per CPU. Other checks share
+the host; the baseline is not an isolated benchmark. No result attributes the
+older #1244 reliable gap, #1264 event, or #458 binary, or qualifies remote networks.
