@@ -1731,10 +1731,25 @@ async fn backpressure_pair_with_runtimes(
     limit: Option<usize>,
     initiator_sends: bool,
 ) -> (LivePair, Arc<PausableReactor>, Arc<PausableReactor>) {
+    backpressure_profile_pair(limit, initiator_sends, ChannelProfile::Reference).await
+}
+
+fn swap_pair_endpoints(pair: &mut LivePair) {
+    std::mem::swap(&mut pair.sender, &mut pair.receiver);
+    std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+    std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+}
+
+async fn backpressure_profile_pair(
+    limit: Option<usize>,
+    initiator_sends: bool,
+    channel_profile: ChannelProfile,
+) -> (LivePair, Arc<PausableReactor>, Arc<PausableReactor>) {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
     let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
     let settings = EngineSettings {
         disable_mdns: true,
+        channel_profile,
         ..EngineSettings::default()
     };
     let remote_runtime = PausableReactor::new();
@@ -1760,9 +1775,7 @@ async fn backpressure_pair_with_runtimes(
     };
     pair.negotiate().await;
     if !initiator_sends {
-        std::mem::swap(&mut pair.sender, &mut pair.receiver);
-        std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
-        std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+        swap_pair_endpoints(&mut pair);
     }
     (pair, remote_runtime, local_runtime)
 }
@@ -2413,6 +2426,143 @@ async fn channel_capacity_checks_preserve_connecting_and_peer_shutdown() {
             })
             .await
             .expect("peer close and Drop terminate all capacity operations");
+        }
+    }
+}
+
+// Regression #1260: empty packets must consume and release send capacity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_channel_sends_respect_backpressure_and_resume_exact_receipts() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for initiator_sends in [true, false] {
+            for binary in [true, false] {
+                let (mut pair, mut remote, mut local) =
+                    backpressure_profile_pair(Some(1), initiator_sends, profile).await;
+                for generation in 0..2 {
+                    let channel = pair
+                        .sender
+                        .channel(pair.receiver_id, RELIABLE_LABEL)
+                        .unwrap();
+                    remote.pause().await;
+                    local.pause().await;
+                    if binary {
+                        channel.send(Default::default()).await.unwrap();
+                    } else {
+                        channel.send_text("").await.unwrap();
+                    }
+                    assert_eq!(channel.outstanding_bytes().await.unwrap(), 1,
+                        "profile={profile:?}, initiator_sends={initiator_sends}, binary={binary}, generation={generation}");
+                    for result in [
+                        channel.try_send(Default::default()).await,
+                        channel.try_send_text("").await,
+                    ] {
+                        assert!(
+                            matches!(result, Err(webrtc::error::Error::ErrSendBufferFull)),
+                            "{result:?}"
+                        );
+                    }
+                    {
+                        let empty_binary = channel.send(Default::default());
+                        let empty_text = channel.send_text("");
+                        tokio::pin!(empty_binary, empty_text);
+                        assert!(futures_util::poll!(&mut empty_binary).is_pending());
+                        assert!(futures_util::poll!(&mut empty_text).is_pending());
+                    }
+                    let writable = channel.writable();
+                    let pending = channel.send_text("tail 鱼");
+                    tokio::pin!(writable, pending);
+                    assert!(futures_util::poll!(&mut writable).is_pending());
+                    assert!(futures_util::poll!(&mut pending).is_pending());
+                    local.resume();
+                    remote.resume();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        writable.await.unwrap();
+                        pending.await.unwrap();
+                        let mut bodies = Vec::new();
+                        while bodies.len() < 2 {
+                            match pair.receiver_events.recv().await.unwrap() {
+                                EngineEvent::ChannelMessage { label, text, .. } => {
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert!(
+                                        profile == ChannelProfile::Reference
+                                            || !binary
+                                            || !bodies.is_empty()
+                                    );
+                                    bodies.push(text.into_bytes());
+                                }
+                                EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert_eq!(profile, ChannelProfile::Godot);
+                                    assert!(binary && bodies.is_empty());
+                                    bodies.push(data);
+                                }
+                                EngineEvent::ChannelClosed { .. }
+                                | EngineEvent::ChannelReceiveRejected { .. } => {
+                                    panic!("healthy backpressure must preserve the channel")
+                                }
+                                _ => {}
+                            }
+                        }
+                        assert_eq!(bodies, vec![Vec::new(), "tail 鱼".as_bytes().to_vec()]);
+                        while channel.outstanding_bytes().await.unwrap() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("resuming both reactors drains the empty packet and exact successor");
+                    for (engine, peer, sending) in [
+                        (&pair.sender, pair.receiver_id, true),
+                        (&pair.receiver, pair.sender_id, false),
+                    ] {
+                        let reports = engine.peers[&peer]
+                            .pc
+                            .get_stats(std::time::Instant::now(), StatsSelector::None)
+                            .await;
+                        let stats = reports
+                            .iter()
+                            .find_map(|entry| match entry {
+                                RTCStatsReportEntry::DataChannel(stats)
+                                    if stats.label == RELIABLE_LABEL =>
+                                {
+                                    Some(stats)
+                                }
+                                _ => None,
+                            })
+                            .unwrap();
+                        let actual = if sending {
+                            (stats.messages_sent, stats.bytes_sent)
+                        } else {
+                            (stats.messages_received, stats.bytes_received)
+                        };
+                        assert_eq!(
+                            actual,
+                            (2, u64::try_from("tail 鱼".len()).unwrap()),
+                            "empty-message buffer credit must not become application traffic"
+                        );
+                    }
+                    channel.close().await.unwrap();
+                    assert_channel_closed(channel.send(Default::default()).await);
+                    assert_channel_closed(channel.try_send_text("").await);
+                    let old = pair.sender.peers[&pair.receiver_id].generation;
+                    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                    pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+                    if generation == 0 {
+                        remote = PausableReactor::new();
+                        local = PausableReactor::with_dedicated_reactor(false);
+                        pair.sender.runtime = local.clone();
+                        pair.receiver.runtime = remote.clone();
+                        if !initiator_sends {
+                            swap_pair_endpoints(&mut pair);
+                        }
+                        pair.negotiate().await;
+                        if !initiator_sends {
+                            swap_pair_endpoints(&mut pair);
+                        }
+                        assert_ne!(pair.sender.peers[&pair.receiver_id].generation, old);
+                    }
+                }
+                pair.cleanup().await;
+            }
         }
     }
 }

@@ -70,9 +70,10 @@ pub enum StreamEvent {
         id: StreamId,
         /// SCTP payload bytes released, including DCEP and empty-message fillers.
         n_bytes: usize,
-        /// Nonempty WebRTC application bytes released. DCEP and empty-message
-        /// filler bytes do not count toward the data channel send counter.
+        /// Nonempty WebRTC application bytes released, excluding DCEP and empty fillers.
         data_channel_bytes: usize,
+        /// WebRTC send-buffer bytes released, including empty fillers but excluding DCEP.
+        data_channel_buffer_bytes: usize,
     },
 }
 

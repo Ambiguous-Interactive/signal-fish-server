@@ -267,18 +267,13 @@ impl<'a> SctpHandler<'a> {
                 }
                 Event::Stream(StreamEvent::BufferedAmountReleased {
                     id,
-                    data_channel_bytes,
+                    data_channel_buffer_bytes,
                     ..
                 }) => {
-                    /*
-                        RTC charges application payload bytes at send admission.
-                        DCEP and empty-message fillers release SCTP wire storage
-                        without releasing pending gameplay (see DataChannelHandler).
-                    */
                     messages.push(SctpMessage::StreamEvent(SctpStreamEvent::BufferReleased(
                         ch.0,
                         id,
-                        data_channel_bytes,
+                        data_channel_buffer_bytes,
                     )));
                 }
                 _ => {}
@@ -2484,8 +2479,7 @@ mod tests {
             // The fixture installs an already-created SCTP stream below.
             while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
             let id = pc.data_channels.insert(dc);
-            // DCEP and empty-message fillers do not charge RTC's gameplay
-            // counter. Earlier binary gameplay provides a positive control.
+            // DCEP consumes no send credit; empty messages consume one byte.
             let first = first.freeze();
             pc.pipeline_context
                 .sctp_handler_context
@@ -2497,7 +2491,7 @@ mod tests {
                 .unwrap()
                 .write_sctp(now, &first, ppi)
                 .unwrap();
-            if ppi == PayloadProtocolIdentifier::Binary {
+            if ppi != PayloadProtocolIdentifier::Dcep {
                 pc.data_channels.get_mut(&id).unwrap().outstanding_bytes = first.len();
             }
             let outbound = drain_transmits(
@@ -3848,7 +3842,12 @@ mod tests {
         use crate::peer_connection::RTCPeerConnectionBuilder;
         for (reliable, unsent_timed) in [(false, false), (true, false), (false, true), (true, true)]
         {
-            for binary in [false, true] {
+            for (binary, body) in [
+                (false, "gameplay"),
+                (true, "gameplay"),
+                (false, ""),
+                (true, ""),
+            ] {
                 let now = Instant::now();
                 let pair = establish();
                 let ch = pair.client_ch;
@@ -3888,15 +3887,15 @@ mod tests {
                 if binary {
                     pc.data_channel(id)
                         .unwrap()
-                        .send(now, BytesMut::from("gameplay"))
+                        .send(now, BytesMut::from(body))
                         .unwrap();
                 } else {
-                    pc.data_channel(id)
-                        .unwrap()
-                        .send_text(now, "gameplay")
-                        .unwrap();
+                    pc.data_channel(id).unwrap().send_text(now, body).unwrap();
                 }
-                assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 8);
+                assert_eq!(
+                    pc.data_channel(id).unwrap().outstanding_bytes(),
+                    body.len().max(1)
+                );
                 if unsent_timed {
                     assert!(
                         pc.get_sctp_handler().poll_timeout().is_none(),
@@ -3919,8 +3918,8 @@ mod tests {
                 while pc.poll_data_read().is_some() {}
                 assert_eq!(
                     pc.data_channel(id).unwrap().outstanding_bytes(),
-                    if reliable { 8 } else { 0 },
-                    "reliable={reliable}, binary={binary}, unsent_timed={unsent_timed}"
+                    if reliable { body.len().max(1) } else { 0 },
+                    "reliable={reliable}, binary={binary}, body={body:?}, unsent_timed={unsent_timed}"
                 );
                 assert_eq!(
                     pc.data_channel(id).unwrap().ready_state(),

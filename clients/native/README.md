@@ -123,6 +123,10 @@ A closed channel retains its stream ID until both reset directions finish.
 Completed stream IDs can be reused; late duplicate resets do not close a new channel.
 Accepted text and binary writes enter SCTP before a peer reset can stop the stream.
 A successful send means local admission. It does not prove remote receipt.
+Configured send-buffer limits charge at least one byte per message, including
+empty text and binary packets. A full buffer blocks `send` and `writable` and
+makes `try_send` return `ErrSendBufferFull`. Acknowledgment or abandonment releases
+that charge. Empty messages still count as zero application bytes in statistics.
 DTLS handshake retry exhaustion reports a failed link even before remote channel admission.
 Stream reset retry exhaustion closes the failed SCTP transport and its gameplay channels.
 A fatal driver socket error reports peer closure even before any remote channel opens.

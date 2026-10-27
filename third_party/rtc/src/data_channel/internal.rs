@@ -33,7 +33,7 @@ pub(crate) struct RTCDataChannelInternal {
     pub(crate) ready_state: RTCDataChannelState,
     pub(crate) buffered_amount_high_threshold: u32,
     pub(crate) buffered_amount_low_threshold: u32,
-    /// User payload bytes handed to `send()`/`send_text()` that SCTP has not yet
+    /// Send-buffer bytes (at least one per message) that SCTP has not yet
     /// released (acknowledged or abandoned). Incremented synchronously at the app
     /// send boundary and decremented on SCTP buffer-release events, so it accounts
     /// for bytes still in the app→core→SCTP send pipeline — not just the SCTP
@@ -287,6 +287,48 @@ mod tests {
                     },
                 )),
             })
+    }
+
+    // Regression #1260: filler credit must not release a nonempty successor.
+    #[test]
+    fn empty_message_credit_preserves_unreleased_successor_bytes() -> Result<()> {
+        use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
+        for ordered in [true, false] {
+            for binary in [true, false] {
+                let now = Instant::now();
+                let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+                let mut internal = RTCDataChannelInternal::new(DataChannelParameters {
+                    ordered,
+                    max_retransmits: (!ordered).then_some(0),
+                    negotiated: Some(0),
+                    ..Default::default()
+                });
+                internal.dial(0)?;
+                let id = pc.data_channels.insert(internal);
+                install_connected_stream(&mut pc, id, ordered)?;
+                if binary {
+                    pc.data_channel(id).unwrap().send(now, Default::default())?;
+                } else {
+                    pc.data_channel(id).unwrap().send_text(now, "")?;
+                }
+                assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 1);
+                pc.data_channel(id).unwrap().send_text(now, "successor")?;
+                assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 10);
+                for (released, remaining) in [(1, 9), (4, 5), (5, 0)] {
+                    pc.get_datachannel_handler()
+                        .handle_event(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::SCTPBufferReleased(0, 0, released),
+                        })?;
+                    assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), remaining);
+                }
+                pc.data_channel(id).unwrap().close()?;
+                let result = pc.data_channel(id).unwrap().send_text(now, "");
+                assert_eq!(result, Err(Error::ErrDataChannelClosed));
+                assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 0);
+            }
+        }
+        Ok(())
     }
 
     // Regression #1091: allocated streams still wait for DCEP before gameplay.
