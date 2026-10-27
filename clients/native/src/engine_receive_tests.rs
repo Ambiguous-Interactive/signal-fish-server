@@ -196,7 +196,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
         channels: Arc::new(Mutex::new(RequiredChannelAdmission::default())),
         closed_labels: AtomicU8::new(0),
         rejected: Mutex::new(false),
-        rejection_reason: AtomicU8::new(0),
+        rejection_reason: OnceLock::new(),
         terminal: AtomicBool::new(false),
     });
     // The default SCTP message cap prevents live raw-oversize delivery.

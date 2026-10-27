@@ -31,7 +31,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use crate::deadline::Deadline;
@@ -141,20 +141,18 @@ impl MessageQueueBudget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 enum ReceiveRejection {
-    MessageBytes = 1,
-    PendingMessages = 2,
-    PendingBytes = 3,
+    MessageBytes,
+    PendingMessages,
+    PendingBytes,
 }
 
 impl ReceiveRejection {
-    fn name(value: u8) -> Option<&'static str> {
-        match value {
-            1 => Some("message_bytes"),
-            2 => Some("pending_messages"),
-            3 => Some("pending_bytes"),
-            _ => None,
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MessageBytes => "message_bytes",
+            Self::PendingMessages => "pending_messages",
+            Self::PendingBytes => "pending_bytes",
         }
     }
 }
@@ -209,7 +207,7 @@ struct ChannelReceiveAdmission {
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
     rejected: Mutex<bool>,
-    rejection_reason: AtomicU8,
+    rejection_reason: OnceLock<ReceiveRejection>,
     terminal: AtomicBool,
 }
 
@@ -747,7 +745,7 @@ impl Engine {
             channels: channel_admission.clone(),
             closed_labels: AtomicU8::new(0),
             rejected: Mutex::new(false),
-            rejection_reason: AtomicU8::new(0),
+            rejection_reason: OnceLock::new(),
             terminal: AtomicBool::new(false),
         });
         let handler = Arc::new(PeerHandler {
@@ -1125,7 +1123,7 @@ impl Engine {
             "remote_description_set": link.remote_description_set,
             "remote_candidate_count": link.remote_candidate_count,
             "pending_remote_candidates": link.pending_candidates.len(),
-            "receive_rejection": ReceiveRejection::name(link.receive_admission.rejection_reason.load(Ordering::Relaxed)),
+            "receive_rejection": link.receive_admission.rejection_reason.get().map(|reason| reason.as_str()),
             "receive_budget": {
                 "scope": "engine",
                 "pending_messages": MAX_PENDING_CHANNEL_MESSAGES - self.message_budget.messages.available_permits(),
@@ -1858,10 +1856,10 @@ fn spawn_channel_event_loop(
                                 ChannelReceipts::count(&receipts.rejected);
                             }
                             *rejected = true;
-                            admission.rejection_reason.store(reason as u8, Ordering::Relaxed);
+                            let _ = admission.rejection_reason.set(reason);
                             admission.terminal.store(true, Ordering::Relaxed);
                             tracing::warn!(%peer, generation, %label,
-                                reason = ReceiveRejection::name(reason as u8),
+                                reason = reason.as_str(),
                                 message_bytes = message.data.len(),
                                 pending_messages = MAX_PENDING_CHANNEL_MESSAGES - admission.budget.messages.available_permits(),
                                 pending_bytes = MAX_PENDING_CHANNEL_BYTES - admission.budget.bytes.available_permits(),
