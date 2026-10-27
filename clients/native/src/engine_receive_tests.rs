@@ -1,6 +1,6 @@
 use super::*;
 
-// Regression #1053: required-channel loss must stop sibling input admission.
+// Regressions #1053/#1276: terminal pairs stop sibling input and connection readiness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_pair_does_not_admit_later_sibling_messages() {
     for failure in [
@@ -72,6 +72,11 @@ async fn terminal_pair_does_not_admit_later_sibling_messages() {
                     .terminal
                     .load(Ordering::Relaxed),
                 terminal
+            );
+            assert_eq!(
+                pair.receiver.connected_pair_count(),
+                usize::from(!terminal),
+                "observed terminal loss must stop reporting the pair connected; transient disconnection preserves it"
             );
 
             // Keep application-level loss handling held. Await SCTP acknowledgement
@@ -145,6 +150,7 @@ async fn terminal_pair_does_not_admit_later_sibling_messages() {
             pair.sender.remove_peer(pair.receiver_id).await.unwrap();
             pair.receiver.remove_peer(pair.sender_id).await.unwrap();
             pair.negotiate().await;
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
             assert_ne!(
                 pair.receiver.peers[&pair.sender_id].generation,
                 old_generation

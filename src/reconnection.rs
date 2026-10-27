@@ -8,6 +8,7 @@
 use crate::metrics::ServerMetrics;
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
 use chrono::{DateTime, Duration, Utc};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -1336,7 +1337,8 @@ impl ReconnectionManager {
             self.record_room_event_reached.notify_one();
             self.release_record_room_event.notified().await;
         }
-        self.push_event(room_id, message.clone(), false).await;
+        self.push_event(room_id, Cow::Borrowed(message), false)
+            .await;
     }
 
     /// Buffer an event for a room unconditionally (no replayable filter, no
@@ -1347,13 +1349,18 @@ impl ReconnectionManager {
     /// `Reconnected` snapshot and, for started sessions, the late-join
     /// `SessionPlan` flow.
     pub async fn buffer_event(&self, room_id: &RoomId, message: ServerMessage) {
-        self.push_event(room_id, message, true).await;
+        self.push_event(room_id, Cow::Owned(message), true).await;
     }
 
     /// Shared push path for [`Self::record_room_event`] and
     /// [`Self::buffer_event`]: assigns the next global sequence number, pushes
     /// into the room's ring, and advances the buffered/evicted metrics.
-    async fn push_event(&self, room_id: &RoomId, message: ServerMessage, create_if_missing: bool) {
+    async fn push_event(
+        &self,
+        room_id: &RoomId,
+        message: Cow<'_, ServerMessage>,
+        create_if_missing: bool,
+    ) {
         let mut state = self.replay_state.write().await;
         if !create_if_missing && !state.event_buffers.contains_key(room_id) {
             return;
@@ -1372,7 +1379,7 @@ impl ReconnectionManager {
             };
             buffer
         };
-        let evicted = buffer.push(message, sequence);
+        let evicted = buffer.push(message.into_owned(), sequence);
         drop(state);
 
         self.metrics.add_reconnection_events_buffered(1);
