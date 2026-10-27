@@ -6250,3 +6250,112 @@ Concentrated traffic still requires wider counters and briefly holds old and new
 storage during promotion. These observations do not bound whole-generator peaks
 or establish live throughput. The ten-minute live cell and raw-event growth
 remain open. All attempts remain in ignored `progress/session-554/`.
+
+## Reduce adaptive histogram work (#775, #636)
+
+The adaptive accumulator now checks its exact raw maximum before calculating an
+HDR equivalent range. Samples below that maximum keep the same bucket lookup.
+Samples above it retain the equivalent-bucket guard, including full-width tails.
+Promotion allocates the source histogram's range once before copying counts.
+Counter widths, raw maxima, every bucket, and summary/replay rules stay unchanged.
+
+A new independent 64-bit control compares every retained bucket after a low
+bucket fills beneath sparse tails extending to `u64::MAX`. Existing controls
+retain equivalent values, 8/16/32-bit promotion boundaries, malformed receipts,
+exact delivery violations, and artifact replay. All 71 selected oracle, artifact,
+scheduling, and lag-warning controls pass.
+
+The unchanged distributed profile retains 1,000 histograms, each with 65,536
+samples over 1,024 values. Fresh optimized ARM64 processes run baseline,
+candidate, candidate, baseline:
+
+| Observation | Baseline | Candidate |
+| --- | --- | --- |
+| Fill microseconds | 372,120 / 385,766 | 333,933 / 351,195 |
+| HDR bucket bytes | 11,264,000 | 11,264,000 |
+| Retained RSS bytes | 20,033,536 / 20,037,632 | 20,082,688 / 20,074,496 |
+| Statistics checksum | 3,670,269,000 | 3,670,269,000 |
+
+This measures component fill cost and retained storage. It does not measure live
+throughput or remove the wider-counter memory/CPU tradeoff. Baseline binary:
+`a600b508621356f7bb28625fe31a210d8998f1a2f117b9a7bd5fd1c004d0ed51`.
+Measured candidate:
+`fc5ec2fe9f79e1fb9dda2b0e6c07cbf27c2b56515e15c20b08c923b0d3f836ef`.
+The later lag-worker diagnostics do not run in this ignored component profile.
+Reproduce with `generator_distributed_latency_memory_profile` and
+`CAPACITY_DISTRIBUTED_ADAPTIVE=1`. All cohorts remain in `progress/session-555/`.
+
+## Retain the long-cell scheduling failure (#1009, #775)
+
+Run `0549c651-e7d9-4de0-9457-d626e32b891d` keeps the original one-room,
+16-player, 60 sends/s per sender, 96-byte, seed-1 v3 JSON reliable workload.
+It uses release binaries, four generator workers, 120 seconds of warm-up,
+600 seconds of measurement, and the original 250 ms lag bound. No local Cargo
+build or test command overlaps collection. The ARM64 WSL2 host remains shared.
+
+The attempt is invalid. It schedules 691,232 sends, completes 582,016, retains
+109,216 unsent, and receives all 8,730,240 owed deliveries with zero outstanding.
+All 16 senders stop before sequence 36,376, at observed times
+607,021,881-607,022,725 us. Before-write lag reaches 758,373 us. Completed sends
+have a separate maximum lag of 24,196 us; that statistic does not erase the
+refused-send failure. Replay matches, and the independent streaming audit checks
+every send and all 240 unique ordered recipient/sender prefixes.
+
+The ledger is 1,670,182,448 bytes, SHA-256
+`8492c7349226a4b89679f89c27ec2e28f693fc9650a38774c87e72721b7c5c98`.
+Registered source snapshots and both binary identities match. The observed
+child-process peak is 601,300 KiB. This is the completed prefix plus validation
+and replay, not a bound for the full planned workload or a 999-room run.
+
+The external observer retains 7,905 samples. Its largest gap is 5.786 seconds,
+and no Cargo/rustc/clippy process is observed. CPU-tick alignment brackets the
+workload epoch within 108.307 ms. The broad crossing window records 0.33 seconds
+of generator CPU and a 785.810 ms runqueue-wait increase on one worker. Internal
+samples at 605,046,612-607,023,126 us record only 0.06 seconds of generator CPU
+and 0.17 seconds of server CPU. This attempt does not repeat the earlier observed
+server CPU burst. The scheduler-enable switch remains unavailable. These raw
+thread counters do not locate an individual async task or prove a cause.
+
+New lag warnings capture the reporting Linux worker's TID, start-time ticks,
+state, and scheduling counters. Off Linux they retain null. The snapshot runs
+only after a confirmed lag breach; normal sends keep their previous path.
+It identifies the worker executing the report, not that task's earlier worker
+residency. Live controls match the reporting thread to the interval identity.
+The original long attempt predates this added warning field. Its failed history
+and all artifacts remain in `progress/session-555/release-long/`.
+
+### Final-source attempt with reporting-worker evidence
+
+Run `dc8f6a13-dd52-4075-9e7f-53e96e9eb3fd` repeats the original shape and bound
+with the new warning fields. It is also invalid. It completes 375,549 sends,
+retains 315,683 unsent, and receives all 5,633,235 owed deliveries with zero
+outstanding. Replay and the independent streaming audit again match every raw
+send and all 240 ordered recipient/sender prefixes. All registered source and
+binary identities match. The run takes 793.974 seconds, including export/replay.
+
+Ten before-write and two completed-write warnings span
+194,150,214-194,260,075 us. The first before-write breach is 251,590 us for
+`r0p8` sequence 11,633. Recorded lag later reaches 361,600 us. All four reporting
+worker identities match collected interval snapshots by TID and start-time ticks.
+The first reporting worker is TID 1595153. In the broad aligned crossing window,
+it adds 132.391 ms of runtime and 77.263 ms of runqueue wait. These observations
+do not establish where that async task waited. Snapshot and warning work follows
+a confirmed breach and can affect later reports; its counters are not atomic with
+`observed_us`.
+
+The observer retains 7,603 samples, with a largest gap of 461.359 ms and no
+observed Cargo/rustc/clippy process. CPU-tick alignment brackets the workload
+epoch within 118.137 ms. Child peak RSS is 393,932 KiB. The two attempts retain
+different completed prefixes, so their peaks do not prove a memory reduction.
+Both preserve their original offered schedules and explicit unsent work.
+
+The ledger is 1,075,370,640 bytes, SHA-256
+`e0416ae85cb414b53b1927a10fb7ec8be1b80a6277ee229ddedfa2bb9f20ac01`.
+Generator binary:
+`b91bd568f07c36889279b3551769d402657eeb18d18b9e58510006be4d4e8688`.
+Server binary:
+`82dddf9125488a570943073b9f9cccbd706595c47030f31dd3abbc61d6717c68`.
+All evidence remains in `progress/session-555/release-long-worker/`.
+Neither attempt qualifies the full planned ten-minute cell. The physical stall
+cause, task-level scheduling evidence, and whole-workload memory acceptance remain
+open in #1009/#775.

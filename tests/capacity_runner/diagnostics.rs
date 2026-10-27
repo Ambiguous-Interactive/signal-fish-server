@@ -291,27 +291,7 @@ fn process_scheduling_from(pid: u32, proc_root: &Path) -> Option<ProcessScheduli
     tids.sort_unstable();
     let threads = tids
         .into_iter()
-        .map(|tid| {
-            let task = task_root.join(tid.to_string());
-            let identity = std::fs::read_to_string(task.join("stat"))
-                .ok()
-                .and_then(|text| thread_identity_from_stat(&text));
-            ThreadScheduling {
-                tid,
-                name: std::fs::read_to_string(task.join("comm"))
-                    .ok()
-                    .map(|name| name.trim_end_matches('\n').to_string()),
-                start_time_ticks: identity.as_ref().map(|(_, start)| *start),
-                state: identity.map(|(state, _)| state),
-                wait_channel: std::fs::read_to_string(task.join("wchan"))
-                    .ok()
-                    .map(|text| text.trim().to_string())
-                    .filter(|text| !text.is_empty() && text != "0"),
-                counters: std::fs::read_to_string(task.join("schedstat"))
-                    .ok()
-                    .and_then(|text| thread_scheduling_counters(&text)),
-            }
-        })
+        .map(|tid| thread_scheduling_at(tid, &task_root.join(tid.to_string())))
         .collect();
     let schedstats_enabled = std::fs::read_to_string(proc_root.join("sys/kernel/sched_schedstats"))
         .ok()
@@ -324,6 +304,41 @@ fn process_scheduling_from(pid: u32, proc_root: &Path) -> Option<ProcessScheduli
         schedstats_enabled,
         threads,
     })
+}
+
+/// The OS worker executing a lag report now, not its earlier scheduling history.
+#[cfg(target_os = "linux")]
+pub fn current_thread_scheduling() -> Option<ThreadScheduling> {
+    let thread_path = std::fs::read_link("/proc/thread-self").ok()?;
+    let tid = thread_path.file_name()?.to_str()?.parse().ok()?;
+    Some(thread_scheduling_at(tid, Path::new("/proc/thread-self")))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn current_thread_scheduling() -> Option<ThreadScheduling> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn thread_scheduling_at(tid: u32, task: &Path) -> ThreadScheduling {
+    let identity = std::fs::read_to_string(task.join("stat"))
+        .ok()
+        .and_then(|text| thread_identity_from_stat(&text));
+    ThreadScheduling {
+        tid,
+        name: std::fs::read_to_string(task.join("comm"))
+            .ok()
+            .map(|name| name.trim_end_matches('\n').to_string()),
+        start_time_ticks: identity.as_ref().map(|(_, start)| *start),
+        state: identity.map(|(state, _)| state),
+        wait_channel: std::fs::read_to_string(task.join("wchan"))
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty() && text != "0"),
+        counters: std::fs::read_to_string(task.join("schedstat"))
+            .ok()
+            .and_then(|text| thread_scheduling_counters(&text)),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -646,6 +661,41 @@ mod tests {
         for text in ["", "1 (worker) S 1", "1 (worker) RUNNING 1 2 3"] {
             assert_eq!(thread_identity_from_stat(text), None, "{text:?}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lag_worker_snapshot_matches_the_reporting_thread_and_interval_identity() {
+        let observed = std::thread::Builder::new()
+            .name("lag-worker".into())
+            .spawn(|| {
+                let worker = current_thread_scheduling().expect("current Linux worker");
+                let identity = std::fs::read_link("/proc/thread-self").unwrap();
+                let expected: u32 = identity
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert_eq!(worker.tid, expected);
+                assert_eq!(worker.name.as_deref(), Some("lag-worker"));
+                assert!(worker.counters.is_some());
+                let process = process_scheduling(std::process::id()).unwrap();
+                let interval = process
+                    .threads
+                    .iter()
+                    .find(|thread| thread.tid == expected)
+                    .unwrap();
+                assert_eq!(worker.start_time_ticks, interval.start_time_ticks);
+                assert!(worker.start_time_ticks.is_some());
+                worker
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_ne!(observed.tid, std::process::id());
+        assert_ne!(observed.tid, current_thread_scheduling().unwrap().tid);
     }
 
     #[cfg(target_os = "linux")]
