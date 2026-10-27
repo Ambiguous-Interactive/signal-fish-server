@@ -29,6 +29,7 @@ fn start_output(
                 }
                 Ok(())
             })();
+            drop(pending);
             let _ = finished.send(result);
         })?;
     Ok((output, stopped))

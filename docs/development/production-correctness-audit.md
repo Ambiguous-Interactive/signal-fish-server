@@ -10121,3 +10121,12 @@ controls, 73 selected shutdown/expiry/drain tests, and the native Engine startup
 lifetime-expiry and active-consumer recovery controls. Strict root and native
 all-target/all-feature lint pass. Independent adversarial review found no
 blocking issue. These scoped results leave full hosted qualification to CI.
+
+The current-head native CI run `40594066687` passes all 308 library tests and
+21 interop tests, then fails the existing idle-output-owner control. Issue #1274
+records the actual failure: completion wakes the owner before the writer thread
+drops its pending receiver, so a later event can still enqueue. The probe now
+drops that receiver before sending completion. This closes admission and releases
+queued receive permits before notification. The existing error and late-emission
+assertions and five-second deadline stay unchanged. This is a qualification-probe
+lifecycle repair, not evidence of native SCTP loss or the historical #1264 cause.
