@@ -157,6 +157,12 @@ async fn native_peer_loss_retains_snapshot_before_removal() {
                         peer,
                         generation,
                         label: label.into(),
+                        failure: crate::engine::ChannelReceiveFailure {
+                            reason: crate::engine::ReceiveRejection::PendingMessages,
+                            message_bytes: 4096,
+                            pending_messages: 256,
+                            pending_bytes: 1024 * 1024,
+                        },
                     }
                 } else {
                     EngineEvent::ChannelClosed {

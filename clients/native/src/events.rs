@@ -113,6 +113,13 @@ pub enum Event {
     ChannelOpen { peer: PlayerId, label: String },
     /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed { peer: PlayerId, label: String },
+    /// A receive limit refused input. Emitted before link teardown.
+    ChannelReceiveRejected {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+        failure: crate::engine::ChannelReceiveFailure,
+    },
     /// An `--exchange` message was sent over an open channel.
     ChannelMessageSent {
         peer: PlayerId,
@@ -247,6 +254,45 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn receive_rejection_event_preserves_failure_and_physical_generation() {
+        use crate::engine::{ChannelReceiveFailure, ReceiveRejection};
+
+        for (reason, name) in [
+            (ReceiveRejection::MessageBytes, "message_bytes"),
+            (ReceiveRejection::PendingMessages, "pending_messages"),
+            (ReceiveRejection::PendingBytes, "pending_bytes"),
+        ] {
+            let peer = PlayerId::from_u128(0x1264);
+            let event = Event::ChannelReceiveRejected {
+                peer,
+                generation: 7,
+                label: "reliable".into(),
+                failure: ChannelReceiveFailure {
+                    reason,
+                    message_bytes: 8192,
+                    pending_messages: 128,
+                    pending_bytes: 1024 * 1024,
+                },
+            };
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                json!({
+                    "event": "channel_receive_rejected",
+                    "peer": peer,
+                    "generation": 7,
+                    "label": "reliable",
+                    "failure": {
+                        "reason": name,
+                        "message_bytes": 8192,
+                        "pending_messages": 128,
+                        "pending_bytes": 1024 * 1024,
+                    },
+                })
+            );
+        }
+    }
 
     #[test]
     fn binary_channel_event_preserves_the_base64_packet_contract() {

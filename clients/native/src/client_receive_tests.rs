@@ -342,6 +342,12 @@ async fn channel_termination_reports_fallback_and_preserves_a_newer_link() {
                     peer,
                     generation: 1,
                     label: label.to_owned(),
+                    failure: crate::engine::ChannelReceiveFailure {
+                        reason: crate::engine::ReceiveRejection::PendingMessages,
+                        message_bytes: 4096,
+                        pending_messages: 256,
+                        pending_bytes: 1024 * 1024,
+                    },
                 }
             } else {
                 EngineEvent::ChannelClosed {
