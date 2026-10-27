@@ -140,21 +140,42 @@ impl MessageQueueBudget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReceiveRejection {
+/// The first receive limit that refused an application message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiveRejection {
+    /// Raw or decoded message size exceeds the per-message limit.
     MessageBytes,
+    /// The Engine has no remaining pending-message permits.
     PendingMessages,
+    /// The Engine has insufficient pending-payload byte permits.
     PendingBytes,
 }
 
 impl ReceiveRejection {
-    fn as_str(self) -> &'static str {
+    /// Stable diagnostic name of the failed limit.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::MessageBytes => "message_bytes",
             Self::PendingMessages => "pending_messages",
             Self::PendingBytes => "pending_bytes",
         }
     }
+}
+
+/// Receive refusal evidence retained independently of the physical link.
+/// Counts sample the Engine's shared budget separately after the failed
+/// reservation. Concurrent consumers or other links can change those counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ChannelReceiveFailure {
+    /// The first failed limit; message count is checked before pending bytes.
+    pub reason: ReceiveRejection,
+    /// Raw callback payload size, before any text projection.
+    pub message_bytes: usize,
+    /// Sampled pending messages across all peers and generations.
+    pub pending_messages: usize,
+    /// Sampled pending payload bytes across all peers and generations.
+    pub pending_bytes: usize,
 }
 
 /// Holds receive capacity until a message is handled or discarded.
@@ -207,7 +228,7 @@ struct ChannelReceiveAdmission {
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
     rejected: Mutex<bool>,
-    rejection_reason: OnceLock<ReceiveRejection>,
+    failure: OnceLock<ChannelReceiveFailure>,
     terminal: AtomicBool,
 }
 
@@ -374,10 +395,12 @@ pub enum EngineEvent {
         received_at: tokio::time::Instant,
     },
     /// Receive limits failed; the orchestrator must retire this physical link.
+    /// Failure evidence remains valid after the link is removed.
     ChannelReceiveRejected {
         peer: PlayerId,
         generation: u64,
         label: String,
+        failure: ChannelReceiveFailure,
     },
 }
 
@@ -745,7 +768,7 @@ impl Engine {
             channels: channel_admission.clone(),
             closed_labels: AtomicU8::new(0),
             rejected: Mutex::new(false),
-            rejection_reason: OnceLock::new(),
+            failure: OnceLock::new(),
             terminal: AtomicBool::new(false),
         });
         let handler = Arc::new(PeerHandler {
@@ -1099,6 +1122,8 @@ impl Engine {
     /// Receive rejection identifies the first failed limit. Budget counts span
     /// the Engine, including retained events from retired links, and are sampled
     /// separately. They are current counts, not a frozen rejection-time sample.
+    /// `receive_failure` retains the first refusal's raw message size and sampled
+    /// budget counts even after the backlog drains.
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
@@ -1123,7 +1148,8 @@ impl Engine {
             "remote_description_set": link.remote_description_set,
             "remote_candidate_count": link.remote_candidate_count,
             "pending_remote_candidates": link.pending_candidates.len(),
-            "receive_rejection": link.receive_admission.rejection_reason.get().map(|reason| reason.as_str()),
+            "receive_rejection": link.receive_admission.failure.get().map(|failure| failure.reason.as_str()),
+            "receive_failure": link.receive_admission.failure.get(),
             "receive_budget": {
                 "scope": "engine",
                 "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
@@ -1856,18 +1882,27 @@ fn spawn_channel_event_loop(
                                 ChannelReceipts::count(&receipts.rejected);
                             }
                             *rejected = true;
-                            let _ = admission.rejection_reason.set(reason);
+                            let failure = ChannelReceiveFailure {
+                                reason,
+                                message_bytes: message.data.len(),
+                                pending_messages: MAX_PENDING_CHANNEL_MESSAGES
+                                    .saturating_sub(admission.budget.messages.available_permits()),
+                                pending_bytes: MAX_PENDING_CHANNEL_BYTES
+                                    .saturating_sub(admission.budget.bytes.available_permits()),
+                            };
+                            let _ = admission.failure.set(failure);
                             admission.terminal.store(true, Ordering::Relaxed);
                             tracing::warn!(%peer, generation, %label,
                                 reason = reason.as_str(),
-                                message_bytes = message.data.len(),
-                                pending_messages = MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(admission.budget.messages.available_permits()),
-                                pending_bytes = MAX_PENDING_CHANNEL_BYTES.saturating_sub(admission.budget.bytes.available_permits()),
+                                message_bytes = failure.message_bytes,
+                                pending_messages = failure.pending_messages,
+                                pending_bytes = failure.pending_bytes,
                                 "data-channel receive limit reached");
                             let _ = events.send(EngineEvent::ChannelReceiveRejected {
                                 peer,
                                 generation,
                                 label: label.clone(),
+                                failure,
                             });
                             drop(rejected);
                             let _ = channel.close().await;
@@ -3121,6 +3156,12 @@ mod tests {
                 peer,
                 generation: stale_generation,
                 label: RELIABLE_LABEL.to_string(),
+                failure: crate::engine::ChannelReceiveFailure {
+                    reason: crate::engine::ReceiveRejection::PendingMessages,
+                    message_bytes: 4096,
+                    pending_messages: 256,
+                    pending_bytes: 1024 * 1024,
+                },
             },
         ];
         assert!(stale_events

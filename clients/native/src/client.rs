@@ -3050,9 +3050,23 @@ impl Orchestrator<'_> {
                 });
                 drop(queue_permit);
             }
-            EngineEvent::ChannelReceiveRejected { peer, label, .. } => {
+            EngineEvent::ChannelReceiveRejected {
+                peer,
+                generation,
+                label,
+                failure,
+            } => {
+                emit(&Event::ChannelReceiveRejected {
+                    peer,
+                    generation,
+                    label: label.clone(),
+                    failure,
+                });
                 emit(&Event::Error {
-                    message: format!("peer {peer} channel {label} exceeded receive limits"),
+                    message: format!(
+                        "peer {peer} channel {label} exceeded receive limit {}",
+                        failure.reason.as_str()
+                    ),
                 });
                 let reason = format!("data-channel receive rejected: {label}");
                 emit(&Event::ChannelClosed { peer, label });

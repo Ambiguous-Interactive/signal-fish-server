@@ -196,7 +196,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
         channels: Arc::new(Mutex::new(RequiredChannelAdmission::default())),
         closed_labels: AtomicU8::new(0),
         rejected: Mutex::new(false),
-        rejection_reason: OnceLock::new(),
+        failure: OnceLock::new(),
         terminal: AtomicBool::new(false),
     });
     // The default SCTP message cap prevents live raw-oversize delivery.
@@ -566,7 +566,10 @@ async fn flood_until_rejected(
                     peer,
                     generation,
                     label,
+                    failure,
                 } => {
+                    assert_eq!(failure.message_bytes, bytes);
+                    assert_eq!(serde_json::to_value(failure).unwrap(), pair.receiver.diagnostic_snapshot(peer)["receive_failure"]);
                     assert_eq!(peer, pair.sender_id);
                     assert_eq!(generation, pair.receiver.peers[&pair.sender_id].generation);
                     assert_eq!(label, RELIABLE_LABEL);

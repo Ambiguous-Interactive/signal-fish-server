@@ -9840,3 +9840,61 @@ successor, keep the channel open, and release all sender debt. Both offer roles
 exercise both dimensions. This qualifies intentional binary admission and fresh
 recovery. It does not classify the original combined terminal event or prove
 Godot runtime or remote-network behavior. The unresolved attempt stays in #1264.
+
+### Active Engine consumers after callback saturation (#1264, #1244, #1240)
+
+A new control resumes production Engine callback polling while its application
+consumer immediately checks and drops every receipt. Both offer roles send
+2,048 distinct 4 KiB reliable packets. Before resume, stopped callback tasks must
+produce observed SCTP receive-credit refusal with zero raw Engine receipts.
+Each role repeats on a fresh physical generation in the same Engines. Packet
+bytes include sequence and generation. A skipped prefix, unexplained closure,
+or stalled tail fails the control.
+
+The consumer must receive either all 2,048 exact packets with zero sender debt,
+or the exact admitted prefix followed by one typed pending-message refusal.
+The second result is terminal; all three required channels must refuse new work.
+It is not a successful full-stream delivery. Every case checks raw, admitted,
+rejected and discarded counts, released application permits, and fresh mixed
+traffic after physical-link replacement. No receive budget, offered packet count,
+or reliable receipt requirement changes.
+
+An initial local attempt records one active-consumer refusal after 640 exact
+packets. The producer samples 256 pending messages and 1 MiB at refusal. The
+other three cases receive all 2,048 packets. Two later cohorts receive all
+packets in all four cases. All attempts remain local under
+`progress/session-562/`. The initial attempt does not have a complete retained
+source manifest; it is supporting evidence, not a fixed-source causal comparison.
+The final seven-test cohort also passes. Its four active cases receive every
+packet. Source checksums, the complete diff, binary checksum, and all snapshots
+are retained with that attempt. Its test binary SHA-256 is
+`675d7d834705883ff5c75c935c34b5cabdb7a5474e61d9e12a3e375cc1fb046d`.
+These results establish that active consumption can coincide with a concrete
+budget refusal. They do not identify the original ambiguous event or explain
+the historical Godot 4.3 prefix loss.
+
+Receive failure evidence now travels with the Engine terminal event and the
+native CLI's `channel_receive_rejected` JSONL event. It includes the physical
+generation, label, first failed limit, raw message bytes and sampled Engine
+backlog. The snapshot retains the same `receive_failure` value when application
+permits drop. Removing a peer clears its snapshot but cannot change a retained
+event. The counts are sampled separately after the failed reservation; they
+are not an atomic occupancy history. The existing `receive_rejection` name and
+live `receive_budget` fields retain their meanings.
+
+The held-consumer control pins exact count and byte refusals in both roles,
+then releases one event, removes the link, retains its failure value, and
+recovers on a fresh link. The Reference/text controls also cover decoded
+single-message expansion. Removing the frozen sample fails the new assertion.
+Changing only the terminal event's pending bytes to zero must also fail; a
+snapshot alone cannot substitute for event evidence.
+
+These are native/native Engine results. They do not add Godot runtime,
+full-service, or remote-network qualification. Godot
+[#355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks probe adoption of the failure event and runtime assessment. Its current
+probe ignores this variant and can still use the existing snapshot fields.
+Native Engine callers that construct `ChannelReceiveRejected` must set
+`failure`; callers that read the variant can bind it or use `..`. Rust client
+main `da8f2d16` has no reference-Engine dependency. The .NET project has no
+peer-stack dependency. Their signaling contracts and APIs are unaffected.

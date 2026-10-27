@@ -126,6 +126,19 @@ events keep their permits after link removal. Drop those events to release
 capacity before handling fresh traffic. Budget counts are current observations,
 not frozen rejection-time values, and are sampled separately.
 
+`receive_failure` is null before refusal. It then retains the first failure's
+`reason`, raw `message_bytes`, and sampled `pending_messages` and `pending_bytes`.
+These samples do not change when the backlog drains. The two counts are read
+separately after the failed reservation; concurrent consumers or other peers can
+change capacity between those reads. The typed `ChannelReceiveFailure` also
+travels with `EngineEvent::ChannelReceiveRejected`. Keep that value when removing
+the link; a removed peer's snapshot is null. Callers that construct this event
+must now set its `failure` field.
+
+The CLI emits `channel_receive_rejected` with the physical `generation`, `peer`,
+`label`, and `failure` before its error and channel-closure output. This separates
+receive refusal from a channel that closes without a refused message.
+
 The held-callback Engine control in `engine_profile_tests.rs` fills actual SCTP
 receive credit before it resumes Engine polling. Holding application events
 then admits an exact reliable prefix and produces one explicit budget refusal.
@@ -134,6 +147,15 @@ traffic on fresh links in the same Engines. This control does not identify the
 cause of the earlier ambiguous terminal event in
 [server #1264](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1264)
 or the historical Godot reliable-prefix loss.
+
+The active-consumer control resumes the same saturated callback path while it
+consumes and drops each Engine event. It requires an exact reliable prefix,
+then either all 2,048 packets and zero sender debt, or an explicit message-budget
+refusal with exact receipt totals. A closure or a missing packet cannot substitute
+for either result. Both offer roles repeat on fresh links in the same Engines.
+Scheduling can produce either result because receive admission does not wait for
+application capacity. These native-only controls do not qualify Godot runtime
+or remote-network behavior.
 
 ## Shared transport behavior
 
@@ -405,6 +427,7 @@ until the pipe drains, closes, or the process exits.
 | `local_candidate` | `peer`, `candidate_type`, `address`, `port`, `protocol` | Native-only: a gathered local ICE candidate was advertised to `peer`, reported after the relay so the set describes what the remote side can see. `candidate_type` ∈ `host`/`srflx`/`prflx`/`relay`. The relay-only TURN cell requires every entry to be `relay`, and the IPv6 cell requires every entry to be an IPv6 host; without it, a session that gathers nothing reports only "no candidate pairs" |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
 | `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
+| `channel_receive_rejected` | `peer`, `generation`, `label`, `failure` | Native-only: first failed receive limit, raw message bytes, and sampled Engine backlog before link teardown |
 | `channel_closed` | `peer`, `label` | A required data channel started closing, closed, or became unreadable; the unusable pair is removed and relay fallback remains live |
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |

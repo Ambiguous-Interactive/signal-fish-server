@@ -912,6 +912,70 @@ async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_r
     }
 }
 
+async fn saturate_held_reliable_callbacks(
+    pair: &mut LivePair,
+    packet_bytes: usize,
+    payload_generation: u8,
+) -> (Arc<dyn DataChannel>, serde_json::Value) {
+    let peer = pair.sender_id;
+    let link = pair.receiver.peers.get_mut(&peer).unwrap();
+    for task in &link.channel_tasks {
+        task.abort();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let channel = pair
+        .sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap();
+    let mut payload = vec![0xff; packet_bytes];
+    payload[4] = payload_generation;
+    let snapshot = tokio::time::timeout(Duration::from_secs(15), async {
+        for sequence in 0u32..2048 {
+            payload[..4].copy_from_slice(&sequence.to_be_bytes());
+            channel.send(payload.as_slice().into()).await.unwrap();
+        }
+        loop {
+            let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+                assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
+                assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+                assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("held callbacks exhaust actual SCTP receive credit");
+    (channel, snapshot)
+}
+
+fn resume_reliable_callbacks(pair: &mut LivePair) {
+    let peer = pair.sender_id;
+    let link = &pair.receiver.peers[&peer];
+    let resumed = spawn_channel_event_loop(
+        &pair.receiver.runtime,
+        &pair.receiver.events,
+        peer,
+        link.generation,
+        RELIABLE_LABEL.into(),
+        pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
+        link.receive_admission.clone(),
+    );
+    pair.receiver
+        .peers
+        .get_mut(&peer)
+        .unwrap()
+        .channel_tasks
+        .push(resumed);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_links() {
     for receiver_offers in [false, true] {
@@ -941,56 +1005,13 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
                 "the receiver keeps its selected offer role"
             );
             let peer = pair.sender_id;
-            let link = pair.receiver.peers.get_mut(&peer).unwrap();
-            for task in &link.channel_tasks {
-                task.abort();
-            }
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !link.channel_tasks.iter().all(|task| task.is_finished()) {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            let generation = link.generation;
-            let admission = link.receive_admission.clone();
-            let channel = pair
-                .sender
-                .channel(pair.receiver_id, RELIABLE_LABEL)
-                .unwrap();
+            let generation = pair.receiver.peers[&peer].generation;
+            let (channel, held) =
+                saturate_held_reliable_callbacks(&mut pair, packet_bytes, 0).await;
+            println!("GODOT_ENGINE_HELD receiver_offers={receiver_offers} packet_bytes={packet_bytes} snapshot={held}");
             let mut payload = vec![0xff; packet_bytes];
-            tokio::time::timeout(Duration::from_secs(15), async {
-                for sequence in 0u32..2048 {
-                    payload[..4].copy_from_slice(&sequence.to_be_bytes());
-                    channel.send(payload.as_slice().into()).await.unwrap();
-                }
-                loop {
-                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-                    if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
-                        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
-                        assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
-                        assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
-                        println!("GODOT_ENGINE_HELD receiver_offers={receiver_offers} packet_bytes={packet_bytes} snapshot={snapshot}");
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            }).await.expect("held callbacks exhaust actual SCTP receive credit");
-            let resumed = spawn_channel_event_loop(
-                &pair.receiver.runtime,
-                &pair.receiver.events,
-                peer,
-                generation,
-                RELIABLE_LABEL.into(),
-                pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
-                admission,
-            );
-            pair.receiver
-                .peers
-                .get_mut(&peer)
-                .unwrap()
-                .channel_tasks
-                .push(resumed);
+            payload[4] = 0;
+            resume_reliable_callbacks(&mut pair);
             tokio::time::timeout(Duration::from_secs(15), async {
                 while pair.receiver.diagnostic_snapshot(peer)["receive_rejection"] != reason {
                     tokio::task::yield_now().await;
@@ -1005,13 +1026,23 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
             );
             assert_eq!(snapshot["receive_budget"]["pending_bytes"], 1024 * 1024);
             assert_eq!(
+                snapshot["receive_failure"],
+                serde_json::json!({
+                    "reason": reason,
+                    "message_bytes": packet_bytes,
+                    "pending_messages": admitted_packets,
+                    "pending_bytes": 1024 * 1024,
+                }),
+                "rejection evidence must survive later backlog changes"
+            );
+            assert_eq!(
                 snapshot["channels"][RELIABLE_LABEL]["receipts"],
                 serde_json::json!({
                     "raw": admitted_packets + 1, "admitted": admitted_packets, "rejected": 1, "discarded": 0,
                 })
             );
             let mut retained = Vec::new();
-            tokio::time::timeout(Duration::from_secs(5), async {
+            let failure = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let event = pair.receiver_events.recv().await.unwrap();
                     if !pair.receiver.is_current_event(&event) {
@@ -1033,10 +1064,14 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
                             );
                             retained.push(event);
                         }
-                        EngineEvent::ChannelReceiveRejected { label, .. } => {
+                        EngineEvent::ChannelReceiveRejected { label, failure, .. } => {
                             assert_eq!(label, RELIABLE_LABEL);
                             assert_eq!(retained.len(), admitted_packets);
-                            break;
+                            assert_eq!(
+                                serde_json::to_value(failure).unwrap(),
+                                snapshot["receive_failure"]
+                            );
+                            break failure;
                         }
                         EngineEvent::ChannelClosed { label, .. } => {
                             panic!("closure cannot replace the limit verdict: {label}; {snapshot}")
@@ -1052,7 +1087,23 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
             }
             println!("GODOT_ENGINE_REJECTION receiver_offers={receiver_offers} packet_bytes={packet_bytes} sender_debt={} snapshot={snapshot}", channel.outstanding_bytes().await.unwrap());
             pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            drop(retained.pop());
+            let drained = pair.receiver.diagnostic_snapshot(peer);
+            assert_eq!(drained["receive_failure"], snapshot["receive_failure"]);
+            assert_eq!(
+                drained["receive_budget"]["pending_messages"],
+                admitted_packets - 1
+            );
+            assert_eq!(
+                serde_json::to_value(failure).unwrap(),
+                drained["receive_failure"]
+            );
             pair.receiver.remove_peer(peer).await.unwrap();
+            assert!(pair.receiver.diagnostic_snapshot(peer).is_null());
+            assert_eq!(
+                serde_json::to_value(failure).unwrap(),
+                snapshot["receive_failure"]
+            );
             if receiver_offers {
                 std::mem::swap(&mut pair.sender, &mut pair.receiver);
                 std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
@@ -1086,9 +1137,12 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
             assert!(fresh["receive_rejection"].is_null());
             assert_eq!(
                 fresh["receive_budget"]["pending_messages"],
-                admitted_packets
+                admitted_packets - 1
             );
-            assert_eq!(fresh["receive_budget"]["pending_bytes"], 1024 * 1024);
+            assert_eq!(
+                fresh["receive_budget"]["pending_bytes"],
+                1024 * 1024 - packet_bytes
+            );
             drop(retained);
             let fresh = pair.receiver.diagnostic_snapshot(peer);
             assert_eq!(fresh["receive_budget"]["pending_messages"], 0);
@@ -1096,5 +1150,132 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
             exchange(&mut pair).await;
             pair.cleanup().await;
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_active_consumer_classifies_saturated_recovery_without_silent_prefix_loss() {
+    const PACKETS: u32 = 2048;
+    const PACKET_BYTES: usize = 4096;
+    for receiver_offers in [false, true] {
+        let mut pair = unconnected_negotiated_pair();
+        let mut previous_generation = None;
+        for payload_generation in 0u8..2 {
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let peer = pair.sender_id;
+            let link = &pair.receiver.peers[&peer];
+            let generation = link.generation;
+            assert_ne!(previous_generation, Some(generation));
+            previous_generation = Some(generation);
+            assert_eq!(
+                link.pc.local_description().await.unwrap().sdp_type,
+                if receiver_offers {
+                    rtc::peer_connection::sdp::RTCSdpType::Offer
+                } else {
+                    rtc::peer_connection::sdp::RTCSdpType::Answer
+                }
+            );
+            let (channel, held) =
+                saturate_held_reliable_callbacks(&mut pair, PACKET_BYTES, payload_generation).await;
+            println!("GODOT_ACTIVE_HELD receiver_offers={receiver_offers} generation={generation} snapshot={held}");
+            resume_reliable_callbacks(&mut pair);
+            let mut received = 0u32;
+            let mut expected = vec![0xff; PACKET_BYTES];
+            expected[4] = payload_generation;
+            let failure = tokio::time::timeout(Duration::from_secs(15), async {
+                while received < PACKETS {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if !pair.receiver.is_current_event(&event) { continue; }
+                    match event {
+                        EngineEvent::ChannelBinaryMessage { label, data, queue_permit, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            expected[..4].copy_from_slice(&received.to_be_bytes());
+                            assert_eq!(data, expected, "receiver_offers={receiver_offers} generation={generation} sequence={received}");
+                            received += 1;
+                            drop(queue_permit);
+                        }
+                        EngineEvent::ChannelReceiveRejected { label, failure, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            assert_eq!(failure.message_bytes, PACKET_BYTES);
+                            assert_eq!(failure.reason, ReceiveRejection::PendingMessages);
+                            return Some(failure);
+                        }
+                        EngineEvent::ChannelClosed { label, .. } => {
+                            panic!("active resume closed {label} without a receive verdict: {}", pair.receiver.diagnostic_snapshot(peer));
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }).await.unwrap_or_else(|error| panic!("active resume stalled at {received}/{PACKETS}: {error}; {}", pair.receiver.diagnostic_snapshot(peer)));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while pair.receiver.peers[&peer]
+                    .receive_admission
+                    .receipts(RELIABLE_LABEL)
+                    .unwrap()
+                    .admitted
+                    .load(Ordering::Relaxed)
+                    != u64::from(received)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the producer classifies the last published receipt");
+            let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            let receipts = &snapshot["channels"][RELIABLE_LABEL]["receipts"];
+            assert_eq!(receipts["admitted"], received);
+            assert_eq!(receipts["raw"], received + u32::from(failure.is_some()));
+            assert_eq!(receipts["rejected"], u32::from(failure.is_some()));
+            assert_eq!(receipts["discarded"], 0);
+            assert_eq!(
+                snapshot["receive_failure"],
+                serde_json::to_value(failure).unwrap()
+            );
+            assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+            assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+            if failure.is_some() {
+                for label in [RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL] {
+                    assert!(pair.receiver.send_channel(peer, label).await.is_none());
+                }
+            } else {
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    while channel.outstanding_bytes().await.unwrap() != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("complete reliable delivery clears sender debt");
+                assert!(pair
+                    .receiver
+                    .send_channel(peer, RELIABLE_LABEL)
+                    .await
+                    .is_some());
+            }
+            println!("GODOT_ACTIVE_RESUME receiver_offers={receiver_offers} generation={generation} received={received} offered={PACKETS} failure={} sender_debt={} snapshot={snapshot}", serde_json::to_value(failure).unwrap(), channel.outstanding_bytes().await.unwrap());
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            assert!(pair.receiver.diagnostic_snapshot(peer).is_null());
+            if let Some(failure) = failure {
+                assert_eq!(
+                    serde_json::to_value(failure).unwrap(),
+                    snapshot["receive_failure"],
+                    "event evidence survives peer removal"
+                );
+            }
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+        }
+        pair.negotiate().await;
+        exchange(&mut pair).await;
+        pair.cleanup().await;
     }
 }
