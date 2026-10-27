@@ -6445,3 +6445,87 @@ invalid attempts remain invalid. A completed one-room cell does not establish
 multi-room server capacity or a causal throughput gain from borrowed extraction.
 The candidate's maximum lag is higher, and the observed RSS difference does not
 establish a whole-generator memory improvement.
+
+## Direct capacity replay decoding (#775, #636)
+
+Session 557 profiles the retained tagged-enum receipt decoder before changing it.
+Serde buffers the fields of each internally tagged event. Canonical send,
+receipt, and gap rows now decode directly from the remaining JSON map after
+the first tag. The decoder retains no field buffer. Reordered tags, extensions,
+duplicate fields, and malformed rows keep the historical decoding paths.
+Artifact output, identity pooling, arrival order, budgets, and oracle checks
+stay unchanged.
+
+A fresh-process release profile decodes one million canonical receipt rows.
+Each process checks the same checksum, 253,645,750,000. ABBA order compares
+the retained baseline with the final candidate on the same shared ARM64 host.
+
+| Decoder | First elapsed us | Second elapsed us |
+| --- | --- | --- |
+| Tagged baseline | 575,876 | 558,560 |
+| Direct candidate | 292,727 | 287,747 |
+
+Separate `libmemusage` runs count whole-process allocator calls. The baseline
+records 1,000,684 malloc calls and 1,000,055 realloc calls. The candidate records
+684 malloc calls and 55 realloc calls. Their allocated byte totals are
+512,125,213 and 125,514. Both include the test harness and fixture setup.
+This removes one million malloc calls and one million realloc calls in this
+component profile. It does not establish a lower retained-event footprint,
+whole-run peak RSS, live relay latency, or a cause for historical generator stalls.
+An earlier two-pass candidate removed the allocations but had mixed timing;
+the final candidate uses one pass on canonical rows.
+
+Run `artifacts::tests::generator_replay_decoder_profile` in the release
+`capacity_runner` binary with `--exact --ignored --nocapture`. Run the
+compatibility controls `replay_direct_dispatch_preserves_historical_values_and_errors`,
+`replay_names_borrow_plain_text_and_preserve_escaped_identities`, and
+`jsonl_readers_preserve_every_event_and_arrival_order` in the same target.
+The differential control caught an early candidate accepting `1e400` in an
+unknown field. The final decoder preserves the historical rejection.
+The profile records remain in ignored `progress/session-557/`.
+
+## Clock anchors for capacity lag reports (#1009)
+
+Each over-bound send report now records `report_unix_ns` between run-relative
+`report_started_us` and `report_finished_us`. The same bracket encloses the
+reporting worker snapshot. These fields permit comparison with an independent
+observer without estimating the run epoch from cumulative CPU ticks.
+The report keeps the original intended, wake, preparation, and write times.
+The anchor is read only after an over-bound observation. It does not add work
+to ordinary sends or change invalidation and replay rules.
+
+Wall time can step. Check its relation to the observer's monotonic clock across
+the relevant samples before using the anchor. Null wall time remains unknown.
+The reporting worker is the thread that records the warning, not proof of the
+thread that previously polled the Tokio task. Thread counters remain cumulative;
+match both TID and start-time ticks before taking differences.
+
+Session 557 calibrates these fields with two sequential short controls on the
+same fixed release generator and server. Each offers one room of 16 players,
+60 sends/s, 96-byte values, two seconds of warm-up, and 15 measured seconds.
+The lag bound remains 250,000 us. These are diagnostic controls, not replacements
+for the original long workload.
+
+| Control | Sent | Unsent | Receipts | Maximum lag us | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| Uninterrupted | 16,336 | 0 | 245,040 | 9,041 | Valid |
+| Generator stopped for 600 ms | 4,384 | 11,952 | 65,760 | 619,271 | Invalid |
+
+Only the generator PID receives `SIGSTOP`; the server remains active. The
+external observer records six stopped-state samples before `SIGCONT` resumes
+that PID. All 16 senders then report lag before a write. Their wall/run-origin
+brackets intersect over 51,290 ns. Each reporting worker matches an earlier
+interval by both TID and start-time ticks. The independent full ledger scan
+checks all 240 streams in each control. Every completed send has all 15 exact
+receipts, zero outstanding deliveries, and equal artifact replay. The stopped
+control remains invalid with its original unsent work.
+
+The whole observer series has 1,450,014 ns of wall/monotonic offset variation.
+An initial whole-series stability check fails. Its cause is unproved. The
+relevant stop window, including one second on either side, varies by 7,799 ns.
+The final calibration uses only that local window and retains the earlier
+variation. This demonstrates observation of a known external process stop;
+it does not explain the historical #1009 stall or identify Tokio task history.
+Both controls have no observed build process. A short read-only ledger audit
+and documentation work overlap the later two-room attempt; no other session
+live workload or build overlaps that attempt.

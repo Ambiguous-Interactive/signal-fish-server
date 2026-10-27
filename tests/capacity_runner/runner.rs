@@ -922,9 +922,15 @@ struct SendLagObservation<'a> {
     preparation_us: Option<u64>,
     write_elapsed_us: Option<u64>,
     reporting_worker: Option<diagnostics::ThreadScheduling>,
+    /// Run-relative bounds enclose the wall read and worker snapshot.
+    report_started_us: u64,
+    report_finished_us: u64,
+    /// Wall-clock anchor for external observers; clock steps remain possible.
+    report_unix_ns: Option<u64>,
 }
 
 fn send_lag_observation<'a>(
+    epoch: Instant,
     sender: &'a str,
     send: ScheduledSend,
     bound_us: u64,
@@ -932,6 +938,13 @@ fn send_lag_observation<'a>(
     write_times: Option<(u64, u64)>,
 ) -> SendLagObservation<'a> {
     let observed_us = write_times.map_or(wake_us, |(_, sent_us)| sent_us);
+    let report_started_us = micros(epoch.elapsed());
+    let report_unix_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok());
+    let reporting_worker = diagnostics::current_thread_scheduling();
+    let report_finished_us = micros(epoch.elapsed());
     SendLagObservation {
         event: "capacity_generator_lag",
         stage: if write_times.is_some() {
@@ -951,7 +964,10 @@ fn send_lag_observation<'a>(
         sent_us: write_times.map(|(_, sent)| sent),
         preparation_us: write_times.map(|(start, _)| start.saturating_sub(wake_us)),
         write_elapsed_us: write_times.map(|(start, sent)| sent.saturating_sub(start)),
-        reporting_worker: diagnostics::current_thread_scheduling(),
+        reporting_worker,
+        report_started_us,
+        report_finished_us,
+        report_unix_ns,
     }
 }
 
@@ -1497,6 +1513,7 @@ async fn peer_task(
                         report_send_lag(
                             &log,
                             &send_lag_observation(
+                                epoch,
                                 &plan.name,
                                 send,
                                 facts.generator_lag_bound_us,
@@ -1574,6 +1591,7 @@ async fn peer_task(
                         report_send_lag(
                             &log,
                             &send_lag_observation(
+                                epoch,
                                 &plan.name,
                                 send,
                                 facts.generator_lag_bound_us,
@@ -2817,7 +2835,8 @@ mod session_poll_tests {
             intended_us: 100_000,
             phase: crate::schedule::Phase::Measured,
         };
-        let observation = send_lag_observation("r0p3", send, 250_000, 517_628, None);
+        let observation =
+            send_lag_observation(Instant::now(), "r0p3", send, 250_000, 517_628, None);
         let original = serde_json::to_value(&observation).expect("original warning");
         report_send_lag(&log, &observation);
         assert_eq!(serde_json::to_value(&observation).unwrap(), original);
@@ -2856,6 +2875,7 @@ mod session_poll_tests {
                 517_628
             };
             let evidence = serde_json::to_value(send_lag_observation(
+                Instant::now(),
                 "r0p0",
                 send,
                 250_000,
@@ -2885,6 +2905,48 @@ mod session_poll_tests {
             #[cfg(not(target_os = "linux"))]
             assert!(evidence["reporting_worker"].is_null());
         }
+    }
+
+    #[test]
+    fn send_lag_clock_brackets_wall_and_worker_capture_in_the_run_epoch() {
+        let epoch = Instant::now() - Duration::from_secs(2);
+        let before = std::time::SystemTime::now();
+        let offset_before = micros(epoch.elapsed());
+        let observation = send_lag_observation(
+            epoch,
+            "r0p0",
+            ScheduledSend {
+                seq: 0,
+                intended_us: 0,
+                phase: crate::schedule::Phase::Measured,
+            },
+            250_000,
+            517_628,
+            None,
+        );
+        let offset_after = micros(epoch.elapsed());
+        let after = std::time::SystemTime::now();
+        assert!(offset_before <= observation.report_started_us);
+        assert!(observation.report_started_us <= observation.report_finished_us);
+        assert!(observation.report_finished_us <= offset_after);
+        let nanos = |time: std::time::SystemTime| {
+            u64::try_from(
+                time.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            )
+            .unwrap()
+        };
+        let wall = observation
+            .report_unix_ns
+            .expect("current wall time fits u64");
+        assert!((nanos(before)..=nanos(after)).contains(&wall));
+        assert_eq!(observation.observed_us, 517_628);
+        assert_eq!(observation.lag_us, 517_628);
+        let value = serde_json::to_value(&observation).expect("clock evidence");
+        assert_eq!(value["report_started_us"], observation.report_started_us);
+        assert_eq!(value["report_finished_us"], observation.report_finished_us);
+        assert_eq!(value["report_unix_ns"], wall);
     }
 
     #[test]
