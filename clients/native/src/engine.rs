@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
@@ -136,6 +136,7 @@ impl MessageQueueBudget {
         Ok(MessageQueuePermit {
             _message: message,
             _bytes: bytes,
+            pending: None,
         })
     }
 }
@@ -182,6 +183,31 @@ pub struct ChannelReceiveFailure {
 pub struct MessageQueuePermit {
     _message: OwnedSemaphorePermit,
     _bytes: OwnedSemaphorePermit,
+    pending: Option<PendingChannelMessage>,
+}
+
+impl MessageQueuePermit {
+    fn track_channel(&mut self, receipts: Arc<ChannelReceipts>, bytes: usize) {
+        receipts.pending_messages.fetch_add(1, Ordering::Relaxed);
+        receipts.pending_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.pending = Some(PendingChannelMessage { receipts, bytes });
+    }
+}
+
+struct PendingChannelMessage {
+    receipts: Arc<ChannelReceipts>,
+    bytes: usize,
+}
+
+impl Drop for PendingChannelMessage {
+    fn drop(&mut self) {
+        self.receipts
+            .pending_messages
+            .fetch_sub(1, Ordering::Relaxed);
+        self.receipts
+            .pending_bytes
+            .fetch_sub(self.bytes, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +224,8 @@ struct ChannelReceipts {
     admitted: AtomicU64,
     rejected: AtomicU64,
     discarded: AtomicU64,
+    pending_messages: AtomicUsize,
+    pending_bytes: AtomicUsize,
 }
 
 impl ChannelReceipts {
@@ -223,7 +251,7 @@ struct ChannelReceiveAdmission {
     preserve_binary_messages: bool,
     #[cfg(test)]
     message_observed: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
-    receipts: [ChannelReceipts; 3],
+    receipts: [Arc<ChannelReceipts>; 3],
     budget: Arc<MessageQueueBudget>,
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
@@ -233,7 +261,7 @@ struct ChannelReceiveAdmission {
 }
 
 impl ChannelReceiveAdmission {
-    fn receipts(&self, label: &str) -> Option<&ChannelReceipts> {
+    fn receipts(&self, label: &str) -> Option<&Arc<ChannelReceipts>> {
         match label {
             RELIABLE_LABEL => Some(&self.receipts[0]),
             UNRELIABLE_LABEL => Some(&self.receipts[1]),
@@ -1124,6 +1152,10 @@ impl Engine {
     /// separately. They are current counts, not a frozen rejection-time sample.
     /// `receive_failure` retains the first refusal's raw message size and sampled
     /// budget counts even after the backlog drains.
+    /// Each channel's `pending_application` counts messages and projected bytes
+    /// held by its published events. These counts belong to this generation;
+    /// fresh links start empty even while retired events charge the Engine.
+    /// Counts are sampled separately and do not include transport callback queues.
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
@@ -1138,7 +1170,11 @@ impl Engine {
                         serde_json::json!({
                             "registered": link.channels.contains_key(label),
                             "open_observed": link.open_labels.contains(label),
-                            "receipts": link.receive_admission.receipts(label).map(ChannelReceipts::snapshot),
+                            "receipts": link.receive_admission.receipts(label).map(|receipts| receipts.snapshot()),
+                            "pending_application": link.receive_admission.receipts(label).map(|receipts| serde_json::json!({
+                                "messages": receipts.pending_messages.load(Ordering::Relaxed),
+                                "bytes": receipts.pending_bytes.load(Ordering::Relaxed),
+                            })),
                         }),
                     )
                 })
@@ -1878,7 +1914,7 @@ fn spawn_channel_event_loop(
                             .decode_and_reserve(&message.data)
                             .map(|(text, permit)| (Some(text), permit))
                     };
-                    let (text, queue_permit) = match decoded {
+                    let (text, mut queue_permit) = match decoded {
                         Ok(decoded) => decoded,
                         Err(reason) => {
                             if let Some(receipts) = receipts {
@@ -1912,6 +1948,10 @@ fn spawn_channel_event_loop(
                             return;
                         }
                     };
+                    if let Some(receipts) = receipts {
+                        let bytes = text.as_ref().map_or(message.data.len(), String::len);
+                        queue_permit.track_channel(receipts.clone(), bytes);
+                    }
                     let event = match text {
                         Some(text) => EngineEvent::ChannelMessage {
                             peer,
@@ -1992,6 +2032,10 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 #[path = "engine_profile_tests.rs"]
 mod profile_tests;
+
+#[cfg(test)]
+#[path = "engine_mesh_receive_tests.rs"]
+mod mesh_receive_tests;
 
 #[cfg(test)]
 #[path = "engine_task_tests.rs"]

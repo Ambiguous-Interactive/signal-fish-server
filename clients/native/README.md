@@ -126,6 +126,14 @@ events keep their permits after link removal. Drop those events to release
 capacity before handling fresh traffic. Budget counts are current observations,
 not frozen rejection-time values, and are sampled separately.
 
+Each channel's `pending_application` reports its retained application message
+and byte counts. The counts cover only that physical generation and label.
+Text uses its decoded UTF-8 size. Empty messages still count as one message.
+Compare these counts across peers to locate live owners of the shared budget.
+A fresh link starts at zero even if retired events still hold Engine capacity.
+Counts are sampled separately. They do not count unread transport callbacks or
+form an atomic ownership ledger. Dropping an event releases its local counts.
+
 `receive_failure` is null before refusal. It then retains the first failure's
 `reason`, raw `message_bytes`, and sampled `pending_messages` and `pending_bytes`.
 These samples do not change when the backlog drains. The two counts are read
