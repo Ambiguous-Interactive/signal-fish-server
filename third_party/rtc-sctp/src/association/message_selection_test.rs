@@ -708,3 +708,201 @@ fn outbound_evidence_retains_first_abandonment_and_distinguishes_retry_policy() 
     assert_eq!(sender.stats().get_num_emitted_retransmissions(), 0);
     Ok(())
 }
+
+#[test]
+fn expired_ordered_backlog_preserves_exact_reliable_and_fixed_lifetime_successors() -> Result<()> {
+    for (expired_count, first_tsn, zero_window, lose_first_forward, fixed_lifetime) in [
+        (32_768usize, 1234u32, false, false, false),
+        (32_770, 1234, false, false, false),
+        (65_538, u32::MAX - 3, false, true, false),
+        (32_770, u32::MAX - 3, true, true, false),
+        (32_770, 1234, false, false, true),
+        (65_538, u32::MAX - 3, true, false, true),
+    ] {
+        let now = Instant::now();
+        let mut at = now + Duration::from_millis(2);
+        let mut sender = timed_test_association();
+        let mut receiver = timed_test_association();
+        sender.my_next_tsn = first_tsn;
+        sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+        receiver.ack_mode = AckMode::NoDelay;
+        if zero_window {
+            sender.rwnd = 0;
+        }
+        let ppi = PayloadProtocolIdentifier::Binary;
+        receiver.open_stream(2, ppi)?;
+        let mut stream = sender.open_stream(2, ppi)?;
+        stream.set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        for _ in 0..expired_count {
+            stream.write_sctp(now, &Bytes::from_static(b"x"), ppi)?;
+        }
+        if !fixed_lifetime {
+            sender
+                .stream(2)?
+                .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+        }
+        let expected = Bytes::from_static(b"exact successor after expired ordered backlog");
+        sender.stream(2)?.write_sctp(at, &expected, ppi)?;
+        let mut stale_forward = None;
+        for round in 0..8 {
+            let packets = sender.gather_outbound(at).0;
+            if round == 0 && lose_first_forward {
+                assert!(
+                    transmitted_data(&packets).is_empty(),
+                    "even a zero-window probe must wait for sequence progress"
+                );
+                stale_forward = packets.first().cloned();
+                assert!(
+                    stale_forward.is_some(),
+                    "an actual FORWARD TSN must be lost"
+                );
+                assert!(sender.gather_outbound(at).0.is_empty());
+                at = sender
+                    .poll_timeout()
+                    .expect("lost FORWARD TSN must retain recovery");
+                sender.handle_timeout(at);
+                continue;
+            }
+            for raw in packets {
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+            }
+            for raw in receiver.gather_outbound(at).0 {
+                sender.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+            }
+            if round == 5
+                && let Some(raw) = &stale_forward
+            {
+                receiver.handle_inbound(Packet::unmarshal(raw)?, at)?;
+            }
+        }
+        let actual = receiver.stream(2)?.read_sctp()?.unwrap_or_else(|| {
+            panic!("expired_count={expired_count}, fixed_lifetime={fixed_lifetime}: successor must remain readable")
+        });
+        assert_eq!(actual.to_payload(expected.len())?.freeze(), expected);
+        assert!(receiver.stream(2)?.read_sctp()?.is_none());
+        assert_eq!(
+            sender.stats().get_num_abandoned_messages(),
+            expired_count as u64
+        );
+        assert_eq!(sender.stream(2)?.buffered_amount()?, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn serial_window_fragmented_expiry_drains_before_reliable_successor() -> Result<()> {
+    let now = Instant::now();
+    let later = now + Duration::from_millis(2);
+    let mut sender = timed_test_association();
+    let mut receiver = timed_test_association();
+    receiver.peer_last_tsn = sender.my_next_tsn.wrapping_sub(1);
+    receiver.ack_mode = AckMode::NoDelay;
+    sender.max_payload_size = 4;
+    let ppi = PayloadProtocolIdentifier::Binary;
+    receiver.open_stream(2, ppi)?;
+    let mut stream = sender.open_stream(2, ppi)?;
+    stream.set_reliability_params(false, ReliabilityType::Timed, 1)?;
+    stream.write_sctp(now, &Bytes::from(vec![0xa5; 4 * 32_770]), ppi)?;
+    sender
+        .stream(2)?
+        .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+    let expected = Bytes::from_static(b"reliable after fragmented expiry");
+    sender.stream(2)?.write_sctp(later, &expected, ppi)?;
+    let mut forwards = 0;
+    for _ in 0..8 {
+        for raw in sender.gather_outbound(later).0 {
+            let packet = Packet::unmarshal(&raw)?;
+            forwards += packet
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.as_any().is::<ChunkForwardTsn>())
+                .count();
+            receiver.handle_inbound(packet, later)?;
+        }
+        for raw in receiver.gather_outbound(later).0 {
+            sender.handle_inbound(Packet::unmarshal(&raw)?, later)?;
+        }
+    }
+    assert!(
+        forwards >= 2,
+        "a complete expired message may span multiple forward reports"
+    );
+    assert_eq!(
+        receiver
+            .stream(2)?
+            .read_sctp()?
+            .expect("fragmented expiry must leave successor readable")
+            .to_payload(100)?
+            .freeze(),
+        expected
+    );
+    assert!(receiver.stream(2)?.read_sctp()?.is_none());
+    assert_eq!(sender.stream(2)?.buffered_amount()?, 0);
+    assert_eq!(sender.stats().get_num_abandoned_messages(), 1);
+    Ok(())
+}
+
+#[test]
+fn serial_window_live_ordered_data_waits_for_confirmed_progress() -> Result<()> {
+    for first_tsn in [1234u32, u32::MAX - 3] {
+        let now = Instant::now();
+        let mut sender = timed_test_association();
+        let mut receiver = timed_test_association();
+        sender.my_next_tsn = first_tsn;
+        sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+        receiver.ack_mode = AckMode::NoDelay;
+        sender.cwnd = u32::MAX;
+        sender.rwnd = u32::MAX;
+        let ppi = PayloadProtocolIdentifier::Binary;
+        receiver.open_stream(2, ppi)?;
+        sender.open_stream(2, ppi)?;
+        for sequence in 0u32..32_770 {
+            sender.stream(2)?.write_sctp(
+                now,
+                &Bytes::copy_from_slice(&sequence.to_be_bytes()),
+                ppi,
+            )?;
+        }
+        let packets = sender.gather_outbound(now).0;
+        let mut data = transmitted_data(&packets);
+        assert_eq!(
+            data.len(),
+            32_767,
+            "new DATA must leave an unambiguous sequence window"
+        );
+        sender.rwnd = 0;
+        assert!(
+            sender.gather_outbound(now).0.is_empty(),
+            "window pressure cannot bypass the sequence fence"
+        );
+        let last = data.pop().unwrap();
+        receiver.handle_data(&last)?;
+        for chunk in data {
+            receiver.handle_data(&chunk)?;
+        }
+        sender.handle_sack(&receiver.create_selective_ack_chunk(), now)?;
+        for raw in sender.gather_outbound(now).0 {
+            receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        sender.handle_sack(&receiver.create_selective_ack_chunk(), now)?;
+        for sequence in 0u32..32_770 {
+            assert_eq!(
+                receiver
+                    .stream(2)?
+                    .read_sctp()?
+                    .expect("every reliable sequence must remain readable")
+                    .to_payload(4)?
+                    .freeze()
+                    .as_ref(),
+                sequence.to_be_bytes()
+            );
+        }
+        assert!(receiver.stream(2)?.read_sctp()?.is_none());
+        assert_eq!(sender.stream(2)?.buffered_amount()?, 0);
+    }
+    Ok(())
+}
