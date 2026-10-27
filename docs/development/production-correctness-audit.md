@@ -9635,3 +9635,51 @@ tracks the general driver and host-departure control. Rust at `da8f2d16` and .NE
 on the patched peer stack in their inspected manifests. Their wire contracts do
 not change. Godot's optional reference probe can consume the added diagnostics;
 its production adapter keeps the existing negotiated channel contract.
+
+### Godot service recovery through observed UDP loss (#1240, #1244)
+
+The new `clients/native/tests/fixtures/webrtc_loss_control.py` wraps the merged
+Godot driver at `f3d3f8611e2c85290f222074da6d40807099e4ec` (Godot PR #445).
+It removes inline SDP candidates and selects one IPv4 UDP host candidate per seat.
+Both advertised addresses point to a local relay. Web mDNS endpoints are learned
+from their first UDP packet. Each physical generation gets fresh sockets and a
+fresh loss budget. Original candidates, omitted candidates, endpoints, counts,
+packet sizes, monotonic timestamps, and relay errors remain in `udp-loss.json`.
+
+After native channel open, the relay drops one DTLS application datagram of at
+least 1,000 bytes in each direction. It forwards smaller application packets,
+STUN, and handshake traffic. The wrapper requires observed loss in both directions
+and two distinct physical generations. The ordinary driver retains exact snapshot
+bytes and sequences, final credits, mixed modes, selected-packet retirement,
+required closure, same-room rejoin, and the original receipt deadlines.
+
+Six final local pairings pass: official Godot 4.7.2 native/Web and Godot 4.3 native,
+both initial offer roles, on Linux ARM64 with webrtc-native 1.2.2-stable and
+Chromium 154. All 3,072 required reliable snapshot receipts pass. The 12 physical
+generations retain all 24 injected drops, each 1,101-1,141 UDP payload bytes.
+At reliable snapshot 127, native SCTP samples report one or two fast
+retransmissions per generation. Snapshot bodies remain 1 KiB, with 32 outstanding
+chunks. Godot-offer host departure changes the second generation's offer role;
+the merged driver retains that complementary role and epoch-2 evidence.
+
+Five socket/verdict controls cover exact byte forwarding, small-packet exemption,
+loss arming and budget, mDNS endpoint learning, inline-candidate removal, candidate
+formats, fresh generations, and missing-loss rejection. Disabling injected loss
+or dropping small application packets makes the focused control fail. A root
+Rust test runs these controls in hosted CI. Three initial attempts retain fixture
+candidate-format failures; a fourth small-packet loss control passes separately.
+Those attempts do not establish gameplay loss. All attempts remain in ignored
+`progress/session-555/`.
+
+The probe SHA-256 is
+`777bc6c066e799001732d97021dea81f11569c0848de10c1257cccec040222fd`.
+The wrapper SHA-256 is
+`4eb41776a92afe75398b9d590224a2de011d4d0033e1566b122fffd613c0920b`.
+The fixture README gives the pinned build and run recipe.
+
+This qualifies a local post-open loss boundary. The relay cannot identify an
+encrypted SCTP chunk, and these passes do not attribute the historical Godot 4.3
+missing prefix. Remote networks, larger meshes, and corrected Godot lifetimes
+remain open under #1240/#1244 and Godot #355/#433. Rust and .NET SDK behavior and
+all server messages remain unchanged. The Godot production adapter also stays
+unchanged; its assessment issue tracks this optional reference control.

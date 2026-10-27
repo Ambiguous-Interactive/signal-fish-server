@@ -1101,12 +1101,15 @@ impl RecipientLatency {
             sample: u64,
             limit: T,
         ) -> bool {
-            sample <= value.histogram.highest_equivalent(value.max_us)
+            (sample <= value.max_us || sample <= value.histogram.highest_equivalent(value.max_us))
                 && value.histogram.count_at(sample) == limit
         }
 
         fn widen<T: Counter, U: Counter>(source: &LatencyAccumulator<T>) -> LatencyAccumulator<U> {
-            let mut target = LatencyAccumulator::<U>::default();
+            let mut target = LatencyAccumulator::<U> {
+                histogram: Histogram::new_from(&source.histogram),
+                max_us: source.max_us,
+            };
             for bucket in source.histogram.iter_recorded() {
                 target
                     .histogram
@@ -1117,7 +1120,6 @@ impl RecipientLatency {
                     )
                     .expect("latency histogram auto-resizes to fit retained bucket");
             }
-            target.max_us = source.max_us;
             target
         }
         let promoted = match self {
@@ -3566,6 +3568,53 @@ mod coverage_tests {
         );
         assert_eq!(adaptive.stats().samples, u64::from(u32::MAX) + 1);
         assert_eq!(adaptive.stats().max_us, 2049);
+    }
+
+    #[test]
+    fn adaptive_latency_preserves_sparse_tail_buckets_when_a_low_bucket_fills() {
+        let mut adaptive = RecipientLatency::new();
+        let mut reference = LatencyAccumulator::<u64>::default();
+        let tail = (0..64).map(|shift| u64::MAX >> shift);
+        let input = tail
+            .chain([2048, 2049, 4095])
+            .chain(std::iter::repeat_n(0, 256));
+        for sample in input {
+            adaptive.record(sample);
+            reference.record(sample);
+        }
+        let RecipientLatency::Short(actual) = adaptive else {
+            panic!("only the full low bucket needs promotion");
+        };
+        let buckets = |histogram: &Histogram<u64>| {
+            histogram
+                .iter_recorded()
+                .map(|bucket| {
+                    (
+                        bucket.value_iterated_to(),
+                        bucket.count_since_last_iteration(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let actual_buckets: Vec<_> = actual
+            .histogram
+            .iter_recorded()
+            .map(|bucket| {
+                (
+                    bucket.value_iterated_to(),
+                    bucket.count_since_last_iteration(),
+                )
+            })
+            .collect();
+        assert_eq!(actual_buckets, buckets(&reference.histogram));
+        assert_eq!(actual.max_us, u64::MAX);
+        assert_eq!(actual.histogram.len(), reference.histogram.len());
+        for quantile in [0.0, 0.01, 0.5, 0.95, 0.99, 1.0] {
+            assert_eq!(
+                actual.histogram.value_at_quantile(quantile),
+                reference.histogram.value_at_quantile(quantile)
+            );
+        }
     }
 
     #[test]

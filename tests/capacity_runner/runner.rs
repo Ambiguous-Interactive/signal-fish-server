@@ -921,6 +921,7 @@ struct SendLagObservation<'a> {
     sent_us: Option<u64>,
     preparation_us: Option<u64>,
     write_elapsed_us: Option<u64>,
+    reporting_worker: Option<diagnostics::ThreadScheduling>,
 }
 
 fn send_lag_observation<'a>(
@@ -950,6 +951,7 @@ fn send_lag_observation<'a>(
         sent_us: write_times.map(|(_, sent)| sent),
         preparation_us: write_times.map(|(start, _)| start.saturating_sub(wake_us)),
         write_elapsed_us: write_times.map(|(start, sent)| sent.saturating_sub(start)),
+        reporting_worker: diagnostics::current_thread_scheduling(),
     }
 }
 
@@ -2871,6 +2873,17 @@ mod session_poll_tests {
             assert_eq!(evidence["bound_us"], 250_000);
             assert_eq!(evidence["preparation_us"], serde_json::json!(preparation));
             assert_eq!(evidence["write_elapsed_us"], serde_json::json!(write));
+            #[cfg(target_os = "linux")]
+            {
+                let worker = diagnostics::current_thread_scheduling().unwrap();
+                assert_eq!(evidence["reporting_worker"]["tid"], worker.tid);
+                assert_eq!(
+                    evidence["reporting_worker"]["start_time_ticks"],
+                    serde_json::json!(worker.start_time_ticks)
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            assert!(evidence["reporting_worker"].is_null());
         }
     }
 

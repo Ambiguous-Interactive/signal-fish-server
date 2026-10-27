@@ -44,3 +44,45 @@ the historical Godot 4.3 missing prefix remain open in server #1240/#1244 and
 [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
 The general driver and host-departure follow-up is
 [Godot #444](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/444).
+
+## Observed UDP loss
+
+`webrtc_loss_control.py` wraps the Godot driver at
+`f3d3f8611e2c85290f222074da6d40807099e4ec` (Godot PR #445).
+It removes inline SDP candidates and selects one IPv4 UDP host candidate per
+seat, replacing its address with a local relay. It retains candidate metadata and learns a Web mDNS endpoint
+from its first UDP packet. Other local candidates are counted and omitted.
+Each physical generation gets fresh sockets and a fresh loss budget.
+
+After the native channel-open observation, the relay drops the requested number
+of DTLS application datagrams of at least 1,000 bytes from each seat. STUN and handshake datagrams keep
+flowing. `udp-loss.json` records original and observed endpoints, forwarded and
+dropped totals, each dropped datagram's size, position, and monotonic time, and
+relay errors.
+The wrapper requires two generations and the exact drop budget in each direction.
+The normal driver still requires every reliable snapshot, credits, exact modes,
+selected-packet retirement, required-channel closure, and fresh-link recovery.
+
+Use the same server, probe, Godot, and Web prerequisites as above:
+
+```bash
+python /path/to/server/clients/native/tests/fixtures/webrtc_loss_control.py \
+  --driver /path/to/godot/scripts/check-webrtc-reference.py \
+  --drops-per-direction 1 \
+  --godot /path/to/Godot_v4.7.2-stable_linux.arm64 \
+  --native-extension /path/to/addons/webrtc_native \
+  --native-reference-probe /path/to/native-probe \
+  --runtime all --offerer both --safe-receive --mixed-traffic \
+  --credit-transport webrtc --service-url ws://127.0.0.1:3536/v3/ws \
+  --service-rejoin --require-gameplay --output /path/to/new-loss-output
+```
+
+Run the local socket controls with:
+
+```bash
+python -m unittest discover -s clients/native/tests/fixtures -p 'test_webrtc_loss_control.py'
+```
+
+This is a local loss control. It does not identify the encrypted SCTP chunk in
+a dropped datagram or establish the cause of the historical Godot 4.3 prefix loss.
+It does not qualify remote networks or repaired Godot packet lifetimes.
