@@ -1,4 +1,78 @@
-# Godot-offer service control
+# Godot runtime controls
+
+## Native Engine probe
+
+Build the repository-owned JSONL probe before running the Godot driver:
+
+```bash
+cp clients/native/tests/fixtures/godot_reference_probe.rs clients/native/examples/godot_reference_probe.rs
+cargo build --locked --manifest-path clients/native/Cargo.toml --example godot_reference_probe
+rm clients/native/examples/godot_reference_probe.rs
+```
+
+Pass `clients/native/target/debug/examples/godot_reference_probe` to
+`--native-reference-probe`. The driver at Godot client commit
+`f3d3f8611e2c85290f222074da6d40807099e4ec` supports this probe without a patch.
+Keep the driver, Godot, extension, server, and probe source and binary hashes
+with each attempt. The probe supports the driver's existing text, binary,
+batch, startup, signaling, close, removal, and snapshot commands.
+
+`receive_rejected` records the exact Engine failure, physical generation,
+channel label, and a transport snapshot taken before link removal. The frozen
+failure includes the first failed limit, raw message size, and sampled backlog.
+The snapshot includes current callback receipts, RTC channel counters, SCTP
+admission counters, ICE/DTLS state, and outstanding send bytes per channel.
+These samples are not atomic.
+`closed` records physical closure separately with its own transport snapshot.
+Snapshots taken after receive rejection return the retained pre-removal sample.
+Receipt rows include `receive_boundary` at the first snapshot callback and
+snapshot sequence 127 in each generation. Its marker keeps the actual first
+sequence, including a missing prefix. A teardown sample can have no SCTP
+association; these live samples preserve evidence before that state is removed.
+The probe keeps the pinned bridge's existing event names.
+
+Commands must not remove a rejected link ahead of its queued receipt events.
+The probe queues those receipts before the terminal row.
+It refuses further commands after rejection, except diagnostic snapshots.
+It drops stale-generation events before classifying a failure.
+One dedicated thread writes stdout. Each receipt keeps its Engine permit until
+its row is flushed. A blocked reader must cause an explicit Engine budget
+refusal instead of blocking the executor or moving payloads to an uncharged queue.
+`probe_us` measures enqueue time. It does not measure stdout flush time.
+
+Run the focused output contract checks with:
+
+```bash
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml \
+  --test output_e2e -E 'test(godot_reference_probe::tests)'
+```
+
+Use `--startup-burst --safe-receive --mixed-traffic --credit-transport webrtc`
+with the pinned driver to require exact startup packets and reliable snapshots
+in both physical generations. Add `--service-url` and `--service-rejoin` for
+same-room service recovery. Keep isolated and loaded attempts separate.
+These controls do not explain the historical #1244 prefix loss or #1264 event.
+
+Check blocked stdout separately from a Godot runtime:
+
+```bash
+python3 clients/native/tests/fixtures/probe_output_control.py \
+  --driver /path/to/godot/scripts/check-webrtc-reference.py \
+  --probe "$PWD/clients/native/target/debug/examples/godot_reference_probe" \
+  --output /path/to/new-output-directory
+```
+
+The control uses the pinned driver's JSONL bridge and two native probes.
+Both offer roles exercise count and byte refusal. It holds receiver stdout,
+requires observed sender channel closure, queues a snapshot command, then
+resumes output. Every admitted reliable packet must appear with exact bytes,
+sequence, label, and generation before one typed refusal. The retained snapshot
+must still match after link removal. Packet totals may vary with pipe capacity;
+the control compares exact receipts with the Engine's admitted total.
+Each attempt retains the frozen probe, source hashes, event streams, sender
+state, and a separate assessment. Do not reuse an output directory.
+
+## Godot-offer service control (older driver)
 
 Apply `godot-service-offer.patch` to Godot client commit
 `988797b4c2f2a870b946870b59046ea5a5f1a297` in a separate checkout.

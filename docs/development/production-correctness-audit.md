@@ -9898,3 +9898,70 @@ Native Engine callers that construct `ChannelReceiveRejected` must set
 `failure`; callers that read the variant can bind it or use `..`. Rust client
 main `da8f2d16` has no reference-Engine dependency. The .NET project has no
 peer-stack dependency. Their signaling contracts and APIs are unaffected.
+
+### Portable Godot runtime evidence under blocked stdout (#1240, #1244, #1264)
+
+The server now owns the native JSONL probe under
+`clients/native/tests/fixtures/godot_reference_probe.rs`. The pinned Godot
+bridge keeps its existing event names. Receipt rows add live samples at the
+first snapshot callback and sequence 127 in each physical generation. Markers
+keep the actual first sequence; they must not invent sequence zero. Samples
+include Engine receipts, SCTP admission, RTC channels, ICE/DTLS state, and
+outstanding send bytes. Cross-layer counts are not atomic. A final teardown
+sample can have no SCTP association, so it cannot replace these live samples.
+
+One dedicated thread writes stdout. Each payload keeps its Engine permit until
+its JSONL row is flushed. The owner can process a terminal event while output
+is blocked. It retains the typed failure and pre-removal snapshot, refuses new
+commands except diagnostics, and writes earlier receipts before the terminal
+row. Writer failure ends an idle probe; stdin EOF flushes queued output.
+
+The portable `probe_output_control.py` uses two probes and the pinned Godot
+JSONL bridge. Both offer roles hold receiver stdout until the sender observes
+channel closure. A snapshot command enters stdin before output resumes. Count
+cases preserve 264 exact 4 KiB packets each; byte cases preserve 134 exact 8 KiB
+packets each. Every admitted packet arrives in order before one explicit
+refusal. The frozen sample retains 256 pending messages or 128 pending messages,
+respectively, with 1 MiB charged. Cumulative receipts include packets flushed
+before the pipe filled; they need not equal pending capacity. The control pins
+all three negotiated stream IDs and preserves the snapshot after link removal.
+Removing permit ownership until flush makes the control fail. Removing typed
+failure evidence makes its contract test fail. Four hosted output-contract
+cases cover failure fields, physical closure, writer errors, and first-marker
+identity across fresh generations.
+
+Eight final-source local service pairings cover Godot 4.3 native with baseline
+and added CPU contention, and Godot 4.7.2 native/Web, in both offer roles. Each
+pairing has two physical generations, same-room rejoin, original 1 KiB snapshot
+bodies, the 32-credit window, mixed modes, and 32 extra startup packets per
+sender and generation. Both 4.3 cohorts use CPUs 0/1; the loaded cohort adds one
+busy worker on each CPU. This is a shared host, not an isolated benchmark.
+An independent artifact audit confirms all 4,096 required reliable snapshot
+receipts and all 1,024 startup receipts. All first/last live samples retain SCTP
+state. Native receipt bytes and sequence, outgoing markers, driver receipt
+checks, physical generations, and frozen probe hashes agree.
+
+The strict gameplay verdict passes seven pairings. Loaded Godot 4.3 with Godot
+offering fails after its second generation misses the initial
+`reference:2:unreliable` probe. The native enqueue is recorded. Godot receives
+17 later positions on that channel, all reliable traffic, and all eight ordered
+probes. Service recovery and retirement complete with no script error. This
+case remains a failed qualification; it is not rerun until green or counted as
+supported. [Godot #458](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/458)
+tracks exact transmit/abandon and ingress evidence. Current evidence does not
+locate the finite packet gap or prove expiry caused it.
+
+An earlier diagnostic-event prototype failed because the pinned bridge rejects
+unknown event names. The final source nests diagnostics in existing receipt
+rows. All failed attempts and source manifests remain local under
+`progress/session-563/`. Final probe SHA-256 is
+`41cf46f9acedbef1adbd7517102b0d88e46c814b85e314150e21f6db57985804`;
+the driver is Godot commit `f3d3f8611e2c85290f222074da6d40807099e4ec`.
+These results do not explain the historical #1244 reliable gap or #1264 event,
+or qualify remote networks or corrected Godot channel lifetimes. Keep those
+issues open. [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks probe adoption; [#433](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/433)
+tracks lifetime repair.
+The Rust client manifest and .NET project have no reference-Engine dependency.
+Their public APIs and signaling behavior are unchanged. This is internal probe
+and qualification work, so it needs no changelog entry.

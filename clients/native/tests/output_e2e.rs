@@ -1,3 +1,7 @@
+#[path = "fixtures/godot_reference_probe.rs"]
+#[allow(dead_code)]
+mod godot_reference_probe;
+
 use std::process::Stdio;
 use std::time::Duration;
 
