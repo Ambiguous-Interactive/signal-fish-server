@@ -1315,7 +1315,7 @@ fn insert_epoch(epochs: &mut Vec<u32>, epoch: u32) {
     }
 }
 
-/// Compact raw offsets halve retained index and stable-sort storage on 64-bit hosts.
+/// Raw offsets break timestamp ties without stable-sort scratch storage.
 enum ChurnPositions {
     Compact(Vec<u32>),
     Wide(Vec<usize>),
@@ -1355,10 +1355,11 @@ impl ChurnPositions {
 
     fn sort(&mut self, events: &[ChurnEvent]) {
         match self {
-            Self::Compact(positions) => {
-                positions.sort_by_key(|&position| events[position as usize].at_us)
+            Self::Compact(positions) => positions
+                .sort_unstable_by_key(|&position| (events[position as usize].at_us, position)),
+            Self::Wide(positions) => {
+                positions.sort_unstable_by_key(|&position| (events[position].at_us, position))
             }
-            Self::Wide(positions) => positions.sort_by_key(|&position| events[position].at_us),
         }
     }
 
@@ -3367,7 +3368,7 @@ mod coverage_tests {
         ]);
         let names = ["", "alice", "βob", "other", "last", "absent"];
         let mut state = 0x2718_2818_u64;
-        for count in 0..192 {
+        for count in (0..192).chain([1024, 4096]) {
             let events: Vec<_> = (0..count)
                 .map(|position| {
                     state ^= state << 13;

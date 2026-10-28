@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce allocations when selecting or replacing a session host (#636).
 - Reduce server latency metric memory and keep routine timing updates free of allocations (#1285, #636).
 - Reduce room-event copies when no player needs reconnect replay (#636, #1277).
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
@@ -52,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve server shutdown close reasons while inbound traffic is still arriving (#1295).
+- Preserve player readiness when the public room API enters the lobby (#1293).
 - Keep the original physical generation on native gameplay and connection output after link rebuilds (#1283).
 - Wait for the requested native P2P rebuild before reporting success after relay fallback (#1282).
 - Keep native gameplay charged to the receive budget until its output is flushed or discarded (#1280).

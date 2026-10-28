@@ -460,9 +460,15 @@ impl CloseReason {
 /// reasons that raced the drain.
 #[derive(Debug, Clone)]
 pub struct ConnectionCloseSignal {
-    tx: tokio::sync::watch::Sender<Option<CloseReason>>,
+    tx: tokio::sync::watch::Sender<Option<ConnectionCloseRequest>>,
     #[cfg(feature = "trace-validation")]
     trace: Option<Arc<crate::trace_validation::DeliveryTraceRecorder>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConnectionCloseRequest {
+    reason: CloseReason,
+    requested_at: tokio::time::Instant,
 }
 
 impl ConnectionCloseSignal {
@@ -520,8 +526,8 @@ impl ConnectionCloseSignal {
     fn request_close_inner(&self, reason: CloseReason, trace_lifecycle: bool) -> bool {
         #[cfg(not(feature = "trace-validation"))]
         let _ = trace_lifecycle;
-        self.tx
-            .send_if_modified(|current| match (*current, reason) {
+        self.tx.send_if_modified(
+            |current| match (current.map(|request| request.reason), reason) {
                 (None, _) => {
                     // Record the lifecycle transition while the watch value is
                     // still exclusively borrowed. This preserves the same
@@ -548,7 +554,10 @@ impl ConnectionCloseSignal {
                             );
                         }
                     }
-                    *current = Some(reason);
+                    *current = Some(ConnectionCloseRequest {
+                        reason,
+                        requested_at: tokio::time::Instant::now(),
+                    });
                     true
                 }
                 (Some(CloseReason::Shutdown), _) => false,
@@ -561,11 +570,14 @@ impl ConnectionCloseSignal {
                             Some("shutdown-close-reason-upgrade"),
                         );
                     }
-                    *current = Some(CloseReason::Shutdown);
+                    if let Some(request) = current {
+                        request.reason = CloseReason::Shutdown;
+                    }
                     true
                 }
                 (Some(_), _) => false,
-            })
+            },
+        )
     }
 
     #[cfg(feature = "trace-validation")]
@@ -636,7 +648,11 @@ impl ConnectionCloseSignal {
     /// consumer, teardown) requested for the transient socket must not cross
     /// the swap and kill the restored connection with a stale reason.
     pub fn requested_reason(&self) -> Option<CloseReason> {
-        *self.tx.borrow()
+        self.tx.borrow().map(|request| request.reason)
+    }
+
+    pub(crate) fn requested_at(&self) -> Option<tokio::time::Instant> {
+        self.tx.borrow().map(|request| request.requested_at)
     }
 
     /// Order a synchronous queue commit before any later socket close request.
@@ -663,7 +679,10 @@ impl ConnectionCloseSignal {
             #[cfg(feature = "trace-validation")]
             self.record_trace_grace_expired(delivery_id, initiated_close);
             if initiated_close {
-                *current = Some(CloseReason::SlowConsumer);
+                *current = Some(ConnectionCloseRequest {
+                    reason: CloseReason::SlowConsumer,
+                    requested_at: tokio::time::Instant::now(),
+                });
             }
             initiated_close
         })
@@ -674,7 +693,7 @@ impl ConnectionCloseSignal {
 /// tasks.
 #[derive(Debug, Clone)]
 pub struct ConnectionCloseListener {
-    rx: tokio::sync::watch::Receiver<Option<CloseReason>>,
+    rx: tokio::sync::watch::Receiver<Option<ConnectionCloseRequest>>,
 }
 
 impl ConnectionCloseListener {
@@ -685,13 +704,13 @@ impl ConnectionCloseListener {
     /// connection was unregistered from all delivery maps). Cancel-safe.
     pub async fn closed(&mut self) -> Option<CloseReason> {
         loop {
-            if let Some(reason) = *self.rx.borrow_and_update() {
-                return Some(reason);
+            if let Some(request) = *self.rx.borrow_and_update() {
+                return Some(request.reason);
             }
             if self.rx.changed().await.is_err() {
                 // All signal holders are gone; report any reason set right
                 // before the final drop, otherwise a plain unregistration.
-                return *self.rx.borrow();
+                return self.rx.borrow().map(|request| request.reason);
             }
         }
     }
@@ -704,7 +723,7 @@ impl ConnectionCloseListener {
     /// loop-ended arm and lose the reason — and with it the semantic close
     /// code. Terminal paths consult this before concluding "no reason".
     pub fn requested_reason(&self) -> Option<CloseReason> {
-        *self.rx.borrow()
+        self.rx.borrow().map(|request| request.reason)
     }
 }
 
@@ -5706,6 +5725,29 @@ mod tests {
 
         assert!(signal.request_close(CloseReason::Shutdown));
         assert_eq!(listener.requested_reason(), Some(CloseReason::Shutdown));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_request_time_survives_duplicate_requests_and_shutdown_upgrade() {
+        for delivery_timeout in [false, true] {
+            let (signal, mut listener) = ConnectionCloseSignal::channel();
+            assert_eq!(signal.requested_at(), None);
+            let started = tokio::time::Instant::now();
+            assert!(if delivery_timeout {
+                signal.request_delivery_timeout_close(None)
+            } else {
+                signal.request_close(CloseReason::IdleTimeout)
+            });
+            assert_eq!(signal.requested_at(), Some(started));
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(!signal.request_close(CloseReason::Unregistered));
+            assert_eq!(signal.requested_at(), Some(started));
+            assert!(signal.request_close(CloseReason::Shutdown));
+            assert_eq!(signal.requested_at(), Some(started));
+            assert_eq!(listener.closed().await, Some(CloseReason::Shutdown));
+            assert!(!signal.request_delivery_timeout_close(None));
+            assert_eq!(signal.requested_at(), Some(started));
+        }
     }
 
     /// The RFC 6455 close-code assignments are documented protocol surface

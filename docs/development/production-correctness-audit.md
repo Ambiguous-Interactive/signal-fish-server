@@ -10764,3 +10764,110 @@ startup burst and assert its completion/open rows after dropping old receipts.
 All seven probe tests pass in `c5e69ee7-d66a-47f0-b134-9d35080f59e4`; native scoped
 strict lint and source policy pass. This refines #1291 and the terminal evidence
 needed by #1264; it does not change negotiated limits or supported Godot pairings.
+
+### F203 — Lobby promotion clears accepted public Room readiness (#1293)
+
+Baseline: `01a85868`. `Room::set_player_ready` accepts readiness in Waiting,
+but `Room::enter_lobby` clears only `ready_players`. The player flags remain
+ready. A room whose members all readied before promotion then fails
+`all_players_ready` and `finalize_game`. The two readiness views disagree.
+
+The red control marks one of two Waiting members ready, then promotes the
+room. The original code returns an empty ready list instead of that member.
+The repair preserves the existing list. The table covers no ready members,
+a ready subset, all members ready, flag/list agreement, repeated promotion,
+the original lobby timestamp, and the finalization precondition. A stored-room
+control also exercises `GameDatabase::transition_room_to_lobby`. The four
+focused lifecycle controls pass in Nextest
+`8e0989ff-23d0-4fac-859e-8f169384155d`; the red run is
+`f0157ab0-88e7-4e1c-990c-0f27e6232c75`.
+
+The source sweep finds that database transition as the sole production caller
+of `enter_lobby`. The normal coordinator keeps a separate readiness set and
+already preserves its published lobby readiness. This finding establishes a
+public Room/storage inconsistency, not a normal WebSocket gameplay incident.
+The Rust client does not depend on the server crate; .NET and Godot do not call
+its Rust Room API. No wire fields or client migration change.
+
+### Borrowed session host candidates (#636)
+
+Initial host selection and host replacement clone every eligible member into
+a temporary vector. Names, endpoint strings and capability vectors are copied
+only to elect one member. Direct eligibility also constructs an owned endpoint
+only to check whether it exists. The repaired selection borrows candidates
+and validates endpoint parts before allocating only the endpoint returned to
+a plan consumer. Authority preference, oldest-join ordering and UUID ties stay
+the same.
+
+The allocation control calls each initial/replacement selector 64 times for
+2, 16 and 256 members under WebRTC and Direct. All twelve baseline cells
+allocate. At 16 members they allocate 225,728 through 235,520 bytes, plus
+128 reallocations per cell. All twelve repaired cells allocate and reallocate
+zero bytes. The existing relay allocation ceilings also pass. Nineteen focused
+selection, endpoint and failover tests pass in Nextest
+`e72b3ca6-5a7b-4b53-ada6-ecadadd04eb7`, as do all nine independent
+session-policy property tests. These are component allocation measurements,
+not a server throughput claim.
+
+### Capacity room-churn sort scratch (#775)
+
+Room-churn indexing still stably sorts raw offsets by timestamp. The repair
+sorts in place by timestamp and unique raw offset. This keeps the original
+stable order for equal timestamps, including the viewer-first merge, without
+scratch allocation proportional to the history. Compact and wide offset paths
+remain available; raw records and replay verdicts are unchanged. Three focused
+churn controls pass in Nextest `e297c3c5-16ed-41fd-9473-995451bffe1c`,
+including independent stable viewer comparisons through 4,096 events.
+
+An isolated counting-allocator control sorts one million events through the
+production offset implementation. The baseline allocates 4,000,000 scratch
+bytes for compact offsets and 8,000,000 for wide offsets. The repair allocates
+zero for either path. All four controls produce checksum
+`3359507878442902874`. This measures sort scratch, not whole-run RSS or the
+full ten-minute workload. The generator memory-bound requirement stays open.
+
+### F204 — Unread inbound frames reset the semantic server close (#1295)
+
+Fortress Interop at `f3bfa464` receives `GoingAway`, then a TCP reset instead
+of close 4000/`server_shutdown`. Job `123141685411` retains clean pre-drain
+Running snapshots from both peers. One unchanged focused local drain/restart
+run passes in 14.27 seconds. That pass does not explain the hosted failure.
+
+Source inspection finds that the reader drops its split stream when closure
+starts. The writer sends a semantic close and flushes its sink, but it does
+not consume the peer's close response. Dropping the transport with unread
+inbound frames can reset the socket and lose the close tail.
+
+A controlled real-socket history holds the reader on a selected Ping, queues
+128 KiB of outbound frames and 64 unread inbound Ping messages, then requests
+shutdown. After the writer unregisters, the reader resumes. Baseline Nextest
+`215975e0-c1d2-45b5-8963-531756a4eabe` records premature handler completion
+and `Connection reset by peer` instead of a semantic close. This proves the
+first-party failure class; it does not establish the original hosted schedule.
+
+The repair retains the reader during common receive teardown and discards
+in-flight frames until peer Close, EOF, error or the existing four-second
+close budget. It runs with lifecycle cleanup, not after that cleanup's waits.
+The first close request records its timestamp in the existing watch state.
+Duplicate requests and a Shutdown reason upgrade preserve that timestamp. A
+late reader cannot start a fresh four-second window. One absolute deadline
+covers every discarded frame; cooperative task budgeting lets cleanup and
+the writer progress. No discarded message reaches application
+handlers. Common placement also covers a lifecycle change after frame read,
+rather than only the close-listener branch. Invalid transport frames retain
+the WebSocket codec's existing error-close behavior.
+
+The repaired real-socket control observes exact close 4000/`server_shutdown`,
+retains socket ownership through the peer acknowledgment, and records no new
+heartbeat effects. All 13 final close controls pass with all features in
+`9af77a1b-00d9-4ad9-aa8e-1759f6c0d3c6`. A fresh server binary also passes
+the real Fortress drain/restart case in 14.36 seconds. Its first green run is
+`370a1d30-c76d-486e-9e2e-c91f843e38dd`. Replacing the request-time anchor
+with the late reader exit time fails the withheld-acknowledgment control in
+`6ab22057-0f64-4b2f-af48-72b43215d4c1`. Paused-clock controls check silent
+peers, late and continuously ready frames, deadline expiry, and terminal frames.
+
+The wire schema and close codes stay unchanged. SDK runtime qualification is
+tracked separately in Rust #297, .NET #149 and Godot #482; all three already
+expose peer close codes. A completed server control does not complete those
+client assessments.

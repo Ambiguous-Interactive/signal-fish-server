@@ -1365,6 +1365,20 @@ async fn wait_socket_child(
     }
 }
 
+/// Discard in-flight frames until the peer closes so unread TCP input cannot
+/// reset the socket and erase the semantic close tail during normal teardown.
+async fn drain_peer_close<S, E>(receiver: &mut S, deadline: Instant)
+where
+    S: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+{
+    while Instant::now() < deadline {
+        match complete_before_deadline(deadline, receiver.next()).await {
+            Ok(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) | Err(_) => return,
+            Ok(Some(Ok(_))) => tokio::task::consume_budget().await,
+        }
+    }
+}
+
 async fn handle_socket_owned(
     socket: WebSocket,
     server: Arc<EnhancedGameServer>,
@@ -3183,10 +3197,14 @@ async fn handle_socket_supervised(
             }
         }
 
-        // Cleanup when receive task ends
-        server_clone
-            .unregister_client_with_lifecycle(lifecycle_for_receive)
-            .await;
+        let close_read_deadline = checked_deadline(
+            close_signal.requested_at().unwrap_or_else(Instant::now),
+            CLOSE_WRITE_TIMEOUT.saturating_mul(REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS),
+        );
+        tokio::join!(
+            server_clone.unregister_client_with_lifecycle(lifecycle_for_receive),
+            drain_peer_close(&mut receiver, close_read_deadline),
+        );
     });
 
     supervision.socket_tasks[1] = Some(receive_task);
@@ -3268,6 +3286,76 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::task::Context;
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_close_reader_bounds_silence_and_does_not_restart_on_data() {
+        let budget = CLOSE_WRITE_TIMEOUT.saturating_mul(REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS);
+        let started = Instant::now();
+        let mut silent = futures_util::stream::pending::<Result<Message, ()>>();
+        drain_peer_close(&mut silent, started + budget).await;
+        assert_eq!(started.elapsed(), budget);
+
+        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let producer_count = Arc::clone(&produced);
+        let mut data = futures_util::stream::unfold((), move |()| {
+            let count = Arc::clone(&producer_count);
+            async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                count.fetch_add(1, Ordering::Relaxed);
+                Some((
+                    Ok::<_, ()>(Message::Text("late application frame".into())),
+                    (),
+                ))
+            }
+        })
+        .boxed();
+        let started = Instant::now();
+        drain_peer_close(&mut data, started + budget).await;
+        assert_eq!(started.elapsed(), budget);
+        assert_eq!(produced.load(Ordering::Relaxed), 7);
+
+        let polled = AtomicBool::new(false);
+        let mut ready = futures_util::stream::poll_fn(|_| {
+            polled.store(true, Ordering::Relaxed);
+            std::task::Poll::Ready(Some(Ok::<_, ()>(Message::Text("late".into()))))
+        });
+        drain_peer_close(&mut ready, Instant::now()).await;
+        assert!(!polled.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_close_reader_yields_while_peer_data_stays_ready() {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::clone(&reached);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let task = tokio::spawn(async move {
+            let mut ready = futures_util::stream::poll_fn(|_| {
+                observed.notify_one();
+                std::task::Poll::Ready(Some(Ok::<_, ()>(Message::Text("late".into()))))
+            });
+            drain_peer_close(&mut ready, deadline).await;
+        });
+        reached.notified().await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        task.await
+            .expect("ready peer data cannot starve the close deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_close_reader_stops_on_close_error_or_eof() {
+        for terminal in [Some(Ok(Message::Close(None))), Some(Err(())), None] {
+            let has_terminal = terminal.is_some();
+            let mut frames = futures_util::stream::iter(
+                std::iter::once(Ok(Message::Text("in flight".into())))
+                    .chain(terminal)
+                    .chain(has_terminal.then_some(Ok(Message::Text("unread tail".into())))),
+            );
+            let started = Instant::now();
+            drain_peer_close(&mut frames, started + Duration::from_secs(4)).await;
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            assert_eq!(frames.next().await.is_some(), has_terminal);
+        }
+    }
 
     async fn test_server() -> Arc<EnhancedGameServer> {
         test_server_with_config(ServerConfig::default()).await
@@ -4940,6 +5028,179 @@ mod tests {
         })
         .await
         .expect("audit join deadline")
+    }
+
+    #[tokio::test]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn shutdown_close_preserves_semantic_frame_with_unread_peer_data() {
+        let server = test_server().await;
+        let UpgradedSocketPair {
+            server_sink,
+            _server_stream: server_stream,
+            mut client,
+            serve_task,
+        } = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(8192)).await;
+        let mut handler = tokio::spawn(handle_socket(
+            server_sink.reunite(server_stream).expect("reunite socket"),
+            Arc::clone(&server),
+            "127.0.0.1:45568".parse().unwrap(),
+            None,
+            3,
+            "shutdown-unread-peer-data".to_string(),
+        ));
+        let joined = join_socket_audit_room(&mut client, "shutdown-unread-peer-data", None).await;
+        let pause = arm_receive_ownership_pause(joined.player_id);
+        client
+            .send(TungsteniteMessage::Text(
+                serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+            ))
+            .await
+            .expect("select held inbound frame");
+        tokio::time::timeout(Duration::from_secs(5), pause.reached.notified())
+            .await
+            .expect("reader holds selected frame");
+        for _ in 0..4 {
+            server
+                .send_error_to_player(&joined.player_id, "x".repeat(32 * 1024), None)
+                .await
+                .expect("queue outbound tail");
+        }
+        for _ in 0..64 {
+            client
+                .send(TungsteniteMessage::Text(
+                    serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+                ))
+                .await
+                .expect("retain unread inbound frames");
+        }
+        server.begin_shutdown_drain();
+        assert_eq!(server.close_connections_for_shutdown(), 1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.client_lifecycle(&joined.player_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer completes and unregisters before reader release");
+        let activity = server.metrics().heartbeat_updates.load(Ordering::Relaxed);
+        pause.release.notify_one();
+        let completed_before_ack = tokio::time::timeout(Duration::from_millis(100), &mut handler)
+            .await
+            .is_ok();
+        let close = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(TungsteniteMessage::Close(close))) => break Ok(close),
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => break Err(error.to_string()),
+                    None => break Err("stream ended before semantic close".to_string()),
+                }
+            }
+        })
+        .await
+        .expect("close reaches reader within existing close budget");
+        let _ = client.flush().await;
+        if !completed_before_ack {
+            tokio::time::timeout(Duration::from_secs(5), &mut handler)
+                .await
+                .expect("peer acknowledgment finishes handler")
+                .expect("handler succeeds");
+        }
+        serve_task.abort();
+        let _ = serve_task.await;
+        eprintln!(
+            "SHUTDOWN_UNREAD_DATA completed_before_ack={completed_before_ack} close={close:?}"
+        );
+        assert!(
+            !completed_before_ack,
+            "socket ownership must outlive the peer close acknowledgment"
+        );
+        let close = close
+            .expect("unread inbound frames must not reset the semantic close")
+            .expect("coded close");
+        assert_eq!(u16::from(close.code), 4000);
+        assert_eq!(close.reason, "server_shutdown");
+        assert_eq!(
+            server.metrics().heartbeat_updates.load(Ordering::Relaxed),
+            activity
+        );
+        assert!(!server.has_active_socket_tasks());
+    }
+
+    #[tokio::test]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn late_close_reader_keeps_original_close_request_deadline() {
+        let server = test_server().await;
+        let UpgradedSocketPair {
+            server_sink,
+            _server_stream: server_stream,
+            mut client,
+            serve_task,
+        } = UpgradedSocketPair::connect().await;
+        let mut handler = tokio::spawn(handle_socket(
+            server_sink.reunite(server_stream).expect("reunite socket"),
+            Arc::clone(&server),
+            "127.0.0.1:45569".parse().unwrap(),
+            None,
+            3,
+            "late-shutdown-reader".to_string(),
+        ));
+        let joined = join_socket_audit_room(&mut client, "late-shutdown-reader", None).await;
+        let pause = arm_receive_ownership_pause(joined.player_id);
+        client
+            .send(TungsteniteMessage::Text(
+                serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+            ))
+            .await
+            .expect("select held inbound frame");
+        tokio::time::timeout(Duration::from_secs(5), pause.reached.notified())
+            .await
+            .expect("reader holds selected frame");
+        server.begin_shutdown_drain();
+        assert_eq!(server.close_connections_for_shutdown(), 1);
+        let close = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(TungsteniteMessage::Close(close))) => break Ok(close),
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => break Err(error.to_string()),
+                    None => break Err("stream ended before writer close".to_string()),
+                }
+            }
+        })
+        .await
+        .expect("writer sends close while reader is held")
+        .expect("writer close reaches the client")
+        .expect("coded close");
+        assert_eq!(u16::from(close.code), 4000);
+        assert_eq!(close.reason, "server_shutdown");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.client_lifecycle(&joined.player_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("writer cleanup finishes");
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(2)).await;
+        pause.release.notify_one();
+        let settled = tokio::time::timeout(Duration::from_secs(3), &mut handler).await;
+        tokio::time::resume();
+        let _ = client.flush().await;
+        if settled.is_err() {
+            tokio::time::timeout(Duration::from_secs(5), &mut handler)
+                .await
+                .expect("cleanup after withheld acknowledgment")
+                .expect("handler succeeds");
+        }
+        serve_task.abort();
+        let _ = serve_task.await;
+        settled
+            .expect("late reader must use the first close request, not add a fresh four seconds")
+            .expect("handler succeeds");
+        assert!(!server.has_active_socket_tasks());
     }
 
     // Regression #839: retain ownership through supervisor unwind and child failure.

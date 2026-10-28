@@ -834,7 +834,32 @@ fn assert_idle_replay_capture_does_not_clone_payloads() {
     });
 }
 
+fn assert_host_election_borrows_candidates() {
+    use signal_fish_server::server::allocation_benchmark::HostElectionFixture;
+
+    let mut bounded = true;
+    for members in [2, 16, 256] {
+        for direct in [false, true] {
+            let mut fixture = HostElectionFixture::new(members, direct);
+            for replace_host in [false, true] {
+                assert_eq!(fixture.elect(replace_host), Some(PlayerId::from_u128(1)));
+                let region = Region::new(GLOBAL);
+                for _ in 0..64 {
+                    assert_eq!(fixture.elect(replace_host), Some(PlayerId::from_u128(1)));
+                }
+                let stats = region.change();
+                bounded &= stats.allocations == 0
+                    && stats.reallocations == 0
+                    && stats.bytes_allocated == 0;
+                eprintln!("host_election members={members} direct={direct} replace_host={replace_host}: {stats:?}");
+            }
+        }
+    }
+    assert!(bounded, "host election must borrow its candidates");
+}
+
 fn main() {
+    assert_host_election_borrows_candidates();
     assert_idle_replay_capture_does_not_clone_payloads();
     assert_payload_sizing_does_not_allocate();
     assert_database_metrics_reuse_game_names();
