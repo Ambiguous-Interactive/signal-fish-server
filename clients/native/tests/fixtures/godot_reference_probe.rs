@@ -116,6 +116,47 @@ async fn send_startup_packet(engine: &Engine, peer: PlayerId, data: &[u8]) -> an
     Ok(())
 }
 
+async fn handle_channel_open(
+    output: &ProbeOutput,
+    engine: &mut Engine,
+    peer: PlayerId,
+    generation: u64,
+    label: &str,
+    startup_phase: u64,
+) -> anyhow::Result<()> {
+    engine.note_channel_open(peer, label).await;
+    let channel = engine
+        .channel(peer, label)
+        .ok_or_else(|| anyhow::anyhow!("open channel disappeared"))?;
+    if startup_phase > 0 && label == "reliable" {
+        for sequence in 0..32 {
+            let data = format!(
+                "startup:{startup_phase}:reference:{sequence}:{}",
+                "0123456789abcdef".repeat(64)
+            );
+            if send_startup_packet(engine, peer, data.as_bytes())
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        emit(
+            output,
+            json!({"event":"startup_sent", "generation":generation, "count":32}),
+        )?;
+    }
+    emit(
+        output,
+        json!({"event":"open", "generation":generation, "label":label,
+        "properties": {"internal_id":channel.id(), "negotiated":channel.negotiated().await?,
+            "ordered":channel.ordered().await?,
+            "lifetime":channel.max_packet_life_time().await?,
+            "retransmits":channel.max_retransmits().await?}}),
+    )?;
+    Ok(())
+}
+
 async fn receive_boundary(
     engine: &Engine,
     peer: PlayerId,
@@ -250,20 +291,7 @@ async fn main() -> anyhow::Result<()> {
                 match event {
                     EngineEvent::LocalCandidate {candidate_json,..} => emit(&output,json!({"event":"candidate", "generation":generation, "candidate":candidate_json}))?,
                     EngineEvent::ChannelOpen {label,..} => {
-                        engine.note_channel_open(peer,&label).await;
-                        let channel = engine.channel(peer, &label).ok_or_else(|| anyhow::anyhow!("open channel disappeared"))?;
-                        if startup_phase > 0 && label == "reliable" {
-                            for sequence in 0..32 {
-                                let data = format!("startup:{startup_phase}:reference:{sequence}:{}", "0123456789abcdef".repeat(64));
-                                send_startup_packet(&engine, peer, data.as_bytes()).await?;
-                            }
-                            emit(&output,json!({"event":"startup_sent", "generation":generation, "count":32}))?;
-                        }
-                        emit(&output,json!({"event":"open", "generation":generation, "label":label,
-                            "properties": {"internal_id":channel.id(), "negotiated":channel.negotiated().await?,
-                                "ordered":channel.ordered().await?,
-                                "lifetime":channel.max_packet_life_time().await?,
-                                "retransmits":channel.max_retransmits().await?}}))?;
+                        handle_channel_open(&output, &mut engine, peer, generation, &label, startup_phase).await?;
                     }
                     EngineEvent::PcState {state,..} => emit(&output,json!({"event":"state", "generation":generation, "state":state.to_string()}))?,
                     EngineEvent::ChannelMessage {label,text,queue_permit,..} => {

@@ -1,6 +1,14 @@
 use super::*;
 use std::time::Duration;
 
+fn assert_no_output(rows: &mut mpsc::UnboundedReceiver<(Value, Option<MessageQueuePermit>)>) {
+    match rows.try_recv() {
+        Ok((row, _)) => panic!("refused startup or packet command emitted output: {row}"),
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        Err(mpsc::error::TryRecvError::Disconnected) => panic!("probe output must remain open"),
+    }
+}
+
 struct ProbePair {
     engines: [Engine; 2],
     events: [mpsc::UnboundedReceiver<EngineEvent>; 2],
@@ -159,16 +167,24 @@ async fn packet_commands_refuse_terminal_siblings_and_recover_on_fresh_links() {
             ] {
                 let result = send_packet(&output, &pair.engines[0], pair.peers[0], &packet).await;
                 assert!(result.is_err(), "offerer={offerer} closed={closed_label}: probe must refuse terminal-link command: {result:?}");
-                assert!(
-                    matches!(rows.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                    "refused commands must not emit sent rows"
-                );
+                assert_no_output(&mut rows);
             }
             assert!(
                 send_startup_packet(&pair.engines[0], pair.peers[0], b"refused-startup")
                     .await
                     .is_err()
             );
+            handle_channel_open(
+                &output,
+                &mut pair.engines[0],
+                pair.peers[0],
+                before["generation"].as_u64().unwrap(),
+                "reliable",
+                1,
+            )
+            .await
+            .expect("startup refusal must preserve the owner event loop");
+            assert_no_output(&mut rows);
             let after = pair.engines[0]
                 .transport_diagnostic_snapshot(pair.peers[0])
                 .await;
@@ -205,6 +221,35 @@ async fn packet_commands_refuse_terminal_siblings_and_recover_on_fresh_links() {
                 .await
                 .unwrap();
             drop(pair.receipt(1, &payload).await);
+            assert_eq!(rows.try_recv().unwrap().0["event"], "sent");
+            let generation = pair.engines[0].diagnostic_snapshot(pair.peers[0])["generation"]
+                .as_u64()
+                .unwrap();
+            handle_channel_open(
+                &output,
+                &mut pair.engines[0],
+                pair.peers[0],
+                generation,
+                "reliable",
+                2,
+            )
+            .await
+            .unwrap();
+            let startup = rows.try_recv().unwrap().0;
+            assert_eq!(startup["event"], "startup_sent");
+            assert_eq!(startup["count"], 32);
+            assert_eq!(startup["generation"], generation);
+            let open = rows.try_recv().unwrap().0;
+            assert_eq!(open["event"], "open");
+            assert_eq!(open["label"], "reliable");
+            assert_eq!(open["properties"]["negotiated"], true);
+            for sequence in 0..32 {
+                let expected = format!(
+                    "startup:2:reference:{sequence}:{}",
+                    "0123456789abcdef".repeat(64)
+                );
+                drop(pair.receipt(1, expected.as_bytes()).await);
+            }
             pair.remove().await;
         }
     }
@@ -252,16 +297,24 @@ async fn packet_commands_refuse_actual_receive_limits_before_terminal_event_drai
                         .await
                         .is_err()
                 );
-                assert!(matches!(
-                    rows.try_recv(),
-                    Err(mpsc::error::TryRecvError::Empty)
-                ));
+                assert_no_output(&mut rows);
             }
             assert!(
                 send_startup_packet(&pair.engines[0], pair.peers[0], b"refused-startup")
                     .await
                     .is_err()
             );
+            handle_channel_open(
+                &output,
+                &mut pair.engines[0],
+                pair.peers[0],
+                snapshot["generation"].as_u64().unwrap(),
+                "reliable",
+                1,
+            )
+            .await
+            .expect("startup refusal must leave the typed receive failure queued");
+            assert_no_output(&mut rows);
             let mut retained = Vec::new();
             for sequence in 0..admitted {
                 if packet_bytes >= 4 {

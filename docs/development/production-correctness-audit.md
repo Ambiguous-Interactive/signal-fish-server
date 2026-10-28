@@ -10682,7 +10682,10 @@ tracks probe adoption and separate runtime qualification. These native/native
 controls advance three open gameplay investigations without claiming their
 historical causes or remote-network acceptance complete.
 
-#### Guarded probe runtime qualification
+#### Initial guarded probe runtime qualification
+
+These runs use the first guarded candidate, `0e072e8c`, before the startup-owner
+repair below. Their frozen source and binary remain separate from later attempts.
 
 Six local Linux ARM64 service pairings use the repaired probe: Godot 4.3 native,
 Godot 4.7.2 native and Godot 4.7.2 Web, each in both offer roles. Every case keeps
@@ -10716,3 +10719,21 @@ finite-retirement witnesses remain in `progress/session-573/runtime-guarded/`.
 These are local artifacts, not hosted evidence. The portable fixture and pinned
 driver provide the reproduction source. Remote-network and corrected Godot
 lifetime qualification remain open.
+
+#### Startup refusal must preserve the owner event loop
+
+Review found that a guarded startup refusal still propagated from the inline
+startup burst through `main`. This could exit before the owner consumed its
+queued receive refusal and pre-removal evidence. The real open-event handler is
+now independently callable by the fixture controls. Red Nextest
+`dc007e17-4fe3-490f-ae12-48bc3064ab13` fails both closure and actual-budget cases
+because startup handling returns an error before owner drain.
+
+The handler now stops a refused burst without emitting `startup_sent` or exiting
+the owner loop. The same controls then consume the exact admitted prefix and
+typed failure. Fresh links also pass all 32 exact startup packets and publish
+completion only after the full burst. All six probe tests pass in
+`ecf23176-d333-4bed-a66b-0a00116f9f6c`. Hosted root CI also found that the new
+empty-output assertions used a macro form its source policy cannot inspect.
+Explicit Empty/Disconnected branches preserve the assertions and pass the
+focused policy control in `96078bb6-965b-4ba5-af26-bda718c9c0e5`.
