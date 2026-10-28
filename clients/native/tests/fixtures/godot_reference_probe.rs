@@ -60,13 +60,14 @@ async fn send_packet(
     value: &Value,
 ) -> anyhow::Result<()> {
     let channel = engine
-        .channel(
+        .send_channel(
             peer,
             value["label"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing label"))?,
         )
-        .ok_or_else(|| anyhow::anyhow!("missing channel"))?;
+        .await
+        .ok_or_else(|| anyhow::anyhow!("missing or unusable channel"))?;
     match value["op"].as_str().unwrap_or("") {
         "send" => {
             channel
@@ -103,6 +104,16 @@ async fn send_packet(
 
 async fn transport_snapshot(engine: &Engine, peer: PlayerId) -> Value {
     engine.transport_diagnostic_snapshot(peer).await
+}
+
+async fn send_startup_packet(engine: &Engine, peer: PlayerId, data: &[u8]) -> anyhow::Result<()> {
+    engine
+        .send_channel(peer, "reliable")
+        .await
+        .ok_or_else(|| anyhow::anyhow!("missing or unusable startup channel"))?
+        .send(data.into())
+        .await?;
+    Ok(())
 }
 
 async fn receive_boundary(
@@ -244,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
                         if startup_phase > 0 && label == "reliable" {
                             for sequence in 0..32 {
                                 let data = format!("startup:{startup_phase}:reference:{sequence}:{}", "0123456789abcdef".repeat(64));
-                                channel.send(data.as_bytes().into()).await?;
+                                send_startup_packet(&engine, peer, data.as_bytes()).await?;
                             }
                             emit(&output,json!({"event":"startup_sent", "generation":generation, "count":32}))?;
                         }
@@ -419,3 +430,7 @@ mod tests {
         assert!(receive_rejection_event(&closed, json!({"receive_failure":null})).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "godot_probe_send_tests.rs"]
+mod send_tests;

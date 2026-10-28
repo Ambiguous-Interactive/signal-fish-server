@@ -10639,3 +10639,80 @@ All 15 output controls pass with four test threads in the final local run
 native all-target/all-feature lint gate passes. These changes isolate and
 improve first-party failure evidence; they do not relax the closed-pipe
 expectation or establish new Godot runtime qualification.
+
+### F202 — Godot probe packet commands bypass terminal-link admission
+
+Related: #1291, #1240, #1244 and #1264. Baseline: `c970b947`.
+
+The server-owned Godot probe selected packet-command and startup channels with
+`Engine::channel`. This raw accessor retains handles after a required sibling
+channel closes or the Engine refuses input. The native CLI already used the
+Engine send guard. A live red control closed the reliable channel, held owner
+event handling, then sent on the surviving ordered channel. The command returned
+success. Nextest `d31dd55c-22bc-4f35-9410-36f6d1f1f426` retains that failure.
+This is a probe command-admission defect, not a server signaling defect or proof
+of the historical missing Godot prefix or ambiguous terminal event.
+
+`Engine::send_channel` is now public. Packet commands and every startup packet
+use this same guard. Selection refuses observed terminal connection state,
+required-channel loss and receive refusal before selecting a transport handle.
+Raw lookup remains available for diagnostics and closure. Selection is not atomic
+with the subsequent send; callers still need send-error handling and deadlines.
+The negotiated channel contract and receive limits do not change.
+
+Six live closure cases cover all three required channels and both offer roles.
+They retain an exact 4 KiB reliable receipt while the owner has not drained the
+terminal event. Text, binary and startup sends refuse on the old link; refused
+commands emit no sent row and do not change the SCTP last-enqueued message.
+Replacement keeps the old receipt charged until its owner drops it. Each fresh
+physical generation then receives the exact reliable payload.
+
+Four additional cases fill the actual Engine count and byte budgets in both
+offer roles. They hold 256 empty receipts or 128 exact 8 KiB receipts, respectively,
+and send one excess packet. Commands refuse before owner event drain. The exact
+admitted prefix precedes the typed refusal, whose sampled failure remains intact.
+Fresh pairing retains old receipt ownership and resumes exact reliable startup
+after those receipts drop. Removing command guarding makes both regressions fail;
+all attempts remain under ignored `progress/session-573/`.
+
+The Rust client manifest at `da8f2d16` and .NET project at `e467c871` do not depend
+on the native reference Engine. Their APIs and signaling remain unchanged.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks probe adoption and separate runtime qualification. These native/native
+controls advance three open gameplay investigations without claiming their
+historical causes or remote-network acceptance complete.
+
+#### Guarded probe runtime qualification
+
+Six local Linux ARM64 service pairings use the repaired probe: Godot 4.3 native,
+Godot 4.7.2 native and Godot 4.7.2 Web, each in both offer roles. Every case keeps
+two physical generations, same-room rejoin, mixed modes, the original 1 KiB
+snapshot bodies, 32-credit window and 32 startup packets per direction and phase.
+All 3,072 required reliable snapshot receipts and 768 startup receipts complete.
+The independent artifact audit checks native bytes, sequence, generation, live
+first/last samples, frozen probe hashes and driver receipt counts. No local
+build overlaps these runs. The 4.3 driver uses CPUs 0/1 on a shared host; this is
+not an isolated performance result.
+
+The driver reports six passes, but the strict initial-probe audit reports four
+passes and two failures. Godot-offer phase 1 lacks the initial unreliable probe
+in both the 4.3 native and 4.7.2 Web cases. These failures remain visible; no case
+was rerun. In each failed case, the `reference:1:unreliable` send boundary records
+physical generation 1, message ID 33, stream ID 3, stream incarnation 2, SSN 0,
+unordered lifetime policy and `transmission_selected=false`. A later live sample
+at `snapshot:1:godot:127` records that exact identity as the first abandoned
+message, still with no transmission selection. No channel closure or terminal
+connection observation exists in that sample. This locates these two omissions
+at local lifetime retirement before first transmission selection. It does not
+locate the historical #1244 reliable gap, #1264 terminal event, or original
+[Godot #458](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/458)
+packet. Keep strict finite-probe qualification separate from reliable recovery.
+
+The driver is `f3d3f8611e2c85290f222074da6d40807099e4ec`. Probe binary SHA-256 is
+`cfa7d20b9b8aa61bd7ef42eb70e9310b847bd3eb4ae9192aa73b2f18f395fc92`;
+probe source is `38bc1ed7b6589bc81dd39e01ea67bc89f055281a739fae1abe0255f80216bb43`.
+The runtime manifest, independent reliable audit, failed strict verdict and exact
+finite-retirement witnesses remain in `progress/session-573/runtime-guarded/`.
+These are local artifacts, not hosted evidence. The portable fixture and pinned
+driver provide the reproduction source. Remote-network and corrected Godot
+lifetime qualification remain open.

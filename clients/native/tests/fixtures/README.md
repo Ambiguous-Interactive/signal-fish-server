@@ -43,6 +43,12 @@ sequence, including a missing prefix. A teardown sample can have no SCTP
 association; these live samples preserve evidence before that state is removed.
 The probe keeps the pinned bridge's existing event names.
 
+Packet commands and each startup packet use `Engine::send_channel`.
+They refuse new sends after observed required-channel loss, terminal connection
+state, or receive refusal, even before the owner drains the terminal event.
+The raw `Engine::channel` accessor remains available for diagnostics and closure.
+Selection does not prevent a later loss; callers must still handle send errors.
+
 Commands must not remove a rejected link ahead of its queued receipt events.
 The probe queues those receipts before the terminal row.
 It refuses further commands after rejection, except diagnostic snapshots.

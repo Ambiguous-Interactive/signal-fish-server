@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add native reference-client channel selection that stops new sends on failed links (#1291).
 - Add an experimental native reference-client profile for Godot negotiated channels with exact binary packet events (#1240).
 - Relay live room events and gameplay to read-only spectators (#1137).
 
