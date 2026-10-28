@@ -10182,3 +10182,50 @@ Final-source run `2c7a7cd1-d3e0-428c-85b2-f056bbda8ac4` passes the three new con
 Strict root/native all-target/all-feature lint and documentation checks pass.
 The CI configuration validator reports only its bundled dependency-audit failure;
 that result stays visible under the GOAL audit exception.
+
+### Idle replay copies and terminal native readiness (#1277, #1276)
+
+The root replay path cloned each replayable room event before checking whether
+its room had a pending reconnect. A baseline on `9846ef44` records 641
+allocations and 8,472,256 allocated bytes for 128 ignored `PlayerJoined`
+events with 64 KiB metadata. This includes one 64-byte runtime allocation.
+The repair borrows the event through the existing replay-state lock and clones
+it only when the room ring will retain it. Unconditional `buffer_event`
+still transfers ownership. Gate admission, sequence assignment and capture
+remain under one lock; the change adds no separate pending-room check.
+
+The allocation control warms the runtime before measurement. It requires zero
+allocations, reallocations and allocated bytes across 128 ignored events, both
+before any disconnect and after the last pending reconnect completes. Its
+positive case retains the complete metadata while a reconnect is pending.
+This advances #636 and the A06 replay review under #826. It does not change
+wire messages, replay contents or the snapshot precedence contract.
+
+A separate public native Engine defect kept `connected_pair_count()` positive
+after required-channel closure or receive refusal had made the link terminal.
+The retained generation refused all sends while the count still reported one.
+The red-first actual-channel closure control reproduces that mismatch. The
+repair excludes the existing terminal admission latch from the count. It keeps
+transient `Disconnected` distinct from terminal loss and counts a replacement
+only after its required channels open.
+
+Existing live controls now check both offer roles, terminal Reference channel
+and peer states, all three Godot required-channel closures, shared Engine
+receive refusal, the healthy sibling link, and fresh-link recovery. The count
+is an observation of Engine state, not a synchronous physical-state query.
+The production CLI tracks a separate count; this repair affects public Engine
+readiness consumers. It does not establish the cause of the historical #1244
+prefix gap or #1264 terminal event. Those investigations remain open.
+
+The inspected Rust client manifest at `da8f2d16` and .NET project at `e467c871`
+do not consume this reference Engine. The server replay change preserves
+client-visible messages and semantics. No client migration is required.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks reference Engine qualification separately from native/Web Godot,
+service sessions and remote networks.
+
+Local final controls pass: five focused replay tests (`3a013539`) and three
+native readiness/closure/refusal controls (`932f60e2`). Both repairs pass
+independent adversarial review. Strict root and native all-target/all-feature
+lint pass. The allocation result is local; full hosted qualification remains
+a separate gate.

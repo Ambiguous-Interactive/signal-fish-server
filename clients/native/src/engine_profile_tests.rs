@@ -182,6 +182,7 @@ async fn godot_profile_exchanges_and_retires_every_required_channel_before_fresh
             .expect("retain one admitted callback across physical-link replacement");
             assert!(pair.receiver.is_current_event(&queued));
             let generation = pair.receiver.peers[&pair.sender_id].generation;
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
             let channel = if closer_offers {
                 pair.sender.channel(pair.receiver_id, label)
             } else {
@@ -201,6 +202,7 @@ async fn godot_profile_exchanges_and_retires_every_required_channel_before_fresh
             })
             .await
             .expect("every reserved channel loss retires the pair");
+            assert_eq!(pair.receiver.connected_pair_count(), 0);
             for sibling in ["reliable", "ordered", "unreliable"] {
                 assert!(pair
                     .receiver
@@ -218,6 +220,7 @@ async fn godot_profile_exchanges_and_retires_every_required_channel_before_fresh
             pair.receiver.remove_peer(pair.sender_id).await.unwrap();
             pair.negotiate().await;
             assert_ne!(pair.receiver.peers[&pair.sender_id].generation, generation);
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
             assert!(!pair.receiver.is_current_event(&queued));
             drop(queued);
             for (key, count) in exchange(&mut pair).await {

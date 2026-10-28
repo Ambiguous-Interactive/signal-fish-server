@@ -764,7 +764,72 @@ fn assert_payload_sizing_does_not_allocate() {
     }
 }
 
+/// Regression #1277: idle rooms must not copy replay payloads before admission.
+fn assert_idle_replay_capture_does_not_clone_payloads() {
+    use signal_fish_server::protocol::{ConnectionInfo, PlayerInfo};
+    use signal_fish_server::reconnection::ReconnectionManager;
+
+    let runtime = Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let room = RoomId::from_u128(0x636);
+        let player = PlayerId::from_u128(0x826);
+        let message = ServerMessage::PlayerJoined {
+            player: PlayerInfo {
+                id: player,
+                name: "player-雪".into(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: None,
+                connection_info: Some(ConnectionInfo::Custom {
+                    data: serde_json::json!({"payload": "x".repeat(65_536)}),
+                }),
+                epoch: None,
+                seq: None,
+                region_id: "test".into(),
+            },
+        };
+        for completed in [false, true] {
+            if completed {
+                manager
+                    .register_disconnection(player, room, false, None, 0)
+                    .await;
+                manager.record_room_event(&room, &message).await;
+                let replay = manager.get_missed_events(&room, 0).await;
+                assert_eq!(replay.events.len(), 1);
+                assert_eq!(
+                    serde_json::to_value(&replay.events[0]).expect("replay JSON"),
+                    serde_json::to_value(&message).expect("message JSON"),
+                );
+                assert!(!replay.truncated);
+                manager.complete_reconnection(&player).await;
+            }
+            for _ in 0..256 {
+                manager.record_room_event(&room, &message).await;
+            }
+            let region = Region::new(GLOBAL);
+            for _ in 0..128 {
+                manager.record_room_event(&room, &message).await;
+            }
+            let stats = region.change();
+            eprintln!("idle_replay_capture completed={completed}: {stats:?}");
+            assert_eq!(
+                stats.allocations, 0,
+                "idle replay capture cloned its payload"
+            );
+            assert_eq!(stats.reallocations, 0, "idle replay capture grew a payload");
+            assert_eq!(stats.bytes_allocated, 0);
+            assert!(manager.get_missed_events(&room, 0).await.events.is_empty());
+        }
+    });
+}
+
 fn main() {
+    assert_idle_replay_capture_does_not_clone_payloads();
     assert_payload_sizing_does_not_allocate();
     assert_database_metrics_reuse_game_names();
     assert_steady_state_timing_records_do_not_allocate();

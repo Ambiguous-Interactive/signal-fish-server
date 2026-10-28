@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce room-event copies when no player needs reconnect replay (#636, #1277).
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
   and handle binary channel events and the receive-rejection `failure` field.
 - Bound active-session response storage and reduce metrics memory and dashboard-history sizing work (#636).
@@ -47,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exclude terminal native reference-client links from the connected-pair count (#1276).
 - Preserve reliable and ordered native gameplay after large expiry backlogs (#1271).
 - Report native associations as drained only after shutdown work and unread gameplay finish (#1272).
 - Stop expired ordered native gameplay before its first transmission (#1269).

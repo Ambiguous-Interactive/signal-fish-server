@@ -734,11 +734,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Number of fully connected pairs (both channels open).
+    /// Number of pairs whose required channels opened without observed terminal
+    /// loss. A refused receive or observed closure removes a pair from this
+    /// count before the orchestrator retires its physical link. Transient
+    /// connection-state disconnection does not retire the pair.
     pub fn connected_pair_count(&self) -> usize {
         self.peers
             .values()
-            .filter(|link| link.pair_connected)
+            .filter(|link| {
+                link.pair_connected && !link.receive_admission.terminal.load(Ordering::Relaxed)
+            })
             .count()
     }
 

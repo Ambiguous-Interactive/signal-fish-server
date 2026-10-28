@@ -180,6 +180,7 @@ async fn godot_mesh_receive_owners_survive_shared_limit_refusal_and_fresh_links(
             for index in 0..2 {
                 mesh.pair(index, center_offers).await;
             }
+            assert_eq!(mesh.center.connected_pair_count(), 2);
             let mut retained = Vec::new();
             for index in 0..2 {
                 for sequence in 0..per_sender {
@@ -221,6 +222,11 @@ async fn godot_mesh_receive_owners_survive_shared_limit_refusal_and_fresh_links(
             .await
             .expect("shared receive limit refusal");
             assert_eq!(failure.reason, reason);
+            assert_eq!(
+                mesh.center.connected_pair_count(),
+                1,
+                "receive refusal must exclude only the terminal physical link"
+            );
             assert_eq!(failure.pending_messages, 2 * per_sender);
             assert_eq!(failure.pending_bytes, 2 * per_sender * bytes);
             for index in 0..2 {
@@ -266,6 +272,7 @@ async fn godot_mesh_receive_owners_survive_shared_limit_refusal_and_fresh_links(
                 );
                 assert!(snapshot["receive_failure"].is_null());
             }
+            assert_eq!(mesh.center.connected_pair_count(), 2);
             assert!(retained
                 .iter()
                 .all(|event| !mesh.center.is_current_event(event)));
