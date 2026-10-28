@@ -465,7 +465,7 @@ impl Room {
         self.lobby_state == LobbyState::Waiting && !self.players.is_empty()
     }
 
-    /// Transition room to lobby state
+    /// Transition room to lobby state without changing player readiness.
     #[allow(dead_code)]
     pub fn enter_lobby(&mut self) -> bool {
         if self.should_enter_lobby() {
@@ -473,7 +473,6 @@ impl Room {
             // Wall clock (durable record): lifecycle timestamps are absolute
             // by design.
             self.lobby_started_at = Some(chrono::Utc::now());
-            self.ready_players.clear();
             true
         } else {
             false
@@ -632,6 +631,46 @@ mod tests {
             true,
             "relay".to_string(),
         )
+    }
+
+    #[test]
+    fn lobby_promotion_preserves_waiting_readiness_and_start_preconditions() {
+        for ready_count in 0..=2 {
+            let mut room = empty_room();
+            let members = [Uuid::from_u128(1), Uuid::from_u128(2)];
+            for id in members {
+                assert!(room.add_player(PlayerInfo {
+                    id,
+                    name: id.to_string(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: None,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: DEFAULT_REGION_ID.to_string(),
+                }));
+            }
+            for id in members.iter().take(ready_count) {
+                assert!(room.set_player_ready(id, true));
+            }
+            let ready_before = room.ready_players.clone();
+            assert!(room.enter_lobby());
+            assert_eq!(
+                room.ready_players, ready_before,
+                "ready_count={ready_count}"
+            );
+            assert_eq!(room.all_players_ready(), ready_count == members.len());
+            for (position, id) in members.iter().enumerate() {
+                assert_eq!(room.players[id].is_ready, position < ready_count);
+            }
+            let started_at = room.lobby_started_at;
+            assert!(started_at.is_some());
+            assert!(!room.enter_lobby());
+            assert_eq!(room.lobby_started_at, started_at);
+            assert_eq!(room.ready_players, ready_before);
+            assert_eq!(room.finalize_game(), ready_count == members.len());
+        }
     }
 
     /// `is_expired_at` times every window off `last_activity` at the caller's

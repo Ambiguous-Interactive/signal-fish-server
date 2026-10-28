@@ -171,7 +171,12 @@ impl SessionMember {
     /// WebRTC carries its own connection establishment through signaling.
     fn can_host(&self, topology: Topology, transport: Transport) -> bool {
         self.supports_session(topology, transport)
-            && (transport != Transport::Direct || self.direct_endpoint().is_some())
+            && (transport != Transport::Direct
+                || self
+                    .connection_info
+                    .as_ref()
+                    .and_then(DirectEndpoint::validated_parts)
+                    .is_some())
     }
 }
 
@@ -228,12 +233,11 @@ pub(crate) fn membership_session_decision(
         };
     }
 
-    let electable: Vec<_> = members
-        .iter()
-        .filter(|member| stored.supported_by(member))
-        .cloned()
-        .collect();
-    if let Some(host) = elect_host(authority, &electable) {
+    let host = elect_host(
+        authority,
+        members.iter().filter(|member| stored.supported_by(member)),
+    );
+    if let Some(host) = host {
         let updated = ActiveSessionPlan {
             host: Some(host),
             ..stored
@@ -473,12 +477,12 @@ pub(crate) fn choose_session_plan(
         .unwrap_or(RELAY_FLOOR);
 
     let host = if topology == Topology::Host {
-        let electable: Vec<_> = members
-            .iter()
-            .filter(|member| member.can_host(topology, transport))
-            .cloned()
-            .collect();
-        elect_host(authority, &electable)
+        elect_host(
+            authority,
+            members
+                .iter()
+                .filter(|member| member.can_host(topology, transport)),
+        )
     } else {
         None
     };
@@ -498,22 +502,22 @@ pub(crate) fn choose_session_plan(
 /// `members`*; otherwise the earliest joiner (ties broken by the smaller
 /// `player_id` for determinism); `None` for an empty room.
 #[must_use]
-pub(crate) fn elect_host(
+pub(crate) fn elect_host<'a>(
     authority: Option<PlayerId>,
-    members: &[SessionMember],
+    members: impl IntoIterator<Item = &'a SessionMember>,
 ) -> Option<PlayerId> {
-    authority
-        .filter(|id| members.iter().any(|member| member.player_id == *id))
-        .or_else(|| {
-            members
-                .iter()
-                .min_by(|a, b| {
-                    a.joined_at
-                        .cmp(&b.joined_at)
-                        .then(a.player_id.cmp(&b.player_id))
-                })
-                .map(|member| member.player_id)
-        })
+    let mut earliest: Option<&SessionMember> = None;
+    for member in members {
+        if Some(member.player_id) == authority {
+            return Some(member.player_id);
+        }
+        if earliest.is_none_or(|candidate| {
+            (member.joined_at, member.player_id) < (candidate.joined_at, candidate.player_id)
+        }) {
+            earliest = Some(member);
+        }
+    }
+    earliest.map(|member| member.player_id)
 }
 
 impl SessionPlanDecision {

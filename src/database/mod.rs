@@ -4338,6 +4338,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lobby_promotion_preserves_stored_room_readiness() {
+        let database = InMemoryDatabase::new();
+        let room = create_test_room(&database, "ready-promotion", "READY1")
+            .await
+            .expect("create room");
+        let creator_id = *room.players.keys().next().expect("creator");
+        {
+            let mut rooms = database.rooms.write().await;
+            assert!(rooms
+                .get_mut(&room.id)
+                .expect("stored room")
+                .set_player_ready(&creator_id, true));
+        }
+        database
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("promote stored room");
+        let mut snapshot = database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("read promoted room")
+            .expect("room exists");
+        assert_eq!(snapshot.lobby_state, crate::protocol::LobbyState::Lobby);
+        assert_eq!(snapshot.ready_players, vec![creator_id]);
+        assert!(snapshot.players[&creator_id].is_ready);
+        assert!(snapshot.all_players_ready());
+        assert!(snapshot.finalize_game());
+        let started_at = snapshot.lobby_started_at;
+        database
+            .transition_room_to_lobby(&room.id)
+            .await
+            .expect("repeat promotion");
+        let repeated = database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("read room again")
+            .expect("room exists");
+        assert_eq!(repeated.lobby_started_at, started_at);
+        assert_eq!(repeated.ready_players, vec![creator_id]);
+    }
+
+    #[tokio::test]
     async fn test_remove_player_from_room_prunes_ready_players() {
         // `finalize_room_game` force-populates `ready_players` with every
         // member; removing a player must prune its id so it cannot linger in

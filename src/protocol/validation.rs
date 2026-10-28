@@ -8,6 +8,13 @@ impl DirectEndpoint {
     /// endpoint shape. Non-direct metadata and unusable addresses are ignored.
     #[must_use]
     pub fn from_connection_info(connection_info: &ConnectionInfo) -> Option<Self> {
+        Self::validated_parts(connection_info).map(|(host, port)| Self {
+            host: host.to_owned(),
+            port,
+        })
+    }
+
+    pub(crate) fn validated_parts(connection_info: &ConnectionInfo) -> Option<(&str, u16)> {
         let ConnectionInfo::Direct { host, port } = connection_info else {
             return None;
         };
@@ -16,10 +23,7 @@ impl DirectEndpoint {
             return None;
         }
 
-        Some(Self {
-            host: host.clone(),
-            port: *port,
-        })
+        Some((host, *port))
     }
 }
 

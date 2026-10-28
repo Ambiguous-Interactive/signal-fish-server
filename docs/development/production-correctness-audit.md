@@ -10764,3 +10764,64 @@ startup burst and assert its completion/open rows after dropping old receipts.
 All seven probe tests pass in `c5e69ee7-d66a-47f0-b134-9d35080f59e4`; native scoped
 strict lint and source policy pass. This refines #1291 and the terminal evidence
 needed by #1264; it does not change negotiated limits or supported Godot pairings.
+
+### F203 — Lobby promotion clears accepted public Room readiness (#1293)
+
+Baseline: `01a85868`. `Room::set_player_ready` accepts readiness in Waiting,
+but `Room::enter_lobby` clears only `ready_players`. The player flags remain
+ready. A room whose members all readied before promotion then fails
+`all_players_ready` and `finalize_game`. The two readiness views disagree.
+
+The red control marks one of two Waiting members ready, then promotes the
+room. The original code returns an empty ready list instead of that member.
+The repair preserves the existing list. The table covers no ready members,
+a ready subset, all members ready, flag/list agreement, repeated promotion,
+the original lobby timestamp, and the finalization precondition. A stored-room
+control also exercises `GameDatabase::transition_room_to_lobby`. The four
+focused lifecycle controls pass in Nextest
+`8e0989ff-23d0-4fac-859e-8f169384155d`; the red run is
+`f0157ab0-88e7-4e1c-990c-0f27e6232c75`.
+
+The source sweep finds that database transition as the sole production caller
+of `enter_lobby`. The normal coordinator keeps a separate readiness set and
+already preserves its published lobby readiness. This finding establishes a
+public Room/storage inconsistency, not a normal WebSocket gameplay incident.
+The Rust client does not depend on the server crate; .NET and Godot do not call
+its Rust Room API. No wire fields or client migration change.
+
+### Borrowed session host candidates (#636)
+
+Initial host selection and host replacement clone every eligible member into
+a temporary vector. Names, endpoint strings and capability vectors are copied
+only to elect one member. Direct eligibility also constructs an owned endpoint
+only to check whether it exists. The repaired selection borrows candidates
+and validates endpoint parts before allocating only the endpoint returned to
+a plan consumer. Authority preference, oldest-join ordering and UUID ties stay
+the same.
+
+The allocation control calls each initial/replacement selector 64 times for
+2, 16 and 256 members under WebRTC and Direct. All twelve baseline cells
+allocate. At 16 members they allocate 225,728 through 235,520 bytes, plus
+128 reallocations per cell. All twelve repaired cells allocate and reallocate
+zero bytes. The existing relay allocation ceilings also pass. Nineteen focused
+selection, endpoint and failover tests pass in Nextest
+`e72b3ca6-5a7b-4b53-ada6-ecadadd04eb7`, as do all nine independent
+session-policy property tests. These are component allocation measurements,
+not a server throughput claim.
+
+### Capacity room-churn sort scratch (#775)
+
+Room-churn indexing still stably sorts raw offsets by timestamp. The repair
+sorts in place by timestamp and unique raw offset. This keeps the original
+stable order for equal timestamps, including the viewer-first merge, without
+scratch allocation proportional to the history. Compact and wide offset paths
+remain available; raw records and replay verdicts are unchanged. Three focused
+churn controls pass in Nextest `e297c3c5-16ed-41fd-9473-995451bffe1c`,
+including independent stable viewer comparisons through 4,096 events.
+
+An isolated counting-allocator control sorts one million events through the
+production offset implementation. The baseline allocates 4,000,000 scratch
+bytes for compact offsets and 8,000,000 for wide offsets. The repair allocates
+zero for either path. All four controls produce checksum
+`3359507878442902874`. This measures sort scratch, not whole-run RSS or the
+full ten-minute workload. The generator memory-bound requirement stays open.

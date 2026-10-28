@@ -499,6 +499,71 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    /// Retain selection inputs between allocation measurements.
+    pub struct HostElectionFixture {
+        members: Vec<super::session_policy::SessionMember>,
+        config: crate::config::SessionConfig,
+    }
+
+    impl HostElectionFixture {
+        /// Build candidates with owned names, endpoints, and capabilities.
+        pub fn new(member_count: u32, direct: bool) -> Self {
+            use crate::protocol::{ConnectionInfo, PlayerId, Topology, Transport};
+            Self {
+                members: (1..=member_count)
+                    .map(|index| super::session_policy::SessionMember {
+                        player_id: PlayerId::from_u128(u128::from(index)),
+                        player_name: format!("host-election-player-{index}"),
+                        is_authority: false,
+                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        connection_info: Some(ConnectionInfo::Direct {
+                            host: "127.0.0.1".to_string(),
+                            port: 7777,
+                        }),
+                        version: 3,
+                        transports: vec![Transport::Relay, Transport::WebRtc, Transport::Direct],
+                        topologies: vec![Topology::Relay, Topology::Host],
+                    })
+                    .collect(),
+                config: crate::config::SessionConfig {
+                    default_topology: Topology::Host,
+                    enable_webrtc: !direct,
+                    enable_direct: true,
+                    ..Default::default()
+                },
+            }
+        }
+
+        /// Run initial selection or replace a departed host, then reuse the inputs.
+        pub fn elect(&mut self, replace_host: bool) -> Option<crate::protocol::PlayerId> {
+            use super::session_policy::{
+                choose_session_plan, membership_session_decision, ActiveSessionPlan,
+            };
+            use crate::protocol::{PlayerId, Topology, Transport};
+            let members = std::mem::take(&mut self.members);
+            let decision = if replace_host {
+                membership_session_decision(
+                    Some(ActiveSessionPlan {
+                        topology: Topology::Host,
+                        transport: if self.config.enable_webrtc {
+                            Transport::WebRtc
+                        } else {
+                            Transport::Direct
+                        },
+                        host: Some(PlayerId::nil()),
+                    }),
+                    None,
+                    members,
+                )
+                .decision
+            } else {
+                choose_session_plan("host-election", None, members, &self.config)
+            };
+            self.members = decision.members;
+            decision.host
+        }
+    }
+
     /// Measure the production payload-sizing path without starting a server.
     pub fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
         super::signaling::canonical_json_len(value)
