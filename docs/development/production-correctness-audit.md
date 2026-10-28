@@ -10573,3 +10573,38 @@ explicit. Four snapshot/contract controls pass in
 with all nine hosted rules and the normal native all-target/all-feature gate
 both pass. The original failed hosted job remains visible at
 [122944866399](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/40724246142/job/122944866399).
+
+### F201 — Directional partition proxy can discard semantic close evidence
+
+The root test run at `66eea45f` fails the client-to-server blackhole control
+with Broken pipe before its required close frame. The proxy's default policy
+aborts the opposite pump as soon as one direction ends. That policy cannot
+promise a remaining server tail when resumed client traffic reaches an already
+closed upstream. The hosted attempt retains no per-pump trace, so it does not
+establish a production server close-write defect.
+
+A new raw TCP control holds the server-to-client pump, writes an exact server
+tail and closes the upstream, then forces client forwarding to end before
+resuming the tail. It fails with UnexpectedEof in Nextest
+`df4d2daa-5f81-4962-a5eb-02fb1a969e79`. This reproduces the fixture contract gap
+without relying on a Ping timer race. Related: #1289 and #826.
+
+The three directional partition scenarios now select an opt-in half-close
+mode. Each direction keeps the opposite pump alive. A completed pump shuts
+down its destination write half and drains late source acknowledgments until
+EOF or explicit kill. Two standard-library socket clones provide shutdown
+handles; the original socket owners stay alive until each drain ends. A reset
+can therefore still reach all live sockets. Default full teardown is unchanged.
+No server liveness setting, receipt assertion or test deadline changes.
+
+The tail and terminal-injection controls live in the canonical helper target,
+so every integration binary that imports the proxy does not repeat them.
+FIN, RST and Drop stop a held-tail drain. Linux still requires the RST result,
+and the live socket-owner count returns to zero. Existing default FIN/RST
+controls pass too. Those four tests pass in
+`fb9cf464-5ed4-4430-a4da-5a442f6a08f6`. The three exact-close and room-recovery
+scenarios pass in `46c9a4f3-81bc-4462-91f4-a9322740e16e`. Their existing Windows
+reset allowance remains; these local results add no Windows qualification.
+Root strict all-target/all-feature lint and all 34 source-policy controls pass.
+This repairs first-party test transport fidelity. Server messages and external
+client behavior stay unchanged.

@@ -264,8 +264,7 @@ async fn observe_until_close(ws: &mut WsStream) -> CloseObservation {
             Ok(frame) => frame,
             #[cfg(windows)]
             Err(error) if is_windows_reset_after_authoritative_cause(&error) => {
-                // ChaosProxy deliberately tears down both pumps when either
-                // half observes EOF. Windows may surface WSAECONNRESET before
+                // Windows may surface WSAECONNRESET before
                 // tungstenite exposes the already-forwarded close frame,
                 // either as a raw I/O reset or its protocol-level
                 // ResetWithoutClosingHandshake wrapper (the same platform
@@ -388,7 +387,7 @@ fn assert_close(observation: &CloseObservation, code: u16, reason: &str) {
 #[serial_test::serial]
 async fn symmetric_blackhole_closes_4003_and_room_heals() {
     let (running, server) = start_server(1, 1, 500).await;
-    let proxy = ChaosProxy::spawn(running.addr()).await;
+    let proxy = ChaosProxy::spawn_with_half_close(running.addr()).await;
     let mut healthy = connect(running.addr()).await;
     let mut partitioned = connect(proxy.addr()).await;
     let healthy_id = join_room(&mut healthy, "CAPSYM", "Healthy").await.player_id;
@@ -432,7 +431,7 @@ async fn server_to_client_blackhole_closes_4002_while_inbound_ping_is_live() {
     // this cell isolates reliable delivery's response to a one-way receive
     // outage. The symmetric/client->server cells exercise the E4 probe path.
     let (running, server) = start_server(30, 5, 300).await;
-    let proxy = ChaosProxy::spawn(running.addr()).await;
+    let proxy = ChaosProxy::spawn_with_half_close(running.addr()).await;
     let mut sender = connect(running.addr()).await;
     let mut partitioned = connect(proxy.addr()).await;
     let sender_id = join_room(&mut sender, "CAPS2C", "Sender").await.player_id;
@@ -502,7 +501,7 @@ async fn server_to_client_blackhole_closes_4002_while_inbound_ping_is_live() {
 #[serial_test::serial]
 async fn client_to_server_blackhole_receives_data_then_closes_4003() {
     let (running, server) = start_server(1, 1, 500).await;
-    let proxy = ChaosProxy::spawn(running.addr()).await;
+    let proxy = ChaosProxy::spawn_with_half_close(running.addr()).await;
     let mut sender = connect(running.addr()).await;
     let mut partitioned = connect(proxy.addr()).await;
     let sender_id = join_room(&mut sender, "CAPC2S", "Sender").await.player_id;
