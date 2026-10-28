@@ -50,6 +50,10 @@ The raw `Engine::channel` accessor remains available for diagnostics and closure
 Selection does not prevent a later loss; callers must still handle send errors.
 Startup refusal stops the burst without exiting the owner loop or emitting
 `startup_sent`. Queued receipts and terminal evidence still drain.
+If a selected channel rejects a startup packet, the probe emits `startup_sent`
+with the exact admitted `count`, `label`, and `startup_failure` error. A count
+below 32 is a failed burst, not completion. This uses an event name that the
+pinned bridge already accepts. It does not invent receive rejection or close the link.
 
 Commands must not remove a rejected link ahead of its queued receipt events.
 The probe queues those receipts before the terminal row.

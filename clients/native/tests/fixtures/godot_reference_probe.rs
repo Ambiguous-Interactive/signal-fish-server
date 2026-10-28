@@ -106,14 +106,16 @@ async fn transport_snapshot(engine: &Engine, peer: PlayerId) -> Value {
     engine.transport_diagnostic_snapshot(peer).await
 }
 
-async fn send_startup_packet(engine: &Engine, peer: PlayerId, data: &[u8]) -> anyhow::Result<()> {
-    engine
-        .send_channel(peer, "reliable")
-        .await
-        .ok_or_else(|| anyhow::anyhow!("missing or unusable startup channel"))?
-        .send(data.into())
-        .await?;
-    Ok(())
+async fn send_startup_packet(
+    engine: &Engine,
+    peer: PlayerId,
+    data: &[u8],
+) -> webrtc::error::Result<bool> {
+    let Some(channel) = engine.send_channel(peer, "reliable").await else {
+        return Ok(false);
+    };
+    channel.send(data.into()).await?;
+    Ok(true)
 }
 
 async fn handle_channel_open(
@@ -134,11 +136,17 @@ async fn handle_channel_open(
                 "startup:{startup_phase}:reference:{sequence}:{}",
                 "0123456789abcdef".repeat(64)
             );
-            if send_startup_packet(engine, peer, data.as_bytes())
-                .await
-                .is_err()
-            {
-                return Ok(());
+            match send_startup_packet(engine, peer, data.as_bytes()).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(error) => {
+                    emit(
+                        output,
+                        json!({"event":"startup_sent", "generation":generation,
+                        "label":label, "count":sequence, "startup_failure":error.to_string()}),
+                    )?;
+                    return Ok(());
+                }
             }
         }
         emit(

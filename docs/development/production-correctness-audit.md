@@ -10687,7 +10687,7 @@ historical causes or remote-network acceptance complete.
 These runs use the first guarded candidate, `0e072e8c`, before the startup-owner
 repair below. Their frozen source and binary remain separate from later attempts.
 
-Six local Linux ARM64 service pairings use the repaired probe: Godot 4.3 native,
+Six local Linux ARM64 service pairings use that initial guarded candidate: Godot 4.3 native,
 Godot 4.7.2 native and Godot 4.7.2 Web, each in both offer roles. Every case keeps
 two physical generations, same-room rejoin, mixed modes, the original 1 KiB
 snapshot bodies, 32-credit window and 32 startup packets per direction and phase.
@@ -10737,3 +10737,30 @@ completion only after the full burst. All six probe tests pass in
 empty-output assertions used a macro form its source policy cannot inspect.
 Explicit Empty/Disconnected branches preserve the assertions and pass the
 focused policy control in `96078bb6-965b-4ba5-af26-bda718c9c0e5`.
+
+#### Selected-channel startup send errors
+
+A later review identified a separate error class: a live peer can negotiate a
+message-size limit below the startup payload. The send then returns
+`ErrOutboundPacketTooLarge` without closing the link. Treating every startup
+error as link refusal lost that evidence. Red Nextest
+`8b93fed7-865e-467a-86c7-017e05152d91` confirms an open negotiated pair silently
+returns without a failure row at a 512-byte limit.
+
+Startup selection now returns link refusal separately from a selected send error.
+Guard refusal remains silent so pending terminal evidence drains. A selected send
+error emits the existing `startup_sent` event with the exact admitted count,
+channel label and `startup_failure` error before returning to the owner loop.
+A count below 32 cannot establish completion. Reusing the event name preserves
+the pinned bridge, which rejects unknown names. This row does not invent a
+receive refusal, channel closure or new peer state.
+
+Four live cases cover both offer roles at 512 and 1,046 negotiated bytes. The
+first limit refuses packet zero. The second admits exactly ten 1,046-byte packets
+and refuses sequence 10 at 1,047 bytes. Each case pins the typed send error,
+exact admitted count and payload prefix, open link state and a later exact small
+reliable packet. Budget-recovery cases now also consume the full 32-packet
+startup burst and assert its completion/open rows after dropping old receipts.
+All seven probe tests pass in `c5e69ee7-d66a-47f0-b134-9d35080f59e4`; native scoped
+strict lint and source policy pass. This refines #1291 and the terminal evidence
+needed by #1264; it does not change negotiated limits or supported Godot pairings.

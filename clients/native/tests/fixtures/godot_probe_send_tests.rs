@@ -35,6 +35,23 @@ impl ProbePair {
     }
 
     async fn negotiate(&mut self, offerer: usize) {
+        self.negotiate_with_limit(offerer, None).await;
+    }
+
+    async fn negotiate_with_limit(&mut self, offerer: usize, limit: Option<u32>) {
+        fn advertise_limit(sdp: String, limit: Option<u32>) -> String {
+            let Some(limit) = limit else { return sdp };
+            assert!(sdp.contains("a=max-message-size:"));
+            sdp.lines()
+                .map(|line| {
+                    if line.starts_with("a=max-message-size:") {
+                        format!("a=max-message-size:{limit}\r\n")
+                    } else {
+                        format!("{line}\r\n")
+                    }
+                })
+                .collect()
+        }
         let answerer = 1 - offerer;
         let offer = self.engines[offerer]
             .pair_with(self.peers[offerer], true, &[])
@@ -46,11 +63,11 @@ impl ProbePair {
             .await
             .unwrap();
         let answer = self.engines[answerer]
-            .handle_offer(self.peers[answerer], offer)
+            .handle_offer(self.peers[answerer], advertise_limit(offer, limit))
             .await
             .unwrap();
         self.engines[offerer]
-            .handle_answer(self.peers[offerer], answer)
+            .handle_answer(self.peers[offerer], advertise_limit(answer, limit))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -84,6 +101,43 @@ impl ProbePair {
         })
         .await
         .expect("both negotiated peers open all required channels");
+    }
+
+    async fn full_startup(
+        &mut self,
+        sender: usize,
+        output: &ProbeOutput,
+        rows: &mut mpsc::UnboundedReceiver<(Value, Option<MessageQueuePermit>)>,
+        phase: u64,
+    ) {
+        let generation = self.engines[sender].diagnostic_snapshot(self.peers[sender])["generation"]
+            .as_u64()
+            .unwrap();
+        handle_channel_open(
+            output,
+            &mut self.engines[sender],
+            self.peers[sender],
+            generation,
+            "reliable",
+            phase,
+        )
+        .await
+        .unwrap();
+        let startup = rows.try_recv().unwrap().0;
+        assert_eq!(startup["event"], "startup_sent");
+        assert_eq!(startup["count"], 32);
+        assert_eq!(startup["generation"], generation);
+        let open = rows.try_recv().unwrap().0;
+        assert_eq!(open["event"], "open");
+        assert_eq!(open["label"], "reliable");
+        assert_eq!(open["properties"]["negotiated"], true);
+        for sequence in 0..32 {
+            let expected = format!(
+                "startup:{phase}:reference:{sequence}:{}",
+                "0123456789abcdef".repeat(64)
+            );
+            drop(self.receipt(1 - sender, expected.as_bytes()).await);
+        }
     }
 
     async fn remove(&mut self) {
@@ -170,9 +224,9 @@ async fn packet_commands_refuse_terminal_siblings_and_recover_on_fresh_links() {
                 assert_no_output(&mut rows);
             }
             assert!(
-                send_startup_packet(&pair.engines[0], pair.peers[0], b"refused-startup")
+                !send_startup_packet(&pair.engines[0], pair.peers[0], b"refused-startup")
                     .await
-                    .is_err()
+                    .unwrap()
             );
             handle_channel_open(
                 &output,
@@ -222,34 +276,7 @@ async fn packet_commands_refuse_terminal_siblings_and_recover_on_fresh_links() {
                 .unwrap();
             drop(pair.receipt(1, &payload).await);
             assert_eq!(rows.try_recv().unwrap().0["event"], "sent");
-            let generation = pair.engines[0].diagnostic_snapshot(pair.peers[0])["generation"]
-                .as_u64()
-                .unwrap();
-            handle_channel_open(
-                &output,
-                &mut pair.engines[0],
-                pair.peers[0],
-                generation,
-                "reliable",
-                2,
-            )
-            .await
-            .unwrap();
-            let startup = rows.try_recv().unwrap().0;
-            assert_eq!(startup["event"], "startup_sent");
-            assert_eq!(startup["count"], 32);
-            assert_eq!(startup["generation"], generation);
-            let open = rows.try_recv().unwrap().0;
-            assert_eq!(open["event"], "open");
-            assert_eq!(open["label"], "reliable");
-            assert_eq!(open["properties"]["negotiated"], true);
-            for sequence in 0..32 {
-                let expected = format!(
-                    "startup:2:reference:{sequence}:{}",
-                    "0123456789abcdef".repeat(64)
-                );
-                drop(pair.receipt(1, expected.as_bytes()).await);
-            }
+            pair.full_startup(0, &output, &mut rows, 2).await;
             pair.remove().await;
         }
     }
@@ -300,9 +327,9 @@ async fn packet_commands_refuse_actual_receive_limits_before_terminal_event_drai
                 assert_no_output(&mut rows);
             }
             assert!(
-                send_startup_packet(&pair.engines[0], pair.peers[0], b"refused-startup")
+                !send_startup_packet(&pair.engines[0], pair.peers[0], b"refused-startup")
                     .await
-                    .is_err()
+                    .unwrap()
             );
             handle_channel_open(
                 &output,
@@ -350,11 +377,76 @@ async fn packet_commands_refuse_actual_receive_limits_before_terminal_event_drai
                 admitted
             );
             drop(retained);
-            let fresh = [0, 0xff, 0x80, 1].repeat(1024);
-            send_startup_packet(&pair.engines[1], pair.peers[1], &fresh)
-                .await
+            pair.full_startup(1, &output, &mut rows, 2).await;
+            pair.remove().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn negotiated_small_message_limit_reports_startup_failure_without_retiring_link() {
+    for (limit, admitted) in [(512, 0), (1046, 10)] {
+        for offerer in [0, 1] {
+            println!("GODOT_STARTUP_LIMIT offerer={offerer} limit={limit} admitted={admitted}");
+            let mut pair = ProbePair::new();
+            pair.negotiate_with_limit(offerer, Some(limit)).await;
+            let peer = pair.peers[0];
+            let generation = pair.engines[0].diagnostic_snapshot(peer)["generation"]
+                .as_u64()
                 .unwrap();
-            drop(pair.receipt(0, &fresh).await);
+            assert!(matches!(
+                send_startup_packet(
+                    &pair.engines[0],
+                    peer,
+                    &vec![0; usize::try_from(limit).unwrap() + 1]
+                )
+                .await,
+                Err(webrtc::error::Error::ErrOutboundPacketTooLarge)
+            ));
+            let (output, mut rows) = mpsc::unbounded_channel();
+            handle_channel_open(
+                &output,
+                &mut pair.engines[0],
+                peer,
+                generation,
+                "reliable",
+                1,
+            )
+            .await
+            .unwrap();
+            let failed = rows
+                .try_recv()
+                .expect("selected-channel send failure needs an explicit row")
+                .0;
+            assert_eq!(failed["event"], "startup_sent");
+            assert_eq!(failed["generation"], generation);
+            assert_eq!(failed["label"], "reliable");
+            assert_eq!(failed["count"], admitted);
+            assert!(failed["startup_failure"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+            assert_no_output(&mut rows);
+            let snapshot = pair.engines[0].diagnostic_snapshot(peer);
+            assert!(snapshot["receive_failure"].is_null());
+            assert!(snapshot["channel_closure"].is_null());
+            assert_eq!(pair.engines[0].connected_pair_count(), 1);
+            for sequence in 0..admitted {
+                let expected = format!(
+                    "startup:1:reference:{sequence}:{}",
+                    "0123456789abcdef".repeat(64)
+                );
+                drop(pair.receipt(1, expected.as_bytes()).await);
+            }
+            let small = [0xff, 0, 0x80, 1].repeat(64);
+            send_packet(
+            &output,
+            &pair.engines[0],
+            peer,
+            &json!({"op":"send_binary", "label":"reliable", "data_base64":STANDARD.encode(&small)}),
+        )
+        .await
+        .unwrap();
+            drop(pair.receipt(1, &small).await);
             pair.remove().await;
         }
     }
