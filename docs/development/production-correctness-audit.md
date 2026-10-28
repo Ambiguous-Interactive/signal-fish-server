@@ -10608,3 +10608,34 @@ reset allowance remains; these local results add no Windows qualification.
 Root strict all-target/all-feature lint and all 34 source-policy controls pass.
 This repairs first-party test transport fidelity. Server messages and external
 client behavior stay unchanged.
+
+### Native closed-stdout timeout evidence and control isolation (#1290)
+
+Native Interop at `ed23981c` times out the existing closed-stdout handshake
+control after eight seconds. Its child diagnostics were discarded. The log
+does not distinguish writer failure detection, client cancellation, teardown,
+or a pipe that still had a temporary reader. The isolated local baseline
+passes in `99e9f811-da1d-4992-8274-805bbd7d6d01`; the original four-thread,
+14-test process suite also passes. Neither pass explains the hosted result.
+
+Ten process/pipe controls previously ran concurrently in one parent. They
+now share a named serial guard, so another fixture cannot spawn while a pipe
+failure control establishes exclusive reader ownership. The reader closes
+explicitly before the stub releases Authenticated. The handshake fixture
+retains the first 16 KiB of child stderr and continues draining later bytes,
+so diagnostic retention cannot add pipe backpressure. Failure assertions
+include that evidence. Exit codes, offered traffic and deadlines stay unchanged.
+
+A Linux negative control retains a second read descriptor after closing the
+original reader. It observes the exact Authenticated output and a live child.
+After the last reader closes, ProtocolInfo forces another output write, which
+must produce exit code 3 within the original eight-second bound. This proves
+that an extra reader changes the pipe-failure precondition. It does not prove
+that concurrent descriptor inheritance caused the hosted timeout. The original
+cause remains open in #1290; no production CLI defect or repair is claimed.
+
+All 15 output controls pass with four test threads in the final local run
+(`progress/session-572/output-reader-control.log`, 16.08 seconds). The normal
+native all-target/all-feature lint gate passes. These changes isolate and
+improve first-party failure evidence; they do not relax the closed-pipe
+expectation or establish new Godot runtime qualification.
