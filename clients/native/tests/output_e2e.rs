@@ -91,20 +91,41 @@ async fn blocked_diagnostic_output(runtime: &str, close_stderr: bool) {
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stderr_preserves_current_thread_protocol_failure() {
     blocked_diagnostic_output("current", false).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stderr_preserves_multi_thread_protocol_failure() {
     blocked_diagnostic_output("multi", false).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn closed_stderr_preserves_both_runtime_protocol_failures() {
     for runtime in ["current", "multi"] {
         blocked_diagnostic_output(runtime, true).await;
     }
+}
+
+async fn read_child_diagnostics(mut stderr: tokio::process::ChildStderr) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut retained = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let read = stderr
+            .read(&mut chunk)
+            .await
+            .expect("read child diagnostics");
+        if read == 0 {
+            break;
+        }
+        let keep = read.min(16_384usize.saturating_sub(retained.len()));
+        retained.extend_from_slice(&chunk[..keep]);
+    }
+    String::from_utf8_lossy(&retained).into_owned()
 }
 
 async fn blocked_handshake_output(runtime: &str, close_output: bool) {
@@ -148,10 +169,11 @@ async fn blocked_handshake_output(runtime: &str, close_output: bool) {
                 if close_output { "90" } else { "2" },
             ])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+    let diagnostics = tokio::spawn(read_child_diagnostics(child.stderr.take().unwrap()));
     let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
     let first = tokio::time::timeout(Duration::from_secs(5), stdout.next_line())
         .await
@@ -162,20 +184,29 @@ async fn blocked_handshake_output(runtime: &str, close_output: bool) {
         serde_json::from_str::<serde_json::Value>(&first).unwrap()["event"],
         "connected"
     );
-    let held_stdout = (!close_output).then_some(stdout);
+    let held_stdout = if close_output {
+        drop(stdout);
+        None
+    } else {
+        Some(stdout)
+    };
     release.send(()).unwrap();
     let status = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
     if status.is_err() {
         child.kill().await.unwrap();
     }
     drop(held_stdout);
+    let diagnostics = tokio::time::timeout(Duration::from_secs(5), diagnostics)
+        .await
+        .expect("diagnostic drain finishes after child exit")
+        .expect("diagnostic reader completes");
     tokio::time::timeout(Duration::from_secs(5), stub)
         .await
         .unwrap()
         .unwrap();
     assert!(
         status.is_ok(),
-        "{runtime}: unread or closed stdout must not strand the process"
+        "{runtime}: unread or closed stdout must not strand the process; diagnostics: {diagnostics}"
     );
     assert_eq!(
         status.unwrap().unwrap().code(),
@@ -184,21 +215,25 @@ async fn blocked_handshake_output(runtime: &str, close_output: bool) {
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stdout_preserves_current_thread_watchdog() {
     blocked_handshake_output("current", false).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stdout_preserves_multi_thread_watchdog() {
     blocked_handshake_output("multi", false).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn closed_stdout_fails_held_handshake() {
     blocked_handshake_output("current", true).await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stdout_fails_streaming_relay_before_the_watchdog() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -392,16 +427,19 @@ async fn diagnostic_flood_preserves_watchdog(runtime: &str) {
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stderr_diagnostic_flood_preserves_current_thread_watchdog() {
     diagnostic_flood_preserves_watchdog("current").await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stderr_diagnostic_flood_preserves_multi_thread_watchdog() {
     diagnostic_flood_preserves_watchdog("multi").await;
 }
 
 #[tokio::test]
+#[serial_test::serial(native_output_process)]
 async fn unread_stderr_bounds_cli_errors_before_runtime_startup() {
     let mut child =
         tokio::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-reference-native"))
@@ -424,4 +462,103 @@ async fn unread_stderr_bounds_cli_errors_before_runtime_startup() {
     }
     drop(stderr);
     assert_eq!(status.unwrap().unwrap().code(), Some(2));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial_test::serial(native_output_process)]
+async fn retained_stdout_reader_defers_failure_until_the_next_output_write() {
+    use std::os::fd::AsRawFd;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_auth, auth_ready) = tokio::sync::oneshot::channel();
+    let (release_info, info_ready) = tokio::sync::oneshot::channel();
+    let stub = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let auth = ws.next().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(auth.to_text().unwrap()).unwrap()["type"],
+            "Authenticate"
+        );
+        auth_ready.await.unwrap();
+        ws.send(Message::Text(json!({"type":"Authenticated","data":{"app_name":"test","rate_limits":{"per_minute":1000,"per_hour":60000,"per_day":1440000}}}).to_string().into())).await.unwrap();
+        info_ready.await.unwrap();
+        ws.send(Message::Text(json!({"type":"ProtocolInfo","data":{"protocol_version":3,"sdk_version":"0.1.0","capabilities":[],"game_data_formats":["json"]}}).to_string().into())).await.unwrap();
+        while let Some(frame) = ws.next().await {
+            if matches!(frame, Err(_) | Ok(Message::Close(_))) {
+                break;
+            }
+        }
+    });
+    let mut child =
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-reference-native"))
+            .args([
+                "--server-url",
+                &format!("ws://{address}/v3/ws"),
+                "--create-room",
+                "--runtime",
+                "current",
+                "--max-runtime-secs",
+                "90",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+    let diagnostics = tokio::spawn(read_child_diagnostics(child.stderr.take().unwrap()));
+    let stdout = child.stdout.take().unwrap();
+    let duplicate = std::fs::File::open(format!("/proc/self/fd/{}", stdout.as_raw_fd())).unwrap();
+    let mut primary = BufReader::new(stdout).lines();
+    let first = tokio::time::timeout(Duration::from_secs(5), primary.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first).unwrap()["event"],
+        "connected"
+    );
+    drop(primary);
+    release_auth.send(()).unwrap();
+    let (authenticated, retained_reader) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            let mut retained_reader = std::io::BufReader::new(duplicate);
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut retained_reader, &mut line).unwrap();
+            (line, retained_reader)
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&authenticated).unwrap()["event"],
+        "authenticated"
+    );
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "closing one reader does not close a pipe with another reader"
+    );
+    drop(retained_reader);
+    release_info.send(()).unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+    if status.is_err() {
+        child.kill().await.unwrap();
+    }
+    let diagnostics = tokio::time::timeout(Duration::from_secs(5), diagnostics)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), stub)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.is_ok(),
+        "the next write must detect the last reader's closure: {diagnostics}"
+    );
+    assert_eq!(status.unwrap().unwrap().code(), Some(3));
 }

@@ -2685,3 +2685,132 @@ fn sequenced_relay_trace_io_failure_does_not_double_panic_on_drop() {
     }));
     drop(auditor);
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn half_close_preserves_server_tail_after_client_forwarding_fails() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = ChaosProxy::spawn_with_half_close(listener.local_addr().unwrap()).await;
+    proxy.pause(Direction::ServerToClient);
+    let mut client = TcpStream::connect(proxy.addr()).await.unwrap();
+    let (mut server, _) = tokio::time::timeout(CHAOS_EVENT_DEADLINE, listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let tail = b"exact semantic close frame bytes";
+    server.write_all(tail).await.unwrap();
+    server.shutdown().await.unwrap();
+    drop(server);
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        while !proxy
+            .terminations()
+            .iter()
+            .any(|end| end.direction == Direction::ClientToServer)
+        {
+            match client.write_all(&[7; 4096]).await {
+                Ok(()) => tokio::task::yield_now().await,
+                Err(error) => {
+                    assert!(matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    ));
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        proxy
+            .terminations()
+            .iter()
+            .any(|end| end.direction == Direction::ClientToServer),
+        "client forwarding must fail before the paused server tail resumes"
+    );
+    proxy.resume(Direction::ServerToClient);
+    let mut actual = vec![0; tail.len()];
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, client.read_exact(&mut actual))
+        .await
+        .unwrap()
+        .expect("upstream write failure must not discard the queued server tail");
+    assert_eq!(actual, tail);
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn half_close_terminal_faults_release_draining_connections() {
+    for action in ["fin", "rst", "drop"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = ChaosProxy::spawn_with_half_close(listener.local_addr().unwrap()).await;
+        proxy.pause(Direction::ServerToClient);
+        let mut client = TcpStream::connect(proxy.addr()).await.unwrap();
+        let (mut server, _) = tokio::time::timeout(CHAOS_EVENT_DEADLINE, listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        server.write_all(b"withheld tail").await.unwrap();
+        server.shutdown().await.unwrap();
+        drop(server);
+        tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+            while !proxy
+                .terminations()
+                .iter()
+                .any(|end| end.direction == Direction::ClientToServer)
+            {
+                client
+                    .write_all(&[7; 4096])
+                    .await
+                    .expect("half-close mode retains the client read half");
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(proxy.active_connections(), 1);
+        let mut retained_proxy = Some(proxy);
+        match action {
+            "fin" => retained_proxy.as_ref().unwrap().kill_mid_frame(),
+            "rst" => retained_proxy.as_ref().unwrap().rst_all(),
+            "drop" => drop(retained_proxy.take()),
+            _ => unreachable!(),
+        }
+        let mut byte = [0];
+        let result = tokio::time::timeout(CHAOS_EVENT_DEADLINE, client.read(&mut byte))
+            .await
+            .unwrap();
+        match result {
+            Ok(0) => {
+                #[cfg(target_os = "linux")]
+                assert_ne!(action, "rst", "RST must remain observable");
+            }
+            Err(error) if action == "rst" => {
+                #[cfg(target_os = "linux")]
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+                #[cfg(not(target_os = "linux"))]
+                let _terminal_error = error;
+            }
+            Err(error) => {
+                #[cfg(target_os = "linux")]
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ));
+                #[cfg(not(target_os = "linux"))]
+                let _terminal_error = error;
+            }
+            Ok(count) => panic!("terminal injection forwarded {count} withheld tail bytes"),
+        }
+        if let Some(proxy) = retained_proxy {
+            tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+                while proxy.active_connections() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("terminal injection releases proxy socket owners");
+            assert!(proxy.control_errors().is_empty());
+        }
+    }
+}

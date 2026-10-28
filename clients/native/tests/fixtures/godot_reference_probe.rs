@@ -102,21 +102,7 @@ async fn send_packet(
 }
 
 async fn transport_snapshot(engine: &Engine, peer: PlayerId) -> Value {
-    let mut snapshot = engine.transport_diagnostic_snapshot(peer).await;
-    if let Some(fields) = snapshot.as_object_mut() {
-        let mut debt = serde_json::Map::new();
-        for label in ["reliable", "ordered", "unreliable"] {
-            if let Some(channel) = engine.channel(peer, label) {
-                let value = match channel.outstanding_bytes().await {
-                    Ok(bytes) => json!({"outstanding_bytes":bytes}),
-                    Err(error) => json!({"error":error.to_string()}),
-                };
-                debt.insert(label.to_owned(), value);
-            }
-        }
-        fields.insert("send_channels".to_owned(), Value::Object(debt));
-    }
-    snapshot
+    engine.transport_diagnostic_snapshot(peer).await
 }
 
 async fn receive_boundary(

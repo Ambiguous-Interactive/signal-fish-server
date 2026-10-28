@@ -10486,3 +10486,156 @@ through the existing 0–4,095 microsecond steady-state band. The final initial
 range reserves that band. The unchanged relay allocation benchmark then passes
 with zero timing allocations, reallocations and allocated bytes. The measured
 128-operation bucket total remains 3,145,728 bytes.
+
+### F200 — Native transport diagnostics wait without a deadline
+
+Baseline: `6de82293`. The first-party Engine samples RTC statistics, SCTP
+statistics, and channel settings through the wrapper's shared RTC core mutex.
+The Godot probe then reads channel send debt with more unbounded awaits.
+A busy core can therefore prevent a diagnostic report from returning.
+This is separate from the historical missing reliable prefix in #1244 and
+the ambiguous terminal event in #1264. Related: #1287 and #1240.
+
+The new regression uses a custom runtime clock only on a named writer thread.
+`DataChannel::send` calls that clock while it owns the actual RTC core mutex.
+The clock signals entry and waits for the fixture to release it. The Engine's
+ordinary transport snapshot then waits for that same mutex. The initial
+control fails its one-second outer deadline in Nextest
+`81d371ad-306e-42bd-a720-ad1b8b88e268`. It releases and joins the writer before
+asserting, so the failed attempt does not leave blocked work behind.
+
+All transport queries now share one 250 ms cooperative timeout. On expiry,
+the snapshot keeps completed transport samples, samples current local callback
+and receive-budget observations, and identifies the unfinished stage and
+channel when applicable. Uncollected fields stay absent. Send debt is part of
+the same Engine query; the probe no longer starts unbounded follow-up reads.
+Cancellation drops the query future without closing or replacing the link.
+This bounds asynchronous waits, not synchronous work or host scheduling delay.
+
+The extended control covers the reference and negotiated Godot profiles,
+both receiver offer roles, and two fresh physical generations on the same
+Engines. Each generation retains one exact 4 KiB incoming reliable packet
+while the core is held. The partial snapshot preserves its generation,
+per-channel ownership, and shared budget, including the first generation's
+retained packet after replacement. Releasing the core delivers one exact
+4 KiB reliable packet in reverse. Complete snapshots work again afterward.
+Dropping both retained events releases all count and byte permits.
+
+The first extended control incorrectly required the whole callback queue to
+be empty after removal. Its failure retained an ordinary connection-lifecycle
+event, not an extra gameplay receipt. The final assertion drains lifecycle
+callbacks and still rejects any extra gameplay receipt. The extended control
+and both existing actual/closed-channel contract controls pass in Nextest
+`cc17bce4-76cc-45f6-844f-7d7a1c8b1224`.
+
+This is new native/native recovery and diagnosis evidence for #1240, #1244
+and #1264. It does not classify their historical failures or qualify Godot
+runtimes, full service sessions, larger meshes or remote networks. Channel
+IDs, delivery modes, receipt requirements and receive limits stay unchanged.
+The inspected Rust SDK manifest does not depend on this reference Engine.
+The .NET SDK project has no package dependencies. Neither needs a change;
+server protocol messages stay unchanged. Godot #355 tracks optional adoption
+of partial snapshot fields and separate runtime qualification.
+
+A second new control covers actual terminal causes in both receiver offer
+roles. It closes the real unordered channel, or retains 256 actual empty
+reliable receipts and sends one extra message to trigger `pending_messages`.
+With the core then held on a sibling channel, the partial snapshot preserves
+the exact closure or refusal record and shared budget. Engine send selection
+remains refused on every required label. The fixture's direct sibling write
+only holds the core; it is not a claim of new Engine work admission after loss.
+Dropping the retained receipts restores capacity without erasing the failure.
+Both new controls pass in Nextest `e0df1f0f-0368-49bb-b6a6-405704c5b3c8`.
+
+Five existing startup, closure, terminal-connection and saturated-recovery
+controls pass in `a52600d2-7157-459f-8d2b-5afb0d78ad7a`. Four portable probe
+output controls pass in `4b4a18e7-9c6d-4383-95a0-d536a22eeb3d`. The source
+policy scanner required explicit Empty/Disconnected handling in the new
+callback-drain check; the final control passes in
+`8016b688-9f99-4ca4-8a6b-226eb87a349c`. Root and native strict all-target,
+all-feature lint, formatting, Markdown and document consistency checks pass.
+Godot #355 now records the inspected driver's missing timeout-marker check
+and the required partial-snapshot adoption controls. No runtime result is
+inferred from these native/native tests.
+
+Final self-review found that callback publication precedes its admission-counter
+update. The recovery control now waits for classification before comparing
+snapshots; it does not assume that separately sampled counters update atomically.
+Both new controls pass again in `c09b59cc-f5ee-4275-a713-13ad1faca5c5`.
+
+Hosted root lint at `dcafa001` rejects JSON-map indexing in the new sampler.
+Its additional `clippy::indexing_slicing` rule is stricter than the normal
+local Clippy gate. The sampler now inserts into typed maps retained outside
+the query future, then publishes completed maps after sampling. A timeout
+omits maps that have no completed channel entries. Healthy empty maps remain
+explicit. Four snapshot/contract controls pass in
+`9a2b9b87-1dbb-4b9a-90ce-a34e077abff6`. The exact native production lint command
+with all nine hosted rules and the normal native all-target/all-feature gate
+both pass. The original failed hosted job remains visible at
+[122944866399](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/40724246142/job/122944866399).
+
+### F201 — Directional partition proxy can discard semantic close evidence
+
+The root test run at `66eea45f` fails the client-to-server blackhole control
+with Broken pipe before its required close frame. The proxy's default policy
+aborts the opposite pump as soon as one direction ends. That policy cannot
+promise a remaining server tail when resumed client traffic reaches an already
+closed upstream. The hosted attempt retains no per-pump trace, so it does not
+establish a production server close-write defect.
+
+A new raw TCP control holds the server-to-client pump, writes an exact server
+tail and closes the upstream, then forces client forwarding to end before
+resuming the tail. It fails with UnexpectedEof in Nextest
+`df4d2daa-5f81-4962-a5eb-02fb1a969e79`. This reproduces the fixture contract gap
+without relying on a Ping timer race. Related: #1289 and #826.
+
+The three directional partition scenarios now select an opt-in half-close
+mode. Each direction keeps the opposite pump alive. A completed pump shuts
+down its destination write half and drains late source acknowledgments until
+EOF or explicit kill. Two standard-library socket clones provide shutdown
+handles; the original socket owners stay alive until each drain ends. A reset
+can therefore still reach all live sockets. Default full teardown is unchanged.
+No server liveness setting, receipt assertion or test deadline changes.
+
+The tail and terminal-injection controls live in the canonical helper target,
+so every integration binary that imports the proxy does not repeat them.
+FIN, RST and Drop stop a held-tail drain. Linux still requires the RST result,
+and the live socket-owner count returns to zero. Existing default FIN/RST
+controls pass too. Those four tests pass in
+`fb9cf464-5ed4-4430-a4da-5a442f6a08f6`. The three exact-close and room-recovery
+scenarios pass in `46c9a4f3-81bc-4462-91f4-a9322740e16e`. Their existing Windows
+reset allowance remains; these local results add no Windows qualification.
+Root strict all-target/all-feature lint and all 34 source-policy controls pass.
+This repairs first-party test transport fidelity. Server messages and external
+client behavior stay unchanged.
+
+### Native closed-stdout timeout evidence and control isolation (#1290)
+
+Native Interop at `ed23981c` times out the existing closed-stdout handshake
+control after eight seconds. Its child diagnostics were discarded. The log
+does not distinguish writer failure detection, client cancellation, teardown,
+or a pipe that still had a temporary reader. The isolated local baseline
+passes in `99e9f811-da1d-4992-8274-805bbd7d6d01`; the original four-thread,
+14-test process suite also passes. Neither pass explains the hosted result.
+
+Ten process/pipe controls previously ran concurrently in one parent. They
+now share a named serial guard, so another fixture cannot spawn while a pipe
+failure control establishes exclusive reader ownership. The reader closes
+explicitly before the stub releases Authenticated. The handshake fixture
+retains the first 16 KiB of child stderr and continues draining later bytes,
+so diagnostic retention cannot add pipe backpressure. Failure assertions
+include that evidence. Exit codes, offered traffic and deadlines stay unchanged.
+
+A Linux negative control retains a second read descriptor after closing the
+original reader. It observes the exact Authenticated output and a live child.
+After the last reader closes, ProtocolInfo forces another output write, which
+must produce exit code 3 within the original eight-second bound. This proves
+that an extra reader changes the pipe-failure precondition. It does not prove
+that concurrent descriptor inheritance caused the hosted timeout. The original
+cause remains open in #1290; no production CLI defect or repair is claimed.
+
+All 15 output controls pass with four test threads in the final local run
+(`progress/session-572/output-reader-control.log`, 16.08 seconds). The normal
+native all-target/all-feature lint gate passes. These changes isolate and
+improve first-party failure evidence; they do not relax the closed-pipe
+expectation or establish new Godot runtime qualification.

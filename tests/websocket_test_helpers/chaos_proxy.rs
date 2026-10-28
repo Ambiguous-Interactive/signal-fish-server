@@ -23,10 +23,10 @@
 //! Faults apply to **all** of a proxy's connections; tests that need
 //! per-client faults spawn one proxy per client. A killed proxy stays killed
 //! (subsequent accepts are dropped immediately) — spawn a fresh proxy for a
-//! fresh link. On half-close or a socket error in either direction the whole
-//! proxied connection is torn down (a full close on half-close): the chaos
-//! suites only ever end proxied connections by injected kill or test end, so
-//! graceful half-close fidelity is deliberately out of scope.
+//! fresh link. By default, a pump ending tears down both directions.
+//! [`spawn_with_half_close`](ChaosProxy::spawn_with_half_close) retains the
+//! opposite read direction and drains late acknowledgments after forwarding
+//! ends. Explicit kills still tear down both directions.
 //!
 //! The proxy's own unit tests live at the bottom of this file (echo-server
 //! upstream). They carry `#[serial_test::serial]` because this module is
@@ -193,6 +193,7 @@ struct ConnectionSockets {
 }
 
 struct ProxyControl {
+    preserve_half_close: bool,
     client_to_server: DirectionControls,
     server_to_client: DirectionControls,
     kill: watch::Sender<KillMode>,
@@ -204,6 +205,7 @@ struct ProxyControl {
 impl ProxyControl {
     fn new() -> Self {
         Self {
+            preserve_half_close: false,
             client_to_server: DirectionControls::new(),
             server_to_client: DirectionControls::new(),
             kill: watch::Sender::new(KillMode::None),
@@ -319,6 +321,11 @@ impl ChaosProxy {
         Self::spawn_with_upstream_recv_buffer(upstream, None).await
     }
 
+    /// Keep the opposite direction readable after a pump ends.
+    pub async fn spawn_with_half_close(upstream: SocketAddr) -> Self {
+        Self::spawn_configured(upstream, None, true).await
+    }
+
     /// Spawn a proxy whose server-facing socket requests a bounded receive
     /// window before connecting.
     ///
@@ -331,12 +338,22 @@ impl ChaosProxy {
         upstream: SocketAddr,
         recv_buffer_bytes: Option<u32>,
     ) -> Self {
+        Self::spawn_configured(upstream, recv_buffer_bytes, false).await
+    }
+
+    async fn spawn_configured(
+        upstream: SocketAddr,
+        recv_buffer_bytes: Option<u32>,
+        preserve_half_close: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind chaos proxy listener");
         let addr = listener.local_addr().expect("read chaos proxy address");
 
-        let control = Arc::new(ProxyControl::new());
+        let mut control = ProxyControl::new();
+        control.preserve_half_close = preserve_half_close;
+        let control = Arc::new(control);
 
         let accept_control = Arc::clone(&control);
         let accept_task = tokio::spawn(async move {
@@ -429,6 +446,19 @@ impl ChaosProxy {
             .direction(direction)
             .destination_write_bytes
             .load(Ordering::Relaxed)
+    }
+
+    /// Connections whose socket owners have not finished yet.
+    pub fn active_connections(&self) -> usize {
+        self.control
+            .connections
+            .lock()
+            .expect("proxy connection registry poisoned")
+            .iter()
+            .filter(|connection| {
+                connection.client.strong_count() > 0 || connection.upstream.strong_count() > 0
+            })
+            .count()
     }
 
     /// Snapshot the 64 most recent completed-pump diagnostics, oldest first.
@@ -564,6 +594,8 @@ impl Drop for ChaosProxy {
 /// pump per direction; when either pump ends, the other is aborted and both
 /// sockets close (see the module docs on full-close-on-half-close).
 fn spawn_connection(control: &Arc<ProxyControl>, client: TcpStream, server: TcpStream) {
+    let (client, client_shutdown) = shutdown_handle(client, control.preserve_half_close);
+    let (server, server_shutdown) = shutdown_handle(server, control.preserve_half_close);
     let client = Arc::new(client);
     let server = Arc::new(server);
     control
@@ -574,6 +606,29 @@ fn spawn_connection(control: &Arc<ProxyControl>, client: TcpStream, server: TcpS
             client: Arc::downgrade(&client),
             upstream: Arc::downgrade(&server),
         });
+
+    if let (Some(client_shutdown), Some(server_shutdown)) = (client_shutdown, server_shutdown) {
+        let control = Arc::clone(control);
+        tokio::spawn(async move {
+            tokio::join!(
+                pump_with_half_close(
+                    Arc::clone(&control),
+                    Direction::ClientToServer,
+                    Arc::clone(&client),
+                    Arc::clone(&server),
+                    server_shutdown,
+                ),
+                pump_with_half_close(
+                    control,
+                    Direction::ServerToClient,
+                    server,
+                    client,
+                    client_shutdown,
+                ),
+            );
+        });
+        return;
+    }
 
     let mut client_to_server = tokio::spawn(pump(
         Arc::clone(control),
@@ -608,6 +663,70 @@ fn spawn_connection(control: &Arc<ProxyControl>, client: TcpStream, server: TcpS
             }
         }
     });
+}
+
+fn shutdown_handle(stream: TcpStream, preserve: bool) -> (TcpStream, Option<std::net::TcpStream>) {
+    if !preserve {
+        return (stream, None);
+    }
+    let socket = stream.into_std().expect("detach proxy socket");
+    let shutdown = socket.try_clone().expect("clone proxy shutdown handle");
+    (
+        TcpStream::from_std(socket).expect("register proxy socket"),
+        Some(shutdown),
+    )
+}
+
+async fn pump_with_half_close(
+    control: Arc<ProxyControl>,
+    direction: Direction,
+    from: Arc<TcpStream>,
+    to: Arc<TcpStream>,
+    shutdown: std::net::TcpStream,
+) {
+    let cause = pump(
+        Arc::clone(&control),
+        direction,
+        Arc::clone(&from),
+        Arc::clone(&to),
+    )
+    .await;
+    record_control_termination(&control, direction, cause);
+    {
+        let _barrier = control.direction(direction).io_barrier.read();
+        if *control.kill.borrow() != KillMode::None {
+            return;
+        }
+        if let Err(error) = shutdown.shutdown(std::net::Shutdown::Write) {
+            record_control_termination(
+                &control,
+                direction,
+                format!("destination half-close failed: {error}"),
+            );
+        }
+    }
+    let mut kill = control.kill.subscribe();
+    let mut discarded = [0; 8192];
+    loop {
+        if *kill.borrow() != KillMode::None {
+            return;
+        }
+        tokio::select! {
+            biased;
+            changed = kill.changed() => {
+                if changed.is_err() || *kill.borrow() != KillMode::None { return; }
+            }
+            ready = from.readable() => {
+                if ready.is_err() { return; }
+                match from.try_read(&mut discarded) {
+                    Ok(0) => return,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => return,
+                }
+            }
+        }
+    }
 }
 
 fn record_pump_termination(

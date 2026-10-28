@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, and retained stream memory
   (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).
-- Add native SCTP, transport, and actual channel settings to gameplay diagnostics (#1240, #1244).
+- Add native SCTP, transport, and actual channel settings to gameplay diagnostics, with bounded waits and explicit partial
+  results on busy links (#1240, #1244, #1287).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
