@@ -2280,13 +2280,7 @@ impl Orchestrator<'_> {
             emit(&Event::ExchangeReady);
             self.exchange_ready_reported = true;
         }
-        if self.cli.p2p_rebuild_release_file.is_some()
-            && (!self.p2p_rebuild_released
-                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs)
-                || !self.expected_peers.iter().all(|peer| {
-                    self.pair_retry_attempts.get(peer) == Some(&self.cli.p2p_retry_count)
-                }))
-        {
+        if self.reserved_rebuild_pending() {
             return Ok(());
         }
         if self.exchange_release_pending().await? {
@@ -3888,6 +3882,15 @@ impl Orchestrator<'_> {
             .map_err(|error| FatalError::connection(format!("{error:#}")))
     }
 
+    fn reserved_rebuild_pending(&self) -> bool {
+        self.cli.p2p_rebuild_release_file.is_some()
+            && (!self.p2p_rebuild_released
+                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs)
+                || !self.expected_peers.iter().all(|peer| {
+                    self.pair_retry_attempts.get(peer) == Some(&self.cli.p2p_retry_count)
+                }))
+    }
+
     /// The flag-driven minimum this client must observe to exit 0. Deep
     /// correctness assertions live in the interop harness, not here.
     fn criteria_met(&self) -> bool {
@@ -3897,6 +3900,9 @@ impl Orchestrator<'_> {
     /// Human-readable list of unmet criteria (for the failure diagnostics).
     fn unmet_criteria(&self) -> Vec<String> {
         let mut unmet = Vec::new();
+        if self.reserved_rebuild_pending() {
+            unmet.push("awaiting requested P2P rebuild".to_string());
+        }
         if self.reconnect_attempts < self.cli.reconnect_release_file.len() {
             unmet.push("awaiting requested room restore".to_string());
         }

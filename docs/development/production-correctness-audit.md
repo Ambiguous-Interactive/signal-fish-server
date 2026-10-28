@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197; premature native rebuild success in F198 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97; closed-epoch delivery evidence in F130 |
 
@@ -10327,3 +10327,45 @@ separate publication gate.
 The disconnected-output admission control also passes in
 `1c6d02f8-9acf-41fd-86f4-e578bbd9be3c`. It requires the refused gameplay charge to
 be free before output failure and completed drain are observed.
+
+### F198 — Initial fallback completes a requested native rebuild early
+
+Related: #1282 and #826. Final-head qualification of PR #1281 found a separate
+native CLI completion defect on `eec6accf`. Verification Nightly run
+`40628349941`, job `122618603505`, failed the unchanged eight-player host
+1% loss cell. The server recorded 137 relayed signals against a frozen client
+success-prefix ledger of 127.
+
+Artifact `webrtc-netem-40628349941-1` (`12790104030`) locates all ten extra
+signals in `client-c03.jsonl`. Initial physical failure produces relay fallback,
+then `success_criteria_met` at zero-based event 39. The leaf later sends ten
+signals for automatic retry and its requested reserved clean-path rebuild.
+Its prefix has four signals; its complete history has fourteen. The other
+clients contribute 123. The exact server ledger exposes the premature marker;
+it does not establish duplicate server relay or a gameplay delivery failure.
+
+`process_exchange_gate` already waits for local rebuild release, every planned
+peer's current reconnect evidence, and the reserved final retry attempt.
+`unmet_criteria` omitted that condition. Initial fallback before any pair opens
+has no formed-pair exchange debt, so the client could announce success before
+its explicitly requested future phase. This condition predates the session's
+stdout ownership change and the portable Godot Engine probe does not use it.
+
+The deterministic initial-fallback regression fails at the premature success
+assertion in Nextest `a28bb7cb-5414-4d3e-9647-fc256136799b`. The repair shares one
+reserved-rebuild predicate between exchange release and success. The regression
+checks the unreleased gate, release without recovery, missing/older reserved
+attempts, exact reserved recovery, renewed loss, and ordinary fallback without
+a requested rebuild. It and the existing reserved-generation and stale-open
+controls pass in `2120e100-acd4-4178-85b4-7703b27e7c7b`.
+
+The network-loss rate, deadlines, exact signal ledger, graph, gameplay receipts
+and transport-status assertions remain unchanged. Native CLI completion flags
+are not server wire messages. Rust and .NET SDKs and the Godot adapter do not
+consume this CLI success gate. Hosted loss qualification remains required.
+
+A local run of the exact loss cell stopped at netem setup with
+`RTNETLINK answers: Operation not permitted`. It did not exercise packet loss.
+The loopback qdisc remains `noqueue`. This setup failure is retained separately;
+it is not a passing loss control. Final hosted qualification must run the
+unchanged cell on a runner with the required network-fault capability.

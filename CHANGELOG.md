@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Wait for the requested native P2P rebuild before reporting success after relay fallback (#1282).
 - Keep native gameplay charged to the receive budget until its output is flushed or discarded (#1280).
 - Exclude terminal native reference-client links from the connected-pair count (#1276).
 - Preserve reliable and ordered native gameplay after large expiry backlogs (#1271).
