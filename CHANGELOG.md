@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce room-event copies when no player needs reconnect replay (#636, #1277).
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
   and handle binary channel events and the receive-rejection `failure` field.
-- Bound active-session response storage and reduce room occupancy metrics memory and dashboard-history sizing work (#636).
+- Bound active-session response storage and reduce room percentile query memory and dashboard-history sizing work (#636).
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, and retained stream memory
   (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).

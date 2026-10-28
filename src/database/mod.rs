@@ -2884,8 +2884,9 @@ struct PlayerCountDistribution {
 
 impl PlayerCountDistribution {
     fn record(&mut self, players: usize) {
-        *self.frequencies.entry(players).or_default() += 1;
-        self.rooms += 1;
+        let count = self.frequencies.entry(players).or_default();
+        *count = count.saturating_add(1);
+        self.rooms = self.rooms.saturating_add(1);
     }
 
     fn percentile(&self, per_mille: usize) -> f64 {
@@ -2894,7 +2895,7 @@ impl PlayerCountDistribution {
             if rank < count {
                 return players as f64;
             }
-            rank -= count;
+            rank = rank.saturating_sub(count);
         }
         0.0
     }
