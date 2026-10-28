@@ -10440,8 +10440,10 @@ Hosted qualification remains the publication gate.
 Baseline: `39d36c4a`. Server operation histograms reserve the full five-minute
 range at their first sample. Each default histogram owns 20,480 `u64` buckets
 (163,840 bytes), even when every sample is below one millisecond. The new
-range starts small and grows at the same precision. Input clamping still occurs
-before recording, so the five-minute limit and reported metrics stay unchanged.
+range covers 0 through 4,095 microseconds initially and grows at the same
+precision. This keeps the existing steady-state timing band free of allocations.
+Input clamping still occurs before recording, so the five-minute limit and
+reported metrics stay unchanged.
 
 The range regression fails on the baseline with 20,480 initial buckets versus
 20,480 full-range buckets. The repaired comparison checks exact JSON metrics
@@ -10478,3 +10480,9 @@ real-socket controls pass in `f93de86c-d467-4c44-ae4e-deae4e8a2ac3`.
 These changes preserve server protocol messages and metrics JSON. The Rust,
 .NET and Godot clients need no changes. This does not close the broader audit,
 the full generator memory bound, or the historical generator-stall cause.
+
+The first hosted allocation check rejects growth from the 1 ms warm-up sample
+through the existing 0–4,095 microsecond steady-state band. The final initial
+range reserves that band. The unchanged relay allocation benchmark then passes
+with zero timing allocations, reallocations and allocated bytes. The measured
+128-operation bucket total remains 3,145,728 bytes.

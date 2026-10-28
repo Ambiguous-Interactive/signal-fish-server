@@ -396,6 +396,7 @@ pub struct ResponseTimeTracker {
 const DEFAULT_LOWEST_DISCERNIBLE_MICROS: u64 = 1;
 const DEFAULT_HIGHEST_TRACKABLE_MICROS: u64 = 300_000_000; // 5 minutes in microseconds
 const DEFAULT_SIGNIFICANT_FIGURES: u8 = 3;
+const INITIAL_HIGHEST_TRACKABLE_MICROS: u64 = 4_095;
 
 #[derive(Debug, Clone)]
 struct OperationLatencyHistogram {
@@ -1893,6 +1894,7 @@ impl OperationLatencyHistogram {
         let lowest = lowest_discernible_micros.max(1);
         let highest = lowest
             .saturating_mul(2)
+            .max(INITIAL_HIGHEST_TRACKABLE_MICROS)
             .min(highest_trackable_micros.max(lowest));
         let sig_figs = significant_figures.clamp(1, 5);
 
