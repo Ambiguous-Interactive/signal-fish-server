@@ -6705,3 +6705,36 @@ workloads overlap. Brief docs, lint, hook, git, and network operations do overla
 the host remains shared. Native admission tests start only after this process
 exits. Earlier failed attempts remain unchanged. Historical causes and the full
 memory bound remain open.
+
+## Compact room churn indices (#775, #636)
+
+The room churn view retained one pointer per event and sorted those pointers
+stably by timestamp. The new index retains four-byte raw offsets when the
+source length fits `u32`. Larger explicitly admitted histories keep native-width
+offsets. Both paths keep stable timestamp order and visit the viewer's own
+events first at each timestamp. No record, deadline, gap, or replay rule changes.
+
+The portable ignored control is
+`oracle::coverage_tests::generator_room_churn_index_memory_profile` in the
+`capacity_runner` target. `CAPACITY_ROOM_CHURN_STABLE=1` selects the former
+pointer implementation. Both modes use the same one-million-event input and
+an order-sensitive raw-position checksum. On this ARM64 host, retained index
+storage falls from 8,388,608 to 4,194,304 bytes. Both checksums are
+`4894385488969092582`. Nine focused controls preserve exact raw identity,
+compact and wide indices, Unicode/empty names, absent rooms, tied timestamps,
+closed epochs, snapshot tails, and invalid evidence.
+
+A same-binary glibc `libmemusage.so` comparison reports total heap allocation
+of 137,999,924 bytes for the pointer control and 129,805,707 for the compact
+index. Whole-process peak heap remains 121,519,089 bytes in both modes because
+raw-event setup dominates this fixture. This is not a peak-RSS reduction claim.
+Uninstrumented local index/view time is 0.71–0.76 seconds for the pointer
+control and 0.80–0.85 seconds for the compact index. These debug timings show
+a CPU cost; they do not establish server throughput or a capacity limit.
+
+Scratch-free sort candidates were rejected after matched controls showed
+roughly twice the sort/view time. The retained stable compact sort halves its
+index and sort-buffer widths instead. All attempts remain local under
+`progress/session-568/`; the portable control retains the comparison. Raw
+record and oracle memory still need the broader #775 work and long-cell
+qualification. This change does not complete that issue.

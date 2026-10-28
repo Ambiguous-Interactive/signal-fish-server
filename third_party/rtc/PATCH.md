@@ -21,6 +21,7 @@ The copy contains the published library sources and both license files.
 Trailing whitespace is removed from the source copy.
 Its normalized manifest omits upstream example and integration targets.
 Library tests retain their required development dependencies.
+The manifest uses `pem` 4.0.0 and `x509-parser` 0.18.1; the native exchange controls qualify these dependency updates.
 Development dependencies used only by omitted examples are removed.
 CI scans this test graph with the native client supply-chain policy.
 

@@ -19,7 +19,7 @@ prost = "0.14.4"
 ciborium = "0.2.2"
 cbor4ii = { version = "1.2.4", features = ["serde1", "use_std"] }
 flatbuffers = "25.12.19"
-capnp = "0.27.2"
+capnp = "0.27.3"
 criterion = { version = "0.8.2", default-features = false }
 stats_alloc = "0.1.10"
 sha2 = "0.11.1"

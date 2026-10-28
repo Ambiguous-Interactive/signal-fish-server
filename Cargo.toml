@@ -116,7 +116,7 @@ rmp = "0.8.15"
 rmp-serde = "1.3.1"
 
 # Identifiers & time
-uuid = { version = "1.28.0", features = ["v4", "serde"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 semver = "1.0.28"
 # Parse configured browser origins with the URL Standard's canonical host,
@@ -126,7 +126,7 @@ url = "2.5.8"
 # canonical normalization with full, non-Turkic folding without conflating
 # compatibility-only equivalents.
 unicode-normalization = "0.1.26"
-icu_casemap = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 
 # Error handling & logging
 anyhow = "1.0.104"
@@ -229,7 +229,7 @@ trybuild = "1.0.122"
 # actually parsing them, rather than approximating a parser with fragile quote/
 # indent heuristics. `default-features = false` drops the encoding_rs dependency
 # (UTF-8 input only), which is all the test fixtures and on-disk workflows need.
-saphyr = { version = "0.2.2", default-features = false }
+saphyr = { version = "0.3.3", default-features = false }
 
 [[bin]]
 name = "signal-fish-server"
