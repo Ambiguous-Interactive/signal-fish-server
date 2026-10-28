@@ -16,12 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduce room-event copies when no player needs reconnect replay (#636, #1277).
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
-  and handle binary channel events, the receive-rejection `failure` field, and channel-close observation fields.
+  and handle binary channel events, the receive-rejection `failure` field, channel-close observations,
+  and generation fields on connection, channel-open, and received-message output events.
 - Bound active-session response storage and reduce room percentile query memory and dashboard-history sizing work (#636).
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, and retained stream memory
   (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).
-- Add native SCTP send, expiry, acceptance, refusal, transport, and channel evidence to gameplay diagnostic snapshots (#1244).
+- Add native SCTP, transport, and actual channel settings to gameplay diagnostics (#1240, #1244).
 - Reduce native gameplay send allocations by reserving the required fragment count (#636).
 - Reduce native gameplay receive copies and retained storage for small messages and reordered packets (#636, #1229).
 - Reduce delivery-report and retained-gap lookup work in both reference clients (#1192, #1194).
@@ -39,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce relay queue scan work when batching is enabled (#1155).
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
-- Preserve native reference-client receive-limit and channel-closure observations in terminal events and logs (#1264).
+- Preserve native reference-client receive-limit, channel-closure, and first terminal connection observations (#1264).
 - Show which native peer channels retain application messages in shared receive-budget diagnostics (#1264).
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
 - Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
@@ -48,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the original physical generation on native gameplay and connection output after link rebuilds (#1283).
 - Wait for the requested native P2P rebuild before reporting success after relay fallback (#1282).
 - Keep native gameplay charged to the receive budget until its output is flushed or discarded (#1280).
 - Exclude terminal native reference-client links from the connected-pair count (#1276).

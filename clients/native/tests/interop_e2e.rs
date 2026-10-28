@@ -621,6 +621,25 @@ fn assert_pair_connected_exactly(events: &[Value], who: &str, expected_peers: &B
 /// (sender, label), with the documented `{"from","channel","seq"}` payload —
 /// and no messages from anyone outside `senders`.
 fn assert_exchange_received_from(events: &[Value], who: &str, senders: &BTreeSet<&str>) {
+    for receipt in events_named(events, "channel_message") {
+        let generation = receipt["generation"]
+            .as_u64()
+            .filter(|generation| *generation > 0)
+            .expect("every received packet retains its physical generation");
+        assert!(
+            events.iter().any(|event| event["event"] == "channel_open"
+                && event["peer"] == receipt["peer"]
+                && event["label"] == receipt["label"]
+                && event["generation"] == generation),
+            "{who}: receipt must identify its own open channel: {receipt}"
+        );
+        assert!(
+            events.iter().any(|event| event["event"] == "pc_state"
+                && event["peer"] == receipt["peer"]
+                && event["generation"] == generation),
+            "{who}: receipt must identify its own connection: {receipt}"
+        );
+    }
     let events = events_named(events, "channel_message");
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     for event in &events {

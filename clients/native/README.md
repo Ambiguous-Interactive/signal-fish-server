@@ -69,11 +69,16 @@ The default `reference` profile keeps its existing in-band channel contract.
 
 Binary packets in this profile use `EngineEvent::ChannelBinaryMessage` with
 exact `data` bytes. The CLI emits `channel_binary_message` with standard-base64
-`data_base64`. Text messages still use `ChannelMessage`. Binary packets do not
+`data_base64`. Both received-message output variants retain their physical
+`generation`, including queued receipts from a retired link. Text messages still use `ChannelMessage`.
+Binary packets do not
 count as the CLI's text exchange probes. All messages share the same receive
 count and byte limits. Keep each event's `queue_permit` until processing ends.
 **Migration:** Native library consumers must handle `ChannelBinaryMessage` in
-both the engine and output event enums.
+both the engine and output event enums. Output `PcState`, `ChannelOpen`,
+`ChannelMessage`, and `ChannelBinaryMessage` constructors must set `generation`.
+JSONL consumers must accept this added field. Generation numbers are local to one Engine;
+do not compare their numeric values between endpoints.
 The reference profile keeps its existing text projection for received packets.
 
 Local native-stack controls verify channel properties, SCTP IDs, exact binary
@@ -448,12 +453,13 @@ until the pipe drains, closes, or the process exits.
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
 | `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
 | `local_candidate` | `peer`, `candidate_type`, `address`, `port`, `protocol` | Native-only: a gathered local ICE candidate was advertised to `peer`, reported after the relay so the set describes what the remote side can see. `candidate_type` ∈ `host`/`srflx`/`prflx`/`relay`. The relay-only TURN cell requires every entry to be `relay`, and the IPv6 cell requires every entry to be an IPv6 host; without it, a session that gathers nothing reports only "no candidate pairs" |
-| `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
-| `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
+| `pc_state` | `peer`, `generation`, `state` | RTCPeerConnection state transition (informational) |
+| `channel_open` | `peer`, `generation`, `label` | One required data channel reached open |
 | `channel_receive_rejected` | `peer`, `generation`, `label`, `failure` | Native-only: first failed receive limit, raw message bytes, and sampled Engine backlog before link teardown |
-| `channel_closed` | `peer`, `label` | A required data channel started closing, closed, or became unreadable; the unusable pair is removed and relay fallback remains live |
+| `channel_closed` | `peer`, `generation`, `label`, optional `observation` | A required data channel started closing, closed, or became unreadable; the unusable pair is removed and relay fallback remains live |
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
-| `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
+| `channel_message` | `peer`, `generation`, `label`, `text` | A data-channel text message arrived |
+| `channel_binary_message` | `peer`, `generation`, `label`, `data_base64` | Exact Godot-profile binary bytes arrived |
 | `p2p_pair_connected` | `peer` | Both channels first opened for this logical peer obligation |
 | `p2p_pair_reconnected` | `peer` | Both channels reopened for a retained logical pair after PairRetry or a new session plan, even after the P2P deadline |
 | `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only nominated ICE pair after both channels open. The client reads the transport pair directly, including the actual type and address of a learned `prflx` remote candidate. Exchange proceeds while the probe runs, but clean exit requires this event. TURN requires both types to be `relay`. IPv6 requires a local `host`, a remote `host` or `prflx`, and two concrete dialable IPv6 addresses. Missing or `null` address evidence fails the IPv6 gate |
@@ -700,7 +706,19 @@ WebRTC driver. Compare both endpoints and their `pc_state` events when
 investigating a failed connection.
 
 Library callers can read the same local snapshot with
-`Engine::diagnostic_snapshot(peer)`.
+`Engine::diagnostic_snapshot(peer)`. `connection_terminal` retains the first
+`failed` or `closed` peer-connection callback for that physical generation.
+Transient `disconnected` callbacks do not set it. It is separate from
+`channel_closure` and `receive_failure`; none establishes a network cause.
+A fresh link starts with no terminal observation.
+
+`Engine::transport_diagnostic_snapshot(peer)` also queries each registered channel.
+`channel_properties` maps labels to the actual internal ID, label, protocol,
+negotiated flag, ordering, packet lifetime, and retry limit. Match these entries
+with `transport_channels` to check SCTP stream IDs. A failed property query returns
+an `error` entry without guessed settings. These driver queries are asynchronous
+and the combined snapshot is not atomic. Compare physical generations before
+combining samples or gameplay output across a rebuild.
 
 Each required channel also reports physical-generation `receipts` counts:
 `raw` counts complete messages returned by the driver poll; `admitted` counts

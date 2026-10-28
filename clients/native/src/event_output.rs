@@ -482,6 +482,7 @@ mod tests {
             crate::engine::MessageQueuePermit::for_test_with_budget(4096);
         let event = Event::ChannelBinaryMessage {
             peer: signal_fish_server::protocol::PlayerId::nil(),
+            generation: 7,
             label: "reliable".into(),
             data_base64: "x".repeat(5464),
         };
@@ -536,6 +537,7 @@ mod tests {
             output.emit_with_permit(
                 &Event::ChannelMessage {
                     peer: signal_fish_server::protocol::PlayerId::nil(),
+                    generation: 7,
                     label: "reliable".into(),
                     text: text.into(),
                 },

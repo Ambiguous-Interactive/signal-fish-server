@@ -297,6 +297,7 @@ struct ChannelReceiveAdmission {
     rejected: Mutex<bool>,
     failure: OnceLock<ChannelReceiveFailure>,
     closure: OnceLock<ChannelClosure>,
+    connection_terminal: OnceLock<RTCPeerConnectionState>,
     terminal: AtomicBool,
 }
 
@@ -855,6 +856,7 @@ impl Engine {
             rejected: Mutex::new(false),
             failure: OnceLock::new(),
             closure: OnceLock::new(),
+            connection_terminal: OnceLock::new(),
             terminal: AtomicBool::new(false),
         });
         let handler = Arc::new(PeerHandler {
@@ -1216,6 +1218,8 @@ impl Engine {
     /// Counts are sampled separately and do not include transport callback queues.
     /// `channel_closure` retains the first required-channel closure observation.
     /// It identifies a local callback or state query, not the network root cause.
+    /// `connection_terminal` keeps the first Failed or Closed PC callback.
+    /// It is separate from channel closure and receive refusal.
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
@@ -1247,6 +1251,7 @@ impl Engine {
             "receive_rejection": link.receive_admission.failure.get().map(|failure| failure.reason.as_str()),
             "receive_failure": link.receive_admission.failure.get(),
             "channel_closure": link.receive_admission.closure.get(),
+            "connection_terminal": link.receive_admission.connection_terminal.get().map(ToString::to_string),
             "receive_budget": {
                 "scope": "engine",
                 "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
@@ -1267,6 +1272,8 @@ impl Engine {
     /// retained closed channels; labels alone do not identify a channel.
     /// Transport packet counts include control traffic and protocol overhead;
     /// they do not prove SCTP DATA acceptance or application delivery.
+    /// `channel_properties` samples the registered channel objects themselves.
+    /// A failed property query returns an error instead of invented settings.
     /// Transport IDs are scoped to this physical generation.
     /// SCTP DATA attempts split into accepted, redundant, and refused chunks.
     /// Acceptance means receive-TSN admission, including saved reset DATA and
@@ -1322,8 +1329,26 @@ impl Engine {
                 _ => None,
             })
             .collect();
+        let mut channel_properties = serde_json::Map::new();
+        for (label, channel) in &link.channels {
+            let properties = async {
+                Ok::<_, webrtc::error::Error>(serde_json::json!({
+                    "internal_id": channel.id(),
+                    "label": channel.label().await?,
+                    "protocol": channel.protocol().await?,
+                    "negotiated": channel.negotiated().await?,
+                    "ordered": channel.ordered().await?,
+                    "max_packet_life_time": channel.max_packet_life_time().await?,
+                    "max_retransmits": channel.max_retransmits().await?,
+                }))
+            }
+            .await
+            .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}));
+            channel_properties.insert(label.clone(), properties);
+        }
         let mut snapshot = self.diagnostic_snapshot(peer);
         if let Some(fields) = snapshot.as_object_mut() {
+            fields.insert("channel_properties".to_string(), channel_properties.into());
             fields.insert("sctp".to_string(), serde_json::json!(sctp));
             fields.insert("sctp_error".to_string(), serde_json::json!(sctp_error));
             fields.insert(
@@ -1548,6 +1573,7 @@ impl PeerConnectionEventHandler for PeerHandler {
             state,
             RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
         ) {
+            let _ = self.receive_admission.connection_terminal.set(state);
             self.receive_admission
                 .terminal
                 .store(true, Ordering::Relaxed);

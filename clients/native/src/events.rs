@@ -108,9 +108,17 @@ pub enum Event {
         protocol: String,
     },
     /// RTCPeerConnection state transition (`new`/`connecting`/`connected`/...).
-    PcState { peer: PlayerId, state: String },
+    PcState {
+        peer: PlayerId,
+        generation: u64,
+        state: String,
+    },
     /// One data channel reached the open state.
-    ChannelOpen { peer: PlayerId, label: String },
+    ChannelOpen {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+    },
     /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed {
         peer: PlayerId,
@@ -136,12 +144,14 @@ pub enum Event {
     /// A data-channel text message was received.
     ChannelMessage {
         peer: PlayerId,
+        generation: u64,
         label: String,
         text: String,
     },
     /// Exact Godot-profile binary packet, encoded with standard base64.
     ChannelBinaryMessage {
         peer: PlayerId,
+        generation: u64,
         label: String,
         data_base64: String,
     },
@@ -349,11 +359,13 @@ mod tests {
         for bytes in [vec![], (0..=255).collect(), vec![0xff; 65_536]] {
             let value = serde_json::to_value(Event::ChannelBinaryMessage {
                 peer,
+                generation: 7,
                 label: "ordered".into(),
                 data_base64: STANDARD.encode(&bytes),
             })
             .unwrap();
             assert_eq!(value["event"], "channel_binary_message");
+            assert_eq!(value["generation"], 7);
             assert_eq!(value["peer"], peer.to_string());
             assert_eq!(value["label"], "ordered");
             assert_eq!(

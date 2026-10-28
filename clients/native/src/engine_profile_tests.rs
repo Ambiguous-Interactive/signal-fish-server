@@ -1432,6 +1432,7 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
     struct HeldOutput {
         started: Option<std::sync::mpsc::Sender<()>>,
         release: std::sync::mpsc::Receiver<()>,
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     }
     impl std::io::Write for HeldOutput {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -1439,6 +1440,7 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
                 started.send(()).unwrap();
                 self.release.recv().unwrap();
             }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1479,13 +1481,16 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
             assert_eq!(data, payload);
             let (started, waiting) = std::sync::mpsc::channel();
             let (release, released) = std::sync::mpsc::channel();
+            let output_bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
             let output = crate::event_output::EventOutput::new(HeldOutput {
                 started: Some(started),
                 release: released,
+                bytes: output_bytes.clone(),
             });
             output.emit_with_permit(
                 &crate::events::Event::ChannelBinaryMessage {
                     peer,
+                    generation,
                     label: RELIABLE_LABEL.into(),
                     data_base64: base64::Engine::encode(
                         &base64::engine::general_purpose::STANDARD,
@@ -1587,6 +1592,18 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
                 pair.receiver.diagnostic_snapshot(peer)["receive_budget"]["pending_bytes"],
                 0
             );
+            let row: serde_json::Value =
+                serde_json::from_slice(&output_bytes.lock().unwrap()).unwrap();
+            assert_eq!(
+                row["generation"], generation,
+                "flushed gameplay must retain the old physical identity after rebuilding"
+            );
+            assert_ne!(row["generation"], fresh["generation"]);
+            assert_eq!(row["peer"], peer.to_string());
+            assert_eq!(
+                row["data_base64"],
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &payload)
+            );
             let payload = format!("fresh:{receiver_offers}:{label}:鱼\0").into_bytes();
             pair.sender
                 .channel(pair.receiver_id, RELIABLE_LABEL)
@@ -1620,4 +1637,177 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
             pair.cleanup().await;
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transport_snapshot_preserves_actual_channel_contracts_in_both_profiles() {
+    for godot in [false, true] {
+        let pair = if godot {
+            negotiated_pair().await
+        } else {
+            LivePair::connect().await
+        };
+        for (engine, peer) in [
+            (&pair.sender, pair.receiver_id),
+            (&pair.receiver, pair.sender_id),
+        ] {
+            let snapshot = engine.transport_diagnostic_snapshot(peer).await;
+            let properties = snapshot["channel_properties"]
+                .as_object()
+                .expect("retain actual registered channel properties");
+            assert_eq!(properties.len(), if godot { 3 } else { 2 });
+            for (label, channel) in &engine.peers[&peer].channels {
+                let label = label.as_str();
+                let actual = &properties[label];
+                assert_eq!(actual["internal_id"], channel.id());
+                assert_eq!(actual["label"], label);
+                assert_eq!(actual["protocol"], "");
+                assert_eq!(actual["negotiated"], godot);
+                assert_eq!(actual["ordered"], label != UNRELIABLE_LABEL);
+                assert_eq!(
+                    actual["max_packet_life_time"],
+                    if godot && label != RELIABLE_LABEL {
+                        serde_json::json!(1)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                );
+                assert_eq!(
+                    actual["max_retransmits"],
+                    if !godot && label == UNRELIABLE_LABEL {
+                        serde_json::json!(0)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                );
+                assert!(actual.get("error").is_none());
+                let stats = snapshot["transport_channels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["label"] == label)
+                    .unwrap();
+                if godot {
+                    assert_eq!(
+                        stats["stream_id"],
+                        match label {
+                            RELIABLE_LABEL => 1,
+                            ORDERED_LABEL => 2,
+                            _ => 3,
+                        }
+                    );
+                }
+            }
+        }
+        pair.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_terminal_connection_callback_keeps_first_state_until_fresh_pair() {
+    for first in [
+        RTCPeerConnectionState::Failed,
+        RTCPeerConnectionState::Closed,
+    ] {
+        for receiver_offers in [false, true] {
+            let mut pair = negotiated_pair().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            let peer = pair.sender_id;
+            let link = &pair.receiver.peers[&peer];
+            let generation = link.generation;
+            let handler = PeerHandler {
+                peer,
+                generation,
+                crippled: false,
+                events: pair.receiver.events.clone(),
+                channel_admission: link.channel_admission.clone(),
+                receive_admission: link.receive_admission.clone(),
+            };
+            handler
+                .on_connection_state_change(RTCPeerConnectionState::Disconnected)
+                .await;
+            assert!(pair.receiver.diagnostic_snapshot(peer)["connection_terminal"].is_null());
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
+            handler.on_connection_state_change(first).await;
+            handler
+                .on_connection_state_change(RTCPeerConnectionState::Closed)
+                .await;
+            handler
+                .on_connection_state_change(RTCPeerConnectionState::Failed)
+                .await;
+            let snapshot = pair.receiver.diagnostic_snapshot(peer);
+            assert_eq!(snapshot["connection_terminal"], first.to_string());
+            assert!(
+                snapshot["channel_closure"].is_null(),
+                "a PC callback does not invent a channel closure"
+            );
+            assert!(snapshot["receive_failure"].is_null());
+            assert_eq!(pair.receiver.connected_pair_count(), 0);
+            for label in [RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL] {
+                assert!(pair.receiver.send_channel(peer, label).await.is_none());
+            }
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            pair.negotiate().await;
+            assert_ne!(pair.receiver.peers[&peer].generation, generation);
+            assert!(pair.receiver.diagnostic_snapshot(peer)["connection_terminal"].is_null());
+            handler.on_connection_state_change(first).await;
+            assert!(
+                pair.receiver.diagnostic_snapshot(peer)["connection_terminal"].is_null(),
+                "retired callbacks cannot alter fresh-link evidence"
+            );
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
+            exchange(&mut pair).await;
+            pair.cleanup().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn transport_snapshot_preserves_retained_channel_contracts_after_driver_close() {
+    let (events, _receiver) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(
+        EngineSettings {
+            crippled: true,
+            channel_profile: ChannelProfile::Godot,
+            ..EngineSettings::default()
+        },
+        events,
+    )
+    .unwrap();
+    let peer = PlayerId::from_u128(0x570);
+    assert!(engine.transport_diagnostic_snapshot(peer).await.is_null());
+    engine.pair_with(peer, false, &[]).await.unwrap();
+    let before = engine.transport_diagnostic_snapshot(peer).await;
+    assert_eq!(before["channel_properties"].as_object().unwrap().len(), 3);
+    assert_eq!(
+        before["channel_properties"][RELIABLE_LABEL]["negotiated"],
+        true
+    );
+    engine.peers[&peer].pc.close().await.unwrap();
+    let after = tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.transport_diagnostic_snapshot(peer),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        after["channel_properties"], before["channel_properties"],
+        "closed channel objects still report their actual immutable contract"
+    );
+    for label in [RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL] {
+        let stats = after["transport_channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["label"] == label)
+            .unwrap();
+        assert_eq!(stats["state"], "closed");
+    }
+    engine.remove_peer(peer).await.unwrap();
+    assert!(engine.transport_diagnostic_snapshot(peer).await.is_null());
 }
