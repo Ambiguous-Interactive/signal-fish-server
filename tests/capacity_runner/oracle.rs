@@ -973,6 +973,7 @@ fn indexed_relay_blocks<'a>(
             .is_some()
         {
             /* Arbitrary replay epochs can interleave within sequence order. */
+            drop(blocks);
             return relay_blocks(sent);
         }
         start = end;
