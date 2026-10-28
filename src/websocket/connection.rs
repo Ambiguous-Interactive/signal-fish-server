@@ -5163,17 +5163,17 @@ mod tests {
         let close = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match client.next().await {
-                    Some(Ok(TungsteniteMessage::Close(close))) => {
-                        break close.expect("coded close")
-                    }
+                    Some(Ok(TungsteniteMessage::Close(close))) => break Ok(close),
                     Some(Ok(_)) => {}
-                    Some(Err(error)) => panic!("writer close failed: {error}"),
-                    None => panic!("stream ended before writer close"),
+                    Some(Err(error)) => break Err(error.to_string()),
+                    None => break Err("stream ended before writer close".to_string()),
                 }
             }
         })
         .await
-        .expect("writer sends close while reader is held");
+        .expect("writer sends close while reader is held")
+        .expect("writer close reaches the client")
+        .expect("coded close");
         assert_eq!(u16::from(close.code), 4000);
         assert_eq!(close.reason, "server_shutdown");
         tokio::time::timeout(Duration::from_secs(5), async {
