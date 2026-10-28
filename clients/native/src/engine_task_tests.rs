@@ -359,16 +359,33 @@ async fn first_channel_closure_survives_later_labels_and_duplicate_reports() {
         ChannelCloseReason::CallbackClosed,
     );
     let mut observed = Vec::new();
-    while let Ok(event) = received.try_recv() {
-        if let EngineEvent::ChannelClosed {
-            label,
-            reason,
-            generation,
-            ..
-        } = event
-        {
-            assert_eq!(generation, link.generation);
-            observed.push((label, reason));
+    loop {
+        let event = match received.try_recv() {
+            Ok(event) => event,
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                panic!("live Engine retains its event sender")
+            }
+        };
+        match event {
+            EngineEvent::ChannelClosed {
+                label,
+                reason,
+                generation,
+                ..
+            } => {
+                assert_eq!(generation, link.generation);
+                observed.push((label, reason));
+            }
+            event => assert!(
+                matches!(
+                    event,
+                    EngineEvent::LocalCandidate { .. }
+                        | EngineEvent::IceGatheringComplete { .. }
+                        | EngineEvent::PcState { .. }
+                ),
+                "unconnected pair must not discard gameplay or admission events"
+            ),
         }
     }
     assert_eq!(
