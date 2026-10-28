@@ -1891,7 +1891,9 @@ impl OperationLatencyHistogram {
         significant_figures: u8,
     ) -> Self {
         let lowest = lowest_discernible_micros.max(1);
-        let highest = highest_trackable_micros.max(lowest);
+        let highest = lowest
+            .saturating_mul(2)
+            .min(highest_trackable_micros.max(lowest));
         let sig_figs = significant_figures.clamp(1, 5);
 
         // Try to create histogram with requested bounds; fall back to unbounded if that fails.
@@ -1919,6 +1921,10 @@ impl OperationLatencyHistogram {
             tracing::error!(target: "metrics", "All histogram creation attempts failed - metrics will not be recorded");
         }
 
+        let histogram = histogram.map(|mut histogram| {
+            histogram.auto(true);
+            histogram
+        });
         Self { histogram }
     }
 
@@ -2062,6 +2068,75 @@ mod tests {
                 .is_some_and(|value| (10.0..10.01).contains(&value)));
         }
         assert_eq!(tracker.operations.len(), 3);
+    }
+
+    #[test]
+    fn operation_latency_range_grows_without_changing_metrics_or_limits() {
+        for (lowest, highest, precision) in [(1, 300_000_000, 3), (100, 10_000_000, 2), (1, 2, 1)] {
+            let mut actual = OperationLatencyHistogram::new(lowest, highest, precision);
+            let mut expected = OperationLatencyHistogram {
+                histogram: Some(Histogram::new_with_bounds(lowest, highest, precision).unwrap()),
+            };
+            let initial_buckets = actual.histogram.as_ref().unwrap().distinct_values();
+            let full_buckets = expected.histogram.as_ref().unwrap().distinct_values();
+            if highest > 2 {
+                assert!(
+                    initial_buckets < full_buckets,
+                    "initial={initial_buckets}, full={full_buckets}"
+                );
+            }
+            for sample in [
+                0,
+                1,
+                lowest,
+                777,
+                65_535,
+                1_000_000,
+                highest,
+                highest.saturating_add(1),
+                u64::MAX,
+            ] {
+                assert_eq!(
+                    actual.record(sample, highest),
+                    expected.record(sample, highest)
+                );
+                assert_eq!(
+                    serde_json::to_value(actual.metrics()).unwrap(),
+                    serde_json::to_value(expected.metrics()).unwrap(),
+                    "lowest={lowest}, highest={highest}, precision={precision}, sample={sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated operation latency memory profile"]
+    fn operation_latency_memory_profile() {
+        let fixed = std::env::var_os("SIGNAL_FISH_FIXED_LATENCY_RANGE").is_some();
+        let mut histograms = Vec::new();
+        for _ in 0..128 {
+            let mut histogram = if fixed {
+                OperationLatencyHistogram {
+                    histogram: Some(Histogram::new_with_bounds(1, 300_000_000, 3).unwrap()),
+                }
+            } else {
+                OperationLatencyHistogram::new(1, 300_000_000, 3)
+            };
+            for sample in [0, 100, 500, 1_000, 4_000] {
+                histogram.record(sample, 300_000_000);
+            }
+            histograms.push(histogram);
+        }
+        let buckets: usize = histograms
+            .iter()
+            .map(|histogram| histogram.histogram.as_ref().unwrap().distinct_values())
+            .sum();
+        let checksum: u64 = histograms
+            .iter()
+            .map(|histogram| histogram.metrics().unwrap().sample_count)
+            .sum();
+        println!("OPERATION_LATENCY_MEMORY fixed={fixed} histograms={} bucket_bytes={} checksum={checksum}", histograms.len(), buckets * std::mem::size_of::<u64>());
+        std::hint::black_box(histograms);
     }
 
     // -----------------------------------------------------------------------
