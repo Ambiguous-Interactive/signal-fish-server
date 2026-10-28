@@ -10229,3 +10229,27 @@ native readiness/closure/refusal controls (`932f60e2`). Both repairs pass
 independent adversarial review. Strict root and native all-target/all-feature
 lint pass. The allocation result is local; full hosted qualification remains
 a separate gate.
+
+### Room occupancy percentile storage (#636)
+
+Room percentile queries copied and sorted one occupancy value per room.
+The allocation control on 1,024 rooms records 8,739 bytes for the overall
+query and 11,280 bytes for four game queries before the repair. The new
+frequency distribution retains one counter per distinct occupancy. The same
+control records 599 and 3,392 bytes. These new byte totals are also unchanged
+at 16 rooms. The existing allocation benchmark now enforces fixed ceilings
+for both query paths.
+
+The distribution preserves the integer rounded ranks for all six public
+percentiles, including the maximum. Empty databases still return empty maps.
+A differential control covers every per-mille rank through 1,001, repeated
+sizes, zero, 255, 256 and `usize::MAX`. A live database control retains exact
+overall and per-game metrics. The result is a storage improvement; it does
+not establish a relay-throughput increase or a new room-capacity limit.
+
+The server wire and public metrics schema are unchanged. Rust, .NET and Godot
+clients require no migration for this change. Dependency refresh validation
+includes the existing canonical-name matching control, six YAML controls,
+15 RTC library controls and two native Godot-profile exchange/recovery controls.
+The native RTC dependency manifest now uses `pem` 4.0.0 and `x509-parser`
+0.18.1. No transport source repair is claimed by those dependency changes.

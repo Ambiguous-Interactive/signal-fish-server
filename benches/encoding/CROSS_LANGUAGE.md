@@ -97,7 +97,8 @@ hashes beside the Rust baseline. Different runtime and model costs limit direct
 language comparisons. The Rust run uses Criterion's different sampling method.
 The [adoption decision](ADOPTION.md) applies the separate gate in #772.
 
-The [latest dependency refresh](results/2026-10-21-cross-language-aarch64/README.md)
+The [latest dependency refresh](results/2026-10-28-cross-language-aarch64/README.md)
 retains a new full sample set for the current locks and Godot 4.7.2. The earlier
-[refresh](results/2026-10-16-cross-language-aarch64/README.md) and baseline remain
+[2026-10-21 refresh](results/2026-10-21-cross-language-aarch64/README.md),
+[2026-10-16 refresh](results/2026-10-16-cross-language-aarch64/README.md), and baseline remain
 historical evidence for their recorded sources.

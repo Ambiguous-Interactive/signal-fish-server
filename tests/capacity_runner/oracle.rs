@@ -1264,38 +1264,123 @@ fn insert_epoch(epochs: &mut Vec<u32>, epoch: u32) {
     }
 }
 
-fn room_churn_events<'a>(
-    events: &'a [ChurnEvent],
-    room_of: &BTreeMap<&str, u32>,
-) -> BTreeMap<u32, Vec<&'a ChurnEvent>> {
-    let mut rooms: BTreeMap<u32, Vec<&ChurnEvent>> = BTreeMap::new();
-    for event in events {
-        if let Some(room) = room_of.get(event.recipient.as_str()) {
-            rooms.entry(*room).or_default().push(event);
+/// Compact raw offsets halve retained index and stable-sort storage on 64-bit hosts.
+enum ChurnPositions {
+    Compact(Vec<u32>),
+    Wide(Vec<usize>),
+}
+
+impl ChurnPositions {
+    fn new(compact: bool) -> Self {
+        if compact {
+            Self::Compact(Vec::new())
+        } else {
+            Self::Wide(Vec::new())
         }
     }
-    for events in rooms.values_mut() {
-        events.sort_by_key(|event| event.at_us);
+
+    fn push(&mut self, position: usize) {
+        match self {
+            Self::Compact(positions) => {
+                positions.push(u32::try_from(position).expect("validated churn offset"))
+            }
+            Self::Wide(positions) => positions.push(position),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Compact(positions) => positions.len(),
+            Self::Wide(positions) => positions.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<usize> {
+        match self {
+            Self::Compact(positions) => positions.get(index).map(|&position| position as usize),
+            Self::Wide(positions) => positions.get(index).copied(),
+        }
+    }
+
+    fn sort(&mut self, events: &[ChurnEvent]) {
+        match self {
+            Self::Compact(positions) => {
+                positions.sort_by_key(|&position| events[position as usize].at_us)
+            }
+            Self::Wide(positions) => positions.sort_by_key(|&position| events[position].at_us),
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Compact(positions) => positions.capacity() * std::mem::size_of::<u32>(),
+            Self::Wide(positions) => positions.capacity() * std::mem::size_of::<usize>(),
+        }
+    }
+}
+
+fn room_churn_events(
+    events: &[ChurnEvent],
+    room_of: &BTreeMap<&str, u32>,
+) -> BTreeMap<u32, ChurnPositions> {
+    index_room_churn_events(events, room_of, u32::try_from(events.len()).is_ok())
+}
+
+fn index_room_churn_events(
+    events: &[ChurnEvent],
+    room_of: &BTreeMap<&str, u32>,
+    compact: bool,
+) -> BTreeMap<u32, ChurnPositions> {
+    let mut rooms: BTreeMap<u32, ChurnPositions> = BTreeMap::new();
+    for (position, event) in events.iter().enumerate() {
+        if let Some(room) = room_of.get(event.recipient.as_str()) {
+            rooms
+                .entry(*room)
+                .or_insert_with(|| ChurnPositions::new(compact))
+                .push(position);
+        }
+    }
+    for positions in rooms.values_mut() {
+        positions.sort(events);
     }
     rooms
 }
 
 fn viewer_churn_events<'a>(
-    events: &'a [&'a ChurnEvent],
+    events: &'a [ChurnEvent],
+    positions: &'a ChurnPositions,
     viewer: &'a str,
 ) -> impl Iterator<Item = &'a ChurnEvent> + 'a {
-    events
-        .chunk_by(|first, next| first.at_us == next.at_us)
-        .flat_map(move |tied| {
-            tied.iter()
-                .copied()
-                .filter(move |event| event.recipient == viewer)
-                .chain(
-                    tied.iter()
-                        .copied()
-                        .filter(move |event| event.recipient != viewer),
-                )
-        })
+    let mut begin = 0;
+    let mut end = 0;
+    let mut cursor = 0;
+    let mut own_events = false;
+    std::iter::from_fn(move || loop {
+        if cursor == end {
+            if own_events {
+                cursor = begin;
+                own_events = false;
+            } else {
+                begin = end;
+                let first = positions.get(end)?;
+                end += 1;
+                while positions
+                    .get(end)
+                    .is_some_and(|position| events[position].at_us == events[first].at_us)
+                {
+                    end += 1;
+                }
+                cursor = begin;
+                own_events = true;
+            }
+        }
+        let event = &events[positions.get(cursor)?];
+        cursor += 1;
+        if (event.recipient == viewer) == own_events {
+            return Some(event);
+        }
+    })
 }
 
 /// Rebuild every roster peer's [`ChurnView`] from the run's recorded churn
@@ -1369,7 +1454,7 @@ fn churn_views<'a>(
         for member in &members_by_room[room] {
             view.adopted.insert(*member, vec![1]);
         }
-        for event in viewer_churn_events(events, viewer) {
+        for event in viewer_churn_events(&records.churn, events, viewer) {
             let crate::records::ChurnEvent {
                 recipient,
                 phase,
@@ -3147,7 +3232,78 @@ mod coverage_tests {
         }
     }
 
-    // #636: room indexing must preserve the stable per-viewer transition order.
+    // #775/#636: room indexing must preserve the stable per-viewer transition order.
+    #[test]
+    #[ignore = "isolated room churn index memory profile; run in a fresh process"]
+    fn generator_room_churn_index_memory_profile() {
+        let records = churn_sort_fixture(1_000_000);
+        let room_of: BTreeMap<_, _> = records
+            .churn
+            .iter()
+            .map(|event| (event.recipient.as_str(), 0))
+            .collect();
+        let stable = std::env::var_os("CAPACITY_ROOM_CHURN_STABLE").is_some();
+        let started = std::time::Instant::now();
+        let checksum = |events: &mut dyn Iterator<Item = &ChurnEvent>| {
+            let mut hash = 0_u64;
+            for event in events {
+                let position = (std::ptr::from_ref(event).addr() - records.churn.as_ptr().addr())
+                    / std::mem::size_of::<ChurnEvent>();
+                hash = hash.wrapping_mul(31).wrapping_add(count_u64(position));
+            }
+            hash
+        };
+        let (count, bytes, digest) = if stable {
+            let mut rooms: BTreeMap<u32, Vec<&ChurnEvent>> = BTreeMap::new();
+            for event in &records.churn {
+                if let Some(room) = room_of.get(event.recipient.as_str()) {
+                    rooms.entry(*room).or_default().push(event);
+                }
+            }
+            for events in rooms.values_mut() {
+                events.sort_by_key(|event| event.at_us);
+            }
+            let digest = checksum(
+                &mut rooms[&0]
+                    .chunk_by(|first, next| first.at_us == next.at_us)
+                    .flat_map(|tied| {
+                        tied.iter()
+                            .copied()
+                            .filter(|event| event.recipient == "peer-0")
+                            .chain(
+                                tied.iter()
+                                    .copied()
+                                    .filter(|event| event.recipient != "peer-0"),
+                            )
+                    }),
+            );
+            let count = rooms.values().map(Vec::len).sum::<usize>();
+            let bytes = rooms
+                .values()
+                .map(|events| events.capacity() * std::mem::size_of::<&ChurnEvent>())
+                .sum::<usize>();
+            std::hint::black_box(&rooms);
+            (count, bytes, digest)
+        } else {
+            let rooms = room_churn_events(&records.churn, &room_of);
+            let digest = checksum(&mut viewer_churn_events(
+                &records.churn,
+                &rooms[&0],
+                "peer-0",
+            ));
+            let count = rooms.values().map(ChurnPositions::len).sum::<usize>();
+            let bytes = rooms
+                .values()
+                .map(ChurnPositions::retained_bytes)
+                .sum::<usize>();
+            std::hint::black_box(&rooms);
+            (count, bytes, digest)
+        };
+        assert_eq!(count, records.churn.len());
+        println!("ROOM_CHURN_INDEX stable={stable} rows={count} retained_bytes={bytes} checksum={digest} elapsed_us={}", started.elapsed().as_micros());
+        std::hint::black_box(&records);
+    }
+
     #[test]
     fn indexed_churn_events_match_independent_viewer_sorts() {
         let room_of = BTreeMap::from([
@@ -3179,32 +3335,42 @@ mod coverage_tests {
                     }
                 })
                 .collect();
-            let rooms = room_churn_events(&events, &room_of);
-            assert_eq!(
-                rooms.values().map(Vec::len).sum::<usize>(),
-                events
-                    .iter()
-                    .filter(|event| room_of.contains_key(event.recipient.as_str()))
-                    .count()
-            );
-            for (viewer, room) in &room_of {
-                let mut expected: Vec<_> = events
-                    .iter()
-                    .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
-                    .collect();
-                expected.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
-                let actual: Vec<_> =
-                    viewer_churn_events(rooms.get(room).map_or(&[], Vec::as_slice), viewer)
-                        .map(std::ptr::from_ref)
-                        .collect();
+            for compact in [true, false] {
+                let rooms = if compact {
+                    room_churn_events(&events, &room_of)
+                } else {
+                    index_room_churn_events(&events, &room_of, false)
+                };
+                assert!(rooms
+                    .values()
+                    .all(|positions| matches!(positions, ChurnPositions::Compact(_)) == compact));
                 assert_eq!(
-                    actual,
-                    expected
-                        .into_iter()
-                        .map(std::ptr::from_ref)
-                        .collect::<Vec<_>>(),
-                    "count={count}, viewer={viewer:?}"
+                    rooms.values().map(ChurnPositions::len).sum::<usize>(),
+                    events
+                        .iter()
+                        .filter(|event| room_of.contains_key(event.recipient.as_str()))
+                        .count()
                 );
+                for (viewer, room) in &room_of {
+                    let mut expected: Vec<_> = events
+                        .iter()
+                        .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
+                        .collect();
+                    expected.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
+                    let empty = ChurnPositions::new(true);
+                    let actual: Vec<_> =
+                        viewer_churn_events(&events, rooms.get(room).unwrap_or(&empty), viewer)
+                            .map(std::ptr::from_ref)
+                            .collect();
+                    assert_eq!(
+                        actual,
+                        expected
+                            .into_iter()
+                            .map(std::ptr::from_ref)
+                            .collect::<Vec<_>>(),
+                        "count={count}, viewer={viewer:?}"
+                    );
+                }
             }
         }
     }

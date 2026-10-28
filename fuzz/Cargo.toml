@@ -37,7 +37,7 @@ chrono = "0.4.45"
 # runs on a fresh current-thread runtime so background tasks cannot accumulate
 # across libFuzzer iterations.
 tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
-uuid = { version = "1.28.0", features = ["v4"] }
+uuid = { version = "1.29.0", features = ["v4"] }
 
 [dependencies.signal-fish-server]
 path = ".."

@@ -2571,69 +2571,36 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn get_player_count_percentiles(&self) -> Result<HashMap<String, f64>> {
-        let mut player_counts: Vec<usize> = {
+        let counts = {
             let rooms = self.rooms.read().await;
-            rooms.values().map(|room| room.players.len()).collect()
+            let mut counts = PlayerCountDistribution::default();
+            for room in rooms.values() {
+                counts.record(room.players.len());
+            }
+            counts
         };
-
-        if player_counts.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        player_counts.sort_unstable();
-
-        let mut percentiles = HashMap::new();
-        percentiles.insert("p50".to_string(), percentile(&player_counts, 500));
-        percentiles.insert("p90".to_string(), percentile(&player_counts, 900));
-        percentiles.insert("p99".to_string(), percentile(&player_counts, 990));
-        percentiles.insert("p99_5".to_string(), percentile(&player_counts, 995));
-        percentiles.insert("p99_9".to_string(), percentile(&player_counts, 999));
-        // SAFETY: We checked player_counts.is_empty() above, so .last() is guaranteed to succeed
-        percentiles.insert(
-            "p100".to_string(),
-            player_counts.last().copied().unwrap_or(0) as f64,
-        );
-
-        Ok(percentiles)
+        Ok(counts.percentiles())
     }
 
     async fn get_game_player_percentiles(&self) -> Result<HashMap<String, HashMap<String, f64>>> {
-        let game_player_counts = {
+        let counts = {
             let rooms = self.rooms.read().await;
-            let mut counts: HashMap<String, Vec<usize>> = HashMap::new();
+            let mut counts: HashMap<String, PlayerCountDistribution> = HashMap::new();
             for room in rooms.values() {
-                if let Some(player_counts) = counts.get_mut(room.game_name.as_str()) {
-                    player_counts.push(room.players.len());
+                if let Some(distribution) = counts.get_mut(room.game_name.as_str()) {
+                    distribution.record(room.players.len());
                 } else {
-                    counts.insert(room.game_name.clone(), vec![room.players.len()]);
+                    let mut distribution = PlayerCountDistribution::default();
+                    distribution.record(room.players.len());
+                    counts.insert(room.game_name.clone(), distribution);
                 }
             }
             counts
         };
-
-        let mut result = HashMap::with_capacity(game_player_counts.len());
-
-        for (game_name, mut player_counts) in game_player_counts {
-            if !player_counts.is_empty() {
-                player_counts.sort_unstable();
-
-                let mut percentiles = HashMap::new();
-                percentiles.insert("p50".to_string(), percentile(&player_counts, 500));
-                percentiles.insert("p90".to_string(), percentile(&player_counts, 900));
-                percentiles.insert("p99".to_string(), percentile(&player_counts, 990));
-                percentiles.insert("p99_5".to_string(), percentile(&player_counts, 995));
-                percentiles.insert("p99_9".to_string(), percentile(&player_counts, 999));
-                // SAFETY: We're inside if !player_counts.is_empty(), so .last() is guaranteed to succeed
-                percentiles.insert(
-                    "p100".to_string(),
-                    player_counts.last().copied().unwrap_or(0) as f64,
-                );
-
-                result.insert(game_name, percentiles);
-            }
-        }
-
-        Ok(result)
+        Ok(counts
+            .into_iter()
+            .map(|(game, counts)| (game, counts.percentiles()))
+            .collect())
     }
 
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()> {
@@ -2908,6 +2875,50 @@ impl GameDatabase for InMemoryDatabase {
 
 const PERCENTILE_SCALE: usize = 1_000;
 
+/// Exact occupancy ranks retain one counter per distinct room size.
+#[derive(Default)]
+struct PlayerCountDistribution {
+    frequencies: std::collections::BTreeMap<usize, usize>,
+    rooms: usize,
+}
+
+impl PlayerCountDistribution {
+    fn record(&mut self, players: usize) {
+        let count = self.frequencies.entry(players).or_default();
+        *count = count.saturating_add(1);
+        self.rooms = self.rooms.saturating_add(1);
+    }
+
+    fn percentile(&self, per_mille: usize) -> f64 {
+        let mut rank = percentile_index(self.rooms.saturating_sub(1), per_mille);
+        for (&players, &count) in &self.frequencies {
+            if rank < count {
+                return players as f64;
+            }
+            rank = rank.saturating_sub(count);
+        }
+        0.0
+    }
+
+    fn percentiles(&self) -> HashMap<String, f64> {
+        if self.rooms == 0 {
+            return HashMap::new();
+        }
+        [
+            ("p50", 500),
+            ("p90", 900),
+            ("p99", 990),
+            ("p99_5", 995),
+            ("p99_9", 999),
+            ("p100", 1000),
+        ]
+        .into_iter()
+        .map(|(name, rank)| (name.to_string(), self.percentile(rank)))
+        .collect()
+    }
+}
+
+#[cfg(test)]
 fn percentile(sorted_values: &[usize], per_mille: usize) -> f64 {
     if sorted_values.is_empty() {
         return 0.0;
@@ -3005,6 +3016,43 @@ mod tests {
         assert_eq!(percentile(&values, 900), 80.0);
         assert_eq!(percentile(&values, 999), 90.0);
         assert_eq!(percentile(&[], 999), 0.0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn occupancy_distribution_matches_sorted_ranks_for_repeated_and_extreme_sizes() {
+        for sizes in [
+            vec![],
+            vec![0],
+            vec![usize::MAX],
+            vec![0, 255, 256, usize::MAX],
+            (0..1024).map(|index| (index * 17) % 256).collect(),
+        ] {
+            let mut distribution = PlayerCountDistribution::default();
+            for &size in &sizes {
+                distribution.record(size);
+            }
+            let mut sorted = sizes.clone();
+            sorted.sort_unstable();
+            for rank in 0..=1001 {
+                assert_eq!(
+                    distribution.percentile(rank),
+                    percentile(&sorted, rank),
+                    "sizes={}, rank={rank}",
+                    sizes.len()
+                );
+            }
+            assert_eq!(
+                distribution.frequencies.len(),
+                sizes.iter().collect::<HashSet<_>>().len()
+            );
+        }
+        let mut repeated = PlayerCountDistribution::default();
+        for _ in 0..100_000 {
+            repeated.record(16);
+        }
+        assert_eq!(repeated.frequencies.len(), 1);
+        assert_eq!(repeated.percentile(999), 16.0);
     }
 
     #[tokio::test]

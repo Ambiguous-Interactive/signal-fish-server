@@ -186,7 +186,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.29
+        uses: taiki-e/install-action@v2.87.32
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny

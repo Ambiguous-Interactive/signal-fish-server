@@ -680,6 +680,12 @@ fn assert_database_metrics_reuse_game_names() {
             let region = Region::new(GLOBAL);
             std::hint::black_box(database.get_game_player_percentiles().await.expect("percentiles"));
             let percentiles = region.change();
+            let region = Region::new(GLOBAL);
+            std::hint::black_box(database.get_player_count_percentiles().await.expect("overall percentiles"));
+            let overall_percentiles = region.change();
+            eprintln!("rooms={room_count} overall_percentiles={overall_percentiles:?}");
+            bounded &= overall_percentiles.bytes_allocated <= 2_048
+                && percentiles.bytes_allocated <= 4_096;
             eprintln!(
                 "rooms={room_count} games=4 counts_allocations={} counts_reallocations={} counts_bytes={} percentiles_allocations={} percentiles_reallocations={} percentiles_bytes={}",
                 counts.allocations, counts.reallocations, counts.bytes_allocated,

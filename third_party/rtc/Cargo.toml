@@ -92,7 +92,7 @@ version = "0.21.1"
 package = "rtc-media"
 
 [dependencies.pem]
-version = "3.0.3"
+version = "4.0.0"
 
 [dependencies.rand]
 version = "0.10.1"
@@ -164,7 +164,7 @@ version = "2.8"
 version = "2.5.0"
 
 [dependencies.x509-parser]
-version = "0.16.0"
+version = "0.18.1"
 
 [dev-dependencies.chrono]
 version = "0.4.45"
