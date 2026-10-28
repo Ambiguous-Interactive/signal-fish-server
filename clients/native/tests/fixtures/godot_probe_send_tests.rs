@@ -422,9 +422,10 @@ async fn negotiated_small_message_limit_reports_startup_failure_without_retiring
             assert_eq!(failed["generation"], generation);
             assert_eq!(failed["label"], "reliable");
             assert_eq!(failed["count"], admitted);
-            assert!(failed["startup_failure"]
-                .as_str()
-                .is_some_and(|error| !error.is_empty()));
+            assert_eq!(
+                failed["startup_failure"],
+                webrtc::error::Error::ErrOutboundPacketTooLarge.to_string()
+            );
             assert_no_output(&mut rows);
             let snapshot = pair.engines[0].diagnostic_snapshot(peer);
             assert!(snapshot["receive_failure"].is_null());
