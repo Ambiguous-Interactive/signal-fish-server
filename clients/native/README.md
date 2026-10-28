@@ -102,6 +102,14 @@ remote networks, and the historical Godot 4.3 loss remain open in
 and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
 
 For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
+All RTC, SCTP, channel-setting, and send-debt queries share one 250 ms wait budget.
+If a query times out, the snapshot keeps local callback and receive-budget evidence
+and completed transport samples. `transport_snapshot_error` is `deadline_elapsed`;
+`transport_snapshot_stage` names the unfinished query. A channel query also sets
+`transport_snapshot_channel`. Missing samples stay absent; do not read them as zero.
+`send_channels` reports each registered channel's outstanding bytes under this same budget.
+Timeout cancels sampling and leaves gameplay and link ownership unchanged.
+The budget is cooperative; synchronous work can still delay executor scheduling.
 Its `sctp` entry records received DATA and SACK chunks, local retransmission
 and delayed-acknowledgment timeouts, and fast retransmissions. DATA counts
 advance before message reassembly. Separate counters report new accepted DATA,

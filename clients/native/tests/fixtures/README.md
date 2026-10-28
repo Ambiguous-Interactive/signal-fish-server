@@ -23,6 +23,12 @@ failure includes the first failed limit, raw message size, and sampled backlog.
 The snapshot includes current callback receipts, RTC channel counters, SCTP
 admission counters, ICE/DTLS state, and outstanding send bytes per channel.
 These samples are not atomic.
+The Engine bounds all transport and send-debt queries with one 250 ms wait budget.
+A timeout keeps local callback evidence and completed samples. It sets
+`transport_snapshot_error=deadline_elapsed` and `transport_snapshot_stage`;
+channel queries also name `transport_snapshot_channel`. Uncollected fields or
+channel entries stay absent. A partial snapshot does not prove zero transport
+activity or qualify gameplay. The probe does not start separate unbounded debt reads.
 `closed` records physical closure separately with its own transport snapshot.
 Its `observation` names the local callback (`callback_error`, `callback_closing`,
 `callback_closed`), ended stream (`stream_ended`), or state query

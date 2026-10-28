@@ -1283,82 +1283,109 @@ impl Engine {
     /// remote receipt. Enqueue and first/last abandonment identities retain no
     /// payload and use constant space; unordered SSNs are not unique identities.
     /// Missing associations return null; sampling failures also set `sctp_error`.
+    /// All transport queries share a 250 ms cooperative timeout. A timeout keeps
+    /// completed samples and the current local observations, adds
+    /// `transport_snapshot_error=deadline_elapsed`, and names the incomplete
+    /// stage and channel (when applicable). Uncollected fields stay absent.
+    /// `send_channels` reports outstanding bytes under the same deadline.
+    /// The timeout cancels queries; it does not close or retire the link.
+    /// A synchronous driver operation can still delay executor scheduling.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
         };
-        let reports = link
-            .pc
-            .get_stats(std::time::Instant::now(), StatsSelector::None)
-            .await;
-        let (sctp, sctp_error) = match link.pc.sctp().await {
-            Some(transport) => match transport.association_stats().await {
-                Ok(stats) => (stats, None),
-                Err(error) => (None, Some(error.to_string())),
-            },
-            None => (None, None),
-        };
-        let channels: Vec<_> = reports
-            .iter()
-            .filter_map(|entry| match entry {
-                RTCStatsReportEntry::DataChannel(channel) => Some(serde_json::json!({
-                    "id": channel.stats.id,
-                    "stream_id": channel.data_channel_identifier,
-                    "label": channel.label,
-                    "state": channel.state,
-                    "messages_sent": channel.messages_sent,
-                    "bytes_sent": channel.bytes_sent,
-                    "messages_received": channel.messages_received,
-                    "bytes_received": channel.bytes_received,
-                })),
-                _ => None,
-            })
-            .collect();
-        let transports: Vec<_> = reports
-            .iter()
-            .filter_map(|entry| match entry {
-                RTCStatsReportEntry::Transport(transport) => Some(serde_json::json!({
-                    "id": transport.stats.id,
-                    "ice_state": transport.ice_state,
-                    "dtls_state": transport.dtls_state,
-                    "packets_sent": transport.packets_sent,
-                    "packets_received": transport.packets_received,
-                    "bytes_sent": transport.bytes_sent,
-                    "bytes_received": transport.bytes_received,
-                })),
-                _ => None,
-            })
-            .collect();
-        let mut channel_properties = serde_json::Map::new();
-        for (label, channel) in &link.channels {
-            let properties = async {
-                Ok::<_, webrtc::error::Error>(serde_json::json!({
-                    "internal_id": channel.id(),
-                    "label": channel.label().await?,
-                    "protocol": channel.protocol().await?,
-                    "negotiated": channel.negotiated().await?,
-                    "ordered": channel.ordered().await?,
-                    "max_packet_life_time": channel.max_packet_life_time().await?,
-                    "max_retransmits": channel.max_retransmits().await?,
-                }))
+        let mut transport_fields = serde_json::Map::new();
+        let mut stage = "rtc_stats";
+        let mut stage_channel = None;
+        let sampled = crate::deadline::timeout(Duration::from_millis(250), async {
+            let reports = link
+                .pc
+                .get_stats(std::time::Instant::now(), StatsSelector::None)
+                .await;
+            let channels: Vec<_> = reports
+                .iter()
+                .filter_map(|entry| match entry {
+                    RTCStatsReportEntry::DataChannel(channel) => Some(serde_json::json!({
+                        "id": channel.stats.id,
+                        "stream_id": channel.data_channel_identifier,
+                        "label": channel.label,
+                        "state": channel.state,
+                        "messages_sent": channel.messages_sent,
+                        "bytes_sent": channel.bytes_sent,
+                        "messages_received": channel.messages_received,
+                        "bytes_received": channel.bytes_received,
+                    })),
+                    _ => None,
+                })
+                .collect();
+            let transports: Vec<_> = reports
+                .iter()
+                .filter_map(|entry| match entry {
+                    RTCStatsReportEntry::Transport(transport) => Some(serde_json::json!({
+                        "id": transport.stats.id,
+                        "ice_state": transport.ice_state,
+                        "dtls_state": transport.dtls_state,
+                        "packets_sent": transport.packets_sent,
+                        "packets_received": transport.packets_received,
+                        "bytes_sent": transport.bytes_sent,
+                        "bytes_received": transport.bytes_received,
+                    })),
+                    _ => None,
+                })
+                .collect();
+            transport_fields.insert("transport_channels".to_string(), channels.into());
+            transport_fields.insert("transports".to_string(), transports.into());
+            stage = "sctp";
+            let (sctp, sctp_error) = match link.pc.sctp().await {
+                Some(transport) => match transport.association_stats().await {
+                    Ok(stats) => (stats, None),
+                    Err(error) => (None, Some(error.to_string())),
+                },
+                None => (None, None),
+            };
+            transport_fields.insert("sctp".to_string(), serde_json::json!(sctp));
+            transport_fields.insert("sctp_error".to_string(), serde_json::json!(sctp_error));
+            transport_fields.insert("channel_properties".to_string(), serde_json::json!({}));
+            transport_fields.insert("send_channels".to_string(), serde_json::json!({}));
+            for (label, channel) in &link.channels {
+                stage = "channel_properties";
+                stage_channel = Some(label.as_str());
+                let properties = async {
+                    Ok::<_, webrtc::error::Error>(serde_json::json!({
+                        "internal_id": channel.id(),
+                        "label": channel.label().await?,
+                        "protocol": channel.protocol().await?,
+                        "negotiated": channel.negotiated().await?,
+                        "ordered": channel.ordered().await?,
+                        "max_packet_life_time": channel.max_packet_life_time().await?,
+                        "max_retransmits": channel.max_retransmits().await?,
+                    }))
+                }
+                .await
+                .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}));
+                transport_fields["channel_properties"][label] = properties;
+                stage = "send_channels";
+                let debt = match channel.outstanding_bytes().await {
+                    Ok(bytes) => serde_json::json!({"outstanding_bytes": bytes}),
+                    Err(error) => serde_json::json!({"error": error.to_string()}),
+                };
+                transport_fields["send_channels"][label] = debt;
             }
-            .await
-            .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}));
-            channel_properties.insert(label.clone(), properties);
+        })
+        .await;
+        if sampled.is_err() {
+            transport_fields.insert(
+                "transport_snapshot_error".to_string(),
+                "deadline_elapsed".into(),
+            );
+            transport_fields.insert("transport_snapshot_stage".to_string(), stage.into());
+            if let Some(label) = stage_channel {
+                transport_fields.insert("transport_snapshot_channel".to_string(), label.into());
+            }
         }
         let mut snapshot = self.diagnostic_snapshot(peer);
         if let Some(fields) = snapshot.as_object_mut() {
-            fields.insert("channel_properties".to_string(), channel_properties.into());
-            fields.insert("sctp".to_string(), serde_json::json!(sctp));
-            fields.insert("sctp_error".to_string(), serde_json::json!(sctp_error));
-            fields.insert(
-                "transports".to_string(),
-                serde_json::Value::Array(transports),
-            );
-            fields.insert(
-                "transport_channels".to_string(),
-                serde_json::Value::Array(channels),
-            );
+            fields.extend(transport_fields);
         }
         snapshot
     }
@@ -4094,3 +4121,7 @@ mod tests {
 #[cfg(test)]
 #[path = "channel_admission_tests.rs"]
 mod channel_admission_tests;
+
+#[cfg(test)]
+#[path = "engine_snapshot_tests.rs"]
+mod snapshot_tests;
