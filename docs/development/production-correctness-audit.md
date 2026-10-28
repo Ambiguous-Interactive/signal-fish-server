@@ -10369,3 +10369,68 @@ A local run of the exact loss cell stopped at netem setup with
 The loopback qdisc remains `noqueue`. This setup failure is retained separately;
 it is not a passing loss control. Final hosted qualification must run the
 unchanged cell on a runner with the required network-fault capability.
+
+### F199 — Native gameplay output loses its physical generation
+
+Related: #1283, #1244, #1264 and #826. Baseline: `320e7829`.
+The native orchestrator preserves admitted gameplay across physical link loss.
+Its Engine events retain the original generation, but the CLI omitted that
+identity from text and binary receipt rows. Connection and channel-open rows
+also omitted it. A reader could not distinguish an old queued receipt from
+fresh gameplay for the same peer after a rebuild. This is an output defect;
+it does not establish a transport delivery failure.
+
+The binary-output control fails on the absent generation in Nextest
+`ef9f15ca-75b1-439a-b9c2-141446072ec9`. The repair forwards the event's original
+identity to stdout without replacing it with the current link's generation.
+All four output constructors now require generation. JSON consumers receive
+an added field. The native README records both migration requirements.
+Generation numbers belong to one Engine and cannot be compared between endpoints.
+
+Six live native/native cases hold exact binary gameplay in stdout across each
+Godot-required channel closure, in both receiver offer roles. They rebuild
+the physical link before releasing stdout, then check the old output's generation,
+peer, and exact bytes. The new generation differs and delivers an exact reliable
+successor. The same controls retain the receive charge until flush.
+The process interop receipt oracle now matches each text receipt to its own
+connection and channel-open observations by peer, label and local generation.
+
+### Native terminal connection and actual channel contracts (#1264, #1240)
+
+The Engine's local snapshot previously kept receive refusal and required-channel
+closure but omitted terminal peer-connection callbacks. `connection_terminal`
+now retains the first `failed` or `closed` callback for that physical generation.
+Transient `disconnected` observations leave it empty. Repeated callbacks cannot
+replace the first observation. Old handlers cannot alter a fresh link's record.
+The record does not invent a channel closure, receive refusal, or network cause.
+
+Transport snapshots now query each registered channel for its actual label,
+internal ID, protocol, negotiated flag, ordering, lifetime and retry limit.
+These `channel_properties` complement RTC statistics and SCTP stream IDs.
+They describe stored channel objects, not just the selected profile's intended
+settings. Query failures return an error without guessed settings. All layers
+remain separately sampled; a combined snapshot is not atomic.
+
+The initial snapshot controls fail in Nextest
+`f35ba0eb-5d9d-4598-9168-c97e250b75d5`. Final focused controls pass in
+`44ea1128-2870-45b5-aa35-c758da0c17fd`. They check both channel profiles and
+both endpoint roles, every Godot negotiated stream ID, first terminal states,
+transient disconnection, stale callbacks, and exact gameplay after recovery.
+A closed-driver experiment initially assumed properties become unreadable.
+Source inspection and its failed assertion show that closed channel objects
+remain queryable. The corrected control checks unchanged actual contracts and
+closed RTC states, then verifies removal returns a null snapshot.
+
+This advances #1240, #1244 and #1264 without attributing their historical
+runtime failures. Native/Web Godot, service and remote-network qualification
+remain separate. The inspected Rust Cargo manifest and dependency-free .NET
+project do not consume this reference Engine or its output enum. Server wire
+messages and channel delivery rules are unchanged.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks optional evidence adoption and separate runtime qualification.
+
+Three focused process controls pass in
+`b25d1c49-a8be-4698-a25d-0d614667b82e`: initial two-peer WebRTC, remote retry,
+and active-room restore with exact exchange. They use the rebuilt server and
+native client binaries. Root and native strict all-target/all-feature lint pass.
+Hosted qualification remains the publication gate.

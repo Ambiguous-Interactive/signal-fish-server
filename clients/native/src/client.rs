@@ -2984,6 +2984,7 @@ impl Orchestrator<'_> {
             EngineEvent::PcState { peer, state, .. } => {
                 emit(&Event::PcState {
                     peer,
+                    generation,
                     state: state.to_string(),
                 });
                 if is_terminal_peer_connection_state(&state) {
@@ -3002,6 +3003,7 @@ impl Orchestrator<'_> {
             EngineEvent::ChannelOpen { peer, label, .. } => {
                 emit(&Event::ChannelOpen {
                     peer,
+                    generation,
                     label: label.clone(),
                 });
                 if self.engine.note_channel_open(peer, &label).await {
@@ -3037,8 +3039,15 @@ impl Orchestrator<'_> {
                 {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
-                crate::event_output::stdout()
-                    .emit_with_permit(&Event::ChannelMessage { peer, label, text }, queue_permit);
+                crate::event_output::stdout().emit_with_permit(
+                    &Event::ChannelMessage {
+                        peer,
+                        generation,
+                        label,
+                        text,
+                    },
+                    queue_permit,
+                );
             }
             EngineEvent::ChannelBinaryMessage {
                 peer,
@@ -3050,6 +3059,7 @@ impl Orchestrator<'_> {
                 crate::event_output::stdout().emit_with_permit(
                     &Event::ChannelBinaryMessage {
                         peer,
+                        generation,
                         label,
                         data_base64: BASE64_STANDARD.encode(data),
                     },
