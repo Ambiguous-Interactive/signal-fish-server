@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve server shutdown close reasons while inbound traffic is still arriving (#1295).
 - Preserve player readiness when the public room API enters the lobby (#1293).
 - Keep the original physical generation on native gameplay and connection output after link rebuilds (#1283).
 - Wait for the requested native P2P rebuild before reporting success after relay fallback (#1282).

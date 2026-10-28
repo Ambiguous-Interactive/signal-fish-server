@@ -34160,7 +34160,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 44 shards, ceil(440/44) * 29s remains 290s.
 // 448 (was 440): borrowed host election and endpoint validation add eight sites (#636).
 // With 45 shards, ceil(448/45) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 448;
+// 450 (was 448): first close-request timestamps add two mutable sites (#1295).
+// With 45 shards, ceil(450/45) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 450;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

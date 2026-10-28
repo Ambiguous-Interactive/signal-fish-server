@@ -168,8 +168,8 @@ jobs:
         # N=45: --in-place runs each shard's mutants SERIALLY. Measured shard 22
         # at N=42, the worst 12-mutant shard, took 310.12s (25.843s/mutant).
         # Adding ~10% headroom and rounding up gives a 29s/mutant budget.
-        # With 448 mutants (#636 borrowed host election and endpoint validation),
-        # ceil(448/45) = 10 mutants/shard and the modeled worst shard is
+        # With 450 mutants (#636 borrowed host election and #1295 close timestamps),
+        # ceil(450/45) = 10 mutants/shard and the modeled worst shard is
         # 10 * 29s = 290s, under the 5-minute target. The feasibility of
         # {mutant-count, N, per-mutant budget, timeout} is asserted by
         # test_mutation_shard_budget_is_feasible_vs_timeout.

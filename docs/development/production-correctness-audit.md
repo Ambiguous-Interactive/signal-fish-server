@@ -10825,3 +10825,49 @@ bytes for compact offsets and 8,000,000 for wide offsets. The repair allocates
 zero for either path. All four controls produce checksum
 `3359507878442902874`. This measures sort scratch, not whole-run RSS or the
 full ten-minute workload. The generator memory-bound requirement stays open.
+
+### F204 — Unread inbound frames reset the semantic server close (#1295)
+
+Fortress Interop at `f3bfa464` receives `GoingAway`, then a TCP reset instead
+of close 4000/`server_shutdown`. Job `123141685411` retains clean pre-drain
+Running snapshots from both peers. One unchanged focused local drain/restart
+run passes in 14.27 seconds. That pass does not explain the hosted failure.
+
+Source inspection finds that the reader drops its split stream when closure
+starts. The writer sends a semantic close and flushes its sink, but it does
+not consume the peer's close response. Dropping the transport with unread
+inbound frames can reset the socket and lose the close tail.
+
+A controlled real-socket history holds the reader on a selected Ping, queues
+128 KiB of outbound frames and 64 unread inbound Ping messages, then requests
+shutdown. After the writer unregisters, the reader resumes. Baseline Nextest
+`215975e0-c1d2-45b5-8963-531756a4eabe` records premature handler completion
+and `Connection reset by peer` instead of a semantic close. This proves the
+first-party failure class; it does not establish the original hosted schedule.
+
+The repair retains the reader during common receive teardown and discards
+in-flight frames until peer Close, EOF, error or the existing four-second
+close budget. It runs with lifecycle cleanup, not after that cleanup's waits.
+The first close request records its timestamp in the existing watch state.
+Duplicate requests and a Shutdown reason upgrade preserve that timestamp. A
+late reader cannot start a fresh four-second window. One absolute deadline
+covers every discarded frame; cooperative task budgeting lets cleanup and
+the writer progress. No discarded message reaches application
+handlers. Common placement also covers a lifecycle change after frame read,
+rather than only the close-listener branch. Invalid transport frames retain
+the WebSocket codec's existing error-close behavior.
+
+The repaired real-socket control observes exact close 4000/`server_shutdown`,
+retains socket ownership through the peer acknowledgment, and records no new
+heartbeat effects. All 13 final close controls pass with all features in
+`9af77a1b-00d9-4ad9-aa8e-1759f6c0d3c6`. A fresh server binary also passes
+the real Fortress drain/restart case in 14.36 seconds. Its first green run is
+`370a1d30-c76d-486e-9e2e-c91f843e38dd`. Replacing the request-time anchor
+with the late reader exit time fails the withheld-acknowledgment control in
+`6ab22057-0f64-4b2f-af48-72b43215d4c1`. Paused-clock controls check silent
+peers, late and continuously ready frames, deadline expiry, and terminal frames.
+
+The wire schema and close codes stay unchanged. SDK runtime qualification is
+tracked separately in Rust #297, .NET #149 and Godot #482; all three already
+expose peer close codes. A completed server control does not complete those
+client assessments.
