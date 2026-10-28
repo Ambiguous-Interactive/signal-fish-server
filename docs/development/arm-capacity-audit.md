@@ -6738,3 +6738,32 @@ index and sort-buffer widths instead. All attempts remain local under
 `progress/session-568/`; the portable control retains the comparison. Raw
 record and oracle memory still need the broader #775 work and long-cell
 qualification. This change does not complete that issue.
+
+### Session 571 — share the summary relay index (#775, #636)
+
+Baseline: `39d36c4a`. The summary already owns a sorted four-byte send-offset
+index. Relay-block construction builds and sorts another offset vector per
+sender incarnation for interleaved live records. The new path borrows slices
+of the first index when each incarnation forms one contiguous group. Replays
+with interleaved epochs retain the original independent construction. This
+preserves duplicate tie order and every raw send and receipt.
+
+The red control retains extra offsets for 3,000 sends over three peers and four
+incarnations. The new path owns no additional offset array. An independent
+4,096-history control compares every event pointer and completion count across
+arbitrary epochs, duplicate keys, Unicode names and extreme sequence values.
+Nine focused ledger, corruption, replay and real-socket controls pass.
+
+A separate one-million-send component profile uses 64 interleaved senders and
+16 incarnations. Both versions own a 4,001,536-byte send index and report 1,024
+blocks with checksum 499,999,500,000. The original relay blocks own another
+4,000,000 offset bytes; the shared blocks own zero. Debug construction samples
+are 1,611,535 microseconds separately and 118,714 microseconds shared. These
+single shared-host samples measure component work and storage. They do not
+bound whole-generator RSS or establish a general speed ratio.
+
+Server latency histograms separately reduce retained bucket storage from
+20,971,520 to 3,145,728 bytes for 128 operations with five samples through 4 ms.
+Precision, sample counts, metrics JSON and the five-minute clamp are unchanged.
+See #1285 and the production correctness audit for the exact comparison.
+The full workload, memory bound and historical generator stalls remain open.

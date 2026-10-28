@@ -887,6 +887,10 @@ enum RelayBlock<'a> {
         events: &'a [SentEvent],
         positions: Vec<u32>,
     },
+    SharedCompact {
+        events: &'a [SentEvent],
+        positions: &'a [u32],
+    },
     Indexed(Vec<&'a SentEvent>),
 }
 
@@ -894,7 +898,7 @@ impl<'a> RelayBlock<'a> {
     #[cfg(test)]
     fn retained_index_bytes(&self) -> usize {
         match self {
-            Self::Borrowed { .. } => 0,
+            Self::Borrowed { .. } | Self::SharedCompact { .. } => 0,
             Self::Compact { positions, .. } => positions.capacity() * std::mem::size_of::<u32>(),
             Self::Indexed(events) => events.capacity() * std::mem::size_of::<&SentEvent>(),
         }
@@ -904,6 +908,7 @@ impl<'a> RelayBlock<'a> {
         match self {
             Self::Borrowed { events, .. } => events.len(),
             Self::Compact { positions, .. } => positions.len(),
+            Self::SharedCompact { positions, .. } => positions.len(),
             Self::Indexed(events) => events.len(),
         }
     }
@@ -912,6 +917,9 @@ impl<'a> RelayBlock<'a> {
         match self {
             Self::Borrowed { events, .. } => events.get(index),
             Self::Compact { events, positions } => events.get(*positions.get(index)? as usize),
+            Self::SharedCompact { events, positions } => {
+                events.get(*positions.get(index)? as usize)
+            }
             Self::Indexed(events) => events.get(index).copied(),
         }
     }
@@ -925,9 +933,52 @@ impl<'a> RelayBlock<'a> {
                 .iter()
                 .filter(|&&position| events[position as usize].sent_us <= at_us)
                 .count(),
+            Self::SharedCompact { events, positions } => positions
+                .iter()
+                .filter(|&&position| events[position as usize].sent_us <= at_us)
+                .count(),
             Self::Indexed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
         }
     }
+}
+
+fn indexed_relay_blocks<'a>(
+    sent: &'a [SentEvent],
+    index: &'a SendIndex<'_>,
+) -> BTreeMap<(&'a str, u32), RelayBlock<'a>> {
+    let SendIndex::Reordered { positions, .. } = index else {
+        return relay_blocks(sent);
+    };
+    let mut blocks = BTreeMap::new();
+    let mut start = 0;
+    while start < positions.len() {
+        let first = &sent[positions[start] as usize];
+        let key = (first.sender.as_str(), first.epoch);
+        let mut end = start + 1;
+        while end < positions.len() {
+            let event = &sent[positions[end] as usize];
+            if (event.sender.as_str(), event.epoch) != key {
+                break;
+            }
+            end += 1;
+        }
+        if blocks
+            .insert(
+                key,
+                RelayBlock::SharedCompact {
+                    events: sent,
+                    positions: &positions[start..end],
+                },
+            )
+            .is_some()
+        {
+            /* Arbitrary replay epochs can interleave within sequence order. */
+            drop(blocks);
+            return relay_blocks(sent);
+        }
+        start = end;
+    }
+    blocks
 }
 
 fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
@@ -974,7 +1025,7 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
                     ..u32::try_from(end).expect("compact ledger end fits u32"),
             ),
             RelayBlock::Indexed(events) => events.extend(&sent[start..end]),
-            RelayBlock::Borrowed { .. } => {}
+            RelayBlock::Borrowed { .. } | RelayBlock::SharedCompact { .. } => {}
         }
         start = end;
     }
@@ -985,7 +1036,7 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
                 .sort_unstable_by_key(|&position| (events[position as usize].seq, position)),
             // Stable order preserves original evidence for duplicate keys.
             RelayBlock::Indexed(events) => events.sort_by_key(|event| event.seq),
-            RelayBlock::Borrowed { .. } => {}
+            RelayBlock::Borrowed { .. } | RelayBlock::SharedCompact { .. } => {}
         }
     }
     blocks
@@ -1843,7 +1894,7 @@ pub fn summarize(
     // `1 <= server_seq <= block.len()` — the bound the misroute checks
     // enforce; the ledger position (`block[server_seq - 1]`) pairs the
     // stream coordinates with the sender-stamped ledger sequence.
-    let blocks = relay_blocks(&records.sent);
+    let blocks = indexed_relay_blocks(&records.sent, &sent_by_key);
     snapshot_tail_evidence(records, roster, &blocks, &mut reasons);
     let sender_epochs: BTreeMap<&str, BTreeSet<u32>> =
         blocks
@@ -5091,6 +5142,43 @@ mod coverage_tests {
 
     // #775: arbitrary artifact order must not retain a wide pointer per send.
     #[test]
+    fn relay_blocks_share_send_index_offsets_for_interleaved_incarnations() {
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans).sent.remove(0);
+        let mut events = Vec::new();
+        for seq in 0..1000 {
+            for sender in ["r0p0", "r0p1", "r0p2"] {
+                events.push(SentEvent {
+                    sender: sender.into(),
+                    seq,
+                    epoch: 1 + u32::try_from(seq / 250).unwrap(),
+                    ..template.clone()
+                });
+            }
+        }
+        let index = SendIndex::new(&events);
+        let blocks = indexed_relay_blocks(&events, &index);
+        assert_eq!(blocks.len(), 12);
+        assert_eq!(
+            blocks
+                .values()
+                .map(RelayBlock::retained_index_bytes)
+                .sum::<usize>(),
+            0
+        );
+        for ((sender, epoch), block) in blocks {
+            let expected: Vec<_> = events
+                .iter()
+                .filter(|event| event.sender == sender && event.epoch == epoch)
+                .collect();
+            assert_eq!(block.len(), expected.len());
+            for (position, event) in expected.iter().enumerate() {
+                assert!(std::ptr::eq(block.get(position).unwrap(), *event));
+            }
+        }
+    }
+
+    #[test]
     fn reordered_relay_block_retains_compact_offsets() {
         let context = crate::unit_context();
         let mut records = crate::complete_records(&context.plans);
@@ -5158,11 +5246,14 @@ mod coverage_tests {
                 events.sort_by_key(|event| event.seq);
             }
             let actual = relay_blocks(&sent);
+            let index = SendIndex::new(&sent);
+            let shared = indexed_relay_blocks(&sent, &index);
+            assert_eq!(shared.len(), expected.len());
             assert_eq!(actual.len(), expected.len());
             for (key, events) in expected {
                 // The wide-host fallback retains these same pointer-ledger semantics.
                 let wide = RelayBlock::Indexed(events.clone());
-                for block in [&actual[&key], &wide] {
+                for block in [&actual[&key], &shared[&key], &wide] {
                     assert_eq!(block.len(), events.len());
                     for (index, event) in events.iter().enumerate() {
                         assert!(std::ptr::eq(block.get(index).unwrap(), *event));
@@ -5349,6 +5440,45 @@ mod coverage_tests {
         for ((sender, seq), event) in expected {
             assert!(std::ptr::eq(index.get(sender, seq).unwrap(), event));
         }
+    }
+
+    #[test]
+    #[ignore = "isolated shared relay index memory profile"]
+    fn generator_shared_relay_index_memory_profile() {
+        let separate = std::env::var_os("CAPACITY_SEPARATE_RELAY_INDEX").is_some();
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans).sent.remove(0);
+        let names: Vec<ReceiptName> = (0..64).map(|peer| format!("r0p{peer}").into()).collect();
+        let mut events = Vec::with_capacity(1_000_000);
+        for position in 0..1_000_000 {
+            let seq = position / names.len();
+            events.push(SentEvent {
+                sender: names[position % names.len()].clone(),
+                seq: u64::try_from(seq).unwrap(),
+                epoch: 1 + u32::try_from(seq / 1000).unwrap(),
+                sent_us: u64::try_from(position).unwrap(),
+                ..template.clone()
+            });
+        }
+        let index = SendIndex::new(&events);
+        let started = std::time::Instant::now();
+        let blocks = if separate {
+            relay_blocks(&events)
+        } else {
+            indexed_relay_blocks(&events, &index)
+        };
+        let elapsed = started.elapsed();
+        let retained: usize = blocks.values().map(RelayBlock::retained_index_bytes).sum();
+        let checksum: u64 = blocks
+            .values()
+            .map(|block| {
+                (0..block.len())
+                    .map(|position| block.get(position).unwrap().sent_us)
+                    .sum::<u64>()
+            })
+            .sum();
+        println!("SHARED_RELAY_INDEX_MEMORY separate={separate} sends={} blocks={} send_index_bytes={} relay_index_bytes={retained} checksum={checksum} construction_us={}", events.len(), blocks.len(), index.retained_index_bytes(), elapsed.as_micros());
+        std::hint::black_box((&events, &index, &blocks));
     }
 
     #[test]

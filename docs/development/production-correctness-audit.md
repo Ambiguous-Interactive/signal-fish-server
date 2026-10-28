@@ -10434,3 +10434,55 @@ Three focused process controls pass in
 and active-room restore with exact exchange. They use the rebuilt server and
 native client binaries. Root and native strict all-target/all-feature lint pass.
 Hosted qualification remains the publication gate.
+
+### Operation latency range and replay-index ownership (#1285, #636, #775, #826)
+
+Baseline: `39d36c4a`. Server operation histograms reserve the full five-minute
+range at their first sample. Each default histogram owns 20,480 `u64` buckets
+(163,840 bytes), even when every sample is below one millisecond. The new
+range covers 0 through 4,095 microseconds initially and grows at the same
+precision. This keeps the existing steady-state timing band free of allocations.
+Input clamping still occurs before recording, so the five-minute limit and
+reported metrics stay unchanged.
+
+The range regression fails on the baseline with 20,480 initial buckets versus
+20,480 full-range buckets. The repaired comparison checks exact JSON metrics
+against the fixed-range implementation after each sample. It covers zero,
+non-default lower bounds and precision, range growth, the configured maximum,
+and over-limit values through `u64::MAX`. Existing average and sample-limit
+controls also pass in Nextest `6f0c1db2-acc9-48b2-9721-9592adec7ad0`.
+
+Separate component profiles retain 128 histograms and the same five samples per
+histogram (0, 100, 500, 1,000 and 4,000 microseconds). Fixed-range bucket storage
+is 20,971,520 bytes; growing-range storage is 3,145,728 bytes. Both retain 640
+samples. This measures histogram buckets, not allocator overhead or server RSS.
+Growth can allocate when a new range is first observed. No throughput claim
+follows from this component memory result.
+
+Capacity summary construction also keeps a second offset vector beside its
+send lookup index. The new relay blocks borrow the existing sorted offsets
+when each sender incarnation is contiguous in sequence order. Arbitrary replay
+histories that interleave incarnations keep the original independent index.
+Raw events, duplicate tie order, completion times and verdicts stay unchanged.
+A new interleaved-incarnation control first fails with retained offset bytes,
+then passes without them. The independent 4,096-history ledger comparison also
+checks the shared path, including duplicate and extreme sequence keys.
+
+The one-million-send component profile uses 64 interleaved senders and 16
+incarnations per sender. The send index owns 4,001,536 bytes in both controls.
+The separate relay index owns another 4,000,000 bytes; the shared version owns
+no additional offset array. Both report 1,024 blocks and checksum 499,999,500,000.
+One debug construction sample takes 1,611,535 microseconds separately and
+118,714 microseconds with sharing. These single shared-host samples do not
+establish a general speed ratio. Nine focused replay, corruption, ledger and
+real-socket controls pass in `f93de86c-d467-4c44-ae4e-deae4e8a2ac3`.
+
+These changes preserve server protocol messages and metrics JSON. The Rust,
+.NET and Godot clients need no changes. This does not close the broader audit,
+the full generator memory bound, or the historical generator-stall cause.
+
+The first hosted allocation check rejects growth from the 1 ms warm-up sample
+through the existing 0–4,095 microsecond steady-state band. The final initial
+range reserves that band. The unchanged relay allocation benchmark then passes
+with zero timing allocations, reallocations and allocated bytes. The measured
+128-operation bucket total remains 3,145,728 bytes.
