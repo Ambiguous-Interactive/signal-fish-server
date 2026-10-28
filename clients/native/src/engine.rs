@@ -1295,6 +1295,8 @@ impl Engine {
             return serde_json::Value::Null;
         };
         let mut transport_fields = serde_json::Map::new();
+        let mut channel_properties = serde_json::Map::new();
+        let mut send_channels = serde_json::Map::new();
         let mut stage = "rtc_stats";
         let mut stage_channel = None;
         let sampled = crate::deadline::timeout(Duration::from_millis(250), async {
@@ -1345,8 +1347,6 @@ impl Engine {
             };
             transport_fields.insert("sctp".to_string(), serde_json::json!(sctp));
             transport_fields.insert("sctp_error".to_string(), serde_json::json!(sctp_error));
-            transport_fields.insert("channel_properties".to_string(), serde_json::json!({}));
-            transport_fields.insert("send_channels".to_string(), serde_json::json!({}));
             for (label, channel) in &link.channels {
                 stage = "channel_properties";
                 stage_channel = Some(label.as_str());
@@ -1363,16 +1363,22 @@ impl Engine {
                 }
                 .await
                 .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}));
-                transport_fields["channel_properties"][label] = properties;
+                channel_properties.insert(label.clone(), properties);
                 stage = "send_channels";
                 let debt = match channel.outstanding_bytes().await {
                     Ok(bytes) => serde_json::json!({"outstanding_bytes": bytes}),
                     Err(error) => serde_json::json!({"error": error.to_string()}),
                 };
-                transport_fields["send_channels"][label] = debt;
+                send_channels.insert(label.clone(), debt);
             }
         })
         .await;
+        if sampled.is_ok() || !channel_properties.is_empty() {
+            transport_fields.insert("channel_properties".to_string(), channel_properties.into());
+        }
+        if sampled.is_ok() || !send_channels.is_empty() {
+            transport_fields.insert("send_channels".to_string(), send_channels.into());
+        }
         if sampled.is_err() {
             transport_fields.insert(
                 "transport_snapshot_error".to_string(),

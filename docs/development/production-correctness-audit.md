@@ -10562,3 +10562,14 @@ Final self-review found that callback publication precedes its admission-counter
 update. The recovery control now waits for classification before comparing
 snapshots; it does not assume that separately sampled counters update atomically.
 Both new controls pass again in `c09b59cc-f5ee-4275-a713-13ad1faca5c5`.
+
+Hosted root lint at `dcafa001` rejects JSON-map indexing in the new sampler.
+Its additional `clippy::indexing_slicing` rule is stricter than the normal
+local Clippy gate. The sampler now inserts into typed maps retained outside
+the query future, then publishes completed maps after sampling. A timeout
+omits maps that have no completed channel entries. Healthy empty maps remain
+explicit. Four snapshot/contract controls pass in
+`9a2b9b87-1dbb-4b9a-90ce-a34e077abff6`. The exact native production lint command
+with all nine hosted rules and the normal native all-target/all-feature gate
+both pass. The original failed hosted job remains visible at
+[122944866399](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/40724246142/job/122944866399).
