@@ -24,6 +24,12 @@ The snapshot includes current callback receipts, RTC channel counters, SCTP
 admission counters, ICE/DTLS state, and outstanding send bytes per channel.
 These samples are not atomic.
 `closed` records physical closure separately with its own transport snapshot.
+Its `observation` names the local callback (`callback_error`, `callback_closing`,
+`callback_closed`), ended stream (`stream_ended`), or state query
+(`observed_closing`, `observed_closed`, `state_unavailable`). These observations
+do not identify a network cause. The Engine snapshot's `channel_closure` retains
+the first observed label and reason for that physical generation. Later closures
+do not replace it. A fresh physical link starts with no closure observation.
 Snapshots taken after receive rejection return the retained pre-removal sample.
 Receipt rows include `receive_boundary` at the first snapshot callback and
 snapshot sequence 127 in each generation. Its marker keeps the actual first

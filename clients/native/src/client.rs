@@ -3014,9 +3014,19 @@ impl Orchestrator<'_> {
                     self.on_pair_connected(peer).await?;
                 }
             }
-            EngineEvent::ChannelClosed { peer, label, .. } => {
+            EngineEvent::ChannelClosed {
+                peer,
+                generation,
+                label,
+                reason: observation,
+            } => {
                 let reason = format!("required data channel closed: {label}");
-                emit(&Event::ChannelClosed { peer, label });
+                emit(&Event::ChannelClosed {
+                    peer,
+                    generation,
+                    label,
+                    observation: Some(observation),
+                });
                 self.handle_peer_transport_loss(peer, &reason).await?;
             }
             EngineEvent::ChannelMessage {
@@ -3033,8 +3043,8 @@ impl Orchestrator<'_> {
                 {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
-                emit(&Event::ChannelMessage { peer, label, text });
-                drop(queue_permit);
+                crate::event_output::stdout()
+                    .emit_with_permit(&Event::ChannelMessage { peer, label, text }, queue_permit);
             }
             EngineEvent::ChannelBinaryMessage {
                 peer,
@@ -3043,12 +3053,14 @@ impl Orchestrator<'_> {
                 queue_permit,
                 ..
             } => {
-                emit(&Event::ChannelBinaryMessage {
-                    peer,
-                    label,
-                    data_base64: BASE64_STANDARD.encode(data),
-                });
-                drop(queue_permit);
+                crate::event_output::stdout().emit_with_permit(
+                    &Event::ChannelBinaryMessage {
+                        peer,
+                        label,
+                        data_base64: BASE64_STANDARD.encode(data),
+                    },
+                    queue_permit,
+                );
             }
             EngineEvent::ChannelReceiveRejected {
                 peer,
@@ -3069,7 +3081,12 @@ impl Orchestrator<'_> {
                     ),
                 });
                 let reason = format!("data-channel receive rejected: {label}");
-                emit(&Event::ChannelClosed { peer, label });
+                emit(&Event::ChannelClosed {
+                    peer,
+                    generation,
+                    label,
+                    observation: None,
+                });
                 self.handle_peer_transport_loss(peer, &reason).await?;
             }
         }

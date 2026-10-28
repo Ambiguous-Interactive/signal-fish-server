@@ -481,6 +481,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
             peer: PlayerId::from_u128(99),
             generation: 0,
             label: RELIABLE_LABEL.to_string(),
+            reason: crate::engine::ChannelCloseReason::CallbackClosed,
         })
         .unwrap();
     }
@@ -488,6 +489,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
         peer,
         generation,
         label: RELIABLE_LABEL.to_string(),
+        reason: crate::engine::ChannelCloseReason::CallbackClosed,
     })
     .unwrap();
     state.connected_pairs.insert(peer);
@@ -1173,6 +1175,7 @@ async fn formed_pair_accepts_remote_retry_after_window_expiry() {
                         peer,
                         generation: 1,
                         label: RELIABLE_LABEL.to_string(),
+                        reason: crate::engine::ChannelCloseReason::CallbackClosed,
                     })
                     .await
                     .unwrap();
@@ -2148,6 +2151,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
                     peer: closed_peer,
                     generation,
                     label: ref closed_label,
+                    ..
                 } = closed
                 else {
                     unreachable!()

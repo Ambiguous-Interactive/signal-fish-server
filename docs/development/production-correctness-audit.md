@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97; closed-epoch delivery evidence in F130 |
 
@@ -10253,3 +10253,77 @@ includes the existing canonical-name matching control, six YAML controls,
 15 RTC library controls and two native Godot-profile exchange/recovery controls.
 The native RTC dependency manifest now uses `pem` 4.0.0 and `x509-parser`
 0.18.1. No transport source repair is claimed by those dependency changes.
+
+### F197 — Native stdout releases gameplay receive charges before flush
+
+Related: #1280, #1264 and #826. Baseline: `8cbf5d9e`.
+The production native CLI queued text and binary JSONL rows, then dropped their
+Engine receive permits. The asynchronous writer still owned their serialized
+payloads. This violated the Engine's documented permit lifetime. The separate
+stdout count and byte limits remained finite; no unbounded-memory claim follows.
+The Godot control probe already retained permits through its own output worker.
+
+A held-writer regression preserves the original CLI release order through a
+small output helper. Nextest `bb6d997c-ccce-4016-add4-90aa1567f80b` fails:
+a retained 4 KiB receipt leaves all 256 messages and 1,048,576 bytes free,
+instead of 255 messages and 1,044,480 bytes. The writer is released before the
+assertion so this negative control cannot strand its output thread.
+
+The repair moves each gameplay permit into its queued output row. The writer
+releases it after write and flush, or on discard. Failed writers drop their
+queued receiver before making terminal state visible. Output admission refusal
+releases its unqueued permit before notifying waiters. Existing queue limits,
+reserved terminal slots, and writes outside Tokio remain unchanged.
+
+Focused controls cover held binary writes, a held text flush with a second
+queued row, count and serialization refusal, finish refusal, and write/flush
+failure. Failure notification and completed drain require all discarded charges
+to be free. Six live Godot-profile cases close each required label in both
+receiver offer roles while one exact 4 KiB reliable receipt remains held by
+stdout. The old output row still owns shared Engine capacity after physical-link
+replacement, while fresh per-channel counts start at zero. Flushing that row
+releases capacity; each fresh link then delivers an exact reliable successor.
+These cases use two native Engines, not a Godot runtime.
+
+### Native required-channel closure observations (#1264, #1244, #1240)
+
+`ChannelClosed` previously named only the peer, physical generation and label.
+A poller error, closing callback, closed callback, ended stream, or observation
+of an unusable sibling state could produce the same event. The initial #1264
+artifact cannot resolve that ambiguity after the fact.
+
+The Engine now records a typed local observation in each close event and keeps
+the first observed label/reason in the physical link's `channel_closure`
+snapshot. Later labels and repeated callbacks cannot replace the first record.
+CLI and portable Godot probe rows retain the observation; fresh links start
+with no closure record. A receive-budget refusal remains a separate typed
+failure and does not fabricate a physical closure observation.
+
+The initial live regression fails on the baseline's absent snapshot in Nextest
+`9339b87a-82da-4e70-8582-af5251953ff6`. The final control also retains its terminal
+event through removal and rejects it after fresh pairing. Existing held-poller
+controls distinguish sibling state observation from drained terminal callbacks
+and preserve queued reliable input before its own close. Output serialization
+pins all seven observation names and the separate synthetic-refusal shape.
+
+This improves future closure and missing-prefix diagnosis. It does not identify
+the original #1264 event or historical #1244 loss. Native/Web Godot runtimes,
+service sessions and remote networks remain separate qualification boundaries.
+The inspected Rust Cargo manifest and dependency-free .NET project do not use
+this reference Engine or its stdout rows, and the server wire is unchanged.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks optional probe adoption and runtime qualification. Engine close-event
+constructors need the new reason; native JSONL close rows add generation and
+observation fields. The native README records that migration.
+
+Local qualification: the 15 ownership, saturation and closure controls pass in
+Nextest `749053bd-49cc-49ea-b792-21524c14d700`; eight portable-probe and unread-output
+process controls pass in `8869d7a8-2dc0-4e06-9ac8-9ddfc21ecf08`. The earlier six
+closure/FIFO controls also pass in `5000a220-c54d-48d5-86d7-6e817cf80259`.
+Root and native strict all-target/all-feature lint and the markdown, documentation
+consistency and CI-configuration checks pass locally. Hosted qualification is a
+separate publication gate.
+
+The disconnected-output admission control also passes in
+`1c6d02f8-9acf-41fd-86f4-e578bbd9be3c`. It requires the refused gameplay charge to
+be free before output failure and completed drain are observed.

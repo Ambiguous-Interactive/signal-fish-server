@@ -147,6 +147,21 @@ The CLI emits `channel_receive_rejected` with the physical `generation`, `peer`,
 `label`, and `failure` before its error and channel-closure output. This separates
 receive refusal from a channel that closes without a refused message.
 
+`channel_closure` is null before required-channel loss. It then retains the first
+observed `label` and `reason` for that physical link. The reasons distinguish
+terminal callbacks, an ended event stream, and state queries from another task.
+They describe the local observation, not the remote or network cause.
+`EngineEvent::ChannelClosed.reason` keeps that observation after link removal.
+The CLI's `channel_closed` row adds `generation` and `observation`. A synthetic
+close after `channel_receive_rejected` has no `observation`; use its preceding
+typed refusal. Rust callers constructing close events must set these new fields.
+
+The CLI keeps each gameplay receive permit with its queued stdout row through
+write and flush. A blocked stdout reader therefore still consumes Engine receive
+capacity. Failed writes and discarded rows release their permits. Link removal
+does not release rows still held by stdout; those rows keep charging the shared
+Engine budget until they flush or are discarded. Drain stdout continuously.
+
 The held-callback Engine control in `engine_profile_tests.rs` fills actual SCTP
 receive credit before it resumes Engine polling. Holding application events
 then admits an exact reliable prefix and produces one explicit budget refusal.

@@ -39,6 +39,7 @@ async fn ended_channel_streams_publish_one_close_unless_receive_rejected() {
                     peer,
                     generation: event_generation,
                     label,
+                    ..
                 } = event
                 {
                     assert_eq!(peer, pair.sender_id);
@@ -314,4 +315,69 @@ async fn rejected_negotiation_inputs_preserve_bidirectional_required_channels() 
         a.remove_peer(b_id).await.unwrap();
         b.remove_peer(a_id).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn first_channel_closure_survives_later_labels_and_duplicate_reports() {
+    let (events, mut received) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(
+        EngineSettings {
+            crippled: true,
+            ..EngineSettings::default()
+        },
+        events,
+    )
+    .unwrap();
+    let peer = PlayerId::from_u128(0x1264);
+    engine.pair_with(peer, true, &[]).await.unwrap();
+    let link = &engine.peers[&peer];
+    let admission = &link.receive_admission;
+    admission.report_channel_closed(
+        &engine.events,
+        peer,
+        link.generation,
+        RELIABLE_LABEL,
+        ChannelCloseReason::CallbackError,
+    );
+    let first = engine.diagnostic_snapshot(peer)["channel_closure"].clone();
+    assert_eq!(
+        first,
+        serde_json::json!({"label":RELIABLE_LABEL,"reason":"callback_error"})
+    );
+    admission.report_channel_closed(
+        &engine.events,
+        peer,
+        link.generation,
+        RELIABLE_LABEL,
+        ChannelCloseReason::StreamEnded,
+    );
+    admission.report_channel_closed(
+        &engine.events,
+        peer,
+        link.generation,
+        UNRELIABLE_LABEL,
+        ChannelCloseReason::CallbackClosed,
+    );
+    let mut observed = Vec::new();
+    while let Ok(event) = received.try_recv() {
+        if let EngineEvent::ChannelClosed {
+            label,
+            reason,
+            generation,
+            ..
+        } = event
+        {
+            assert_eq!(generation, link.generation);
+            observed.push((label, reason));
+        }
+    }
+    assert_eq!(
+        observed,
+        vec![
+            (RELIABLE_LABEL.into(), ChannelCloseReason::CallbackError),
+            (UNRELIABLE_LABEL.into(), ChannelCloseReason::CallbackClosed)
+        ]
+    );
+    assert_eq!(engine.diagnostic_snapshot(peer)["channel_closure"], first);
+    engine.remove_peer(peer).await.unwrap();
 }

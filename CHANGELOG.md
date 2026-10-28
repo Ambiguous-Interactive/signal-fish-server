@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduce room-event copies when no player needs reconnect replay (#636, #1277).
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
-  and handle binary channel events and the receive-rejection `failure` field.
+  and handle binary channel events, the receive-rejection `failure` field, and channel-close observation fields.
 - Bound active-session response storage and reduce room percentile query memory and dashboard-history sizing work (#636).
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, and retained stream memory
   (#636, #775).
@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce relay queue scan work when batching is enabled (#1155).
 - **Breaking:** Custom message coordinators must support explicit spectator lifecycle frames and observer publication.
 - Expose native reference-client channel receipt diagnostics through the engine API.
-- Preserve native reference-client receive-limit details in terminal events and logs after link removal (#1264).
+- Preserve native reference-client receive-limit and channel-closure observations in terminal events and logs (#1264).
 - Show which native peer channels retain application messages in shared receive-budget diagnostics (#1264).
 - Include browser channel totals and probe validation counts in exchange timeout diagnostics (#889).
 - Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep native gameplay charged to the receive budget until its output is flushed or discarded (#1280).
 - Exclude terminal native reference-client links from the connected-pair count (#1276).
 - Preserve reliable and ordered native gameplay after large expiry backlogs (#1271).
 - Report native associations as drained only after shutdown work and unread gameplay finish (#1272).

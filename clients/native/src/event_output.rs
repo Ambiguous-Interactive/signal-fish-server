@@ -41,9 +41,14 @@ impl Shared {
 /// One bounded writer for the process event stream.
 pub struct EventOutput {
     shared: Arc<Shared>,
-    sender: mpsc::SyncSender<Vec<u8>>,
+    sender: mpsc::SyncSender<PendingOutput>,
     max_events: usize,
     max_bytes: usize,
+}
+
+struct PendingOutput {
+    bytes: Vec<u8>,
+    _receive_permit: Option<crate::engine::MessageQueuePermit>,
 }
 
 struct BoundedLine {
@@ -90,7 +95,7 @@ fn serialize(event: &Event, limit: usize) -> Result<Vec<u8>, serde_json::Error> 
 }
 
 impl EventOutput {
-    fn new(writer: impl Write + Send + 'static) -> Self {
+    pub(crate) fn new(writer: impl Write + Send + 'static) -> Self {
         Self::with_limits(writer, MAX_PENDING_EVENTS, MAX_PENDING_BYTES)
     }
 
@@ -100,32 +105,35 @@ impl EventOutput {
         max_bytes: usize,
     ) -> Self {
         let shared = Arc::new(Shared::default());
-        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(max_events.saturating_add(2));
+        let (sender, receiver) = mpsc::sync_channel::<PendingOutput>(max_events.saturating_add(2));
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("event-output".into())
             .spawn(move || {
-                for line in &receiver {
-                    let result = writer.write_all(&line).and_then(|()| writer.flush());
-                    {
-                        let mut state = worker_shared
-                            .state
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        state.pending_events = state.pending_events.saturating_sub(1);
-                        state.pending_bytes = state.pending_bytes.saturating_sub(line.len());
-                        if result.is_err() {
-                            state.failure.get_or_insert("stdout write failed");
-                            state.writer_stopped = true;
-                            state.pending_events = 0;
-                            state.pending_bytes = 0;
-                        }
-                    }
-                    worker_shared.changed.notify_waiters();
-                    worker_shared.flushed.notify_all();
+                while let Ok(line) = receiver.recv() {
+                    let size = line.bytes.len();
+                    let result = writer.write_all(&line.bytes).and_then(|()| writer.flush());
+                    drop(line);
+                    let mut state = worker_shared
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    state.pending_events = state.pending_events.saturating_sub(1);
+                    state.pending_bytes = state.pending_bytes.saturating_sub(size);
                     if result.is_err() {
+                        drop(receiver);
+                        state.failure.get_or_insert("stdout write failed");
+                        state.writer_stopped = true;
+                        state.pending_events = 0;
+                        state.pending_bytes = 0;
+                        drop(state);
+                        worker_shared.changed.notify_waiters();
+                        worker_shared.flushed.notify_all();
                         break;
                     }
+                    drop(state);
+                    worker_shared.changed.notify_waiters();
+                    worker_shared.flushed.notify_all();
                 }
             });
         if worker.is_err() {
@@ -144,8 +152,8 @@ impl EventOutput {
         }
     }
 
-    fn enqueue(&self, state: &mut State, line: Vec<u8>) {
-        let size = line.len();
+    fn enqueue(&self, state: &mut State, line: PendingOutput) {
+        let size = line.bytes.len();
         if self.sender.try_send(line).is_ok() {
             state.pending_events = state.pending_events.saturating_add(1);
             state.pending_bytes = state.pending_bytes.saturating_add(size);
@@ -157,6 +165,14 @@ impl EventOutput {
 
     /// Queue one event without blocking the executor. Overload fails the run.
     pub fn emit(&self, event: &Event) {
+        self.emit_owned(event, None);
+    }
+
+    fn emit_owned(
+        &self,
+        event: &Event,
+        mut receive_permit: Option<crate::engine::MessageQueuePermit>,
+    ) {
         let mut state = self
             .shared
             .state
@@ -169,14 +185,30 @@ impl EventOutput {
             state.failure = Some("stdout event backlog limit exceeded");
         } else {
             match serialize(event, self.max_bytes.saturating_sub(state.pending_bytes)) {
-                Ok(line) => self.enqueue(&mut state, line),
+                Ok(bytes) => self.enqueue(
+                    &mut state,
+                    PendingOutput {
+                        bytes,
+                        _receive_permit: receive_permit.take(),
+                    },
+                ),
                 Err(_) => {
                     state.failure = Some("stdout event byte limit exceeded");
                 }
             }
         }
+        drop(receive_permit);
         drop(state);
         self.shared.changed.notify_waiters();
+    }
+
+    /// Keep the receive charge until output is consumed or discarded.
+    pub(crate) fn emit_with_permit(
+        &self,
+        event: &Event,
+        permit: crate::engine::MessageQueuePermit,
+    ) {
+        self.emit_owned(event, Some(permit));
     }
 
     /// Return when required output fails or its queue fills.
@@ -220,7 +252,13 @@ impl EventOutput {
             .chain(std::iter::once(Event::Exiting { code }));
         for event in events {
             match serialize(&event, MAX_TERMINAL_BYTES) {
-                Ok(line) => self.enqueue(&mut state, line),
+                Ok(bytes) => self.enqueue(
+                    &mut state,
+                    PendingOutput {
+                        bytes,
+                        _receive_permit: None,
+                    },
+                ),
                 Err(_) => {
                     state
                         .failure
@@ -437,6 +475,151 @@ mod tests {
         assert!(output.shared.state.lock().unwrap().failure.is_none());
     }
 
+    #[tokio::test]
+    async fn gameplay_receive_charge_survives_queued_output_until_flush() {
+        let (output, started, release, _) = held_output(256, 128 * 1024 * 1024);
+        let (permit, messages, bytes) =
+            crate::engine::MessageQueuePermit::for_test_with_budget(4096);
+        let event = Event::ChannelBinaryMessage {
+            peer: signal_fish_server::protocol::PlayerId::nil(),
+            label: "reliable".into(),
+            data_base64: "x".repeat(5464),
+        };
+        output.emit_with_permit(&event, permit);
+        started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let charged = (messages.available_permits(), bytes.available_permits());
+        release.send(()).unwrap();
+        drain(&output).await;
+        assert_eq!(
+            charged,
+            (255, 1024 * 1024 - 4096),
+            "blocked stdout still owns the received gameplay"
+        );
+        assert_eq!(
+            (messages.available_permits(), bytes.available_permits()),
+            (256, 1024 * 1024)
+        );
+    }
+
+    struct HeldFlush {
+        started: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Write for HeldFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn gameplay_charge_covers_in_flight_flush_and_waiting_text_rows() {
+        let (started, waiting) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let output = EventOutput::new(HeldFlush {
+            started: Some(started),
+            release: released,
+        });
+        let mut budgets = Vec::new();
+        for text in ["first 鱼", "second\n"] {
+            let (permit, messages, bytes) =
+                crate::engine::MessageQueuePermit::for_test_with_budget(text.len());
+            output.emit_with_permit(
+                &Event::ChannelMessage {
+                    peer: signal_fish_server::protocol::PlayerId::nil(),
+                    label: "reliable".into(),
+                    text: text.into(),
+                },
+                permit,
+            );
+            budgets.push((messages, bytes, text.len()));
+        }
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let held: Vec<_> = budgets
+            .iter()
+            .map(|(messages, bytes, _)| (messages.available_permits(), bytes.available_permits()))
+            .collect();
+        release.send(()).unwrap();
+        drain(&output).await;
+        for ((messages, bytes, size), charged) in budgets.iter().zip(held) {
+            assert_eq!(charged, (255, 1024 * 1024 - size));
+            assert_eq!(
+                (messages.available_permits(), bytes.available_permits()),
+                (256, 1024 * 1024)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn output_refusals_release_unqueued_gameplay_charges() {
+        for refusal in ["event_limit", "byte_limit", "finishing"] {
+            let (output, started, release, _) =
+                held_output(if refusal == "event_limit" { 1 } else { 256 }, 1024);
+            output.emit(&Event::Authenticated);
+            started
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            if refusal == "finishing" {
+                output.finish(None, 0);
+            }
+            let (permit, messages, bytes) =
+                crate::engine::MessageQueuePermit::for_test_with_budget(4096);
+            output.emit_with_permit(
+                &Event::Error {
+                    message: "x".repeat(2048),
+                },
+                permit,
+            );
+            assert_eq!(
+                (messages.available_permits(), bytes.available_permits()),
+                (256, 1024 * 1024),
+                "{refusal}"
+            );
+            let (permit, messages, bytes) =
+                crate::engine::MessageQueuePermit::for_test_with_budget(1);
+            output.emit_with_permit(&Event::Authenticated, permit);
+            assert_eq!(
+                (messages.available_permits(), bytes.available_permits()),
+                (256, 1024 * 1024),
+                "previous refusal or finish must release later charges"
+            );
+            release.send(()).unwrap();
+            drain(&output).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_output_receiver_releases_the_refused_receive_charge() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let output = EventOutput {
+            shared: Arc::new(Shared::default()),
+            sender,
+            max_events: 256,
+            max_bytes: 1024,
+        };
+        let (permit, messages, bytes) =
+            crate::engine::MessageQueuePermit::for_test_with_budget(4096);
+        output.emit_with_permit(&Event::Authenticated, permit);
+        assert_eq!(output.failed().await, "stdout writer unavailable");
+        assert_eq!(output.drained().await, Err("stdout writer unavailable"));
+        assert_eq!(
+            (messages.available_permits(), bytes.available_permits()),
+            (256, 1024 * 1024)
+        );
+    }
+
     struct FailedWriter {
         fail_flush: bool,
         release: mpsc::Receiver<()>,
@@ -464,7 +647,13 @@ mod tests {
                 fail_flush,
                 release: ready,
             });
-            output.emit(&Event::Authenticated);
+            let mut budgets = Vec::new();
+            for _ in 0..2 {
+                let (permit, messages, bytes) =
+                    crate::engine::MessageQueuePermit::for_test_with_budget(4096);
+                output.emit_with_permit(&Event::Authenticated, permit);
+                budgets.push((messages, bytes));
+            }
             let first = output.failed();
             let second = output.failed();
             tokio::pin!(first, second);
@@ -482,7 +671,20 @@ mod tests {
             .unwrap();
             assert_eq!((a, b), ("stdout write failed", "stdout write failed"));
             assert_eq!(output.drained().await, Err("stdout write failed"));
-            output.emit(&Event::SuccessCriteriaMet);
+            for (messages, bytes) in budgets {
+                assert_eq!(
+                    (messages.available_permits(), bytes.available_permits()),
+                    (256, 1024 * 1024),
+                    "failure notification follows queued and in-flight permit release"
+                );
+            }
+            let (permit, messages, bytes) =
+                crate::engine::MessageQueuePermit::for_test_with_budget(4096);
+            output.emit_with_permit(&Event::SuccessCriteriaMet, permit);
+            assert_eq!(
+                (messages.available_permits(), bytes.available_permits()),
+                (256, 1024 * 1024)
+            );
             assert_eq!(output.shared.state.lock().unwrap().pending_events, 0);
         }
     }
