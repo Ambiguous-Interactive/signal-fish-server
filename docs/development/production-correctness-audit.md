@@ -10639,3 +10639,128 @@ All 15 output controls pass with four test threads in the final local run
 native all-target/all-feature lint gate passes. These changes isolate and
 improve first-party failure evidence; they do not relax the closed-pipe
 expectation or establish new Godot runtime qualification.
+
+### F202 — Godot probe packet commands bypass terminal-link admission
+
+Related: #1291, #1240, #1244 and #1264. Baseline: `c970b947`.
+
+The server-owned Godot probe selected packet-command and startup channels with
+`Engine::channel`. This raw accessor retains handles after a required sibling
+channel closes or the Engine refuses input. The native CLI already used the
+Engine send guard. A live red control closed the reliable channel, held owner
+event handling, then sent on the surviving ordered channel. The command returned
+success. Nextest `d31dd55c-22bc-4f35-9410-36f6d1f1f426` retains that failure.
+This is a probe command-admission defect, not a server signaling defect or proof
+of the historical missing Godot prefix or ambiguous terminal event.
+
+`Engine::send_channel` is now public. Packet commands and every startup packet
+use this same guard. Selection refuses observed terminal connection state,
+required-channel loss and receive refusal before selecting a transport handle.
+Raw lookup remains available for diagnostics and closure. Selection is not atomic
+with the subsequent send; callers still need send-error handling and deadlines.
+The negotiated channel contract and receive limits do not change.
+
+Six live closure cases cover all three required channels and both offer roles.
+They retain an exact 4 KiB reliable receipt while the owner has not drained the
+terminal event. Text, binary and startup sends refuse on the old link; refused
+commands emit no sent row and do not change the SCTP last-enqueued message.
+Replacement keeps the old receipt charged until its owner drops it. Each fresh
+physical generation then receives the exact reliable payload.
+
+Four additional cases fill the actual Engine count and byte budgets in both
+offer roles. They hold 256 empty receipts or 128 exact 8 KiB receipts, respectively,
+and send one excess packet. Commands refuse before owner event drain. The exact
+admitted prefix precedes the typed refusal, whose sampled failure remains intact.
+Fresh pairing retains old receipt ownership and resumes exact reliable startup
+after those receipts drop. Removing command guarding makes both regressions fail;
+all attempts remain under ignored `progress/session-573/`.
+
+The Rust client manifest at `da8f2d16` and .NET project at `e467c871` do not depend
+on the native reference Engine. Their APIs and signaling remain unchanged.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks probe adoption and separate runtime qualification. These native/native
+controls advance three open gameplay investigations without claiming their
+historical causes or remote-network acceptance complete.
+
+#### Initial guarded probe runtime qualification
+
+These runs use the first guarded candidate, `0e072e8c`, before the startup-owner
+repair below. Their frozen source and binary remain separate from later attempts.
+
+Six local Linux ARM64 service pairings use that initial guarded candidate: Godot 4.3 native,
+Godot 4.7.2 native and Godot 4.7.2 Web, each in both offer roles. Every case keeps
+two physical generations, same-room rejoin, mixed modes, the original 1 KiB
+snapshot bodies, 32-credit window and 32 startup packets per direction and phase.
+All 3,072 required reliable snapshot receipts and 768 startup receipts complete.
+The independent artifact audit checks native bytes, sequence, generation, live
+first/last samples, frozen probe hashes and driver receipt counts. No local
+build overlaps these runs. The 4.3 driver uses CPUs 0/1 on a shared host; this is
+not an isolated performance result.
+
+The driver reports six passes, but the strict initial-probe audit reports four
+passes and two failures. Godot-offer phase 1 lacks the initial unreliable probe
+in both the 4.3 native and 4.7.2 Web cases. These failures remain visible; no case
+was rerun. In each failed case, the `reference:1:unreliable` send boundary records
+physical generation 1, message ID 33, stream ID 3, stream incarnation 2, SSN 0,
+unordered lifetime policy and `transmission_selected=false`. A later live sample
+at `snapshot:1:godot:127` records that exact identity as the first abandoned
+message, still with no transmission selection. No channel closure or terminal
+connection observation exists in that sample. This locates these two omissions
+at local lifetime retirement before first transmission selection. It does not
+locate the historical #1244 reliable gap, #1264 terminal event, or original
+[Godot #458](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/458)
+packet. Keep strict finite-probe qualification separate from reliable recovery.
+
+The driver is `f3d3f8611e2c85290f222074da6d40807099e4ec`. Probe binary SHA-256 is
+`cfa7d20b9b8aa61bd7ef42eb70e9310b847bd3eb4ae9192aa73b2f18f395fc92`;
+probe source is `38bc1ed7b6589bc81dd39e01ea67bc89f055281a739fae1abe0255f80216bb43`.
+The runtime manifest, independent reliable audit, failed strict verdict and exact
+finite-retirement witnesses remain in `progress/session-573/runtime-guarded/`.
+These are local artifacts, not hosted evidence. The portable fixture and pinned
+driver provide the reproduction source. Remote-network and corrected Godot
+lifetime qualification remain open.
+
+#### Startup refusal must preserve the owner event loop
+
+Review found that a guarded startup refusal still propagated from the inline
+startup burst through `main`. This could exit before the owner consumed its
+queued receive refusal and pre-removal evidence. The real open-event handler is
+now independently callable by the fixture controls. Red Nextest
+`dc007e17-4fe3-490f-ae12-48bc3064ab13` fails both closure and actual-budget cases
+because startup handling returns an error before owner drain.
+
+The handler now stops a refused burst without emitting `startup_sent` or exiting
+the owner loop. The same controls then consume the exact admitted prefix and
+typed failure. Fresh links also pass all 32 exact startup packets and publish
+completion only after the full burst. All six probe tests pass in
+`ecf23176-d333-4bed-a66b-0a00116f9f6c`. Hosted root CI also found that the new
+empty-output assertions used a macro form its source policy cannot inspect.
+Explicit Empty/Disconnected branches preserve the assertions and pass the
+focused policy control in `96078bb6-965b-4ba5-af26-bda718c9c0e5`.
+
+#### Selected-channel startup send errors
+
+A later review identified a separate error class: a live peer can negotiate a
+message-size limit below the startup payload. The send then returns
+`ErrOutboundPacketTooLarge` without closing the link. Treating every startup
+error as link refusal lost that evidence. Red Nextest
+`8b93fed7-865e-467a-86c7-017e05152d91` confirms an open negotiated pair silently
+returns without a failure row at a 512-byte limit.
+
+Startup selection now returns link refusal separately from a selected send error.
+Guard refusal remains silent so pending terminal evidence drains. A selected send
+error emits the existing `startup_sent` event with the exact admitted count,
+channel label and `startup_failure` error before returning to the owner loop.
+A count below 32 cannot establish completion. Reusing the event name preserves
+the pinned bridge, which rejects unknown names. This row does not invent a
+receive refusal, channel closure or new peer state.
+
+Four live cases cover both offer roles at 512 and 1,046 negotiated bytes. The
+first limit refuses packet zero. The second admits exactly ten 1,046-byte packets
+and refuses sequence 10 at 1,047 bytes. Each case pins the typed send error,
+exact admitted count and payload prefix, open link state and a later exact small
+reliable packet. Budget-recovery cases now also consume the full 32-packet
+startup burst and assert its completion/open rows after dropping old receipts.
+All seven probe tests pass in `c5e69ee7-d66a-47f0-b134-9d35080f59e4`; native scoped
+strict lint and source policy pass. This refines #1291 and the terminal evidence
+needed by #1264; it does not change negotiated limits or supported Godot pairings.

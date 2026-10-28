@@ -25,6 +25,12 @@ still ends the session. The engine observes every required channel as open befor
 reporting a connected pair. Delayed open callbacks do not revive channels
 that already closed. A channel can still close after its state check.
 **Migration:** Native library callers must now await `Engine::note_channel_open`.
+
+Use `Engine::send_channel(peer, label).await` to select a channel for a new send.
+It returns `None` after observed terminal connection state, required-channel loss,
+or receive refusal, even before the owner drains the terminal event.
+`Engine::channel` returns raw stored handles for diagnostics and closure.
+A later loss can race selection. Apply an operation deadline and handle send errors.
 Network loss still follows the configured P2P deadlines.
 
 The orchestrator bounds each pairing, SDP, and ICE operation by its remaining

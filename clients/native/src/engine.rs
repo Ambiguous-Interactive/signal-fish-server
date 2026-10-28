@@ -1176,11 +1176,11 @@ impl Engine {
             .cloned()
     }
 
-    pub(crate) async fn send_channel(
-        &self,
-        peer: PlayerId,
-        label: &str,
-    ) -> Option<Arc<dyn DataChannel>> {
+    /// Select a channel for a new send while the physical link remains usable.
+    /// Returns `None` after observed connection loss, required-channel loss, or
+    /// receive refusal. A later loss can still race selection; callers must
+    /// handle send errors and apply their own operation deadline.
+    pub async fn send_channel(&self, peer: PlayerId, label: &str) -> Option<Arc<dyn DataChannel>> {
         let link = self.peers.get(&peer)?;
         if !link
             .receive_admission
