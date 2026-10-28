@@ -147,6 +147,21 @@ The CLI emits `channel_receive_rejected` with the physical `generation`, `peer`,
 `label`, and `failure` before its error and channel-closure output. This separates
 receive refusal from a channel that closes without a refused message.
 
+`channel_closure` is null before required-channel loss. It then retains the first
+observed `label` and `reason` for that physical link. The reasons distinguish
+terminal callbacks, an ended event stream, and state queries from another task.
+They describe the local observation, not the remote or network cause.
+`EngineEvent::ChannelClosed.reason` keeps that observation after link removal.
+The CLI's `channel_closed` row adds `generation` and `observation`. A synthetic
+close after `channel_receive_rejected` has no `observation`; use its preceding
+typed refusal. Rust callers constructing close events must set these new fields.
+
+The CLI keeps each gameplay receive permit with its queued stdout row through
+write and flush. A blocked stdout reader therefore still consumes Engine receive
+capacity. Failed writes and discarded rows release their permits. Link removal
+does not release rows still held by stdout; those rows keep charging the shared
+Engine budget until they flush or are discarded. Drain stdout continuously.
+
 The held-callback Engine control in `engine_profile_tests.rs` fills actual SCTP
 receive credit before it resumes Engine polling. Holding application events
 then admits an exact reliable prefix and produces one explicit budget refusal.
@@ -283,7 +298,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--platform <P>` | `reference-native` | `Authenticate.platform` |
 | `--exchange` | off | When each physical P2P pair fully opens, send one text message per channel and require the symmetric receives (see success criteria) |
 | `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
-| `--p2p-rebuild-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file` and a nonzero `--p2p-retry-count`. The final retry attempt is reserved: after `exchange_ready`, wait for PATH, then have each pair's designated initiator trigger that coordinated clean-path PairRetry rebuild before exchange release |
+| `--p2p-rebuild-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file` and a nonzero `--p2p-retry-count`. The final retry attempt is reserved: after `exchange_ready`, wait for PATH, then have each pair's designated initiator trigger that coordinated clean-path PairRetry rebuild before exchange release; success waits for every planned peer to complete that reserved attempt |
 | `--unreliable-exchange-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file`. After its first gate opens, send and receive the exact reliable message across every planned pair and emit `exchange_reliable_ready`, then hold the exact unreliable message until PATH exists |
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
 | `--cripple-ice` | off | Deterministically break ICE: bind an isolated dummy UDP transport while allowing only unconfigured TCP candidates in the ICE agent, then drop all outbound/inbound `IceCandidate` signals (SDP offer/answer and gathering completion still flow). Forces the relay fallback |

@@ -169,6 +169,7 @@ async fn native_peer_loss_retains_snapshot_before_removal() {
                         peer,
                         generation,
                         label: label.into(),
+                        reason: crate::engine::ChannelCloseReason::CallbackClosed,
                     }
                 };
                 state.handle_engine_event(event).await.unwrap();
@@ -210,6 +211,7 @@ async fn native_peer_loss_retains_snapshot_before_removal() {
                     peer,
                     generation,
                     label: RELIABLE_LABEL.into(),
+                    reason: crate::engine::ChannelCloseReason::CallbackClosed,
                 })
                 .await
                 .unwrap();
@@ -226,6 +228,7 @@ async fn native_peer_loss_retains_snapshot_before_removal() {
                 peer,
                 generation,
                 label: UNRELIABLE_LABEL.into(),
+                reason: crate::engine::ChannelCloseReason::CallbackClosed,
             })
             .await
             .unwrap();

@@ -481,6 +481,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
             peer: PlayerId::from_u128(99),
             generation: 0,
             label: RELIABLE_LABEL.to_string(),
+            reason: crate::engine::ChannelCloseReason::CallbackClosed,
         })
         .unwrap();
     }
@@ -488,6 +489,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
         peer,
         generation,
         label: RELIABLE_LABEL.to_string(),
+        reason: crate::engine::ChannelCloseReason::CallbackClosed,
     })
     .unwrap();
     state.connected_pairs.insert(peer);
@@ -1173,6 +1175,7 @@ async fn formed_pair_accepts_remote_retry_after_window_expiry() {
                         peer,
                         generation: 1,
                         label: RELIABLE_LABEL.to_string(),
+                        reason: crate::engine::ChannelCloseReason::CallbackClosed,
                     })
                     .await
                     .unwrap();
@@ -2148,6 +2151,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
                     peer: closed_peer,
                     generation,
                     label: ref closed_label,
+                    ..
                 } = closed
                 else {
                     unreachable!()
@@ -2494,4 +2498,81 @@ async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
             state.engine.remove_peer(sibling).await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn requested_rebuild_blocks_fallback_success_until_reserved_recovery() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _server_ws = server.await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let gate = directory.path().join("release");
+    let cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--exchange",
+        "--exchange-release-file",
+        gate.to_str().unwrap(),
+        "--p2p-rebuild-release-file",
+        gate.to_str().unwrap(),
+        "--p2p-retry-count",
+        "2",
+    ]);
+    let me = PlayerId::from_u128(1);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+    state.game_started = true;
+    state.members_seen.insert(peer);
+    state.webrtc_plan_seen = true;
+    state.expected_peers.insert(peer);
+    state.transport_status = Some(false);
+    state.peer_status_from.insert(peer);
+    assert!(
+        state.exchange_ledger.unmet_criteria().is_empty(),
+        "initial fallback has no formed-pair exchange debt"
+    );
+    assert!(
+        !state.criteria_met(),
+        "initial fallback cannot complete a requested future rebuild"
+    );
+    state.p2p_rebuild_released = true;
+    assert!(
+        !state.criteria_met(),
+        "released file alone does not prove peer recovery"
+    );
+    state.p2p_reconnected_pairs.insert(peer);
+    for attempt in [None, Some(1), Some(2)] {
+        if let Some(attempt) = attempt {
+            state.pair_retry_attempts.insert(peer, attempt);
+        }
+        assert_eq!(
+            state.criteria_met(),
+            attempt == Some(2),
+            "only the reserved physical generation can complete the requested rebuild: {attempt:?}"
+        );
+    }
+    state.p2p_reconnected_pairs.clear();
+    assert!(
+        !state.criteria_met(),
+        "losing reserved recovery restores the unmet criterion"
+    );
+    let fallback_cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--exchange",
+    ]);
+    state.cli = &fallback_cli;
+    assert!(
+        state.criteria_met(),
+        "ordinary relay fallback without a requested rebuild remains valid"
+    );
 }

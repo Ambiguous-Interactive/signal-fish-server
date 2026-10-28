@@ -112,7 +112,14 @@ pub enum Event {
     /// One data channel reached the open state.
     ChannelOpen { peer: PlayerId, label: String },
     /// A required data channel started closing, closed, or became unreadable.
-    ChannelClosed { peer: PlayerId, label: String },
+    ChannelClosed {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+        /// Absent for the synthetic close following a typed receive refusal.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        observation: Option<crate::engine::ChannelCloseReason>,
+    },
     /// A receive limit refused input. Emitted before link teardown.
     ChannelReceiveRejected {
         peer: PlayerId,
@@ -256,6 +263,46 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn channel_close_output_distinguishes_observations_from_receive_refusal() {
+        use crate::engine::ChannelCloseReason;
+        for (reason, name) in [
+            (ChannelCloseReason::CallbackError, "callback_error"),
+            (ChannelCloseReason::CallbackClosing, "callback_closing"),
+            (ChannelCloseReason::CallbackClosed, "callback_closed"),
+            (ChannelCloseReason::StreamEnded, "stream_ended"),
+            (ChannelCloseReason::ObservedClosing, "observed_closing"),
+            (ChannelCloseReason::ObservedClosed, "observed_closed"),
+            (ChannelCloseReason::StateUnavailable, "state_unavailable"),
+        ] {
+            let event = Event::ChannelClosed {
+                peer: PlayerId::nil(),
+                generation: 7,
+                label: "ordered".into(),
+                observation: Some(reason),
+            };
+            assert_eq!(
+                serde_json::to_value(event).unwrap(),
+                json!({
+                    "event":"channel_closed", "peer":PlayerId::nil(), "generation":7,
+                    "label":"ordered", "observation":name,
+                })
+            );
+        }
+        let event = Event::ChannelClosed {
+            peer: PlayerId::nil(),
+            generation: 8,
+            label: "reliable".into(),
+            observation: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "event":"channel_closed", "peer":PlayerId::nil(), "generation":8, "label":"reliable",
+            })
+        );
+    }
+
+    #[test]
     fn receive_rejection_event_preserves_failure_and_physical_generation() {
         use crate::engine::{ChannelReceiveFailure, ReceiveRejection};
 
@@ -350,6 +397,8 @@ mod tests {
             (
                 Event::ChannelClosed {
                     peer: PlayerId::nil(),
+                    generation: 7,
+                    observation: Some(crate::engine::ChannelCloseReason::CallbackClosed),
                     label: "reliable".to_string(),
                 },
                 "channel_closed",

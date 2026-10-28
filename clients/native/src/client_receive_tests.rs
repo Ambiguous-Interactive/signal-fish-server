@@ -354,6 +354,7 @@ async fn channel_termination_reports_fallback_and_preserves_a_newer_link() {
                     peer,
                     generation: 1,
                     label: label.to_owned(),
+                    reason: crate::engine::ChannelCloseReason::CallbackClosed,
                 }
             }
         };
@@ -937,6 +938,7 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
             peer,
             generation: 1,
             label: label.to_string(),
+            reason: crate::engine::ChannelCloseReason::CallbackClosed,
         };
         if mode == "closed-before" {
             events.send(closed()).unwrap();
@@ -1854,6 +1856,7 @@ async fn admitted_exchange_receipts_survive_physical_retirement_only() {
                         peer,
                         generation: 1,
                         label: label.into(),
+                        reason: crate::engine::ChannelCloseReason::CallbackClosed,
                     })
                     .await
                     .unwrap();

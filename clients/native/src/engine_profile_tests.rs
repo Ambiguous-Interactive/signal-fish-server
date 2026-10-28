@@ -1426,3 +1426,198 @@ async fn closed_application_receiver_releases_channel_pending_usage() {
     .expect("failed publication returns all receive credit");
     pair.cleanup().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
+    struct HeldOutput {
+        started: Option<std::sync::mpsc::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl std::io::Write for HeldOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                started.send(()).unwrap();
+                self.release.recv().unwrap();
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    for receiver_offers in [false, true] {
+        for label in [RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL] {
+            let mut pair = unconnected_negotiated_pair();
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            let peer = pair.sender_id;
+            let generation = pair.receiver.peers[&peer].generation;
+            assert!(pair.receiver.diagnostic_snapshot(peer)["channel_closure"].is_null());
+            let payload = vec![0xff; 4096];
+            pair.sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap()
+                .send(payload.as_slice().into())
+                .await
+                .unwrap();
+            let (data, permit) = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let EngineEvent::ChannelBinaryMessage {
+                        data, queue_permit, ..
+                    } = pair.receiver_events.recv().await.unwrap()
+                    {
+                        break (data, queue_permit);
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(data, payload);
+            let (started, waiting) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let output = crate::event_output::EventOutput::new(HeldOutput {
+                started: Some(started),
+                release: released,
+            });
+            output.emit_with_permit(
+                &crate::events::Event::ChannelBinaryMessage {
+                    peer,
+                    label: RELIABLE_LABEL.into(),
+                    data_base64: base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &data,
+                    ),
+                },
+                permit,
+            );
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                pair.receiver.diagnostic_snapshot(peer)["channels"][RELIABLE_LABEL]
+                    ["pending_application"],
+                serde_json::json!({"messages":1,"bytes":4096})
+            );
+            pair.receiver
+                .channel(peer, label)
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if matches!(event, EngineEvent::ChannelClosed { .. }) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .expect("required channel closure is published");
+            let EngineEvent::ChannelClosed {
+                reason,
+                label: closed_label,
+                ..
+            } = &closed
+            else {
+                unreachable!()
+            };
+            assert_eq!(closed_label, label);
+            assert!(matches!(
+                reason,
+                ChannelCloseReason::CallbackClosing
+                    | ChannelCloseReason::CallbackClosed
+                    | ChannelCloseReason::ObservedClosing
+                    | ChannelCloseReason::ObservedClosed
+                    | ChannelCloseReason::StateUnavailable
+            ));
+            let snapshot = pair.receiver.diagnostic_snapshot(peer);
+            assert_eq!(snapshot["channel_closure"]["label"], label);
+            assert_eq!(
+                snapshot["channel_closure"]["reason"],
+                serde_json::to_value(reason).unwrap()
+            );
+            assert!(
+                snapshot["receive_failure"].is_null(),
+                "physical closure is not receive refusal"
+            );
+            for sibling in [RELIABLE_LABEL, ORDERED_LABEL, UNRELIABLE_LABEL] {
+                assert!(pair.receiver.send_channel(peer, sibling).await.is_none());
+            }
+            assert_eq!(
+                pair.receiver.diagnostic_snapshot(peer)["channel_closure"],
+                snapshot["channel_closure"]
+            );
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            assert_eq!(closed.peer_generation(), (peer, generation));
+            assert_eq!(
+                serde_json::to_value(reason).unwrap(),
+                snapshot["channel_closure"]["reason"],
+                "queued terminal evidence survives removal"
+            );
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            assert!(!pair.receiver.is_current_event(&closed));
+            let fresh = pair.receiver.diagnostic_snapshot(peer);
+            assert!(fresh["channel_closure"].is_null());
+            assert_eq!(
+                fresh["channels"][RELIABLE_LABEL]["pending_application"],
+                serde_json::json!({"messages":0,"bytes":0})
+            );
+            assert_eq!(fresh["receive_budget"]["pending_messages"], 1);
+            assert_eq!(fresh["receive_budget"]["pending_bytes"], 4096);
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), output.drained())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                pair.receiver.diagnostic_snapshot(peer)["receive_budget"]["pending_bytes"],
+                0
+            );
+            let payload = format!("fresh:{receiver_offers}:{label}:鱼\0").into_bytes();
+            pair.sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap()
+                .send(payload.as_slice().into())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelBinaryMessage { data, .. } => {
+                            assert_eq!(data, payload);
+                            break;
+                        }
+                        event
+                            if pair.receiver.is_current_event(&event)
+                                && matches!(
+                                    event,
+                                    EngineEvent::ChannelClosed { .. }
+                                        | EngineEvent::ChannelReceiveRejected { .. }
+                                ) =>
+                        {
+                            panic!("fresh link must deliver exact reliable gameplay")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            pair.cleanup().await;
+        }
+    }
+}

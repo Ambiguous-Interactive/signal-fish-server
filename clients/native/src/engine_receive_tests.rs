@@ -203,6 +203,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
         closed_labels: AtomicU8::new(0),
         rejected: Mutex::new(false),
         failure: OnceLock::new(),
+        closure: OnceLock::new(),
         terminal: AtomicBool::new(false),
     });
     // The default SCTP message cap prevents live raw-oversize delivery.
@@ -292,6 +293,7 @@ async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
                 peer,
                 generation,
                 label,
+                ..
             } = pair.sender_events.recv().await.unwrap()
             {
                 assert_eq!(peer, pair.receiver_id);
@@ -792,7 +794,21 @@ async fn live_sibling_closure_fences_gameplay_before_its_poller_runs() {
                                 peer: event_peer,
                                 generation: event_generation,
                                 label,
+                                reason,
                             } => {
+                                assert!(
+                                    matches!(
+                                        reason,
+                                        ChannelCloseReason::ObservedClosing
+                                            | ChannelCloseReason::ObservedClosed
+                                            | ChannelCloseReason::StateUnavailable
+                                    ),
+                                    "held poller cannot publish a callback reason"
+                                );
+                                assert_eq!(
+                                    pair.receiver.diagnostic_snapshot(peer)["channel_closure"],
+                                    serde_json::json!({"label":closed_label,"reason":reason})
+                                );
                                 assert_eq!(
                                     (event_peer, event_generation, label.as_str()),
                                     (peer, generation, closed_label)
@@ -977,8 +993,16 @@ async fn queued_reliable_input_drains_before_its_own_graceful_close() {
                         assert_eq!(text, "queued-before-own-close");
                         messages += 1;
                     }
-                    EngineEvent::ChannelClosed { label, .. } => {
+                    EngineEvent::ChannelClosed { label, reason, .. } => {
                         assert_eq!(label, RELIABLE_LABEL);
+                        assert!(
+                            matches!(
+                                reason,
+                                ChannelCloseReason::CallbackClosing
+                                    | ChannelCloseReason::CallbackClosed
+                            ),
+                            "drained FIFO preserves the actual terminal callback"
+                        );
                         assert_eq!(
                             messages, 1,
                             "same-channel FIFO must retain input before its close"

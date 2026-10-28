@@ -2280,13 +2280,7 @@ impl Orchestrator<'_> {
             emit(&Event::ExchangeReady);
             self.exchange_ready_reported = true;
         }
-        if self.cli.p2p_rebuild_release_file.is_some()
-            && (!self.p2p_rebuild_released
-                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs)
-                || !self.expected_peers.iter().all(|peer| {
-                    self.pair_retry_attempts.get(peer) == Some(&self.cli.p2p_retry_count)
-                }))
-        {
+        if self.reserved_rebuild_pending() {
             return Ok(());
         }
         if self.exchange_release_pending().await? {
@@ -3014,9 +3008,19 @@ impl Orchestrator<'_> {
                     self.on_pair_connected(peer).await?;
                 }
             }
-            EngineEvent::ChannelClosed { peer, label, .. } => {
+            EngineEvent::ChannelClosed {
+                peer,
+                generation,
+                label,
+                reason: observation,
+            } => {
                 let reason = format!("required data channel closed: {label}");
-                emit(&Event::ChannelClosed { peer, label });
+                emit(&Event::ChannelClosed {
+                    peer,
+                    generation,
+                    label,
+                    observation: Some(observation),
+                });
                 self.handle_peer_transport_loss(peer, &reason).await?;
             }
             EngineEvent::ChannelMessage {
@@ -3033,8 +3037,8 @@ impl Orchestrator<'_> {
                 {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
-                emit(&Event::ChannelMessage { peer, label, text });
-                drop(queue_permit);
+                crate::event_output::stdout()
+                    .emit_with_permit(&Event::ChannelMessage { peer, label, text }, queue_permit);
             }
             EngineEvent::ChannelBinaryMessage {
                 peer,
@@ -3043,12 +3047,14 @@ impl Orchestrator<'_> {
                 queue_permit,
                 ..
             } => {
-                emit(&Event::ChannelBinaryMessage {
-                    peer,
-                    label,
-                    data_base64: BASE64_STANDARD.encode(data),
-                });
-                drop(queue_permit);
+                crate::event_output::stdout().emit_with_permit(
+                    &Event::ChannelBinaryMessage {
+                        peer,
+                        label,
+                        data_base64: BASE64_STANDARD.encode(data),
+                    },
+                    queue_permit,
+                );
             }
             EngineEvent::ChannelReceiveRejected {
                 peer,
@@ -3069,7 +3075,12 @@ impl Orchestrator<'_> {
                     ),
                 });
                 let reason = format!("data-channel receive rejected: {label}");
-                emit(&Event::ChannelClosed { peer, label });
+                emit(&Event::ChannelClosed {
+                    peer,
+                    generation,
+                    label,
+                    observation: None,
+                });
                 self.handle_peer_transport_loss(peer, &reason).await?;
             }
         }
@@ -3871,6 +3882,15 @@ impl Orchestrator<'_> {
             .map_err(|error| FatalError::connection(format!("{error:#}")))
     }
 
+    fn reserved_rebuild_pending(&self) -> bool {
+        self.cli.p2p_rebuild_release_file.is_some()
+            && (!self.p2p_rebuild_released
+                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs)
+                || !self.expected_peers.iter().all(|peer| {
+                    self.pair_retry_attempts.get(peer) == Some(&self.cli.p2p_retry_count)
+                }))
+    }
+
     /// The flag-driven minimum this client must observe to exit 0. Deep
     /// correctness assertions live in the interop harness, not here.
     fn criteria_met(&self) -> bool {
@@ -3880,6 +3900,9 @@ impl Orchestrator<'_> {
     /// Human-readable list of unmet criteria (for the failure diagnostics).
     fn unmet_criteria(&self) -> Vec<String> {
         let mut unmet = Vec::new();
+        if self.reserved_rebuild_pending() {
+            unmet.push("awaiting requested P2P rebuild".to_string());
+        }
         if self.reconnect_attempts < self.cli.reconnect_release_file.len() {
             unmet.push("awaiting requested room restore".to_string());
         }

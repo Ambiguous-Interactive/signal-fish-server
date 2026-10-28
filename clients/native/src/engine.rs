@@ -179,6 +179,36 @@ pub struct ChannelReceiveFailure {
     pub pending_bytes: usize,
 }
 
+/// The local observation that first reported a required channel as unusable.
+/// These values do not establish the remote or network cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelCloseReason {
+    /// The channel poller received OnError.
+    CallbackError,
+    /// The channel poller received OnClosing.
+    CallbackClosing,
+    /// The channel poller received OnClose.
+    CallbackClosed,
+    /// The channel event stream ended without a terminal callback.
+    StreamEnded,
+    /// Another task observed the required channel in Closing state.
+    ObservedClosing,
+    /// Another task observed the required channel in Closed state.
+    ObservedClosed,
+    /// The channel state query failed; its handle was unavailable.
+    StateUnavailable,
+}
+
+/// First closure observation retained for one physical link.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChannelClosure {
+    /// Required channel whose loss was observed.
+    pub label: String,
+    /// Local observation, rather than a transport root cause.
+    pub reason: ChannelCloseReason,
+}
+
 /// Holds receive capacity until a message is handled or discarded.
 pub struct MessageQueuePermit {
     _message: OwnedSemaphorePermit,
@@ -214,6 +244,15 @@ impl Drop for PendingChannelMessage {
 impl MessageQueuePermit {
     pub(crate) fn for_test() -> Self {
         MessageQueueBudget::default().reserve(0).unwrap()
+    }
+
+    pub(crate) fn for_test_with_budget(bytes: usize) -> (Self, Arc<Semaphore>, Arc<Semaphore>) {
+        let budget = MessageQueueBudget::default();
+        (
+            budget.reserve(bytes).unwrap(),
+            budget.messages,
+            budget.bytes,
+        )
     }
 }
 
@@ -257,6 +296,7 @@ struct ChannelReceiveAdmission {
     closed_labels: AtomicU8,
     rejected: Mutex<bool>,
     failure: OnceLock<ChannelReceiveFailure>,
+    closure: OnceLock<ChannelClosure>,
     terminal: AtomicBool,
 }
 
@@ -303,14 +343,19 @@ impl ChannelReceiveAdmission {
                 continue;
             }
             let Some(channel) = channel else { continue };
-            if matches!(
-                channel.ready_state().await,
-                Ok(rtc::data_channel::RTCDataChannelState::Closing
-                    | rtc::data_channel::RTCDataChannelState::Closed)
-                    | Err(_)
-            ) {
+            let reason = match channel.ready_state().await {
+                Ok(rtc::data_channel::RTCDataChannelState::Closing) => {
+                    Some(ChannelCloseReason::ObservedClosing)
+                }
+                Ok(rtc::data_channel::RTCDataChannelState::Closed) => {
+                    Some(ChannelCloseReason::ObservedClosed)
+                }
+                Err(_) => Some(ChannelCloseReason::StateUnavailable),
+                _ => None,
+            };
+            if let Some(reason) = reason {
                 if !self.terminal.swap(true, Ordering::Relaxed) {
-                    self.report_channel_closed(events, peer, generation, label);
+                    self.report_channel_closed(events, peer, generation, label, reason);
                 }
                 return false;
             }
@@ -324,6 +369,7 @@ impl ChannelReceiveAdmission {
         peer: PlayerId,
         generation: u64,
         label: &str,
+        reason: ChannelCloseReason,
     ) {
         let bit = match label {
             RELIABLE_LABEL => 1,
@@ -332,10 +378,15 @@ impl ChannelReceiveAdmission {
             _ => return,
         };
         if self.closed_labels.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            let _ = self.closure.set(ChannelClosure {
+                label: label.into(),
+                reason,
+            });
             let _ = events.send(EngineEvent::ChannelClosed {
                 peer,
                 generation,
                 label: label.into(),
+                reason,
             });
         }
     }
@@ -399,6 +450,7 @@ pub enum EngineEvent {
         peer: PlayerId,
         generation: u64,
         label: String,
+        reason: ChannelCloseReason,
     },
     /// A text frame, or the Reference profile's text projection of a binary
     /// frame, arrived on an open channel. Keep `queue_permit`
@@ -474,7 +526,7 @@ struct PeerLink {
     /// Shared with the callback so unread announcements retain only required channels.
     channel_admission: Arc<Mutex<RequiredChannelAdmission>>,
     receive_admission: Arc<ChannelReceiveAdmission>,
-    /// Labels observed open so far; the pair is connected when both labels are in.
+    /// Labels observed open so far; all required labels must open before pairing.
     open_labels: BTreeSet<String>,
     /// Remote ICE candidates cannot be applied before the remote description.
     pending_candidates: Vec<RTCIceCandidateInit>,
@@ -482,7 +534,7 @@ struct PeerLink {
     remote_candidate_bytes: usize,
     remote_description_set: bool,
     pair_connected: bool,
-    /// At most two admitted channel pollers, owned by this physical link.
+    /// One poller per admitted required channel, owned by this physical link.
     channel_tasks: Vec<Box<dyn JoinHandle>>,
 }
 
@@ -802,6 +854,7 @@ impl Engine {
             closed_labels: AtomicU8::new(0),
             rejected: Mutex::new(false),
             failure: OnceLock::new(),
+            closure: OnceLock::new(),
             terminal: AtomicBool::new(false),
         });
         let handler = Arc::new(PeerHandler {
@@ -1161,6 +1214,8 @@ impl Engine {
     /// held by its published events. These counts belong to this generation;
     /// fresh links start empty even while retired events charge the Engine.
     /// Counts are sampled separately and do not include transport callback queues.
+    /// `channel_closure` retains the first required-channel closure observation.
+    /// It identifies a local callback or state query, not the network root cause.
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
@@ -1191,6 +1246,7 @@ impl Engine {
             "pending_remote_candidates": link.pending_candidates.len(),
             "receive_rejection": link.receive_admission.failure.get().map(|failure| failure.reason.as_str()),
             "receive_failure": link.receive_admission.failure.get(),
+            "channel_closure": link.receive_admission.closure.get(),
             "receive_budget": {
                 "scope": "engine",
                 "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
@@ -1861,6 +1917,7 @@ fn spawn_channel_event_loop(
 ) -> Box<dyn JoinHandle> {
     let events = events.clone();
     runtime.spawn(Box::pin(async move {
+        let mut close_reason = ChannelCloseReason::StreamEnded;
         while let Some(event) = channel.poll().await {
             // Admission can suspend; publication time must not replace arrival.
             let received_at = tokio::time::Instant::now();
@@ -1988,11 +2045,18 @@ fn spawn_channel_event_loop(
                     }
                 }
                 DataChannelEvent::OnError => {
+                    close_reason = ChannelCloseReason::CallbackError;
                     admission.terminal.store(true, Ordering::Relaxed);
                     tracing::warn!(%peer, channel = %label, "data channel became unreadable");
                     break;
                 }
-                DataChannelEvent::OnClosing | DataChannelEvent::OnClose => {
+                DataChannelEvent::OnClosing => {
+                    close_reason = ChannelCloseReason::CallbackClosing;
+                    admission.terminal.store(true, Ordering::Relaxed);
+                    break;
+                }
+                DataChannelEvent::OnClose => {
+                    close_reason = ChannelCloseReason::CallbackClosed;
                     admission.terminal.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -2017,7 +2081,7 @@ fn spawn_channel_event_loop(
         admission.terminal.store(true, Ordering::Relaxed);
         let rejected = admission.rejected.lock().await;
         if !*rejected {
-            admission.report_channel_closed(&events, peer, generation, &label);
+            admission.report_channel_closed(&events, peer, generation, &label, close_reason);
         }
     }))
 }
@@ -3195,6 +3259,7 @@ mod tests {
                 peer,
                 generation: stale_generation,
                 label: RELIABLE_LABEL.to_string(),
+                reason: crate::engine::ChannelCloseReason::CallbackClosed,
             },
             EngineEvent::ChannelMessage {
                 peer,
@@ -3978,6 +4043,7 @@ mod tests {
                         peer,
                         generation,
                         label,
+                        ..
                     } => break (peer, generation, label),
                     EngineEvent::PcState {
                         state: RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed,

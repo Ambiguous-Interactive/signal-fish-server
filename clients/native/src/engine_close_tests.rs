@@ -206,6 +206,7 @@ async fn remote_peer_close_retires_both_required_channels() {
                     peer,
                     generation: event_generation,
                     label,
+                    ..
                 } = events.recv().await.unwrap()
                 {
                     assert_eq!(peer, closed_peer);
@@ -1245,6 +1246,7 @@ async fn local_channel_closing_retires_pair_before_remote_reset() {
                         peer,
                         generation: event_generation,
                         label,
+                        ..
                     } = pair.sender_events.recv().await.unwrap()
                     {
                         assert_eq!(
@@ -1562,6 +1564,7 @@ async fn fragmented_gameplay_preserves_receipts_through_same_stream_reset() {
                                     peer,
                                     generation: event_generation,
                                     label: closed,
+                                    ..
                                 } => {
                                     assert_eq!(peer, pair.sender_id, "{context}");
                                     assert_eq!(event_generation, generation, "{context}");

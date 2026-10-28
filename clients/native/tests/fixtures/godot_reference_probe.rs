@@ -281,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(boundary) = boundary { row["receive_boundary"] = boundary; }
                         enqueue(&output, row, Some(queue_permit))?;
                     }
-                    EngineEvent::ChannelClosed {label,..} => emit(&output,json!({"event":"closed", "generation":generation, "label":label, "snapshot":transport_snapshot(&engine, peer).await}))?,
+                    EngineEvent::ChannelClosed {label,reason,..} => emit(&output,json!({"event":"closed", "generation":generation, "label":label, "observation":reason, "snapshot":transport_snapshot(&engine, peer).await}))?,
                     _ => {}
                 }
             }
@@ -428,6 +428,7 @@ mod tests {
             peer: PlayerId::from_u128(0x1264),
             generation: 7,
             label: "reliable".to_owned(),
+            reason: signal_fish_reference_native::engine::ChannelCloseReason::CallbackClosed,
         };
         assert!(receive_rejection_event(&closed, json!({"receive_failure":null})).is_none());
     }
