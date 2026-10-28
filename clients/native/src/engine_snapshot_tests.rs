@@ -208,6 +208,16 @@ async fn stalled_transport_snapshot_returns_local_evidence_and_preserves_reliabl
                     .unwrap();
                 retained
                     .push(next_exact_receipt(&mut pair.receiver_events, &payload, profile).await);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while pair.receiver.diagnostic_snapshot(peer)["channels"][RELIABLE_LABEL]
+                        ["receipts"]["admitted"]
+                        != 1
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("receipt publication precedes its final admission counter update");
                 let before = pair.receiver.diagnostic_snapshot(peer);
                 let expected = vec![b'X' + generation; 4096];
                 let snapshot = snapshot_during_send(

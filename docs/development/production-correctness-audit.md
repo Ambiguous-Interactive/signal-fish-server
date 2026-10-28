@@ -10557,3 +10557,8 @@ all-feature lint, formatting, Markdown and document consistency checks pass.
 Godot #355 now records the inspected driver's missing timeout-marker check
 and the required partial-snapshot adoption controls. No runtime result is
 inferred from these native/native tests.
+
+Final self-review found that callback publication precedes its admission-counter
+update. The recovery control now waits for classification before comparing
+snapshots; it does not assume that separately sampled counters update atomically.
+Both new controls pass again in `c09b59cc-f5ee-4275-a713-13ad1faca5c5`.
