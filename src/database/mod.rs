@@ -2062,6 +2062,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Store a changed member name and renew both room activity clocks.
     async fn update_player_name(
         &self,
         room_id: &RoomId,
@@ -2107,6 +2108,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Store changed peer metadata and renew both room activity clocks.
     async fn update_player_connection_info(
         &self,
         room_id: &RoomId,
@@ -2139,6 +2141,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Clear retained peer metadata and renew activity only when metadata was present.
     async fn clear_player_connection_info(
         &self,
         room_id: &RoomId,

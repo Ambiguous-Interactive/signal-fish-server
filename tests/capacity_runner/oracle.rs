@@ -1280,6 +1280,7 @@ impl RecipientLatency {
     }
 }
 
+/// Preserve all samples while assigning histograms only to roster recipients.
 fn individual_recipient_latency_statistics(
     records: &RunRecords,
     sent_by_key: &SendIndex<'_>,
@@ -1642,6 +1643,7 @@ fn churn_views<'a>(
     (views, unresolved)
 }
 
+/// Reject snapshot tails with foreign members, wrong identities or impossible progress.
 fn snapshot_tail_evidence(
     records: &RunRecords,
     rooms: &BTreeMap<&str, u32>,
@@ -3686,8 +3688,8 @@ mod coverage_tests {
         }
     }
 
-    // #775/#636: ordinary rooms share their immutable epoch evidence while
-    // affected rooms retain exact per-seat snapshots and unresolved identities.
+    /// #775/#636: ordinary rooms share their immutable epoch evidence while
+    /// affected rooms retain exact per-seat snapshots and unresolved identities.
     #[test]
     fn churn_views_share_only_unchanged_rooms_and_preserve_exact_evidence() {
         let roster: Vec<_> = [("alice", 0), ("βob", 0), ("other", 1), ("last", 1)]
@@ -3786,7 +3788,7 @@ mod coverage_tests {
         }
     }
 
-    // #775: reuse immutable roster spellings in every oracle epoch and floor map.
+    /// #775: reuse immutable roster spellings in every oracle epoch and floor map.
     #[test]
     fn churn_view_keys_borrow_roster_names() {
         let roster = vec![("αlice".to_string(), 0), ("bob".to_string(), 0)];

@@ -2734,6 +2734,7 @@ async fn half_close_source_eof_preserves_server_tail_and_releases_owners() {
     assert!(proxy.control_errors().is_empty());
 }
 
+/// A failed forward pump must preserve the opposite server-tail bytes.
 #[tokio::test]
 #[serial_test::serial]
 async fn half_close_preserves_server_tail_after_client_forwarding_fails() {
@@ -2783,6 +2784,7 @@ async fn half_close_preserves_server_tail_after_client_forwarding_fails() {
     client.shutdown().await.unwrap();
 }
 
+/// Explicit close controls must release sockets retained after a forward failure.
 #[tokio::test]
 #[serial_test::serial]
 async fn half_close_terminal_faults_release_draining_connections() {
