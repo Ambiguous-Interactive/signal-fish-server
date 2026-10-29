@@ -899,6 +899,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         result
     }
 
+    /// Return a membership-filtered ready snapshot without holding its lock during storage reads.
     async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId> {
         // Snapshot the set without holding the lock across either DB await
         // below: the guard scope closes before any await, so a snapshot can

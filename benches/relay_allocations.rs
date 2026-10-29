@@ -858,6 +858,7 @@ fn assert_host_election_borrows_candidates() {
     assert!(bounded, "host election must borrow its candidates");
 }
 
+/// Enforce component allocation ceilings and report repeated relay measurements.
 fn main() {
     assert_readiness_snapshots_reuse_their_id_storage();
     assert_session_peer_lists_do_not_grow();

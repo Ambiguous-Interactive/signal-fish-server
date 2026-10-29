@@ -702,6 +702,7 @@ where
     events
 }
 
+/// Validate every observed churn action against the planned lifecycle and roster.
 fn churn_evidence(
     churn: &ChurnPlan,
     roster: &[(String, u32)],
@@ -4605,6 +4606,7 @@ mod coverage_tests {
         records
     }
 
+    /// Raw ties and malformed epochs must keep the independent stable order.
     #[test]
     fn churn_order_preserves_stable_raw_identity_for_ties_and_invalid_epochs() {
         for count in [0, 1, 2, 17, 257, 4096] {
@@ -4663,6 +4665,7 @@ mod coverage_tests {
         }
     }
 
+    /// Measure retained index bytes and verify the exact one-million-row order digest.
     #[test]
     #[ignore = "isolated churn sort memory comparison; run in a fresh process"]
     fn generator_churn_sort_memory_profile() {

@@ -54,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Preserve the current room authority when a storage caller names an absent player (#1298).
+- Reject absent-player authority assignments without changing the room (#1298).
 - Reject duplicate player and spectator admissions without replacing members or inflating session join counts (#1296).
 - Preserve server shutdown close reasons while inbound traffic is still arriving (#1295).
 - Preserve player readiness when the public room API enters the lobby (#1293).

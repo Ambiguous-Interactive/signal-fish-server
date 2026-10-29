@@ -2023,6 +2023,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Apply a validated authority change under the room membership write lock.
     async fn update_room_authority(
         &self,
         room_id: &RoomId,
