@@ -9,7 +9,7 @@ fn sample(rooms: usize) -> DashboardMetricsSnapshot {
             HashMap::from([("p95".to_string(), 4.0)]),
         )]),
         active_rooms: rooms,
-        fetched_at: chrono::Utc::now(),
+        fetched_at: chrono::DateTime::from_timestamp(i64::try_from(rooms).unwrap(), 0).unwrap(),
         fetched_at_instant: tokio::time::Instant::now(),
     }
 }

@@ -11072,3 +11072,8 @@ through player flags or direct field assignment. They now select authority
 through `Room::set_authority` and keep their original peer-list, single-authority,
 transfer and departure assertions. All 29 selected protocol and admission controls
 pass after this fixture correction.
+
+Hosted Linux Nextest at `7bb717eb` rejects the new dashboard helper's wall-clock
+read in `clock_source_scan`. The helper now injects distinct fixed timestamps;
+no policy exception is added. All nine clock-policy controls pass, and the
+paused-clock dashboard control passes in `fe15ea46-a120-43b0-9297-fcd9e0823523`.
