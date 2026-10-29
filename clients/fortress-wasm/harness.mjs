@@ -942,6 +942,10 @@ function validateWaitObservations(report, name) {
   assertExactKeys(trace, ["events", "omitted"], `${name} wait observations`);
   assert(Array.isArray(trace.events) && trace.events.length <= 64, `${name}: unbounded wait observations`);
   assert(Number.isSafeInteger(trace.omitted) && trace.omitted >= 0, `${name}: invalid omitted waits`);
+  for (const key of ["wait_recommendations", "callback_count", "poll_count"]) {
+    assert(Number.isSafeInteger(report[key]) && report[key] >= 0, `${name}: invalid ${key}`);
+  }
+  assert(trace.omitted === 0 || trace.events.length === 64, `${name}: omitted waits without a full prefix`);
   assert(trace.events.length + trace.omitted <= report.wait_recommendations, `${name}: excess wait observations`);
   let previousCallback = 0;
   let previousElapsed = 0;
@@ -952,17 +956,21 @@ function validateWaitObservations(report, name) {
       "local_frames_behind", "remote_frames_behind", "skip_frames", "relay_received",
       "relay_queue_depth",
     ], `${name} wait event`);
-    assert(
-      Number.isSafeInteger(event.callback) && event.callback > 0 &&
-        Number.isSafeInteger(event.poll) && event.poll === event.callback &&
-        event.callback >= previousCallback && event.callback <= report.callback_count,
-      `${name}: wait callback order`,
-    );
-    assert(
-      Number.isSafeInteger(event.elapsed_us) && event.elapsed_us >= previousElapsed,
-      `${name}: wait clock order`,
-    );
-    assert(Number.isSafeInteger(event.skip_frames) && event.skip_frames > 0, `${name}: invalid wait skip`);
+    for (const key of ["elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames", "relay_received", "relay_queue_depth"]) {
+      assert(Number.isSafeInteger(event[key]) && event[key] >= 0, `${name}: invalid wait ${key}`);
+    }
+    for (const key of ["frame_before_poll", "current_frame", "confirmed_frame", "frames_ahead"]) {
+      assert(Number.isSafeInteger(event[key]), `${name}: invalid wait ${key}`);
+    }
+    assert(event.callback_interval_us === null ||
+      (Number.isSafeInteger(event.callback_interval_us) && event.callback_interval_us >= 0), `${name}: invalid wait callback interval`);
+    for (const key of ["local_frames_behind", "remote_frames_behind"]) {
+      assert(event[key] === null || Number.isSafeInteger(event[key]), `${name}: invalid wait ${key}`);
+    }
+    assert(event.callback > 0 && event.poll === event.callback &&
+      event.callback >= previousCallback && event.callback <= report.callback_count, `${name}: wait callback order`);
+    assert(event.elapsed_us >= previousElapsed, `${name}: wait clock order`);
+    assert(event.skip_frames > 0, `${name}: invalid wait skip`);
     previousCallback = event.callback;
     previousElapsed = event.elapsed_us;
   }
@@ -976,10 +984,15 @@ function runWaitObservationSelfTests() {
     confirmed_frame: 96, frames_ahead: 3, local_frames_behind: -3,
     remote_frames_behind: 3, skip_frames: 3, relay_received: 123, relay_queue_depth: 2,
   };
-  const valid = { callback_count: 2, wait_recommendations: 1, wait_observations: { events: [event], omitted: 0 } };
+  const valid = { callback_count: 2, poll_count: 2, wait_recommendations: 1, wait_observations: { events: [event], omitted: 0 } };
   validateWaitObservations(valid, "valid trace");
   validateWaitObservations({ ...valid, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 } }, "no waits");
-  for (const trace of [
+  validateWaitObservations({ ...valid, callback_count: 0, poll_count: 0, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 } }, "initial counters");
+  validateWaitObservations({ ...valid, wait_observations: { events: [], omitted: 0 } }, "pending event");
+  validateWaitObservations({ ...valid, wait_recommendations: 71, wait_observations: { events: Array(64).fill(event), omitted: 7 } }, "bounded overflow");
+  validateWaitObservations({ ...valid, wait_observations: { events: [{ ...event, callback_interval_us: null, local_frames_behind: null, remote_frames_behind: null }], omitted: 0 } }, "unavailable estimates");
+  validateWaitObservations({ ...valid, wait_observations: { events: [{ ...event, frame_before_poll: -1, current_frame: -1, confirmed_frame: -1, frames_ahead: -3 }], omitted: 0 } }, "signed frames");
+  const invalidReports = [
     { events: Array(65).fill(event), omitted: 0 },
     { events: [event], omitted: -1 },
     { events: [event], omitted: 1 },
@@ -994,11 +1007,31 @@ function runWaitObservationSelfTests() {
     { events: [{ ...event, elapsed_us: -1 }], omitted: 0 },
     { events: [{ ...event, elapsed_us: Number.MAX_SAFE_INTEGER + 1 }], omitted: 0 },
     { events: [{ ...event, skip_frames: Number.MAX_SAFE_INTEGER + 1 }], omitted: 0 },
+  ].map((trace) => ({ ...valid, wait_observations: trace }));
+  const invalidNumbers = [undefined, null, "", "2", 2.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, false, true];
+  for (const key of ["callback_count", "poll_count", "wait_recommendations"]) {
+    for (const value of [...invalidNumbers, -1]) {
+      invalidReports.push({ ...valid, [key]: value });
+      invalidReports.push({ ...valid, [key]: value, wait_observations: { events: [], omitted: 0 } });
+    }
+  }
+  for (const key of [
+    "elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames",
+    "relay_received", "relay_queue_depth", "frame_before_poll", "current_frame",
+    "confirmed_frame", "frames_ahead", "callback_interval_us", "local_frames_behind", "remote_frames_behind",
   ]) {
+    const nullable = ["callback_interval_us", "local_frames_behind", "remote_frames_behind"].includes(key);
+    const unsigned = ["elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames", "relay_received", "relay_queue_depth", "callback_interval_us"].includes(key);
+    for (const value of [...invalidNumbers.filter((value) => !(nullable && value === null)), ...(unsigned ? [-1] : [])]) {
+      invalidReports.push({ ...valid, wait_observations: { events: [{ ...event, [key]: value }], omitted: 0 } });
+    }
+  }
+  invalidReports.push({ ...valid, wait_observations: { events: [], omitted: 1 } });
+  for (const report of invalidReports) {
     let rejected = false;
-    try { validateWaitObservations({ ...valid, wait_observations: trace }, "invalid trace"); }
+    try { validateWaitObservations(report, "invalid trace"); }
     catch { rejected = true; }
-    assert(rejected, "invalid wait trace passed");
+    assert(rejected, `invalid wait trace passed: ${JSON.stringify(report)}`);
   }
 }
 
