@@ -2857,6 +2857,7 @@ mod coverage_tests {
 
     // #775/#636: sparse and extreme epochs retain the exact set reference.
     #[test]
+    /// Compare epoch ordering and membership with sets and pin borrowed storage.
     fn sender_epoch_index_borrows_single_epochs_and_preserves_churn_sets() {
         for keys in [
             vec![],
@@ -2922,6 +2923,7 @@ mod coverage_tests {
         }
         let before = crate::diagnostics::resident_memory_bytes(std::process::id());
         let started = std::time::Instant::now();
+        /// Capture retained RSS before serialization and emit an exact digest.
         fn report<T: serde::Serialize>(
             index: &T,
             before: Option<u64>,

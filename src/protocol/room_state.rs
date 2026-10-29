@@ -652,6 +652,7 @@ mod tests {
 
     // #1302: membership activity must restart the public expiry window.
     #[test]
+    /// Successful membership changes restart expiry; refused changes do not.
     fn player_membership_restarts_room_expiry_only_on_success() {
         let stale = chrono::DateTime::from_timestamp(946_684_800, 0).unwrap();
         let timeout = chrono::Duration::seconds(60);

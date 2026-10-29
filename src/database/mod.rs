@@ -1894,6 +1894,8 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     /// Admit one new player while preserving every existing membership.
+    /// Refresh both activity clocks under the room lock after admission.
+    /// Refusals preserve the clocks and session join count.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool> {
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
@@ -1934,6 +1936,8 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Remove membership through Room and record actual departures on the
+    /// monotonic clock and session ledger. Absent members do not extend expiry.
     async fn remove_player_from_room(
         &self,
         room_id: &RoomId,
