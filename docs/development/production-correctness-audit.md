@@ -11077,3 +11077,75 @@ Hosted Linux Nextest at `7bb717eb` rejects the new dashboard helper's wall-clock
 read in `clock_source_scan`. The helper now injects distinct fixed timestamps;
 no policy exception is added. All nine clock-policy controls pass, and the
 paused-clock dashboard control passes in `fe15ea46-a120-43b0-9297-fcd9e0823523`.
+
+### F208 — Public player membership leaves the expiry clock stale (#1302)
+
+Baseline `301df5ad`, under #826. `Room::add_player` and `Room::remove_player`
+change membership without refreshing `last_activity`. An embedder that uses
+`Room::is_expired_at` can therefore expire a newly occupied room or give its
+last departure less than the full empty timeout. The spectator methods already
+refresh activity. The shipped in-memory storage updates its own wall and
+monotonic clocks, so this finding does not establish a live server incident.
+
+The membership regression fails on the baseline in Nextest
+`ee07f875-d005-4f6d-bb9a-71747312be3b`. The repair refreshes activity only after
+successful admission or actual removal. Storage reuses the Room methods while
+retaining its monotonic clock and session counts. Duplicate and full-room
+admissions, absent removals, creation time, readiness and authority keep their
+contracts. The expiry control covers open and finalized rooms and the exact
+empty-timeout boundary. All 17 selected all-feature room and storage controls
+pass in `800960f2-1d1b-4a3d-8a97-16f5c43b80ab`, including monotonic-clock steps,
+concurrent duplicate admission and spectator occupancy.
+
+The Rust client manifest at `da8f2d16` has no server-crate dependency. The .NET
+project at `e467c871` is a C# client without that dependency. The Godot addon at
+`39085860` is a GDScript client. None calls these Rust Room methods. Server
+storage preserves its existing lifetime policy, and wire messages do not change.
+No client migration is required. The broader #826 campaign remains open.
+
+### Borrowed sender epoch index (#636, #775)
+
+The capacity oracle built a separate `BTreeSet` for every sender, including
+senders with only one epoch. It now borrows that epoch from the immutable relay
+block key. Churned senders promote to a sorted owned list. Distinct, sorted block
+keys preserve exact set iteration and binary-search membership. The independent
+set control covers empty input, duplicate keys, Unicode names, sparse and
+extreme epochs, and borrowed-pointer identity. The full oracle retains raw
+records, invalidation reasons and artifact formats.
+
+An isolated StatsAlloc control compiles the production helper verbatim with a
+unit-valued relay-block stand-in. It measures index construction only; names and
+block keys are built before the measured region. The frozen reference uses the
+previous set-building loop. On this 64-bit ARM host, the results are:
+
+| Senders | Epochs each | Set allocations | Borrowed allocations | Set bytes | Borrowed bytes |
+| --- | --- | --- | --- | --- | --- |
+| 16 | 1 | 19 | 3 | 2,360 | 1,464 |
+| 15,984 | 1 | 18,646 | 2,662 | 2,145,360 | 1,250,256 |
+| 63,936 | 1 | 74,591 | 10,655 | 8,585,112 | 5,004,696 |
+| 15,984 | 4 | 18,646 | 18,646 | 2,145,360 | 1,506,000 |
+
+The four-epoch list also performs one reallocation per sender; the single-epoch
+case performs none. Every control compares exact epoch lists with the set
+reference. Requested allocation bytes are not process RSS or peak memory.
+The ignored `generator_sender_epoch_index_memory_profile` provides a separate
+production-helper RSS and serialized-digest control; set
+`CAPACITY_EPOCH_SET_REFERENCE=1` for its frozen reference and
+`CAPACITY_EPOCH_CHURN=1` for four epochs. This component result does not prove
+server throughput or the full ten-minute C3 qualification. Both campaigns stay
+open.
+
+All ten selected all-feature oracle, negative-history and live relay/replay
+controls pass in `b2eaf851-ee3e-4025-b73a-9353c3c7df86`. They include inactive,
+unannounced and stale epochs, exact gap failures, mixed churn views and opaque
+payload leaks. These controls do not complete the wider correctness campaign.
+
+The fresh-process helper profiles retain identical serialized output between
+borrowed and set indexes: single-epoch SHA-256
+`47b630e3d4c1d68af6e3aaf31e73ccb800e2e19e29d3d45e95ed28216357c86c`
+and four-epoch SHA-256
+`871f1688d5d1e00db91e402aaaa7a4e3b8401bb94e728d1498c3e7d178723301`.
+Single-epoch RSS growth is 2,256,896 bytes for borrowed storage and 3,215,360
+for the set reference; four-epoch growth is 2,834,432 and 3,215,360 bytes.
+These one-shot observations support only this component's storage claim.
+Strict all-target, all-feature Clippy and all 38 source-policy controls pass.

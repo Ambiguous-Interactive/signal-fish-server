@@ -386,6 +386,7 @@ impl Room {
     /// Authority follows the room's selected member. Open-room readiness
     /// follows the room's ready list. A finalized room also preserves a
     /// returning member's ready flag, which removal pruned from that list.
+    /// A successful admission refreshes activity; a refusal does not.
     pub fn add_player(&mut self, mut player: PlayerInfo) -> bool {
         if self.can_join() && !self.players.contains_key(&player.id) {
             player.is_authority = self.authority_player == Some(player.id);
@@ -395,6 +396,7 @@ impl Room {
                 self.ready_players.push(player.id);
             }
             self.players.insert(player.id, player);
+            self.update_activity();
             true
         } else {
             false
@@ -402,8 +404,12 @@ impl Room {
     }
 
     #[allow(dead_code)]
+    /// Remove a member and refresh activity only when a member was present.
     pub fn remove_player(&mut self, player_id: &PlayerId) -> Option<PlayerInfo> {
         let removed = self.players.remove(player_id);
+        if removed.is_some() {
+            self.update_activity();
+        }
 
         // Readiness follows the membership: leaving an id in `ready_players`
         // would let a later admission read it back as readiness this membership
@@ -642,6 +648,66 @@ mod tests {
             true,
             "relay".to_string(),
         )
+    }
+
+    // #1302: membership activity must restart the public expiry window.
+    #[test]
+    fn player_membership_restarts_room_expiry_only_on_success() {
+        let stale = chrono::DateTime::from_timestamp(946_684_800, 0).unwrap();
+        let timeout = chrono::Duration::seconds(60);
+        for finalized in [false, true] {
+            let mut room = empty_room();
+            room.max_players = 1;
+            let created_at = room.created_at;
+            if finalized {
+                room.lobby_state = LobbyState::Finalized;
+            }
+            let id = Uuid::from_u128(1);
+            let player = PlayerInfo {
+                id,
+                name: "member".into(),
+                is_authority: false,
+                is_ready: finalized,
+                connected_at: None,
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: DEFAULT_REGION_ID.into(),
+            };
+            room.last_activity = stale;
+            assert!(room.add_player(player.clone()));
+            assert!(room.last_activity > stale, "join must refresh activity");
+            assert_eq!(room.created_at, created_at);
+
+            room.last_activity = stale;
+            assert!(!room.add_player(player.clone()));
+            assert_eq!(room.last_activity, stale, "duplicate is not activity");
+            let mut extra = player;
+            extra.id = Uuid::from_u128(2);
+            assert!(!room.add_player(extra));
+            assert_eq!(
+                room.last_activity, stale,
+                "full-room refusal is not activity"
+            );
+            assert!(room.remove_player(&Uuid::from_u128(3)).is_none());
+            assert_eq!(room.last_activity, stale, "absent removal is not activity");
+
+            assert!(room.remove_player(&id).is_some());
+            assert!(
+                room.last_activity > stale,
+                "departure must restart empty expiry"
+            );
+            let emptied_at = room.last_activity;
+            assert!(!room.is_expired_at(emptied_at + timeout, timeout, timeout));
+            assert!(room.is_expired_at(
+                emptied_at + timeout + chrono::Duration::milliseconds(1),
+                timeout,
+                timeout,
+            ));
+            assert!(room.remove_player(&id).is_none());
+            assert_eq!(room.last_activity, emptied_at);
+            assert_eq!(room.created_at, created_at);
+        }
     }
 
     #[test]

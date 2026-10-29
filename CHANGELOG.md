@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refresh public Rust room activity after player joins and departures so each expiry window starts from that change (#1302).
 - Keep public room admission readiness and authority consistent, and refuse ready toggles for absent members (#1300).
 - Reject absent-player authority assignments without changing the room (#1298).
 - Reject duplicate player and spectator admissions without replacing members or inflating session join counts (#1296).
