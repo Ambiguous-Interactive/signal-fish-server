@@ -26,7 +26,7 @@ const reportKeys = [
   "worker_count", "callback_count", "poll_count", "active_callback_count", "callback_intervals",
   "acceptance_thresholds", "max_admissions_per_callback", "current_frame", "confirmed_frame",
   "game_frame", "game_checksum", "frames_advanced", "rollback_count", "max_rollback_depth",
-  "stall_count", "wait_recommendations", "confirmation_lag_current", "confirmation_lag_max",
+  "stall_count", "wait_recommendations", "wait_observations", "confirmation_lag_current", "confirmation_lag_max",
   "checksums_mismatched", "checksums_compared", "checksums_matched", "events_discarded_total",
   "client_game_data_sent", "client_game_data_sent_during_run", "client_game_data_received",
   "client_messages_undecodable", "final_pipeline_queue_depth", "peak_pipeline_queue_depth",
@@ -44,6 +44,7 @@ const [mode, exportDirectoryArg, serverBinaryArg, artifactDirectoryArg, buildSha
   process.argv.slice(2);
 if (mode === "self-test") {
   runHealthGateSelfTests();
+  runWaitObservationSelfTests();
   runDrainGateSelfTests();
   runSyncGateSelfTests();
   runOverflowGateSelfTests();
@@ -724,6 +725,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     );
     assert(report.target === "wasm32-unknown-emscripten" && report.target_os === "emscripten", `${name}: native fallback detected`);
     assert(report.godot_threads === false && report.worker_count === 0, `${name}: Rust thread/worker claim failed`);
+    validateWaitObservations(report, name);
     assert(report.callback_count === report.poll_count, `${name}: poll count differs from genuine Rust callbacks`);
     assertExactKeys(
       report.callback_intervals,
@@ -931,6 +933,56 @@ function negativeControlDrainedItsDrivenBudget(report) {
   return drivenBudget >= 600 &&
     report.relay_frames_enqueued_during_run * 10 >= drivenBudget * 9 &&
     report.client_game_data_sent_during_run * 10 >= drivenBudget * 9;
+}
+
+/** Validate bounded event evidence independently of the zero-wait health gate. */
+function validateWaitObservations(report, name) {
+  const trace = report.wait_observations;
+  assertExactKeys(trace, ["events", "omitted"], `${name} wait observations`);
+  assert(Array.isArray(trace.events) && trace.events.length <= 64, `${name}: unbounded wait observations`);
+  assert(Number.isSafeInteger(trace.omitted) && trace.omitted >= 0, `${name}: invalid omitted waits`);
+  assert(trace.events.length + trace.omitted <= report.wait_recommendations, `${name}: excess wait observations`);
+  let previousCallback = 0;
+  let previousElapsed = 0;
+  for (const event of trace.events) {
+    assertExactKeys(event, [
+      "elapsed_us", "callback", "poll", "callback_interval_us", "remote_poll_us",
+      "frame_before_poll", "current_frame", "confirmed_frame", "frames_ahead",
+      "local_frames_behind", "remote_frames_behind", "skip_frames", "relay_received",
+      "relay_queue_depth",
+    ], `${name} wait event`);
+    assert(event.callback === event.poll && event.callback >= previousCallback && event.callback <= report.callback_count, `${name}: wait callback order`);
+    assert(event.elapsed_us >= previousElapsed, `${name}: wait clock order`);
+    assert(Number.isInteger(event.skip_frames) && event.skip_frames > 0, `${name}: invalid wait skip`);
+    previousCallback = event.callback;
+    previousElapsed = event.elapsed_us;
+  }
+}
+
+/** Reject trace overflow and invalid callback identities without changing health limits. */
+function runWaitObservationSelfTests() {
+  const event = {
+    elapsed_us: 100, callback: 2, poll: 2, callback_interval_us: 17_000,
+    remote_poll_us: 42, frame_before_poll: 100, current_frame: 100,
+    confirmed_frame: 96, frames_ahead: 3, local_frames_behind: -3,
+    remote_frames_behind: 3, skip_frames: 3, relay_received: 123, relay_queue_depth: 2,
+  };
+  const valid = { callback_count: 2, wait_recommendations: 1, wait_observations: { events: [event], omitted: 0 } };
+  validateWaitObservations(valid, "valid trace");
+  validateWaitObservations({ ...valid, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 } }, "no waits");
+  for (const trace of [
+    { events: Array(65).fill(event), omitted: 0 },
+    { events: [event], omitted: -1 },
+    { events: [event], omitted: 1 },
+    { events: [{ ...event, poll: 1 }], omitted: 0 },
+    { events: [{ ...event, skip_frames: 0 }], omitted: 0 },
+    { events: [{ ...event, callback: 3, poll: 3 }], omitted: 0 },
+  ]) {
+    let rejected = false;
+    try { validateWaitObservations({ ...valid, wait_observations: trace }, "invalid trace"); }
+    catch { rejected = true; }
+    assert(rejected, "invalid wait trace passed");
+  }
 }
 
 function runHealthGateSelfTests() {

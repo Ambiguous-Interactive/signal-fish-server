@@ -19,6 +19,18 @@ and the final Rust-origin JSON report across `JavaScriptBridge`. Before handing
 configuration to Rust, it adds the actual `Engine.get_version_info()` identity;
 Rust validates that runtime and echoes the structured identity in its report.
 
+Each report also retains the first 64 consumed Fortress wait recommendations in
+`wait_observations.events` and counts later observations in `omitted`. Each event
+records time since configuration, callback/poll counts, time since the previous
+active callback, remote-poll duration, frames before and after that poll, confirmed
+frame, frame advantage, both peer lag estimates, requested skips and relay state.
+These values describe event consumption after remote polling; Fortress may have
+generated the event during the preceding advance. Peer lag estimates are not
+synchronized remote clock samples. A pending event can make the cumulative
+`wait_recommendations` metric exceed the consumed observation count. The existing
+zero-recommendation health gate remains unchanged. A passing run does not explain
+issue #1312's retained failure.
+
 Run the complete gate with:
 
 ```bash

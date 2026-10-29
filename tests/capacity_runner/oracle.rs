@@ -750,11 +750,13 @@ fn churn_evidence(
             }
         }
     }
-    let registered: BTreeSet<_> = records
-        .registry
-        .values()
-        .map(|(peer, epoch)| (peer.as_str(), *epoch))
-        .collect();
+    let registered = std::cell::LazyCell::new(|| {
+        records
+            .registry
+            .values()
+            .map(|(peer, epoch)| (peer.as_str(), *epoch))
+            .collect::<BTreeSet<_>>()
+    });
     let events = ordered_churn_events(records);
     let mut positions: BTreeMap<&str, usize> = BTreeMap::new();
     let mut count = 0_u64;
@@ -839,10 +841,14 @@ fn scheduled_send_evidence(
     // Keep one interval per incarnation, never one entry per scheduled send.
     // Equal microseconds remain admissible on both sides of a boundary because
     // the artifact clock rounds distinct operations to the same microsecond.
-    let mut epoch_times: BTreeMap<(&str, u32), (u64, Option<u64>)> = plans
-        .keys()
-        .map(|sender| ((*sender, 1), (0, None)))
-        .collect();
+    let mut epoch_times: BTreeMap<(&str, u32), (u64, Option<u64>)> = if records.churn.is_empty() {
+        BTreeMap::new()
+    } else {
+        plans
+            .keys()
+            .map(|sender| ((*sender, 1), (0, None)))
+            .collect()
+    };
     for event in &records.churn {
         if let Some(epoch) = event.epoch.filter(|epoch| *epoch > 1) {
             if event.phase == ChurnPhase::Rejoined {
@@ -878,6 +884,13 @@ fn scheduled_send_evidence(
             covered = false;
         }
         previous_key = Some(key);
+        let epoch_time = if records.churn.is_empty() && event.epoch == 1 {
+            Some((0, None))
+        } else {
+            epoch_times
+                .get(&(event.sender.as_str(), event.epoch))
+                .copied()
+        };
         let mismatch = match plans.get(event.sender.as_str()) {
             None => Some(SendPlanMismatch::UnknownSender),
             Some(plan) => match usize::try_from(event.seq)
@@ -890,15 +903,13 @@ fn scheduled_send_evidence(
                     Some(SendPlanMismatch::IntendedTime)
                 }
                 Some(send) if event.phase != send.phase => Some(SendPlanMismatch::Phase),
-                Some(_) if !epoch_times.contains_key(&(event.sender.as_str(), event.epoch)) => {
+                Some(_) if epoch_time.is_none() => {
                     Some(SendPlanMismatch::UnannouncedEpoch { epoch: event.epoch })
                 }
                 Some(_)
-                    if epoch_times
-                        .get(&(event.sender.as_str(), event.epoch))
-                        .is_some_and(|(start, end)| {
-                            event.sent_us < *start || end.is_some_and(|end| event.sent_us > end)
-                        }) =>
+                    if epoch_time.is_some_and(|(start, end)| {
+                        event.sent_us < start || end.is_some_and(|end| event.sent_us > end)
+                    }) =>
                 {
                     Some(SendPlanMismatch::InactiveEpoch { epoch: event.epoch })
                 }
@@ -2873,6 +2884,59 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    /// Compare implicit initial epochs with the existing materialized interval path.
+    #[test]
+    fn initial_send_epochs_match_materialized_intervals_for_malformed_evidence() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans);
+        for mutation in 0..10 {
+            for reverse in [false, true] {
+                let mut records = base.clone();
+                match mutation {
+                    0 => {}
+                    1 => records.sent[0].epoch = 0,
+                    2 => records.sent[0].epoch = u32::MAX,
+                    3 => records.sent[0].sender = "unknown".into(),
+                    4 => records.sent[0].seq = u64::MAX,
+                    5 => records.sent[0].room = u32::MAX,
+                    6 => records.sent[0].intended_us = u64::MAX,
+                    7 => records.sent[0].sent_us = 0,
+                    8 => records.sent.push(records.sent[0].clone()),
+                    _ => records.sent.clear(),
+                }
+                if reverse {
+                    records.sent.reverse();
+                }
+                let mut fast_reasons = Vec::new();
+                let fast = scheduled_send_evidence(
+                    &context.plans,
+                    &records,
+                    &SendIndex::new(&records.sent),
+                    &mut fast_reasons,
+                );
+                records.churn.push(ChurnEvent {
+                    recipient: "outside-roster".into(),
+                    phase: ChurnPhase::Disconnect,
+                    at_us: 0,
+                    epoch: None,
+                    tails: BTreeMap::new(),
+                });
+                let mut materialized_reasons = Vec::new();
+                let materialized = scheduled_send_evidence(
+                    &context.plans,
+                    &records,
+                    &SendIndex::new(&records.sent),
+                    &mut materialized_reasons,
+                );
+                assert_eq!(
+                    (fast, fast_reasons),
+                    (materialized, materialized_reasons),
+                    "mutation={mutation}, reverse={reverse}"
+                );
+            }
+        }
+    }
 
     // #775/#636: sparse and extreme epochs retain the exact set reference.
     #[test]
