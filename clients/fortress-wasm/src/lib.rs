@@ -404,6 +404,7 @@ impl Runtime {
         })
     }
 
+    /// Poll signaling once and drive active gameplay while retaining wait evidence.
     fn tick(&mut self) -> Result<bool, String> {
         if self.configured_at.elapsed() > RUNTIME_DEADLINE {
             return Err("90-second Rust runtime deadline expired".to_owned());
@@ -845,6 +846,7 @@ impl Runtime {
         self.room_json_pending.take()
     }
 
+    /// Snapshot runtime identity, delivery ledgers, wait observations and health metrics.
     fn report(&self, runtime_error: Option<String>) -> Report {
         let client_stats = self.client.stats();
         let relay_stats = self.relay.counters();

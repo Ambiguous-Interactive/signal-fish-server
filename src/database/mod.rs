@@ -2195,6 +2195,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Remove expired empty published rooms, preserving protected rooms and all live indexes.
     async fn cleanup_empty_rooms(
         &self,
         empty_timeout: chrono::Duration,
@@ -2232,6 +2233,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(deleted_ids)
     }
 
+    /// Extract unprotected published rooms after their empty or occupied idle timeout.
     async fn cleanup_expired_rooms(
         &self,
         empty_timeout: chrono::Duration,

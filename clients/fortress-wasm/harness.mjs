@@ -691,6 +691,7 @@ async function runAttestationSourceSelfTests() {
   }
 }
 
+/** Bind both reports to the expected build, browsers, room and delivery ledgers. */
 function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser, joinerBrowser, roomCode) {
   for (const [name, report, browser] of [
     ["creator", creatorReport, creatorBrowser],

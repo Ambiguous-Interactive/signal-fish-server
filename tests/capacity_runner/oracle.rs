@@ -827,6 +827,7 @@ fn churn_evidence(
     }
 }
 
+/// Check schedule and incarnation evidence, counting each valid planned send once.
 fn scheduled_send_evidence(
     plans: &[SenderPlan],
     records: &RunRecords,
