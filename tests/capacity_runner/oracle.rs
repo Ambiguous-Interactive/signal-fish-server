@@ -4692,7 +4692,12 @@ mod coverage_tests {
             )
         };
         assert_eq!(rows, records.churn.len());
-        assert_eq!(digest, 1_604_667_450_296_019_028);
+        let expected_digest = if usize::BITS == 32 {
+            359_895_309_972_192_010
+        } else {
+            1_604_667_450_296_019_028
+        };
+        assert_eq!(digest, expected_digest);
         println!(
             "CHURN_SORT_PROFILE stable={stable} rows={rows} index_bytes={bytes} elapsed_ms={} digest={digest}",
             start.elapsed().as_millis()
