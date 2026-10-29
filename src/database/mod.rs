@@ -412,17 +412,13 @@ pub trait GameDatabase: Send + Sync {
         player_id: &PlayerId,
     ) -> Result<Option<PlayerInfo>>;
 
-    /// Update room authority.
+    /// Assign a current room player as authority, or clear the role with `None`.
     ///
-    /// A `Some(id)` grant is a raw write: it is the caller's contract to pass
-    /// only a current room member. Granting a non-member leaves
-    /// `authority_player` pointing outside the roster with no `is_authority`
-    /// flag set, which wedges `request_room_authority` (`AlreadyHeld`) and is
-    /// never cleared by a departure (removal clears the role only for the
-    /// departing member). Production must go through
-    /// [`Self::request_room_authority`] (membership-checked) for grants; the
-    /// only production caller of this method passes `None` to clear the role
-    /// during reconnect rollback.
+    /// Return `false` without changing the room when it is missing, does not
+    /// support authority, or the requested player is absent from its roster.
+    /// Membership validation and assignment form one atomic storage operation.
+    /// This method permits replacing an existing authority; use
+    /// [`Self::request_room_authority`] for the request/release policy instead.
     #[allow(dead_code)]
     async fn update_room_authority(
         &self,
@@ -2027,36 +2023,16 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Apply a validated authority change under the room membership write lock.
     async fn update_room_authority(
         &self,
         room_id: &RoomId,
         authority_player: Option<PlayerId>,
     ) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
-        if let Some(room) = rooms.get_mut(room_id) {
-            // Check if room supports authority
-            if !room.supports_authority {
-                return Ok(false);
-            }
-
-            // Remove authority from previous player
-            if let Some(prev_auth) = room.authority_player {
-                if let Some(player) = room.players.get_mut(&prev_auth) {
-                    player.is_authority = false;
-                }
-            }
-
-            // Set new authority
-            room.authority_player = authority_player;
-            if let Some(new_auth) = authority_player {
-                if let Some(player) = room.players.get_mut(&new_auth) {
-                    player.is_authority = true;
-                }
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(rooms
+            .get_mut(room_id)
+            .is_some_and(|room| room.set_authority(authority_player)))
     }
 
     async fn request_room_authority(
@@ -3446,6 +3422,100 @@ mod tests {
             Some(room.id)
         );
         assert!(db.pending_room_ids().await.unwrap().is_empty());
+    }
+
+    /// Regression #1298: refused grants preserve the current authority and room state.
+    #[tokio::test]
+    async fn test_update_room_authority_absent_member_preserves_current_authority() {
+        for supports_authority in [false, true] {
+            let db = InMemoryDatabase::new();
+            let creator = Uuid::new_v4();
+            let room = db
+                .create_room(
+                    "authority-membership".into(),
+                    Some("AUTH01".into()),
+                    4,
+                    supports_authority,
+                    creator,
+                    "relay".into(),
+                    "region".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let peer = member("present peer");
+            assert!(db.add_player_to_room(&room.id, peer.clone()).await.unwrap());
+            let spectator = spectator("observer");
+            assert!(db
+                .add_spectator_to_room(&room.id, spectator.clone())
+                .await
+                .unwrap());
+            let departed = member("departed peer");
+            assert!(db
+                .add_player_to_room(&room.id, departed.clone())
+                .await
+                .unwrap());
+            assert!(db
+                .remove_player_from_room(&room.id, &departed.id)
+                .await
+                .unwrap()
+                .is_some());
+
+            for target in [Uuid::new_v4(), spectator.id, departed.id] {
+                let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+                assert!(
+                    !db.update_room_authority(&room.id, Some(target))
+                        .await
+                        .unwrap(),
+                    "supports_authority={supports_authority}, target={target}"
+                );
+                let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+                assert_eq!(after.authority_player, before.authority_player);
+                assert_eq!(
+                    serde_json::to_value(&after.players).unwrap(),
+                    serde_json::to_value(&before.players).unwrap()
+                );
+                assert_eq!(after.last_activity, before.last_activity);
+                assert_eq!(after.ready_players, before.ready_players);
+            }
+            assert_eq!(
+                db.update_room_authority(&room.id, None).await.unwrap(),
+                supports_authority
+            );
+            assert!(!db
+                .update_room_authority(&room.id, Some(departed.id))
+                .await
+                .unwrap());
+            assert_eq!(
+                db.get_room_by_id(&room.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .authority_player,
+                None
+            );
+            for target in [Some(peer.id), Some(peer.id), None, Some(creator)] {
+                assert_eq!(
+                    db.update_room_authority(&room.id, target).await.unwrap(),
+                    supports_authority
+                );
+                let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+                assert_eq!(
+                    after.authority_player,
+                    if supports_authority { target } else { None }
+                );
+                for player in after.players.values() {
+                    assert_eq!(
+                        player.is_authority,
+                        after.authority_player == Some(player.id)
+                    );
+                }
+            }
+            assert!(!db
+                .update_room_authority(&Uuid::new_v4(), Some(creator))
+                .await
+                .unwrap());
+        }
     }
 
     // --- BUG-1: room lifecycle GC (activity refresh + reconnection-aware GC) ---

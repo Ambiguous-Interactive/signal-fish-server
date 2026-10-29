@@ -10923,3 +10923,72 @@ controls in Nextest `81ee7ed5-e7ee-4e4e-9962-dd9d36614733`. The capacity
 byte-budget and exact-replay controls pass all six selected tests in
 `a206f7ab-cd6b-4bb4-a247-3c24264ccca3`. Strict all-target, all-feature Clippy
 passes. These scoped results do not complete either broad campaign.
+
+### F206 — Storage assigns room authority to an absent player (#1298)
+
+Baseline `ca95e6c0`, under #826. `update_room_authority` clears the previous
+member's flag and assigns any requested ID. Unknown players, departed members,
+and spectator-only IDs can leave a room with an authority outside its player
+roster. That slot also blocks ordinary authority requests. The public
+`Room::set_authority` method already refuses absent players.
+
+The regression fails before repair in Nextest
+`ca86c38a-d49a-49d8-b7d3-2807e240c054`: an unknown-player grant returns true.
+The repair delegates to the Room method while retaining the storage write lock.
+Membership validation and assignment remain atomic. The first green run is
+`eb63a744-e20c-4ba9-a21a-dff6832e3408`. The control covers unknown, departed,
+and spectator-only targets, existing and empty authority slots, supported and
+unsupported rooms, missing rooms, valid transfers, repeated assignment, release,
+and recovery after refusal. Refused requests preserve all member snapshots,
+readiness and activity. The public storage contract now states these rules.
+
+Normal authority transfer checks membership before the write; reconnect rollback
+clears the role with `None`. This finding proves a storage API inconsistency,
+not a live WebSocket incident. The Rust client manifest at `da8f2d16` has no
+server-crate dependency. The .NET project at `e467c871` and the Godot GDScript
+addon do not call this Rust storage API. No wire field or client migration
+changes. The wider #826 campaign remains open.
+
+### Readiness snapshot storage (#636)
+
+Live readiness snapshots cloned a HashSet, built a membership set, then grew a
+filtered result vector. The repair copies ready IDs directly into their result
+vector and filters it in place. It preserves iteration order, membership
+filtering, the durable finalized-room fallback, and empty results on storage
+failure. The snapshot drops its map lock before the membership read; a paused
+read control proves a concurrent clear completes and the original snapshot
+still returns only its present member.
+
+An isolated allocation control performs 64 production snapshots for 2, 16 and
+128 members, with no departures and with half the members departed. Every cell
+removes 64 allocations. At 16 members with no departures, allocated bytes fall
+from 306,752 to 269,888 and reallocations fall from 128 to zero. At 128 members,
+bytes fall from 2,313,792 to 2,033,216 and reallocations fall from 320 to zero.
+All six repaired cells perform zero reallocations. The existing relay allocation
+ceilings also pass. These are component allocation measurements, not a server
+throughput claim. The wider #636 campaign remains open.
+
+### Compact churn evidence ordering (#775)
+
+Churn validation stored one raw offset and one ordinal as two host-width
+integers per event. The repair stores compact offsets and disconnect counts
+when the raw history fits u32. It derives rejoin ordinals from unchanged raw
+epochs and retains a host-width fallback. Both widths preserve the independent
+stable reference's exact raw order, including tied timestamps, malformed
+extreme epochs, and reversed input. Seventeen invalid-history mutations retain
+exact verdicts through artifact replay.
+
+At one million rows, retained index bytes fall from 16,000,000 to 8,000,000 on
+this 64-bit host. Six alternating optimized component controls produce digest
+`1604667450296019028`. Compact times are 816, 969 and 947 ms; the frozen stable
+reference takes 997, 942 and 1,216 ms in the same binary. Debug comparison is
+slower for compact ordering, so these measurements do not establish a general
+speedup. The memory claim covers this index, not process RSS or the full
+ten-minute C3 workload. The wider #775 qualification remains open.
+
+Final all-feature authority/readiness controls pass 13 tests in Nextest
+`7d035f2c-91c7-4fcc-ba94-04875eeefa06`. Churn ordering passes three controls in
+`bed45e66-1e47-413d-9577-14a1dcd0f6ea`; negative histories and exact replay pass
+in `2d1c107a-bac6-44d2-933d-00bfd9e8b674`. Strict all-target, all-feature Clippy
+and both source-policy scans pass. These scoped checks do not complete the
+broad correctness or optimization campaigns.

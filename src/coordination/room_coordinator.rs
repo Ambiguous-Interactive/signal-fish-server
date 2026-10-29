@@ -899,16 +899,19 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         result
     }
 
+    /// Return a membership-filtered ready snapshot without holding its lock during storage reads.
     async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId> {
         // Snapshot the set without holding the lock across either DB await
         // below: the guard scope closes before any await, so a snapshot can
         // never block a concurrent toggle, clear, forget, or finalize
         // entry-drop for the duration of a database read.
-        let live_entry: Option<HashSet<PlayerId>> = {
+        let live_entry: Option<Vec<PlayerId>> = {
             let ready_map = self.ready_players.read().await;
-            ready_map.get(room_id).cloned()
+            ready_map
+                .get(room_id)
+                .map(|ready| ready.iter().copied().collect())
         };
-        let Some(set) = live_entry else {
+        let Some(mut ready_players) = live_entry else {
             // No live entry: either nobody has toggled yet, or the room
             // finalized and the start transaction dropped the entry. Prefer
             // the durable record so a snapshot that straddles finalization
@@ -936,7 +939,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         match self.database.get_room_players(room_id).await {
             Ok(players) => {
                 let current: HashSet<PlayerId> = players.iter().map(|p| p.id).collect();
-                set.into_iter().filter(|id| current.contains(id)).collect()
+                ready_players.retain(|id| current.contains(id));
+                ready_players
             }
             Err(error) => {
                 tracing::warn!(
@@ -2439,6 +2443,65 @@ mod tests {
             durable, expected,
             "a finalized room must report its durable ready set"
         );
+    }
+
+    /// A membership read must not retain the ready-map lock or reread live readiness.
+    #[cfg(signal_fish_repository_tests)]
+    #[tokio::test]
+    async fn ready_snapshot_releases_its_lock_before_loading_membership() {
+        let database = Arc::new(InMemoryDatabase::new());
+        let coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+            Arc::new(RecordingMessageCoordinator::default()),
+            database.clone(),
+            None,
+        ));
+        let present = PlayerId::from_u128(0x9201);
+        let departed = PlayerId::from_u128(0x9202);
+        let room = database
+            .create_room(
+                "ready-snapshot-lock".into(),
+                None,
+                2,
+                false,
+                present,
+                "relay".into(),
+                "region".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([present, departed]));
+        database.pause_next_get_room_players_for_test();
+        let snapshot = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.current_ready_players(&room.id).await })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_paused_get_room_players_for_test(),
+        )
+        .await
+        .expect("snapshot must reach the membership read");
+        timeout(
+            Duration::from_secs(1),
+            coordinator.clear_ready_players(&room.id),
+        )
+        .await
+        .expect("membership reads must not block ready-state mutations")
+        .unwrap();
+        database.release_paused_get_room_players_for_test();
+        assert_eq!(
+            timeout(Duration::from_secs(1), snapshot)
+                .await
+                .expect("snapshot must finish after the membership read resumes")
+                .unwrap(),
+            vec![present]
+        );
+        assert!(coordinator.current_ready_players(&room.id).await.is_empty());
     }
 
     /// When membership cannot be loaded, the readiness snapshot must fail
