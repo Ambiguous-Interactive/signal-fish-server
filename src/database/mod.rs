@@ -1894,6 +1894,8 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     /// Admit one new player while preserving every existing membership.
+    /// Refresh both activity clocks under the room lock after admission.
+    /// Refusals preserve the clocks and session join count.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool> {
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
@@ -1924,7 +1926,6 @@ impl GameDatabase for InMemoryDatabase {
                 self.session_records.record_player_joined(room_id);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
-                room.last_activity = chrono::Utc::now();
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 Ok(true)
             } else {
@@ -1935,6 +1936,8 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Remove membership through Room and record actual departures on the
+    /// monotonic clock and session ledger. Absent members do not extend expiry.
     async fn remove_player_from_room(
         &self,
         room_id: &RoomId,
@@ -1951,7 +1954,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            let removed_player = room.players.remove(player_id);
+            let removed_player = room.remove_player(player_id);
 
             // A real departure is activity, and it starts the empty-room clock:
             // both cleanup paths time an empty room from `last_activity`, so
@@ -1961,29 +1964,8 @@ impl GameDatabase for InMemoryDatabase {
             // on an ACTUAL removal — a no-op remove (player already gone) is not
             // activity and must not keep an otherwise-stale room alive.
             if removed_player.is_some() {
-                room.last_activity = chrono::Utc::now();
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 self.session_records.record_player_left(room_id);
-            }
-
-            // Prune the departed player's ready entry so it cannot linger in
-            // `RoomJoined` / `Reconnected` payloads. Departures intentionally
-            // preserve the room lifecycle state and every remaining member's
-            // readiness, so the departing id must be removed directly.
-            room.ready_players.retain(|id| id != player_id);
-
-            // If removed player was authority, CLEAR authority (don't auto-reassign per protocol).
-            // Guarded by an ACTUAL removal: `leave_room_locked` reports the
-            // vacated role from this call's returned record, so a no-op remove
-            // must not silently clear a role nobody is told about.
-            if removed_player.is_some() && room.authority_player == Some(*player_id) {
-                room.authority_player = None;
-                // Clear authority flag from all players to maintain consistency
-                for player in room.players.values_mut() {
-                    if player.is_authority {
-                        player.is_authority = false;
-                    }
-                }
             }
 
             Ok(removed_player)

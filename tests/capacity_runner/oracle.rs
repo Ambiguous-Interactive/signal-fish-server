@@ -1069,6 +1069,25 @@ fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
     blocks
 }
 
+/// Borrow the first epoch from each sender's block key. Only churned senders
+/// need an owned list; block keys already provide distinct, sorted epochs.
+fn sender_epoch_index<'a>(
+    blocks: &'a BTreeMap<(&str, u32), RelayBlock<'_>>,
+) -> BTreeMap<&'a str, Cow<'a, [u32]>> {
+    let mut epochs: BTreeMap<&str, Cow<'_, [u32]>> = BTreeMap::new();
+    for (sender, epoch) in blocks.keys() {
+        match epochs.entry(*sender) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Cow::Borrowed(std::slice::from_ref(epoch)));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().to_mut().push(*epoch);
+            }
+        }
+    }
+    epochs
+}
+
 /// One-way latency samples over the measured window, per recipient: for
 /// every receipt, the receipt time minus the intended send time of the same
 /// `(sender, seq)` delivery. Single source for the summary percentiles (run
@@ -1924,13 +1943,7 @@ pub fn summarize(
     // stream coordinates with the sender-stamped ledger sequence.
     let blocks = indexed_relay_blocks(&records.sent, &sent_by_key);
     snapshot_tail_evidence(records, roster, &blocks, &mut reasons);
-    let sender_epochs: BTreeMap<&str, BTreeSet<u32>> =
-        blocks
-            .keys()
-            .fold(BTreeMap::new(), |mut acc, (sender, epoch)| {
-                acc.entry(*sender).or_default().insert(*epoch);
-                acc
-            });
+    let sender_epochs = sender_epoch_index(&blocks);
 
     let disconnected: BTreeSet<&str> = records
         .disconnects
@@ -2084,9 +2097,9 @@ pub fn summarize(
         } else if delivery_class == DeliveryClass::Reliable && !opaque_pair {
             detail =
                 Some("reliable delivery permits no loss, yet a gap report arrived".to_string());
-        } else if !sender_epochs
+        } else if sender_epochs
             .get(gap.sender.as_str())
-            .is_some_and(|epochs| epochs.contains(&gap.epoch))
+            .is_none_or(|epochs| epochs.binary_search(&gap.epoch).is_err())
         {
             detail = Some(format!(
                 "gap names epoch {} but the sender never sent in it",
@@ -2277,7 +2290,7 @@ pub fn summarize(
             let Some(epochs) = sender_epochs.get(sender) else {
                 continue;
             };
-            for epoch in epochs {
+            for epoch in epochs.iter() {
                 let gaps = gap_streams.remove(&(recipient.as_str(), sender, *epoch));
                 if let Some(gaps) = &gaps {
                     invalid_gaps.count += gaps.invalid.count;
@@ -2841,6 +2854,106 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    // #775/#636: sparse and extreme epochs retain the exact set reference.
+    #[test]
+    /// Compare epoch ordering and membership with sets and pin borrowed storage.
+    fn sender_epoch_index_borrows_single_epochs_and_preserves_churn_sets() {
+        for keys in [
+            vec![],
+            vec![("αlice", 0)],
+            vec![("bob", u32::MAX), ("αlice", 7), ("bob", 1), ("αlice", 7)],
+            vec![("single", 42), ("churn", 9), ("churn", 0), ("churn", 2)],
+        ] {
+            let blocks: BTreeMap<_, _> = keys
+                .iter()
+                .map(|key| (*key, RelayBlock::Borrowed { events: &[] }))
+                .collect();
+            let mut reference: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+            for &(sender, epoch) in &keys {
+                reference.entry(sender).or_default().insert(epoch);
+            }
+            let index = sender_epoch_index(&blocks);
+            assert_eq!(index.len(), reference.len());
+            for (sender, expected) in reference {
+                let actual = &index[sender];
+                assert_eq!(
+                    actual.as_ref(),
+                    expected.iter().copied().collect::<Vec<_>>()
+                );
+                if expected.len() == 1 {
+                    let (_, epoch) = blocks.keys().find(|(name, _)| *name == sender).unwrap();
+                    assert!(matches!(actual, Cow::Borrowed(_)));
+                    assert!(std::ptr::eq(actual.as_ptr(), epoch));
+                } else {
+                    assert!(matches!(actual, Cow::Owned(_)));
+                }
+                for query in [0, 1, 2, 7, 9, 42, u32::MAX] {
+                    assert_eq!(actual.contains(&query), expected.contains(&query));
+                }
+            }
+        }
+    }
+
+    /// Isolate sender epoch storage from raw event and receipt populations.
+    #[test]
+    #[ignore = "isolated sender epoch index memory profile; run in a fresh process"]
+    fn generator_sender_epoch_index_memory_profile() {
+        let senders = std::env::var("CAPACITY_EPOCH_SENDERS")
+            .unwrap_or_else(|_| "15984".into())
+            .parse::<usize>()
+            .unwrap();
+        assert!((1..=63936).contains(&senders));
+        let churned = std::env::var_os("CAPACITY_EPOCH_CHURN").is_some();
+        let names: Vec<_> = (0..senders)
+            .map(|peer| format!("r{}p{}", peer / 16, peer % 16))
+            .collect();
+        let mut blocks = BTreeMap::new();
+        for name in &names {
+            for epoch in if churned {
+                &[1, 2, 7, u32::MAX][..]
+            } else {
+                &[1][..]
+            } {
+                blocks.insert(
+                    (name.as_str(), *epoch),
+                    RelayBlock::Borrowed { events: &[] },
+                );
+            }
+        }
+        let before = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        /// Capture retained RSS before serialization and emit an exact digest.
+        fn report<T: serde::Serialize>(
+            index: &T,
+            before: Option<u64>,
+            started: std::time::Instant,
+        ) {
+            let elapsed = started.elapsed();
+            let retained = crate::diagnostics::resident_memory_bytes(std::process::id());
+            use sha2::{Digest, Sha256};
+            let encoded = serde_json::to_vec(index).unwrap();
+            let digest = Sha256::digest(&encoded);
+            println!(
+                "SENDER_EPOCH_INDEX_PROFILE {}",
+                serde_json::json!({
+                    "rss_before_bytes": before, "rss_retained_bytes": retained,
+                    "elapsed_us": elapsed.as_micros(), "json_bytes": encoded.len(),
+                    "sha256": digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                })
+            );
+            std::hint::black_box(index);
+        }
+        if std::env::var_os("CAPACITY_EPOCH_SET_REFERENCE").is_some() {
+            let mut reference: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
+            for (sender, epoch) in blocks.keys() {
+                reference.entry(*sender).or_default().insert(*epoch);
+            }
+            report(&reference, before, started);
+        } else {
+            report(&sender_epoch_index(&blocks), before, started);
+        }
+    }
 
     #[test]
     fn unadopted_epoch_reports_still_require_exact_gap_evidence() {
