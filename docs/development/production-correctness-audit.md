@@ -11212,3 +11212,64 @@ and maximum sequences, Unicode names, self/cross-room/unknown senders and exact
 artifact replay. Existing controls retain inactive, unannounced and stale epoch
 failures, closed-epoch evidence, gap violation order and unsupported-format
 refusal. These checks do not complete the wider campaigns.
+
+### F210 — Public state transitions leave room expiry stale (#1306)
+
+Baseline `7605f2f0`, under #826. Public Room lobby entry, readiness changes,
+authority changes and finalization leave `last_activity` unchanged. Their
+storage counterparts also leave the monotonic expiry stamp unchanged. An
+embedder can change an old room and lose it at the next cleanup. The shipped
+socket router refreshes activity separately; no live socket incident is proved.
+
+The paused-clock storage control fails on baseline at the lobby wall-clock
+assertion in Nextest `1ffd3bad-ef56-4212-b422-2f2e4cede808`. The repair refreshes
+both clocks under the room and liveness locks before returning a changed state.
+Room methods refresh their own activity. Repeated and refused calls preserve
+both clocks. Authority request/release reuses the Room transition. Finalization
+keeps its exact-snapshot comparison and one-winner result. Controls check the
+full renewed expiry window, eventual cleanup, direct Room state and cancellation
+while the transition holds the room lock and waits for the liveness lock.
+
+The Rust client at `da8f2d16` has no server-crate dependency. The .NET project at
+`e467c871` is a standalone C# SDK. The Godot addon at `584773fc` is GDScript.
+None calls these server Room/storage methods. Socket messages and their router
+activity policy do not change. All three clients are unaffected; no migration
+is required. The broader #826 campaign remains open.
+
+### Lazy gap-stream failure storage (#636, #775)
+
+Each capacity-oracle gap stream retained an inline violation count and three
+optional diagnostic strings even when every report was valid. It now allocates
+that diagnostic state only after the first stream violation. Exact gap coverage,
+violation counts, roster-ordered first failures and raw artifact replay retain
+their contracts. This changes analysis after traffic collection, not live
+traffic generation.
+
+An isolated StatsAlloc control measures the full production `summarize` call.
+Each room has 16 players and one send per player. Every owed receipt is replaced
+with its exact valid latest-class gap report. Raw records are built before the
+measured region. Baseline and candidate use the same inputs.
+
+| Rooms | Baseline allocated bytes | Candidate allocated bytes | Allocations in either |
+| --- | --- | --- | --- |
+| 100 | 12,588,200 | 9,674,432 | 11,567 |
+| 999 | 125,657,410 | 96,533,194 | 115,339 |
+
+Full serialized summaries match: at 100 rooms, 396,683 bytes with SHA-256
+`5640fb64017b4e30865a0fe623d5e562d8bd1b9d46b9417d52b9bdf1ae29af49`;
+at 999 rooms, 3,983,700 bytes with SHA-256
+`f0a5843286e56ccbbc4946246ad4b042e964c187b0dcec46d831dd5e22c01e4c`.
+At 999 rooms, retained allocated-minus-freed bytes remain 2,401,834 in both
+versions. These are cumulative allocator measurements, not peak memory, RSS,
+throughput or full ten-minute C3 qualification. Both campaigns remain open.
+
+All eight selected all-feature Room/storage and game-start race controls pass
+in Nextest `930a9c40-ad48-4e77-9755-8c6dd2098404`. Fifteen selected storage
+cleanup, authority and clock controls also pass. All 43 source-policy controls
+pass. Strict all-target, all-feature Clippy passes with zero warnings.
+
+All 46 selected all-feature gap, replay and live relay controls pass in Nextest
+`ad3fbcf9-23a6-45ba-9768-71c7bdf0b005`. They retain overlap, beyond-tail, closed
+and unadopted-epoch failures, opaque payload refusal, exact first-failure order,
+complete raw artifacts and identical replay. The added multi-stream control
+checks both valid reports and repeated overlapping/beyond-tail failures.

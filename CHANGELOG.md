@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep rooms alive after lobby, ready, authority, and game-start changes through Rust Room and storage APIs (#1306).
 - Refuse overlapping player and spectator roles in public Rust room admission (#1304).
 - Refresh public Rust room activity after successful player joins and departures so expiry starts from that change (#1302).
 - Keep public room admission readiness and authority consistent, and refuse ready toggles for absent members (#1300).
