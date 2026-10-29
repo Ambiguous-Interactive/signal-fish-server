@@ -10992,3 +10992,88 @@ Final all-feature authority/readiness controls pass 13 tests in Nextest
 in `2d1c107a-bac6-44d2-933d-00bfd9e8b674`. Strict all-target, all-feature Clippy
 and both source-policy scans pass. These scoped checks do not complete the
 broad correctness or optimization campaigns.
+
+### F207 — Public Room admission keeps stale member flags (#1300)
+
+Baseline `fada65ae`, under #826. Public `Room::add_player` stores incoming
+readiness and authority flags unchanged. A stale authority flag can report two
+authorities. An open-room ready flag can disagree with the ready list. Restoring
+a finalized member keeps its ready flag but omits it from the ready list.
+In-memory admission already reconciles these values. Separately, storage
+`toggle_player_ready` returns success for an absent lobby member without a toggle.
+The live ready handler uses the coordinator, not this storage method.
+
+Both controls fail on the baseline in Nextest
+`39f1ba6c-5c1d-423e-8e3f-6e68c25ecbb3`. The repair puts admission reconciliation
+in Room and reuses it under the storage write lock. Authority follows the
+selected room member. Readiness follows the open-room list or a finalized
+returning member's snapshot. Duplicate and full-room refusals still precede all
+mutation. The absent-member toggle returns None. First green validation passes
+four controls in `bd2ac6b5-5e2a-4c81-9273-1712e63c1e77`.
+
+These are public Rust API defects. No live WebSocket incident is established.
+The Rust client manifest at `da8f2d16` has no server-crate dependency. The .NET
+project at `e467c871` uses a dependency-free C# client. The Godot addon at
+`6f915b44` uses GDScript. They do not call these Rust Room/storage methods.
+Dashboard values and capacity artifacts keep their formats and meanings. No
+client migration is required. The broader #826 campaign stays open.
+
+### Dashboard refresh storage (#636)
+
+Each refresh cloned every snapshot map before storing the snapshot, even when
+history selected only the active-room count. History also pushed its next entry
+before removing the oldest entry. A full vector therefore grew beyond its sample
+limit. The repair moves the snapshot after recording selected history fields and
+removes the oldest entry before pushing. Zero-capacity construction consistently
+uses the existing one-sample minimum.
+
+The bounded-history control fails before repair in Nextest
+`9ac512a2-8c93-40e2-aa78-5c4edb60fc2a`. It checks capacities zero, one and four,
+field selection, chronological rollover, failure retention, staleness and recovery.
+Final all-feature library validation passes 57 selected controls in
+`f0482f10-98cd-4921-a878-41fbae259f4d`, including admission, dashboard and
+restored-connection histories.
+
+An isolated current-thread StatsAlloc control calls the production refresh method
+with one, 16 and 128 game entries, four history slots and eight samples. Snapshot
+construction and view reads stay outside the measured region. At 128 games, the
+steady refresh with full history falls from 1,032 allocations and 94,854 bytes to
+516 allocations and 47,427 bytes. Count-only history falls from 516 allocations
+and 47,427 bytes to zero. At the first rollover, the baseline grows the vector;
+the repair performs no reallocation. Selected history still owns its required
+copies. These are component allocation results, not server throughput results.
+
+### Shared initial churn epochs (#775)
+
+Every adopted member allocated a one-element epoch vector, including rooms with
+no churn. The repair borrows the immutable initial epoch slice. A new distinct
+epoch promotes only that member to owned storage. Repeated epochs keep the
+borrowed representation. Sorted membership, sparse and reversed epochs, and
+extreme epoch values retain the independent set reference's results. Raw events
+and artifact formats do not change.
+
+An isolated counting-allocator control calls production `churn_views` for 1,000
+rooms with 16 players each. Baseline allocations are 25,118 and 3,754,128 bytes;
+the repair uses 9,118 allocations and 3,690,128 bytes. This removes 16,000 small
+allocations and 64,000 requested bytes. Both controls build 16,000 viewer entries
+with 16 adopted members each. Process RSS is not an exact allocator measurement.
+This component result does not demonstrate the full ten-minute C3 workload; #775
+stays open.
+
+All 32 selected all-feature capacity and replay controls pass in Nextest
+`e4c010c3-d1bb-4e5e-aaa6-e9ee9b51e330`. They include exact live delivery,
+invalid-ledger replay, mixed unchanged/churned views and independent epoch-set
+comparisons. Both source-policy targets pass all 29 controls. Strict all-target,
+all-feature Clippy and the markdown, documentation and CI-configuration gates
+pass. These scoped checks do not complete the broader campaigns.
+
+A caller review also finds four legacy protocol fixtures that seeded authority
+through player flags or direct field assignment. They now select authority
+through `Room::set_authority` and keep their original peer-list, single-authority,
+transfer and departure assertions. All 29 selected protocol and admission controls
+pass after this fixture correction.
+
+Hosted Linux Nextest at `7bb717eb` rejects the new dashboard helper's wall-clock
+read in `clock_source_scan`. The helper now injects distinct fixed timestamps;
+no policy exception is added. All nine clock-policy controls pass, and the
+paused-clock dashboard control passes in `fe15ea46-a120-43b0-9297-fcd9e0823523`.

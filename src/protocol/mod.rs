@@ -323,7 +323,7 @@ mod tests {
         };
 
         room.add_player(player1);
-        room.authority_player = Some(player1_id);
+        assert!(room.set_authority(Some(player1_id)));
 
         assert_eq!(room.authority_player, Some(player1_id));
         assert!(room.players[&player1_id].is_authority);
@@ -388,7 +388,7 @@ mod tests {
 
         room.add_player(player1);
         room.add_player(player2);
-        room.authority_player = Some(player1_id);
+        assert!(room.set_authority(Some(player1_id)));
 
         // Test: Can only have 0 or 1 players with authority
         let authority_count = room.players.values().filter(|p| p.is_authority).count();
@@ -447,7 +447,7 @@ mod tests {
 
         room.add_player(player1);
         room.add_player(player2);
-        room.authority_player = Some(player1_id);
+        assert!(room.set_authority(Some(player1_id)));
 
         // Authority player leaves
         room.remove_player(&player1_id);
@@ -683,6 +683,7 @@ mod tests {
             region_id: types::DEFAULT_REGION_ID.to_string(),
         });
 
+        assert!(room.set_authority(Some(player1_id)));
         let peer_connections = room.get_peer_connections();
         assert_eq!(peer_connections.len(), 2);
 

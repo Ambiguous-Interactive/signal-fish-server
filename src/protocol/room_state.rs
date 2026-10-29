@@ -382,8 +382,18 @@ impl Room {
 
     #[allow(dead_code)]
     /// Admit a new player without replacing an existing member.
-    pub fn add_player(&mut self, player: PlayerInfo) -> bool {
+    ///
+    /// Authority follows the room's selected member. Open-room readiness
+    /// follows the room's ready list. A finalized room also preserves a
+    /// returning member's ready flag, which removal pruned from that list.
+    pub fn add_player(&mut self, mut player: PlayerInfo) -> bool {
         if self.can_join() && !self.players.contains_key(&player.id) {
+            player.is_authority = self.authority_player == Some(player.id);
+            player.is_ready = self.ready_players.contains(&player.id)
+                || (self.lobby_state == LobbyState::Finalized && player.is_ready);
+            if player.is_ready && !self.ready_players.contains(&player.id) {
+                self.ready_players.push(player.id);
+            }
             self.players.insert(player.id, player);
             true
         } else {
@@ -680,6 +690,46 @@ mod tests {
         }
         assert!(room.remove_player(&id).is_some());
         assert!(room.add_player(player));
+    }
+
+    // #1300: a restored snapshot must not contradict current room state.
+    #[test]
+    fn room_admission_reconciles_stale_player_flags() {
+        for finalized in [false, true] {
+            for restored_ready in [false, true] {
+                let mut room = empty_room();
+                let id = Uuid::from_u128(1);
+                let member = |id, ready| PlayerInfo {
+                    id,
+                    name: "member".to_string(),
+                    is_authority: true,
+                    is_ready: ready,
+                    connected_at: None,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: DEFAULT_REGION_ID.to_string(),
+                };
+                assert!(room.add_player(member(id, false)));
+                assert!(room.set_authority(Some(id)));
+                assert!(room.set_player_ready(&id, true));
+                if finalized {
+                    assert!(room.finalize_game());
+                }
+                let arriving = Uuid::from_u128(2);
+                assert!(room.add_player(member(arriving, restored_ready)));
+                let expected_ready = finalized && restored_ready;
+                assert!(!room.players[&arriving].is_authority);
+                assert_eq!(room.players[&arriving].is_ready, expected_ready);
+                assert_eq!(room.ready_players.contains(&arriving), expected_ready);
+                assert_eq!(room.authority_player, Some(id));
+                let departed = room.remove_player(&id).unwrap();
+                assert!(room.add_player(departed));
+                assert!(!room.players[&id].is_authority);
+                assert_eq!(room.players[&id].is_ready, finalized);
+                assert_eq!(room.ready_players.contains(&id), finalized);
+            }
+        }
     }
 
     #[test]

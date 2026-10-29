@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce dashboard refresh copies and keep history storage within its sample limit (#636).
 - Reduce memory allocation when publishing lobby readiness snapshots (#636).
 - Reduce allocations when selecting a session host and publishing session peer lists (#636).
 - Reduce server latency metric memory and keep routine timing updates free of allocations (#1285, #636).
@@ -54,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep public room admission readiness and authority consistent, and refuse ready toggles for absent members (#1300).
 - Reject absent-player authority assignments without changing the room (#1298).
 - Reject duplicate player and spectator admissions without replacing members or inflating session join counts (#1296).
 - Preserve server shutdown close reasons while inbound traffic is still arriving (#1295).

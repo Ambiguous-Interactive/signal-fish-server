@@ -15,6 +15,7 @@
 //! Because this module is pure, the runner's `summary.json` and an artifact
 //! replay (`artifacts::replay`) run the same code and must agree exactly.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -1320,7 +1321,7 @@ struct ChurnView<'a> {
     // All name keys borrow the immutable roster during summarization.
     /// Member -> the epoch this recipient's seat adopts (and every epoch it
     /// has adopted, which are the streams it can be owed).
-    adopted: BTreeMap<&'a str, Vec<u32>>,
+    adopted: BTreeMap<&'a str, Cow<'static, [u32]>>,
     /// `(sender, epoch) -> instant past which deliveries for the stream are
     /// stale-epoch misroutes (the sender rejoined past it)`.
     closed_at: BTreeMap<(&'a str, u32), u64>,
@@ -1335,9 +1336,9 @@ struct ChurnView<'a> {
     floors: BTreeMap<(&'a str, u32), (u64, u64, bool)>,
 }
 
-fn insert_epoch(epochs: &mut Vec<u32>, epoch: u32) {
+fn insert_epoch(epochs: &mut Cow<'static, [u32]>, epoch: u32) {
     if let Err(position) = epochs.binary_search(&epoch) {
-        epochs.insert(position, epoch);
+        epochs.to_mut().insert(position, epoch);
     }
 }
 
@@ -1520,7 +1521,7 @@ fn churn_views<'a>(
             let initial = initial_views.entry(*room).or_insert_with(|| {
                 let mut view = ChurnView::default();
                 for member in &members_by_room[room] {
-                    view.adopted.insert(*member, vec![1]);
+                    view.adopted.insert(*member, Cow::Borrowed(&[1]));
                 }
                 Arc::new(view)
             });
@@ -1530,7 +1531,7 @@ fn churn_views<'a>(
         let mut view = ChurnView::default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
         for member in &members_by_room[room] {
-            view.adopted.insert(*member, vec![1]);
+            view.adopted.insert(*member, Cow::Borrowed(&[1]));
         }
         for event in viewer_churn_events(&records.churn, events, viewer) {
             let crate::records::ChurnEvent {
@@ -3504,7 +3505,7 @@ mod coverage_tests {
         assert_eq!(mixed["other"], initial["other"]);
         assert_eq!(mixed["alice"].floors[&("βob", 1)], (5, 100, true));
         assert_eq!(mixed["βob"].closed_at[&("alice", 1)], 100);
-        assert_eq!(mixed["βob"].adopted["alice"], [1, 2]);
+        assert_eq!(mixed["βob"].adopted["alice"].as_ref(), [1, 2]);
 
         records.registry.clear();
         let (_, unresolved) = churn_views(&records, &roster, &blocks);
@@ -3517,8 +3518,10 @@ mod coverage_tests {
     #[test]
     fn adopted_epochs_match_set_order_for_sparse_repeated_and_reversed_inputs() {
         for order in 0..3 {
-            let mut epochs = Vec::new();
-            let mut reference = BTreeSet::new();
+            let mut epochs = Cow::Borrowed(&[1][..]);
+            insert_epoch(&mut epochs, 1);
+            assert!(matches!(epochs, Cow::Borrowed(_)));
+            let mut reference = BTreeSet::from([1]);
             let mut input: Vec<_> = (0..256_u32).chain([u32::MAX, 0, 1, u32::MAX]).collect();
             if order == 1 {
                 input.reverse();
@@ -3536,7 +3539,11 @@ mod coverage_tests {
             for epoch in input {
                 insert_epoch(&mut epochs, epoch);
                 reference.insert(epoch);
-                assert_eq!(epochs, reference.iter().copied().collect::<Vec<_>>());
+                assert_eq!(matches!(epochs, Cow::Owned(_)), reference.len() > 1);
+                assert_eq!(
+                    epochs.as_ref(),
+                    reference.iter().copied().collect::<Vec<_>>()
+                );
                 for query in [0, 1, 128, 255, 256, u32::MAX - 1, u32::MAX] {
                     assert_eq!(
                         epochs.binary_search(&query).is_ok(),
