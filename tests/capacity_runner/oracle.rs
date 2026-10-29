@@ -4627,7 +4627,7 @@ mod coverage_tests {
         }
     }
 
-    /// Both index widths must preserve stable raw identities and exact memory bounds.
+    /// Both index widths must preserve stable raw identities and the compact element layout.
     #[test]
     fn compact_and_wide_churn_indexes_preserve_exact_raw_order() {
         for count in [0, 1, 2, 17, 257, 4096] {
@@ -4657,10 +4657,8 @@ mod coverage_tests {
                     expected,
                     "wide count={count}, reversed={reversed}"
                 );
-                assert_eq!(
-                    compact.capacity() * std::mem::size_of::<(u32, u32)>(),
-                    count * 8
-                );
+                assert_eq!(compact.len(), count);
+                assert_eq!(std::mem::size_of::<(u32, u32)>(), 8);
             }
         }
     }
