@@ -313,6 +313,13 @@ pub struct RunConfig {
         skip_serializing_if = "sender_payload_budget_is_default"
     )]
     pub sender_payload_budget_bytes: u64,
+    /// Planned raw send and receipt storage on this host. This excludes
+    /// validation indexes, names, control events, and socket buffers.
+    #[serde(
+        default = "default_raw_event_budget_bytes",
+        skip_serializing_if = "raw_event_budget_is_default"
+    )]
+    pub raw_event_budget_bytes: u64,
     /// Deep-merged over the shared harness base config for spawned servers.
     pub server_overlay: Value,
     /// Negative-control hook: pause senders once (scheduled-send latency).
@@ -357,6 +364,14 @@ pub(crate) fn default_planned_record_budget() -> u64 {
 
 pub(crate) fn default_sender_payload_budget_bytes() -> u64 {
     64 * 1024 * 1024
+}
+
+pub(crate) fn default_raw_event_budget_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
+fn raw_event_budget_is_default(value: &u64) -> bool {
+    *value == default_raw_event_budget_bytes()
 }
 
 fn sender_payload_budget_is_default(value: &u64) -> bool {
@@ -578,6 +593,30 @@ impl RunConfig {
         Ok(planned)
     }
 
+    pub fn validate_raw_event_budget(&self) -> Result<u64, String> {
+        let records = self.validate_planned_record_budget()?;
+        let sends = records
+            .checked_div(u64::from(self.players_per_room))
+            .ok_or_else(|| "raw event storage requires at least one player".to_string())?;
+        let bytes = sends
+            .checked_mul(count_u64(std::mem::size_of::<crate::records::SentEvent>()))
+            .and_then(|send_bytes| {
+                (records - sends)
+                    .checked_mul(count_u64(
+                        std::mem::size_of::<crate::records::ReceiptEvent>(),
+                    ))
+                    .and_then(|receipt_bytes| send_bytes.checked_add(receipt_bytes))
+            })
+            .ok_or_else(|| "planned raw event byte count overflows".to_string())?;
+        if self.raw_event_budget_bytes == 0 || bytes > self.raw_event_budget_bytes {
+            return Err(format!(
+                "planned raw send and receipt storage needs {bytes} bytes; raw_event_budget_bytes is {}. Reduce the workload or explicitly set CAPACITY_RUNNER_RAW_EVENT_BUDGET_BYTES for a provisioned host; indexes and other process memory need separate headroom",
+                self.raw_event_budget_bytes
+            ));
+        }
+        Ok(bytes)
+    }
+
     /// Build the run config from `CAPACITY_RUNNER_*` environment
     /// variables so the runner is standalone on a capacity host:
     ///
@@ -590,7 +629,7 @@ impl RunConfig {
     /// `room-replacement`) with `CHURN_FRACTION_PERCENT`,
     /// `CHURN_START_MS`, `CHURN_WINDOW_MS`, `CHURN_INTERVAL_MS`,
     /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`, `PLANNED_RECORD_BUDGET`,
-    /// `SENDER_PAYLOAD_BUDGET_BYTES`. Absent optional
+    /// `SENDER_PAYLOAD_BUDGET_BYTES`, `RAW_EVENT_BUDGET_BYTES`. Absent optional
     /// variables fall back to the small default scenario; required scalars
     /// fall back to the same defaults so a bare invocation just works. Each
     /// run needs a FRESH `OUTPUT_DIR` (a directory that already holds a run
@@ -743,6 +782,11 @@ impl RunConfig {
             .transpose()
             .map_err(|error| format!("CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES: {error}"))?
             .unwrap_or_else(default_sender_payload_budget_bytes);
+        let raw_event_budget_bytes = var("RAW_EVENT_BUDGET_BYTES")?
+            .map(|raw| raw.parse::<u64>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_RAW_EVENT_BUDGET_BYTES: {error}"))?
+            .unwrap_or_else(default_raw_event_budget_bytes);
         Ok(RunConfig {
             endpoint,
             external_host_evidence,
@@ -766,6 +810,7 @@ impl RunConfig {
             receipt_timings,
             planned_record_budget,
             sender_payload_budget_bytes,
+            raw_event_budget_bytes,
             server_overlay: if experiment.is_some() {
                 Self::unsupported_format_overlay()
             } else {
@@ -785,6 +830,65 @@ impl RunConfig {
 #[cfg(test)]
 mod receipt_timing_tests {
     use super::*;
+
+    #[test]
+    fn raw_event_budget_matches_planned_vector_storage_and_exact_boundaries() {
+        for (rooms, players, seconds) in [(1, 2, 2), (2, 4, 3), (1, 16, 600)] {
+            let mut config = crate::scenario_config(Encoding::V3Json);
+            config.rooms = rooms;
+            config.players_per_room = players;
+            config.send_rate_per_sender = 60.0;
+            config.warmup = Duration::from_secs(120);
+            config.duration = Duration::from_secs(seconds);
+            let (plans, _) = crate::schedule::build_run_shape(&config).unwrap();
+            let sends: usize = plans.iter().map(|plan| plan.sends.len()).sum();
+            let expected = count_u64(
+                sends * std::mem::size_of::<crate::records::SentEvent>()
+                    + sends
+                        * (players as usize - 1)
+                        * std::mem::size_of::<crate::records::ReceiptEvent>(),
+            );
+            for budget in [0, expected - 1, expected, expected + 1] {
+                config.raw_event_budget_bytes = budget;
+                let actual = config.validate_raw_event_budget();
+                if budget >= expected {
+                    assert_eq!(actual.unwrap(), expected);
+                } else {
+                    assert!(actual.unwrap_err().contains(&expected.to_string()));
+                }
+            }
+            assert!(expected <= default_raw_event_budget_bytes());
+        }
+    }
+
+    #[test]
+    fn raw_event_budget_rejects_large_admitted_counts_and_overflow() {
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        config.players_per_room = 16;
+        config.rooms = 2;
+        config.send_rate_per_sender = 60.0;
+        config.warmup = Duration::from_secs(120);
+        config.duration = Duration::from_secs(600);
+        assert!(config.validate_planned_record_budget().is_ok());
+        assert!(config
+            .validate_raw_event_budget()
+            .unwrap_err()
+            .contains("RAW_EVENT_BUDGET_BYTES"));
+        config.raw_event_budget_bytes = u64::MAX;
+        assert!(config.validate_raw_event_budget().is_ok());
+        config.planned_record_budget = u64::MAX;
+        config.rooms = 1;
+        config.players_per_room = 1;
+        config.send_rate_per_sender = 1_000_000.0;
+        config.warmup = Duration::ZERO;
+        config.duration = Duration::from_micros(u64::MAX / 2);
+        assert_eq!(
+            config.validate_raw_event_budget().unwrap_err(),
+            "planned raw event byte count overflows"
+        );
+        config.players_per_room = 0;
+        assert!(config.validate_raw_event_budget().is_err());
+    }
 
     #[test]
     fn sender_payload_budget_counts_all_senders_and_checks_exact_boundaries() {
@@ -919,6 +1023,7 @@ mod receipt_timing_tests {
         assert!(value.get("receipt_timings").is_none());
         assert!(value.get("planned_record_budget").is_none());
         assert!(value.get("sender_payload_budget_bytes").is_none());
+        assert!(value.get("raw_event_budget_bytes").is_none());
         let restored: RunConfig = serde_json::from_slice(&old_bytes).expect("old config shape");
         assert!(!restored.receipt_timings);
         assert_eq!(
@@ -927,10 +1032,12 @@ mod receipt_timing_tests {
         );
         config.planned_record_budget = 1234;
         config.sender_payload_budget_bytes = 5678;
+        config.raw_event_budget_bytes = 9012;
         let custom = serde_json::to_vec(&config).expect("custom budget");
         let restored: RunConfig = serde_json::from_slice(&custom).expect("custom config");
         assert_eq!(restored.planned_record_budget, 1234);
         assert_eq!(restored.sender_payload_budget_bytes, 5678);
+        assert_eq!(restored.raw_event_budget_bytes, 9012);
         config.receipt_timings = true;
         assert_eq!(
             serde_json::to_value(config).expect("enabled config")["receipt_timings"],

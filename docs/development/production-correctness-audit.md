@@ -10871,3 +10871,55 @@ The wire schema and close codes stay unchanged. SDK runtime qualification is
 tracked separately in Rust #297, .NET #149 and Godot #482; all three already
 expose peer close codes. A completed server control does not complete those
 client assessments.
+
+### F205 — Duplicate room admission replaces an existing member (#1296)
+
+Baseline `ee20b51e`, under #826. The public Room and in-memory storage
+admission methods check available capacity but do not check whether the ID
+already occupies that roster. With spare seats, a duplicate player replaces
+its stored snapshot and increments the session join count. A duplicate
+spectator also replaces its snapshot, refreshes room activity and increments
+the spectator join count. Uncapped spectators have the same behavior. A full
+roster instead refuses, so unrelated occupancy changes the result.
+
+The player storage control fails on the baseline in Nextest
+`d34c0748-8ed9-4f3d-8545-43d0c54d123b`. The public Room control also fails
+with spare capacity. The two spectator controls fail before their repair in
+`8447cc24-febd-4ab6-926f-d9e711418e6d`, including the uncapped case.
+
+The repair refuses an ID already in the relevant roster before mutation.
+Controls preserve complete stored snapshots, readiness, authority, activity
+and session counts. They cover full and non-full player rosters, capped and
+uncapped spectator rosters, concurrent duplicate player admission, and a real
+remove-then-rejoin. The guard uses the same storage write lock as admission.
+It does not add a second membership transaction.
+
+This is a public Room/storage API defect. The normal server checks membership
+before joining; a WebSocket gameplay race has not been established. Rust's
+client manifest at `da8f2d16` does not depend on the server crate. The .NET
+project at `e467c871` has no server library dependency, and the Godot client at
+`58f896c6` uses GDScript. These clients do not call the changed Rust methods.
+Peer-list reservation preserves wire values and order. No client migration is
+required for these repairs. The wider #826 campaign remains open.
+
+### Session peer-list reservation (#636)
+
+Host and Mesh publications build filtered peer lists with an iterator whose
+final length is unknown to Vec. The old collection grows its allocation as
+peers arrive. The repair counts eligible members before cloning the same
+peer records in the same order, then reserves the final list length.
+
+An isolated counting-allocator control builds each list 64 times through the
+production plan method. The 16-member baseline performs 128 reallocations per
+topology; the 256-member baseline performs 384 and grows 774,144 bytes per
+topology. All six repaired controls (2, 16 and 256 members, Host and Mesh)
+perform zero reallocations. At two members the total allocated bytes fall
+from 13,696 to 4,480 per topology. Required peer-name copies remain. Existing
+session-policy controls cover filtering, offer direction and exact peers.
+These are component allocation results, not a server throughput result.
+
+Final all-feature admission and session-plan validation passes all 15 selected
+controls in Nextest `81ee7ed5-e7ee-4e4e-9962-dd9d36614733`. The capacity
+byte-budget and exact-replay controls pass all six selected tests in
+`a206f7ab-cd6b-4bb4-a247-3c24264ccca3`. Strict all-target, all-feature Clippy
+passes. These scoped results do not complete either broad campaign.

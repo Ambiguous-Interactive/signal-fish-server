@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce allocations when selecting or replacing a session host (#636).
+- Reduce allocations when selecting a session host and publishing session peer lists (#636).
 - Reduce server latency metric memory and keep routine timing updates free of allocations (#1285, #636).
 - Reduce room-event copies when no player needs reconnect replay (#636, #1277).
 - **Breaking:** Native reference-client consumers must set `channel_profile` in settings literals
@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject duplicate room admissions without replacing members or inflating session join counts (#1296).
 - Preserve server shutdown close reasons while inbound traffic is still arriving (#1295).
 - Preserve player readiness when the public room API enters the lobby (#1293).
 - Keep the original physical generation on native gameplay and connection output after link rebuilds (#1283).
@@ -118,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close native gameplay channels and release blocked sends when DATA or shutdown recovery reaches its retry limit (#1140).
 - Restore browser exchange error reports after a peer link restarts (#1141).
 - Prevent delayed packets from reopening closed native gameplay transports (#1138).
-- Enforce workload, retained event, and archive replay budgets for capacity runs (#775).
+- Enforce workload, planned raw event bytes, retained event, and archive replay budgets for capacity runs (#775).
 - Close native gameplay channels when stream reset retries expire (#1133).
 - Report native peer closure after a fatal socket error, including before channel admission (#1134).
 - Reject native sends after shutdown and return blocked-send closure errors without a polling delay (#1135).

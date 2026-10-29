@@ -6767,3 +6767,40 @@ Server latency histograms separately reduce retained bucket storage from
 Precision, sample counts, metrics JSON and the five-minute clamp are unchanged.
 See #1285 and the production correctness audit for the exact comparison.
 The full workload, memory bound and historical generator stalls remain open.
+
+### Planned raw event byte admission (#775, session 575)
+
+Live capacity runs now check `CAPACITY_RUNNER_RAW_EVENT_BUDGET_BYTES` before
+creating artifacts, building schedules, opening sockets or reserving event
+vectors. The default is 1,073,741,824 bytes (1 GiB). Zero refuses admission.
+An explicit positive override records the host's selected budget in the run
+manifest. The default field is omitted, so old manifest bytes still round-trip.
+Replay uses its existing host admission limits; a recorded live-run budget does
+not replace them.
+
+The check computes the full offered send and recipient receipt counts, using
+the current host's `size_of::<SentEvent>()` and `size_of::<ReceiptEvent>()`.
+Every multiplication and addition is checked. A record-count budget alone can
+admit multiple GiB of raw rows. The new byte budget refuses that workload
+before allocation and reports both required and permitted bytes. It never
+reduces offered work. Hosts must explicitly provision and admit larger cells.
+
+The budget covers planned raw send and receipt vectors only. Names, control
+events, allocation overhead, indexes, histograms, payloads and socket buffers
+need separate headroom. Excess inbound evidence retains the existing record
+budget and fail-visible invalidation. This is not an RSS cap or proof that the
+largest campaign workload fits a host.
+
+The boundary controls compare the byte calculation against independently built
+schedules, including the original one-room 16-player, 60 Hz, 120-second warm-up
+and 600-second measured shape. They cover exact and one-byte-short admission,
+zero, arithmetic overflow and explicit host overrides. Two rooms at that long
+shape fit the old record-count default but exceed the new byte default. A real
+short cell at its exact byte budget completes all delivery checks and produces
+an identical replay summary. The negative control reached network admission
+and wrote an invalid-run artifact before the runner called the new byte check;
+the repaired control refuses before either side effect.
+
+Whole-generator memory qualification and the largest ten-minute workload remain
+open under #775. This change adds an explicit admission bound for the largest
+planned raw allocations; it does not complete those acceptance items.

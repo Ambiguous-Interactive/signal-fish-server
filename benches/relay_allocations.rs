@@ -859,6 +859,7 @@ fn assert_host_election_borrows_candidates() {
 }
 
 fn main() {
+    assert_session_peer_lists_do_not_grow();
     assert_host_election_borrows_candidates();
     assert_idle_replay_capture_does_not_clone_payloads();
     assert_payload_sizing_does_not_allocate();
@@ -901,4 +902,24 @@ fn main() {
     let mut fixture = QueueFixture::new();
     let sample = repeated_samples(|| fixture.measure());
     print_sample("classified_queue", 2, 1, RELAYS_PER_SAMPLE, sample);
+}
+
+fn assert_session_peer_lists_do_not_grow() {
+    use signal_fish_server::server::allocation_benchmark::HostElectionFixture;
+
+    let mut bounded = true;
+    for members in [2, 16, 256] {
+        for mesh in [false, true] {
+            let mut fixture = HostElectionFixture::new(members, false);
+            assert_eq!(fixture.plan_for(mesh).peers.len(), members as usize - 1);
+            let region = Region::new(GLOBAL);
+            for _ in 0..64 {
+                assert_eq!(fixture.plan_for(mesh).peers.len(), members as usize - 1);
+            }
+            let stats = region.change();
+            eprintln!("session_peers members={members} mesh={mesh}: {stats:?}");
+            bounded &= stats.reallocations == 0;
+        }
+    }
+    assert!(bounded, "session peer lists must reserve their final size");
 }

@@ -622,17 +622,20 @@ impl SessionPlanDecision {
             Vec::new()
         } else {
             match self.topology {
-                Topology::Mesh => self
-                    .members
-                    .iter()
-                    .filter(|member| member.player_id != recipient && self.pairable(member))
-                    .map(|member| SessionPeer {
+                Topology::Mesh => {
+                    let members = self
+                        .members
+                        .iter()
+                        .filter(|member| member.player_id != recipient && self.pairable(member));
+                    let mut peers = Vec::with_capacity(members.clone().count());
+                    peers.extend(members.map(|member| SessionPeer {
                         player_id: member.player_id,
                         player_name: member.player_name.clone(),
                         is_authority: member.is_authority,
                         initiate: local_initiates(recipient, member.player_id),
-                    })
-                    .collect(),
+                    }));
+                    peers
+                }
                 Topology::Host => self.host_peers_for(recipient),
                 Topology::Relay => Vec::new(),
             }
@@ -676,16 +679,18 @@ impl SessionPlanDecision {
             // The host answers every pairable client and initiates to none.
             // Non-pairable members (e.g. relay-only seat-fillers) stay off the
             // star: they participate via the relay floor.
-            self.members
+            let members = self
+                .members
                 .iter()
-                .filter(|member| member.player_id != host && self.pairable(member))
-                .map(|member| SessionPeer {
-                    player_id: member.player_id,
-                    player_name: member.player_name.clone(),
-                    is_authority: false,
-                    initiate: false,
-                })
-                .collect()
+                .filter(|member| member.player_id != host && self.pairable(member));
+            let mut peers = Vec::with_capacity(members.clone().count());
+            peers.extend(members.map(|member| SessionPeer {
+                player_id: member.player_id,
+                player_name: member.player_name.clone(),
+                is_authority: false,
+                initiate: false,
+            }));
+            peers
         } else {
             // Each pairable client connects only to the host and offers to it.
             self.members

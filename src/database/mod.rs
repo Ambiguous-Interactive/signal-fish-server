@@ -393,6 +393,8 @@ pub trait GameDatabase: Send + Sync {
     /// pass pre-disconnect snapshots whose flag can be stale, and a stored
     /// member that contradicts `authority_player` would surface two authorities
     /// in `RoomJoined` / `Reconnected` / `GameStarting` payloads.
+    /// Return `false` without mutation when the room is full or already
+    /// contains this player ID.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool>;
 
     /// Remove player from room.
@@ -596,7 +598,8 @@ pub trait GameDatabase: Send + Sync {
     ) -> Result<FinalizeRoomGameOutcome>;
 
     /// Add spectator to room (atomic operation)
-    /// Returns true if successfully added, false if room is full or doesn't exist
+    /// Return false without mutation if the room is full, absent, or already
+    /// contains this spectator ID.
     async fn add_spectator_to_room(
         &self,
         room_id: &RoomId,
@@ -1919,7 +1922,9 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            if room.players.len() < room.max_players as usize {
+            if room.players.len() < room.max_players as usize
+                && !room.players.contains_key(&player.id)
+            {
                 // `authority_player` is the single source of truth for the room
                 // (see `create_room_classified`). An inbound `PlayerInfo` can be
                 // a pre-disconnect snapshot whose flag went stale while the
@@ -1957,7 +1962,7 @@ impl GameDatabase for InMemoryDatabase {
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 Ok(true)
             } else {
-                Ok(false) // Room is full
+                Ok(false)
             }
         } else {
             anyhow::bail!("Room not found")
@@ -3490,6 +3495,112 @@ mod tests {
 
     fn is_fresh(ts: chrono::DateTime<chrono::Utc>) -> bool {
         chrono::Utc::now().signed_duration_since(ts) < chrono::Duration::minutes(1)
+    }
+
+    #[tokio::test]
+    async fn duplicate_spectator_admission_preserves_snapshot_and_counts() {
+        for cap in [None, Some(1), Some(2)] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "duplicate_spectator", "DUP003")
+                .await
+                .unwrap();
+            db.rooms
+                .write()
+                .await
+                .get_mut(&room.id)
+                .unwrap()
+                .max_spectators = cap;
+            let watcher = spectator("original");
+            assert!(db
+                .add_spectator_to_room(&room.id, watcher.clone())
+                .await
+                .unwrap());
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let mut duplicate = watcher.clone();
+            duplicate.name = "replacement".to_string();
+            assert!(
+                !db.add_spectator_to_room(&room.id, duplicate).await.unwrap(),
+                "cap={cap:?}"
+            );
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(after.spectators).unwrap(),
+                serde_json::to_value(before.spectators).unwrap()
+            );
+            assert_eq!(after.last_activity, before.last_activity);
+            assert_eq!(db.session_records.snapshot().active[0].spectators_joined, 1);
+            assert!(db
+                .remove_spectator_from_room(&room.id, &watcher.id)
+                .await
+                .unwrap()
+                .is_some());
+            assert!(db.add_spectator_to_room(&room.id, watcher).await.unwrap());
+            assert_eq!(db.session_records.snapshot().active[0].spectators_joined, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_admission_adds_exactly_one_membership() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "duplicate_race", "DUP002")
+            .await
+            .unwrap();
+        let player = member("one membership");
+        let duplicate = player.clone();
+        let (first, second) = tokio::join!(
+            db.add_player_to_room(&room.id, player),
+            db.add_player_to_room(&room.id, duplicate)
+        );
+        assert_ne!(first.unwrap(), second.unwrap());
+        assert_eq!(db.get_room_players(&room.id).await.unwrap().len(), 2);
+        assert_eq!(db.session_records.snapshot().active[0].players_joined, 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_player_admission_preserves_member_and_session_counts() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "duplicate_member", "DUP001")
+            .await
+            .unwrap();
+        let creator = room.players.values().next().unwrap().clone();
+        for full in [false, true] {
+            if full {
+                for _ in 1..room.max_players {
+                    assert!(db
+                        .add_player_to_room(&room.id, member("peer"))
+                        .await
+                        .unwrap());
+                }
+            }
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let counts = db.session_records.snapshot();
+            let mut duplicate = creator.clone();
+            duplicate.name = "replacement".to_string();
+            duplicate.connection_info = None;
+            assert!(
+                !db.add_player_to_room(&room.id, duplicate).await.unwrap(),
+                "full={full}"
+            );
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(&after.players).unwrap(),
+                serde_json::to_value(&before.players).unwrap()
+            );
+            assert_eq!(after.players.len(), before.players.len());
+            assert_eq!(after.last_activity, before.last_activity);
+            assert_eq!(after.authority_player, before.authority_player);
+            assert_eq!(after.ready_players, before.ready_players);
+            assert_eq!(
+                db.session_records.snapshot().active[0].players_joined,
+                counts.active[0].players_joined
+            );
+        }
+        assert!(db
+            .remove_player_from_room(&room.id, &creator.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db.add_player_to_room(&room.id, creator).await.unwrap());
     }
 
     /// A join must refresh `last_activity`: without it, a room that fills up
