@@ -638,30 +638,53 @@ impl<'a> SendIndex<'a> {
     }
 }
 
-fn ordered_churn_events(records: &RunRecords) -> Vec<(usize, usize)> {
+/// Order raw churn identities using compact offsets when the history fits.
+fn ordered_churn_events(records: &RunRecords) -> impl Iterator<Item = usize> {
+    let (compact, wide) = if u32::try_from(records.churn.len()).is_ok() {
+        (churn_order::<u32>(records), Vec::new())
+    } else {
+        (Vec::new(), churn_order::<usize>(records))
+    };
+    compact
+        .into_iter()
+        .map(|(position, _)| position as usize)
+        .chain(wide.into_iter().map(|(position, _)| position))
+}
+
+/// Sort lifecycle evidence without expanding compact disconnect counts.
+fn churn_order<Index>(records: &RunRecords) -> Vec<(Index, Index)>
+where
+    Index: Copy + TryFrom<usize> + TryInto<usize>,
+{
+    let widen = |index: Index| index.try_into().ok().expect("validated churn offset");
+    let narrow = |index: usize| Index::try_from(index).ok().expect("validated churn offset");
     let mut events: Vec<_> = (0..records.churn.len())
-        .map(|position| (position, 0_usize))
+        .map(|position| (narrow(position), narrow(0)))
         .collect();
     events.sort_unstable_by_key(|&(position, _)| {
-        let event = &records.churn[position];
-        (event.recipient.as_str(), event.at_us, position)
+        let event = &records.churn[widen(position)];
+        (event.recipient.as_str(), event.at_us, widen(position))
     });
     /*
-        Delayed cycles can share a microsecond. Disconnect ordinals and rejoin
-        epochs recover their alternating order only within that timestamp.
+        Delayed cycles can share a microsecond. Retain disconnect counts rather
+        than doubled ordinals, so compact offsets also bound the stored counts.
+        Rejoin ordinals come from raw epochs, including malformed extremes.
     */
     let mut disconnect_ordinals: BTreeMap<&str, usize> = BTreeMap::new();
-    for (position, ordinal) in &mut events {
-        let event = &records.churn[*position];
-        *ordinal = match event.phase {
-            ChurnPhase::Disconnect => {
-                let next = disconnect_ordinals
-                    .entry(event.recipient.as_str())
-                    .or_default();
-                let ordinal = next.saturating_mul(2);
-                *next = next.saturating_add(1);
-                ordinal
-            }
+    for (position, disconnect_count) in &mut events {
+        let event = &records.churn[widen(*position)];
+        if event.phase == ChurnPhase::Disconnect {
+            let next = disconnect_ordinals
+                .entry(event.recipient.as_str())
+                .or_default();
+            *disconnect_count = narrow(*next);
+            *next = next.saturating_add(1);
+        }
+    }
+    events.sort_unstable_by_key(|&(position, disconnect_count)| {
+        let event = &records.churn[widen(position)];
+        let ordinal = match event.phase {
+            ChurnPhase::Disconnect => widen(disconnect_count).saturating_mul(2),
             ChurnPhase::Rejoined => event
                 .epoch
                 .and_then(|epoch| usize::try_from(epoch.checked_sub(2)?).ok())
@@ -669,10 +692,12 @@ fn ordered_churn_events(records: &RunRecords) -> Vec<(usize, usize)> {
                     epoch.saturating_mul(2).saturating_add(1)
                 }),
         };
-    }
-    events.sort_unstable_by_key(|&(position, ordinal)| {
-        let event = &records.churn[position];
-        (event.recipient.as_str(), event.at_us, ordinal, position)
+        (
+            event.recipient.as_str(),
+            event.at_us,
+            ordinal,
+            widen(position),
+        )
     });
     events
 }
@@ -704,7 +729,7 @@ fn churn_evidence(
     let mut positions: BTreeMap<&str, usize> = BTreeMap::new();
     let mut count = 0_u64;
     let mut first = None;
-    for (raw_position, _) in events {
+    for raw_position in events {
         let event = &records.churn[raw_position];
         let position = positions.entry(event.recipient.as_str()).or_default();
         let expected_phase = if position.is_multiple_of(2) {
@@ -4589,9 +4614,50 @@ mod coverage_tests {
                     records.churn.reverse();
                 }
                 assert_eq!(
-                    ordered_churn_events(&records),
-                    stable_churn_order(&records),
+                    ordered_churn_events(&records).collect::<Vec<_>>(),
+                    stable_churn_order(&records)
+                        .into_iter()
+                        .map(|(position, _)| position)
+                        .collect::<Vec<_>>(),
                     "count={count}, reversed={reversed}"
+                );
+            }
+        }
+    }
+
+    /// Both index widths must preserve stable raw identities and exact memory bounds.
+    #[test]
+    fn compact_and_wide_churn_indexes_preserve_exact_raw_order() {
+        for count in [0, 1, 2, 17, 257, 4096] {
+            let mut records = churn_sort_fixture(count);
+            for reversed in [false, true] {
+                if reversed {
+                    records.churn.reverse();
+                }
+                let compact = churn_order::<u32>(&records);
+                let wide = churn_order::<usize>(&records);
+                let expected: Vec<_> = stable_churn_order(&records)
+                    .into_iter()
+                    .map(|(position, _)| position)
+                    .collect();
+                assert_eq!(
+                    compact
+                        .iter()
+                        .map(|&(position, _)| position as usize)
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "compact count={count}, reversed={reversed}"
+                );
+                assert_eq!(
+                    wide.iter()
+                        .map(|&(position, _)| position)
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "wide count={count}, reversed={reversed}"
+                );
+                assert_eq!(
+                    compact.capacity() * std::mem::size_of::<(u32, u32)>(),
+                    count * 8
                 );
             }
         }
@@ -4603,26 +4669,34 @@ mod coverage_tests {
         let records = churn_sort_fixture(1_000_000);
         let stable = std::env::var_os("CAPACITY_CHURN_SORT_STABLE").is_some();
         let start = std::time::Instant::now();
-        let ordered = if stable {
-            stable_churn_order(&records)
+        let (rows, bytes, digest) = if stable {
+            let ordered = stable_churn_order(&records);
+            let digest = ordered.iter().fold(0_u64, |digest, &(position, _)| {
+                digest.wrapping_mul(31).wrapping_add(position as u64)
+            });
+            (
+                ordered.len(),
+                ordered.capacity() * std::mem::size_of::<(usize, usize)>(),
+                digest,
+            )
         } else {
-            ordered_churn_events(&records)
+            let ordered = churn_order::<u32>(&records);
+            let digest = ordered.iter().fold(0_u64, |digest, &(position, _)| {
+                digest.wrapping_mul(31).wrapping_add(u64::from(position))
+            });
+            (
+                ordered.len(),
+                ordered.capacity() * std::mem::size_of::<(u32, u32)>(),
+                digest,
+            )
         };
-        assert_eq!(ordered.len(), records.churn.len());
-        assert!(ordered.windows(2).all(|pair| {
-            let key = |(position, ordinal): (usize, usize)| {
-                let event = &records.churn[position];
-                (event.recipient.as_str(), event.at_us, ordinal, position)
-            };
-            key(pair[0]) <= key(pair[1])
-        }));
+        assert_eq!(rows, records.churn.len());
+        assert_eq!(digest, 1_604_667_450_296_019_028);
         println!(
-            "CHURN_SORT_PROFILE stable={stable} rows={} index_bytes={} elapsed_ms={}",
-            ordered.len(),
-            ordered.capacity() * std::mem::size_of::<(usize, usize)>(),
+            "CHURN_SORT_PROFILE stable={stable} rows={rows} index_bytes={bytes} elapsed_ms={} digest={digest}",
             start.elapsed().as_millis()
         );
-        std::hint::black_box((records, ordered));
+        std::hint::black_box(records);
     }
 
     #[test]

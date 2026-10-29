@@ -859,6 +859,7 @@ fn assert_host_election_borrows_candidates() {
 }
 
 fn main() {
+    assert_readiness_snapshots_reuse_their_id_storage();
     assert_session_peer_lists_do_not_grow();
     assert_host_election_borrows_candidates();
     assert_idle_replay_capture_does_not_clone_payloads();
@@ -923,4 +924,109 @@ fn assert_session_peer_lists_do_not_grow() {
         }
     }
     assert!(bounded, "session peer lists must reserve their final size");
+}
+
+/// Lobby snapshots retain only present members without growing their ID vector.
+fn assert_readiness_snapshots_reuse_their_id_storage() {
+    use signal_fish_server::coordination::{
+        InMemoryRoomOperationCoordinator, RoomOperationCoordinatorTrait,
+    };
+    use signal_fish_server::protocol::PlayerInfo;
+
+    let runtime = Builder::new_current_thread().enable_time().build().unwrap();
+    runtime.block_on(async {
+        let mut bounded = true;
+        for members in [2_u8, 16, 128] {
+            let database = Arc::new(InMemoryDatabase::new());
+            let messages = Arc::new(InMemoryMessageCoordinator::new());
+            let operations =
+                InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+            let ids: Vec<_> = (1..=members)
+                .map(|index| PlayerId::from_u128(u128::from(index)))
+                .collect();
+            let room = database
+                .create_room(
+                    "ready-allocation".into(),
+                    None,
+                    members,
+                    false,
+                    ids[0],
+                    "relay".into(),
+                    "region".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let mut receivers = Vec::new();
+            for &id in &ids {
+                if id != ids[0] {
+                    assert!(database
+                        .add_player_to_room(
+                            &room.id,
+                            PlayerInfo {
+                                id,
+                                name: "member".into(),
+                                is_authority: false,
+                                is_ready: false,
+                                connected_at: None,
+                                connection_info: None,
+                                epoch: None,
+                                seq: None,
+                                region_id: "region".into(),
+                            }
+                        )
+                        .await
+                        .unwrap());
+                }
+                let (sender, receiver) = tokio::sync::mpsc::channel(usize::from(members) + 1);
+                messages
+                    .register_local_client(
+                        id,
+                        Some(room.id),
+                        ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                    )
+                    .await
+                    .unwrap();
+                receivers.push(receiver);
+            }
+            for id in &ids {
+                operations
+                    .handle_player_ready(&room.id, id, None)
+                    .await
+                    .unwrap();
+                for receiver in &mut receivers {
+                    assert!(
+                        receiver.try_recv().is_ok(),
+                        "ready toggle must reach each member"
+                    );
+                }
+            }
+            for departed in [0, usize::from(members) / 2] {
+                for id in ids.iter().take(departed) {
+                    database
+                        .remove_player_from_room(&room.id, id)
+                        .await
+                        .unwrap();
+                }
+                let mut expected = ids[departed..].to_vec();
+                expected.sort_unstable();
+                let mut warm = operations.current_ready_players(&room.id).await;
+                warm.sort_unstable();
+                assert_eq!(warm, expected);
+                let region = Region::new(GLOBAL);
+                for _ in 0..64 {
+                    let mut snapshot = operations.current_ready_players(&room.id).await;
+                    snapshot.sort_unstable();
+                    assert_eq!(snapshot, expected);
+                }
+                let stats = region.change();
+                eprintln!("readiness_snapshot members={members} departed={departed}: {stats:?}");
+                bounded &= stats.reallocations == 0;
+            }
+        }
+        assert!(
+            bounded,
+            "readiness snapshots must retain their original ID vector"
+        );
+    });
 }
