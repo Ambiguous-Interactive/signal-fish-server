@@ -28,8 +28,17 @@ These values describe event consumption after remote polling; Fortress may have
 generated the event during the preceding advance. Peer lag estimates are not
 synchronized remote clock samples. A pending event can make the cumulative
 `wait_recommendations` metric exceed the consumed observation count. The existing
-zero-recommendation health gate remains unchanged. A passing run does not explain
-issue #1312's retained failure.
+zero-recommendation health gate remains unchanged. A second bounded trace,
+`wait_generation_observations`, records each recommendation inside the advance
+that produced it, even if the next callback never consumes the event. It includes
+the advance duration and starting frame. The validator pairs the retained
+prefixes by order and checks callback order, elapsed time and requested skips.
+Generation counts must match the cumulative metric, including omitted events.
+The released Fortress 0.13.0 source checks recommendations during `advance_frame`;
+these traces distinguish that operation from the following remote poll.
+A passing run does not explain issue #1312's retained failure. Hosted runs retain
+control reports for 14 days on both success and failure. Failed runs also retain
+the exported project.
 
 Run the complete gate with:
 

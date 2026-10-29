@@ -386,6 +386,12 @@ pub trait GameDatabase: Send + Sync {
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
 
+    /// Check storage membership without requiring a room snapshot.
+    /// Pending rooms count as present, as they do in `get_room_by_id`.
+    async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
+        Ok(self.get_room_by_id(room_id).await?.is_some())
+    }
+
     /// Add player to room (atomic operation).
     ///
     /// Implementations must store `is_authority` derived from the room's
@@ -960,6 +966,29 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    #[cfg(test)]
+    async fn before_room_read_for_test(&self) -> Result<()> {
+        {
+            self.get_room_by_id_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self
+                .pause_get_room_by_id
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                self.get_room_by_id_reached.notify_one();
+                self.release_get_room_by_id.notified().await;
+            }
+            if self
+                .fail_get_room_by_id
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                anyhow::bail!("injected get_room_by_id failure for test");
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -1873,26 +1902,16 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>> {
         #[cfg(test)]
-        {
-            self.get_room_by_id_calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if self
-                .pause_get_room_by_id
-                .swap(false, std::sync::atomic::Ordering::AcqRel)
-            {
-                self.get_room_by_id_reached.notify_one();
-                self.release_get_room_by_id.notified().await;
-            }
-            if self
-                .fail_get_room_by_id
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                anyhow::bail!("injected get_room_by_id failure for test");
-            }
-        }
+        self.before_room_read_for_test().await?;
 
         let rooms = self.rooms.read().await;
         Ok(rooms.get(room_id).cloned())
+    }
+
+    async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self.rooms.read().await.contains_key(room_id))
     }
 
     /// Admit one new player while preserving every existing membership.

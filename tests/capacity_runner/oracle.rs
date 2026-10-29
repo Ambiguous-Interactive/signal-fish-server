@@ -707,7 +707,7 @@ where
 struct RosterIndex<'a> {
     rows: &'a [(String, u32)],
     room_of: BTreeMap<&'a str, u32>,
-    members_of_room: BTreeMap<u32, Vec<&'a str>>,
+    members_of_room: BTreeMap<u32, RoomMembers<'a>>,
 }
 
 impl<'a> RosterIndex<'a> {
@@ -717,18 +717,64 @@ impl<'a> RosterIndex<'a> {
             .iter()
             .map(|(name, room)| (name.as_str(), *room))
             .collect();
-        let mut members_of_room: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
-        for (name, room) in rows {
-            members_of_room
-                .entry(*room)
-                .or_default()
-                .push(name.as_str());
+        let mut members_of_room = BTreeMap::<u32, RoomMembers<'_>>::new();
+        let mut start = 0;
+        while start < rows.len() {
+            let room = rows[start].1;
+            let mut end = start + 1;
+            while end < rows.len() && rows[end].1 == room {
+                end += 1;
+            }
+            match members_of_room.entry(room) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(RoomMembers {
+                        rows: &rows[start..end],
+                        names: Vec::new(),
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let members = entry.get_mut();
+                    if !members.rows.is_empty() {
+                        members
+                            .names
+                            .extend(members.rows.iter().map(|(name, _)| name.as_str()));
+                        members.rows = &[];
+                    }
+                    members
+                        .names
+                        .extend(rows[start..end].iter().map(|(name, _)| name.as_str()));
+                }
+            }
+            start = end;
         }
         Self {
             rows,
             room_of,
             members_of_room,
         }
+    }
+}
+
+/// Contiguous room rosters borrow their source; interleaved rosters retain name references.
+struct RoomMembers<'a> {
+    rows: &'a [(String, u32)],
+    names: Vec<&'a str>,
+}
+
+impl<'a> RoomMembers<'a> {
+    fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.rows
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.names.iter().copied())
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len() + self.names.len()
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.iter().any(|member| member == name)
     }
 }
 
@@ -1571,8 +1617,8 @@ fn churn_views<'a>(
         let Some(events) = events_by_room.get(room) else {
             let initial = initial_views.entry(*room).or_insert_with(|| {
                 let mut view = ChurnView::default();
-                for member in &members_by_room[room] {
-                    view.adopted.insert(*member, Cow::Borrowed(&[1]));
+                for member in members_by_room[room].iter() {
+                    view.adopted.insert(member, Cow::Borrowed(&[1]));
                 }
                 Arc::new(view)
             });
@@ -1581,8 +1627,8 @@ fn churn_views<'a>(
         };
         let mut view = ChurnView::default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
-        for member in &members_by_room[room] {
-            view.adopted.insert(*member, Cow::Borrowed(&[1]));
+        for member in members_by_room[room].iter() {
+            view.adopted.insert(member, Cow::Borrowed(&[1]));
         }
         for event in viewer_churn_events(&records.churn, events, viewer) {
             let crate::records::ChurnEvent {
@@ -2224,10 +2270,7 @@ pub fn summarize(
             latency_us: LatencyStats::default(),
         };
 
-        let room_members = members_of_room
-            .get(room)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let room_members = &members_of_room[room];
 
         // (a) Arrival-stream validity: an arrival must come from a co-room
         // sender, carry a stream sequence the sender actually stamped in
@@ -2295,7 +2338,6 @@ pub fn summarize(
         // streams this seat still owes. Closed epochs keep their evidence.
         for sender in room_members
             .iter()
-            .copied()
             .filter(|name| *name != recipient.as_str())
         {
             // Keep roster sender order for the first offending key, including
@@ -3883,6 +3925,80 @@ mod coverage_tests {
                 assert!(sources.contains(&name.as_ptr()), "stream name was copied");
             }
         }
+    }
+
+    /// #775: contiguous and interleaved room rosters preserve exact member order.
+    #[test]
+    fn room_roster_borrows_runs_and_preserves_interleaved_evidence() {
+        for rooms in [vec![], vec![0], vec![0, 0, 1, 1], vec![0, 1, 0, 2, 1, 0]] {
+            let rows: Vec<_> = rooms
+                .iter()
+                .enumerate()
+                .map(|(index, &room)| (format!("peer-雪-{index}"), room))
+                .collect();
+            let index = RosterIndex::new(&rows);
+            for (&room, members) in &index.members_of_room {
+                let expected: Vec<_> = rows
+                    .iter()
+                    .filter(|(_, value)| *value == room)
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                assert_eq!(members.iter().collect::<Vec<_>>(), expected);
+                assert_eq!(members.len(), expected.len());
+                assert!(expected.iter().all(|name| members.contains(name)));
+                assert!(!members.contains("absent"));
+                let runs = rooms
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, value)| {
+                        **value == room && (*position == 0 || rooms[*position - 1] != room)
+                    })
+                    .count();
+                if runs == 1 {
+                    assert_eq!(members.names.capacity(), 0);
+                    assert_eq!(members.rows.len(), expected.len());
+                } else {
+                    assert!(members.rows.is_empty());
+                    assert_eq!(members.names.len(), expected.len());
+                }
+            }
+            let legacy = RosterIndex {
+                rows: &rows,
+                room_of: index.room_of.clone(),
+                members_of_room: index
+                    .members_of_room
+                    .iter()
+                    .map(|(&room, members)| {
+                        (
+                            room,
+                            RoomMembers {
+                                rows: &[],
+                                names: members.iter().collect(),
+                            },
+                        )
+                    })
+                    .collect(),
+            };
+            let records = RunRecords::default();
+            let blocks = BTreeMap::new();
+            assert_eq!(
+                churn_views(&records, &index, &blocks),
+                churn_views(&records, &legacy, &blocks)
+            );
+        }
+        let rows: Vec<_> = (0..999)
+            .flat_map(|room| (0..16).map(move |player| (format!("r{room}p{player}"), room)))
+            .collect();
+        let index = RosterIndex::new(&rows);
+        let retained_name_bytes: usize = index
+            .members_of_room
+            .values()
+            .map(|members| members.names.capacity() * std::mem::size_of::<&str>())
+            .sum();
+        assert_eq!(
+            retained_name_bytes, 0,
+            "canonical roster borrows all 15,984 names"
+        );
     }
 
     /// Isolate retained oracle views from event storage and summary serialization.
