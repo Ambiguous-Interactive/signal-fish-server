@@ -593,6 +593,7 @@ impl RunConfig {
         Ok(planned)
     }
 
+    /// Check planned raw rows against the host byte budget before allocation.
     pub fn validate_raw_event_budget(&self) -> Result<u64, String> {
         let records = self.validate_planned_record_budget()?;
         let sends = records
@@ -832,6 +833,7 @@ mod receipt_timing_tests {
     use super::*;
 
     #[test]
+    /// Byte admission must match independent schedules at the exact limit.
     fn raw_event_budget_matches_planned_vector_storage_and_exact_boundaries() {
         for (rooms, players, seconds) in [(1, 2, 2), (2, 4, 3), (1, 16, 600)] {
             let mut config = crate::scenario_config(Encoding::V3Json);
@@ -862,6 +864,7 @@ mod receipt_timing_tests {
     }
 
     #[test]
+    /// An admitted row count must still fit the byte budget without overflow.
     fn raw_event_budget_rejects_large_admitted_counts_and_overflow() {
         let mut config = crate::scenario_config(Encoding::V3Json);
         config.players_per_room = 16;
@@ -1010,6 +1013,7 @@ mod receipt_timing_tests {
     }
 
     #[test]
+    /// Default options must preserve old manifest bytes and explicit overrides.
     fn receipt_timing_option_is_explicit_and_old_config_bytes_round_trip() {
         for (raw, expected) in [("0", false), ("false", false), ("1", true), ("true", true)] {
             assert_eq!(parse_receipt_timings(raw).expect("valid option"), expected);

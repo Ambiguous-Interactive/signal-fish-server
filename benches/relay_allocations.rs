@@ -904,6 +904,7 @@ fn main() {
     print_sample("classified_queue", 2, 1, RELAYS_PER_SAMPLE, sample);
 }
 
+/// Session publications must allocate each peer list at its final size.
 fn assert_session_peer_lists_do_not_grow() {
     use signal_fish_server::server::allocation_benchmark::HostElectionFixture;
 

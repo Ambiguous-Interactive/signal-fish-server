@@ -62,6 +62,7 @@ use schedule::{build_run_shape, ChurnPlan, SenderPlan};
 use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 
 #[tokio::test]
+/// Byte-budget refusal must precede file and network side effects.
 async fn raw_event_budget_refuses_work_before_artifacts_or_connections() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("refused");
@@ -85,6 +86,7 @@ async fn raw_event_budget_refuses_work_before_artifacts_or_connections() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
+/// An exact byte budget must preserve complete live delivery and replay.
 async fn exact_raw_event_budget_preserves_complete_delivery_and_replay() {
     let output = tempfile::tempdir().unwrap();
     let mut config = wire_correctness_config(Encoding::V3Json);

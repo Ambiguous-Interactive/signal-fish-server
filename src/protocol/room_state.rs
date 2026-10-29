@@ -635,6 +635,7 @@ mod tests {
     }
 
     #[test]
+    /// Duplicate spectators must leave activity and the original record unchanged.
     fn duplicate_room_spectator_admission_preserves_original() {
         for cap in [None, Some(1), Some(2)] {
             let mut room = empty_room();
@@ -651,6 +652,7 @@ mod tests {
     }
 
     #[test]
+    /// Duplicate players must not lose readiness or authority at any capacity.
     fn duplicate_room_admission_preserves_ready_member() {
         let mut room = empty_room();
         let id = Uuid::from_u128(1);

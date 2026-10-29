@@ -1896,6 +1896,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
+    /// Admit one new player while preserving every existing membership.
     async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
@@ -3498,6 +3499,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// A refused spectator retry must preserve its snapshot and join count.
     async fn duplicate_spectator_admission_preserves_snapshot_and_counts() {
         for cap in [None, Some(1), Some(2)] {
             let db = InMemoryDatabase::new();
@@ -3540,6 +3542,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Duplicate admission futures must share one successful membership.
     async fn concurrent_duplicate_admission_adds_exactly_one_membership() {
         let db = InMemoryDatabase::new();
         let room = create_test_room(&db, "duplicate_race", "DUP002")
@@ -3557,6 +3560,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Spare capacity must not let a retry replace an existing player.
     async fn duplicate_player_admission_preserves_member_and_session_counts() {
         let db = InMemoryDatabase::new();
         let room = create_test_room(&db, "duplicate_member", "DUP001")
