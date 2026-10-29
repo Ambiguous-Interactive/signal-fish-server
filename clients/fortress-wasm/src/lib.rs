@@ -99,6 +99,45 @@ struct CallbackIntervals {
     p99_us: u64,
 }
 
+const MAX_WAIT_OBSERVATIONS: usize = 64;
+
+/// State when the callback consumes a Fortress wait event after remote polling.
+#[derive(Debug, Clone, Serialize)]
+struct WaitObservation {
+    elapsed_us: u64,
+    callback: u64,
+    poll: u64,
+    callback_interval_us: Option<u64>,
+    remote_poll_us: u64,
+    frame_before_poll: i32,
+    current_frame: i32,
+    confirmed_frame: i32,
+    frames_ahead: i32,
+    local_frames_behind: Option<i32>,
+    remote_frames_behind: Option<i32>,
+    skip_frames: u32,
+    relay_received: u64,
+    relay_queue_depth: usize,
+}
+
+/// Retain the first bounded observations and count every later observation.
+#[derive(Debug, Default, Clone, Serialize)]
+struct WaitObservations {
+    events: Vec<WaitObservation>,
+    omitted: u64,
+}
+
+impl WaitObservations {
+    /// Preserve observation order without growing beyond the trace limit.
+    fn record(&mut self, observation: WaitObservation) {
+        if self.events.len() < MAX_WAIT_OBSERVATIONS {
+            self.events.push(observation);
+        } else {
+            self.omitted = self.omitted.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct AcceptanceThresholds {
     target_confirmed_frames: i32,
@@ -152,6 +191,7 @@ struct Report {
     max_rollback_depth: u32,
     stall_count: u64,
     wait_recommendations: u64,
+    wait_observations: WaitObservations,
     confirmation_lag_current: u64,
     confirmation_lag_max: u64,
     checksums_mismatched: u64,
@@ -259,6 +299,7 @@ struct Runtime {
     poll_count: u64,
     active_callback_count: u64,
     recommended_skips: u32,
+    wait_observations: WaitObservations,
     relay_retries: u64,
     max_admissions_per_callback: u64,
     running_client_sent_baseline: u64,
@@ -344,6 +385,7 @@ impl Runtime {
             poll_count: 0,
             active_callback_count: 0,
             recommended_skips: 0,
+            wait_observations: WaitObservations::default(),
             relay_retries: 0,
             max_admissions_per_callback: 0,
             running_client_sent_baseline: 0,
@@ -362,6 +404,7 @@ impl Runtime {
         })
     }
 
+    /// Poll signaling once and drive active gameplay while retaining wait evidence.
     fn tick(&mut self) -> Result<bool, String> {
         if self.configured_at.elapsed() > RUNTIME_DEADLINE {
             return Err("90-second Rust runtime deadline expired".to_owned());
@@ -415,7 +458,32 @@ impl Runtime {
             if let Some(fortress) = self.session.as_mut() {
                 self.relay
                     .observe_local_frame(fortress.current_frame().as_i32());
+                let frame_before_poll = fortress.current_frame().as_i32();
+                let poll_started = Instant::now();
                 fortress.poll_remote_clients();
+                let remote_poll_us = duration_us(poll_started.elapsed());
+                let remote_stats = fortress
+                    .remote_player_handles_iter()
+                    .next()
+                    .and_then(|handle| fortress.network_stats(handle).ok());
+                let wait_observation = WaitObservation {
+                    elapsed_us: duration_us(self.configured_at.elapsed()),
+                    callback: self.callback_count,
+                    poll: self.poll_count,
+                    callback_interval_us: self
+                        .last_active_callback_at
+                        .map(|previous| duration_us(previous.elapsed())),
+                    remote_poll_us,
+                    frame_before_poll,
+                    current_frame: fortress.current_frame().as_i32(),
+                    confirmed_frame: fortress.confirmed_frame().as_i32(),
+                    frames_ahead: fortress.frames_ahead(),
+                    local_frames_behind: remote_stats.map(|stats| stats.local_frames_behind),
+                    remote_frames_behind: remote_stats.map(|stats| stats.remote_frames_behind),
+                    skip_frames: 0,
+                    relay_received: self.relay.counters().accepted_inbound,
+                    relay_queue_depth: self.relay.queue_depth(),
+                };
                 for event in fortress.events() {
                     match event {
                         FortressEvent::Synchronizing {
@@ -428,6 +496,9 @@ impl Runtime {
                         }
                         FortressEvent::WaitRecommendation { skip_frames } => {
                             self.recommended_skips = skip_frames;
+                            let mut observation = wait_observation.clone();
+                            observation.skip_frames = skip_frames;
+                            self.wait_observations.record(observation);
                         }
                         FortressEvent::DesyncDetected { frame, .. } => {
                             return Err(format!("Fortress desync at frame {frame:?}"));
@@ -775,6 +846,7 @@ impl Runtime {
         self.room_json_pending.take()
     }
 
+    /// Snapshot runtime identity, delivery ledgers, wait observations and health metrics.
     fn report(&self, runtime_error: Option<String>) -> Report {
         let client_stats = self.client.stats();
         let relay_stats = self.relay.counters();
@@ -858,6 +930,7 @@ impl Runtime {
             wait_recommendations: fortress_metrics
                 .as_ref()
                 .map_or(0, |metrics| metrics.wait_recommendations),
+            wait_observations: self.wait_observations.clone(),
             confirmation_lag_current: fortress_metrics
                 .as_ref()
                 .map_or(0, |metrics| metrics.confirmation_lag_current),
@@ -1218,6 +1291,49 @@ mod extension_registration {
 #[allow(clippy::panic)]
 mod tests {
     use super::{percentile, summarize_intervals};
+
+    /// Pin the trace limit, first-event order, wire fields and overflow count.
+    #[test]
+    fn wait_observations_preserve_first_events_and_count_overflow() {
+        let mut observations = super::WaitObservations::default();
+        for index in 0..super::MAX_WAIT_OBSERVATIONS + 7 {
+            observations.record(super::WaitObservation {
+                elapsed_us: index as u64,
+                callback: index as u64 + 1,
+                poll: index as u64 + 1,
+                callback_interval_us: Some(17_000),
+                remote_poll_us: 42,
+                frame_before_poll: 100,
+                current_frame: 100,
+                confirmed_frame: 96,
+                frames_ahead: 3,
+                local_frames_behind: Some(-3),
+                remote_frames_behind: Some(3),
+                skip_frames: 3,
+                relay_received: 123,
+                relay_queue_depth: 2,
+            });
+        }
+        assert_eq!(observations.events.len(), super::MAX_WAIT_OBSERVATIONS);
+        assert_eq!(observations.omitted, 7);
+        for (index, event) in observations.events.iter().enumerate() {
+            assert_eq!(event.elapsed_us, index as u64);
+            assert_eq!(event.callback, event.poll);
+            assert_eq!(event.skip_frames, 3);
+        }
+        let json = serde_json::to_value(&observations)
+            .unwrap_or_else(|error| panic!("serialize wait observations: {error}"));
+        assert_eq!(json["omitted"], 7);
+        assert_eq!(json["events"][0]["local_frames_behind"], -3);
+        observations.omitted = u64::MAX;
+        let event = observations
+            .events
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("first observation"));
+        observations.record(event);
+        assert_eq!(observations.omitted, u64::MAX);
+    }
 
     #[test]
     fn synchronization_checkpoint_requires_partial_handshake_and_real_traffic() {

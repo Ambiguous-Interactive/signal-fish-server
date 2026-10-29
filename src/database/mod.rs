@@ -2195,6 +2195,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Remove expired empty published rooms, preserving protected rooms and all live indexes.
     async fn cleanup_empty_rooms(
         &self,
         empty_timeout: chrono::Duration,
@@ -2209,26 +2210,21 @@ impl GameDatabase for InMemoryDatabase {
             empty_timeout
         };
         let mut liveness = self.room_liveness_monotonic.write().await;
-        let mut publication = self.room_publication.write().await;
+        let publication = self.room_publication.read().await;
 
-        let mut to_remove = Vec::new();
-        for (room_id, room) in rooms.iter() {
-            if !publication.contains_key(room_id)
+        let mut deleted_ids = Vec::new();
+        for (room_id, room) in rooms.extract_if(|room_id, room| {
+            let expired = !publication.contains_key(room_id)
                 && !room.has_occupants()
                 && !protected.contains(room_id)
                 && room_idle_for(liveness.get(room_id).cloned(), room.last_activity)
-                    > effective_timeout
-            {
-                to_remove.push((*room_id, room.game_name.clone(), room.code.clone()));
+                    > effective_timeout;
+            if expired {
+                liveness.remove(room_id);
             }
-        }
-
-        let mut deleted_ids = Vec::new();
-        for (room_id, game_name, room_code) in to_remove {
-            rooms.remove(&room_id);
-            room_codes.remove(&(game_name, room_code));
-            liveness.remove(&room_id);
-            publication.remove(&room_id);
+            expired
+        }) {
+            room_codes.remove(&(room.game_name, room.code));
             self.session_records
                 .record_closed(&room_id, crate::session_records::SessionCloseReason::Empty);
             deleted_ids.push(room_id);
@@ -2237,6 +2233,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(deleted_ids)
     }
 
+    /// Extract unprotected published rooms after their empty or occupied idle timeout.
     async fn cleanup_expired_rooms(
         &self,
         empty_timeout: chrono::Duration,
@@ -2246,35 +2243,27 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
-        let mut publication = self.room_publication.write().await;
-
-        let mut to_remove = Vec::new();
-        for (room_id, room) in rooms.iter() {
-            if protected.contains(room_id) || publication.contains_key(room_id) {
-                continue;
-            }
-            let idle_for = room_idle_for(liveness.get(room_id).cloned(), room.last_activity);
-            let expired = if room.has_occupants() {
-                idle_for > inactive_timeout
-            } else {
-                idle_for > empty_timeout
-            };
-            if expired {
-                to_remove.push((
-                    *room_id,
-                    room.game_name.clone(),
-                    room.code.clone(),
-                    !room.has_occupants(),
-                ));
-            }
-        }
+        let publication = self.room_publication.read().await;
 
         let mut outcome = RoomCleanupOutcome::default();
-        for (room_id, game_name, room_code, was_empty) in to_remove {
-            rooms.remove(&room_id);
-            room_codes.remove(&(game_name, room_code));
-            liveness.remove(&room_id);
-            publication.remove(&room_id);
+        for (room_id, room) in rooms.extract_if(|room_id, room| {
+            if protected.contains(room_id) || publication.contains_key(room_id) {
+                return false;
+            }
+            let idle_for = room_idle_for(liveness.get(room_id).cloned(), room.last_activity);
+            let expired = idle_for
+                > if room.has_occupants() {
+                    inactive_timeout
+                } else {
+                    empty_timeout
+                };
+            if expired {
+                liveness.remove(room_id);
+            }
+            expired
+        }) {
+            let was_empty = !room.has_occupants();
+            room_codes.remove(&(room.game_name, room.code));
             self.session_records.record_closed(
                 &room_id,
                 crate::session_records::SessionCloseReason::Expired,
@@ -5313,6 +5302,114 @@ mod tests {
             let snapshot = records.snapshot();
             assert_eq!(snapshot.completed_count, 1);
             assert_eq!(snapshot.completed[0].close_reason, Some(expected));
+        }
+    }
+    /// Preserve surviving rows and indexes while reclaiming codes across both sweeps.
+    #[tokio::test]
+    async fn cleanup_extraction_preserves_protected_pending_and_live_room_indexes() {
+        for expired in [false, true] {
+            let db = InMemoryDatabase::new();
+            let mut survivors = HashSet::new();
+            let mut removed = HashSet::new();
+            let mut protected = HashSet::new();
+            let mut inputs = Vec::new();
+            for index in 0..8 {
+                let game = format!("cleanup-{index}");
+                let room = create_test_room(&db, &game, "SHARED").await.unwrap();
+                let creator = *room.players.keys().next().unwrap();
+                if index != 1 && index != 6 {
+                    db.remove_player_from_room(&room.id, &creator)
+                        .await
+                        .unwrap();
+                }
+                if index == 2 {
+                    db.add_spectator_to_room(&room.id, spectator("watcher"))
+                        .await
+                        .unwrap();
+                }
+                if index == 3 {
+                    protected.insert(room.id);
+                }
+                if index == 4 {
+                    db.room_publication.write().await.insert(
+                        room.id,
+                        PendingRoomState::Creating {
+                            creator_id: creator,
+                            owner: None,
+                            accounting: None,
+                        },
+                    );
+                }
+                if index != 5 {
+                    age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+                }
+                let should_remove =
+                    matches!(index, 0 | 7) || (expired && matches!(index, 1 | 2 | 6));
+                if should_remove {
+                    removed.insert(room.id);
+                } else {
+                    survivors.insert(room.id);
+                }
+                inputs.push((game, room.id, should_remove));
+            }
+            if expired {
+                let outcome = db
+                    .cleanup_expired_rooms(
+                        chrono::Duration::minutes(5),
+                        chrono::Duration::hours(1),
+                        &protected,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.empty_rooms_cleaned, 2);
+                assert_eq!(outcome.inactive_rooms_cleaned, 3);
+            } else {
+                let deleted = db
+                    .cleanup_empty_rooms(chrono::Duration::minutes(5), &protected)
+                    .await
+                    .unwrap();
+                assert_eq!(deleted.into_iter().collect::<HashSet<_>>(), removed);
+            }
+            assert_eq!(
+                db.rooms
+                    .read()
+                    .await
+                    .keys()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                survivors
+            );
+            assert_eq!(
+                db.room_liveness_monotonic
+                    .read()
+                    .await
+                    .keys()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                survivors
+            );
+            assert_eq!(
+                db.room_codes
+                    .read()
+                    .await
+                    .values()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+                survivors
+            );
+            assert_eq!(db.room_publication.read().await.len(), 1);
+            for (game, id, should_remove) in inputs {
+                if should_remove {
+                    let replacement = create_test_room(&db, &game, "SHARED").await.unwrap();
+                    assert_ne!(replacement.id, id);
+                    assert_eq!(
+                        db.get_room(&game, "SHARED").await.unwrap().unwrap().id,
+                        replacement.id
+                    );
+                } else {
+                    assert!(db.get_room_by_id(&id).await.unwrap().is_some());
+                }
+            }
         }
     }
 }

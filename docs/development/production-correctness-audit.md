@@ -11410,3 +11410,66 @@ checkout/archive/partial-source control and all four gated mutation controls
 pass. The local packaged-unit compilation stops on a confirmed disk-full error;
 its log is retained, generated package build cache is cleared, and full archive
 compilation remains a hosted gate. No test or package assertion is removed.
+
+### Room cleanup and initial-epoch analysis allocations (#636, #775)
+
+The two storage sweeps now extract expired room rows and move their game/code
+strings into index removal. They keep the same room, code, liveness and
+publication lock order. Pending publications and protected rooms remain live.
+The expiry predicate removes liveness only for an extracted row; the loop
+removes its code and records its close reason. Neither step suspends.
+
+An isolated StatsAlloc control creates 1,000 empty rooms before measurement.
+The region covers one production cleanup call, including session close records
+and the empty-sweep result vector. Baseline and candidate use identical input.
+
+| Sweep | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Empty | 2,004 | 3 | 393,778 | 303,352 |
+| Expired | 2,003 | 2 | 385,602 | 286,984 |
+
+These are cumulative allocator counters, not peak RSS or throughput. The new
+mixed-room control checks empty and occupied expiry, spectator occupancy,
+protected and pending rooms, fresh rooms, all retained indexes and reuse of
+identical room codes in separate games. Existing close-reason controls remain.
+
+Capacity analysis now represents the initial `(epoch=1, start=0, no end)`
+interval implicitly when no churn is recorded. Any recorded churn keeps the
+materialized interval path. The registration index is built only when an
+observed rejoin reaches its registration check. No raw event, output schema,
+validation order or delivery rule changes. An adversarial differential control
+compares implicit intervals with materialized intervals for valid, duplicate,
+unknown-sender, malformed-epoch and malformed-schedule evidence in both orders.
+
+A full-summary StatsAlloc control uses 16 players and one send per player in
+each room. Raw records exist before measurement. The reliable case retains all
+receipts; the all-gap case replaces each receipt with its exact valid report.
+The synthetic input has no churn or registry rows.
+
+| Rooms | Cell | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 100 | All-gap | 10,854 | 10,705 | 9,257,456 | 9,022,640 |
+| 999 | All-gap | 108,341 | 106,883 | 92,382,346 | 90,044,010 |
+| 999 | Reliable | 188,278 | 186,820 | 119,487,484 | 117,149,148 |
+
+Complete summary lengths and SHA-256 values remain identical to the preceding
+shared-roster measurements. Retained allocated-minus-freed bytes also match.
+The 999-room reduction is 2,338,336 allocated bytes per summary. This does not
+qualify the ten-minute C3 cell, bound peak generator memory or diagnose live
+stalls. #636 and #775 remain open.
+
+### Bounded Godot WASM wait observations (#1312)
+
+The released fixture retains the first 64 consumed wait events and counts
+later events. It records callback/poll identity, elapsed time, callback spacing,
+remote-poll duration, pre/post-poll frames, confirmation, frame advantage, both
+peer lag estimates, requested skips and relay state. Consumption occurs after
+remote polling; generation can occur during the prior frame advance. Lag
+estimates are not synchronized remote clock measurements.
+
+The bounded-storage control checks event order, serialization and overflow.
+Harness controls reject excess records, invalid counts, mismatched callback
+identity and invalid skip values. The existing zero-wait health gate is
+unchanged. The original attempt and released graph remain retained in #1312.
+No causal repair is claimed from these diagnostics or from a passing rerun.
+Matched runtime evidence is still required before that issue can close.
