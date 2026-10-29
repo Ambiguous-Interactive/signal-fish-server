@@ -11273,3 +11273,119 @@ All 46 selected all-feature gap, replay and live relay controls pass in Nextest
 and unadopted-epoch failures, opaque payload refusal, exact first-failure order,
 complete raw artifacts and identical replay. The added multi-stream control
 checks both valid reports and repeated overlapping/beyond-tail failures.
+
+### F211 — Player metadata changes leave stored room expiry stale (#1309)
+
+Baseline `3eda6da9`, under #826. The public storage methods for member names,
+peer metadata updates and peer metadata clearing change the room without
+refreshing either activity clock. An embedder can update an old room and lose
+it at the next inactive-room sweep. The socket router refreshes activity
+separately; this finding does not establish a live socket incident.
+
+The new paused-clock regression fails on baseline at the changed-name wall
+stamp. Its cancellation control also fails: the old method completes while
+the expiry lock is held. Nextest retains both failures in run
+`b9481e08-e4c2-4144-802a-61e5acd9c575`. The repair acquires the room and liveness locks before
+mutation, then refreshes both clocks when the stored value changes. Repeated
+values, absent members and absent rooms preserve the clocks and return values.
+Name updates reuse string storage. Connection metadata gains structural equality
+without changing its wire format.
+
+All three metadata controls pass after repair in Nextest
+`7428799e-1b16-4da5-ba3a-5ba4f98b4954`. The controls cover each changed field,
+the full renewed expiry window, eventual cleanup, unchanged and missing rows,
+and cancellation while the room lock is held and the liveness lock is pending.
+
+The Rust client at `da8f2d16` has no server-crate dependency. The .NET client at
+`e467c871` is an independent C# SDK. The Godot addon at `113c0f14` is GDScript.
+None calls these server storage methods. Wire messages, session selection and
+socket activity throttling retain their contracts. All three clients are
+unaffected; no migration is required. The broader #826 campaign stays open.
+
+### Game-start membership scratch (#636)
+
+Storage finalization previously allocated both sorted current and expected
+member lists, then allocated the current members again for persisted readiness.
+It now sorts only the caller's copied expectation and checks its length,
+uniqueness and membership against the room map. Successful finalization still
+retains the room's original member order in its ready list. Failed comparisons
+leave the room unchanged. The caller's expectation remains unchanged.
+
+An isolated StatsAlloc process measures 100 successful storage finalizations.
+Each room has 255 members, the public storage API's u8 ceiling; this is not a
+socket-configured capacity workload. Rooms and expectations are built before
+the measured region. Baseline and candidate use the same shape and command.
+
+| Measure | Baseline | Candidate |
+| --- | ---: | ---: |
+| Allocations | 400 | 300 |
+| Allocated bytes | 1,240,000 | 832,000 |
+| Deallocated bytes | 832,000 | 424,000 |
+| Retained allocated-minus-freed bytes | 408,000 | 408,000 |
+
+This measures cumulative allocator work, not peak memory or throughput. The
+new control covers 1, 4 and 255 members, reversed expectations, duplicates,
+missing, extra and foreign members, changed authority and state, one-winner
+finalization and unchanged stored ready order. #636 remains open.
+
+### Shared capacity roster index (#636, #775)
+
+Delivery, churn, snapshot, latency and room-member checks now borrow one roster
+index per summary. The prior implementation rebuilt three name-to-room trees,
+two roster-name sets and two room-member maps across those passes. Raw records,
+roster iteration order, first-failure order and artifact formats do not change.
+
+An isolated StatsAlloc control measures the full production `summarize` call.
+Each room has 16 players and one send per player. Raw records are built before
+measurement. The reliable cell retains every receipt. The all-gap cell replaces
+each receipt with its exact valid latest-class report. Baseline and candidate
+use the same input shape and compare complete serialized summaries.
+
+| Rooms | Cell | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 100 | All-gap | 11,567 | 10,854 | 9,674,432 | 9,257,456 |
+| 999 | All-gap | 115,339 | 108,341 | 96,533,194 | 92,382,346 |
+| 999 | Reliable | 195,276 | 188,278 | 123,638,332 | 119,487,484 |
+
+The 999-room all-gap summary retains 3,983,700 bytes and SHA-256
+`f0a5843286e56ccbbc4946246ad4b042e964c187b0dcec46d831dd5e22c01e4c`.
+The reliable summary retains 6,668,621 bytes and SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
+The 100-room all-gap summary retains 396,683 bytes and SHA-256
+`5640fb64017b4e30865a0fe623d5e562d8bd1b9d46b9417d52b9bdf1ae29af49`.
+Retained allocated-minus-freed bytes match in every pair. These are cumulative
+allocator measurements after collection, not peak memory, RSS, live generator
+stall repairs, throughput or ten-minute C3 qualification. Both campaigns stay
+open.
+
+### Half-close fixture portability (#1310)
+
+Main CI run `40870634179` fails two different helper controls at `3eda6da9`.
+Windows job `123437607746` receives early EOF instead of the queued server tail.
+macOS job `123437607796` fails a later `SO_LINGER=0` operation with EINVAL.
+Both fixtures close and drop the upstream socket before flooding client bytes
+to force a forwarding error. This introduces platform TCP reset and socket
+shutdown behavior into a test of independent directional pumping. The logs do
+not establish the exact kernel history or a production-server defect.
+
+The revised fixtures inject BrokenPipe through the proxy's normal destination
+write-error branch while the upstream socket remains alive. The independent
+reverse pump must retain the exact tail. Explicit FIN, RST and proxy-drop
+controls must still release retained socket owners; Linux still requires an
+observable RST. A separate real source-EOF control requires the exact tail and
+normal owner release after both directions end. No live-socket option failure
+is swallowed, and no reset assertion is removed.
+
+Disabling half-close preservation makes all three controls fail. The restored
+implementation passes the selected controls and the existing pause, kill,
+fragmentation, reset and rate controls. Hosted Windows and macOS qualification
+is still required before this issue can close.
+
+Local validation passes all 26 selected room/session controls in Nextest
+`fd1e426e-91b0-4009-b776-ce092dff8c6e`, all 59 selected oracle and live
+relay/replay controls in `0a19f1f2-f6b5-4bfa-993e-98222e702f7d`, and 13 selected
+proxy controls in `2c1fc691-d8bf-4195-8234-5e2c82bdcdb8`. The oracle controls
+retain independent set-based receipt counts, wide latency comparisons,
+malformed identities, closed and unadopted epochs, gap violation ordering,
+complete raw artifacts and exact replay. All 43 source-policy controls and
+strict all-target, all-feature Clippy pass.

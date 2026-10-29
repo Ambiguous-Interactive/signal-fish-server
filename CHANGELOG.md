@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce allocations when committing a room game start (#636).
 - Reduce dashboard refresh copies and keep history storage within its sample limit (#636).
 - Reduce memory allocation when publishing lobby readiness snapshots (#636).
 - Reduce allocations when selecting a session host and publishing session peer lists (#636).
@@ -55,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep rooms alive after changed player metadata through Rust storage APIs (#1309).
 - Keep rooms alive after lobby, ready, authority, and game-start changes through Rust Room and storage APIs (#1306).
 - Refuse overlapping player and spectator roles in public Rust room admission (#1304).
 - Refresh public Rust room activity after successful player joins and departures so expiry starts from that change (#1302).

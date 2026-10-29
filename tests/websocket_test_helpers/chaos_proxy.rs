@@ -81,6 +81,7 @@ struct DirectionControls {
     /// Bytes per second; 0 means unlimited.
     throttle_bytes_per_sec: AtomicU64,
     fragment_writes: AtomicBool,
+    fail_writes: AtomicBool,
 }
 
 impl DirectionControls {
@@ -91,6 +92,7 @@ impl DirectionControls {
             destination_write_bytes: AtomicU64::new(0),
             throttle_bytes_per_sec: AtomicU64::new(0),
             fragment_writes: AtomicBool::new(false),
+            fail_writes: AtomicBool::new(false),
         }
     }
 
@@ -434,6 +436,14 @@ impl ChaosProxy {
             .direction(direction)
             .fragment_writes
             .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Fail subsequent destination writes in one direction without resetting TCP.
+    /// The opposite direction keeps its kernel-buffered data and socket lifetime.
+    pub fn fail_writes(&self, direction: Direction) {
+        let controls = self.control.direction(direction);
+        let _barrier = controls.io_barrier.write();
+        controls.fail_writes.store(true, Ordering::Relaxed);
     }
 
     /// Saturating count of bytes accepted by destination socket writes in
@@ -979,7 +989,15 @@ async fn write_fully(
                 if *pause_rx.borrow() {
                     continue;
                 }
-                match to.try_write(&data[written..]) {
+                let result = if controls.fail_writes.load(Ordering::Relaxed) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "injected write failure",
+                    ))
+                } else {
+                    to.try_write(&data[written..])
+                };
+                match result {
                     Ok(sent) => {
                         written += sent;
                         let _previous = controls.destination_write_bytes.fetch_update(
