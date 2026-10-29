@@ -952,9 +952,17 @@ function validateWaitObservations(report, name) {
       "local_frames_behind", "remote_frames_behind", "skip_frames", "relay_received",
       "relay_queue_depth",
     ], `${name} wait event`);
-    assert(event.callback === event.poll && event.callback >= previousCallback && event.callback <= report.callback_count, `${name}: wait callback order`);
-    assert(event.elapsed_us >= previousElapsed, `${name}: wait clock order`);
-    assert(Number.isInteger(event.skip_frames) && event.skip_frames > 0, `${name}: invalid wait skip`);
+    assert(
+      Number.isSafeInteger(event.callback) && event.callback > 0 &&
+        Number.isSafeInteger(event.poll) && event.poll === event.callback &&
+        event.callback >= previousCallback && event.callback <= report.callback_count,
+      `${name}: wait callback order`,
+    );
+    assert(
+      Number.isSafeInteger(event.elapsed_us) && event.elapsed_us >= previousElapsed,
+      `${name}: wait clock order`,
+    );
+    assert(Number.isSafeInteger(event.skip_frames) && event.skip_frames > 0, `${name}: invalid wait skip`);
     previousCallback = event.callback;
     previousElapsed = event.elapsed_us;
   }
@@ -978,6 +986,14 @@ function runWaitObservationSelfTests() {
     { events: [{ ...event, poll: 1 }], omitted: 0 },
     { events: [{ ...event, skip_frames: 0 }], omitted: 0 },
     { events: [{ ...event, callback: 3, poll: 3 }], omitted: 0 },
+    { events: [{ ...event, callback: 0, poll: 0 }], omitted: 0 },
+    { events: [{ ...event, callback: 1.5, poll: 1.5 }], omitted: 0 },
+    { events: [{ ...event, callback: "2", poll: "2" }], omitted: 0 },
+    { events: [{ ...event, elapsed_us: 100.5 }], omitted: 0 },
+    { events: [{ ...event, elapsed_us: "100" }], omitted: 0 },
+    { events: [{ ...event, elapsed_us: -1 }], omitted: 0 },
+    { events: [{ ...event, elapsed_us: Number.MAX_SAFE_INTEGER + 1 }], omitted: 0 },
+    { events: [{ ...event, skip_frames: Number.MAX_SAFE_INTEGER + 1 }], omitted: 0 },
   ]) {
     let rejected = false;
     try { validateWaitObservations({ ...valid, wait_observations: trace }, "invalid trace"); }
