@@ -394,7 +394,7 @@ pub trait GameDatabase: Send + Sync {
     /// member that contradicts `authority_player` would surface two authorities
     /// in `RoomJoined` / `Reconnected` / `GameStarting` payloads.
     /// Return `false` without mutation when the room is full or already
-    /// contains this player ID.
+    /// contains this ID as a player or spectator.
     async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool>;
 
     /// Remove player from room.
@@ -596,7 +596,7 @@ pub trait GameDatabase: Send + Sync {
 
     /// Add spectator to room (atomic operation)
     /// Return false without mutation if the room is full, absent, or already
-    /// contains this spectator ID.
+    /// contains this ID as a spectator or player.
     async fn add_spectator_to_room(
         &self,
         room_id: &RoomId,
@@ -3487,6 +3487,125 @@ mod tests {
             id: Uuid::new_v4(),
             name: name.to_string(),
             connected_at: Some(chrono::Utc::now()),
+        }
+    }
+
+    /// Regression #1304: a refused second role must not count as activity or a join.
+    #[tokio::test(start_paused = true)]
+    async fn cross_role_admission_preserves_membership_clocks_and_session_counts() {
+        for spectator_first in [false, true] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "exclusive_roles", "ROLE01")
+                .await
+                .unwrap();
+            let player = member("member");
+            let mut watcher = spectator("watcher");
+            watcher.id = player.id;
+            if spectator_first {
+                assert!(db
+                    .add_spectator_to_room(&room.id, watcher.clone())
+                    .await
+                    .unwrap());
+            } else {
+                assert!(db
+                    .add_player_to_room(&room.id, player.clone())
+                    .await
+                    .unwrap());
+            }
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let RoomLiveness::Live(activity) = db.room_liveness_monotonic.read().await[&room.id]
+            else {
+                panic!("admitted room must have a live clock");
+            };
+            let joined = db.session_records.snapshot().active[0].clone();
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+            let admitted = if spectator_first {
+                db.add_player_to_room(&room.id, player.clone())
+                    .await
+                    .unwrap()
+            } else {
+                db.add_spectator_to_room(&room.id, watcher.clone())
+                    .await
+                    .unwrap()
+            };
+            assert!(!admitted, "spectator_first={spectator_first}");
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.last_activity, before.last_activity);
+            assert_eq!(after.authority_player, before.authority_player);
+            assert_eq!(after.ready_players, before.ready_players);
+            assert_eq!(
+                serde_json::to_value(after.players).unwrap(),
+                serde_json::to_value(before.players).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(after.spectators).unwrap(),
+                serde_json::to_value(before.spectators).unwrap()
+            );
+            assert!(
+                matches!(db.room_liveness_monotonic.read().await[&room.id], RoomLiveness::Live(current) if current == activity)
+            );
+            let refused = db.session_records.snapshot().active[0].clone();
+            assert_eq!(refused.players_joined, joined.players_joined);
+            assert_eq!(refused.spectators_joined, joined.spectators_joined);
+            if spectator_first {
+                assert!(db
+                    .remove_spectator_from_room(&room.id, &player.id)
+                    .await
+                    .unwrap()
+                    .is_some());
+                assert!(db.add_player_to_room(&room.id, player).await.unwrap());
+            } else {
+                assert!(db
+                    .remove_player_from_room(&room.id, &player.id)
+                    .await
+                    .unwrap()
+                    .is_some());
+                assert!(db.add_spectator_to_room(&room.id, watcher).await.unwrap());
+            }
+        }
+    }
+
+    /// Regression #1304: both roles compete for one membership under the room lock.
+    #[tokio::test]
+    async fn concurrent_cross_role_admission_has_one_winner_and_one_join_record() {
+        for spectator_first in [false, true] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "exclusive_role_race", "ROLE02")
+                .await
+                .unwrap();
+            let player = member("member");
+            let mut watcher = spectator("watcher");
+            watcher.id = player.id;
+            let id = player.id;
+            let room_guard = db.rooms.write().await;
+            let player_join = db.add_player_to_room(&room.id, player);
+            let spectator_join = db.add_spectator_to_room(&room.id, watcher);
+            tokio::pin!(player_join, spectator_join);
+            if spectator_first {
+                assert!(futures_util::poll!(&mut spectator_join).is_pending());
+                assert!(futures_util::poll!(&mut player_join).is_pending());
+            } else {
+                assert!(futures_util::poll!(&mut player_join).is_pending());
+                assert!(futures_util::poll!(&mut spectator_join).is_pending());
+            }
+            drop(room_guard);
+            let (player_joined, spectator_joined) = if spectator_first {
+                let (spectator_result, player_result) =
+                    tokio::join!(biased; spectator_join, player_join);
+                (player_result.unwrap(), spectator_result.unwrap())
+            } else {
+                let (player_result, spectator_result) =
+                    tokio::join!(biased; player_join, spectator_join);
+                (player_result.unwrap(), spectator_result.unwrap())
+            };
+            assert_ne!(player_joined, spectator_joined);
+            assert_eq!(spectator_joined, spectator_first);
+            let room = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(room.players.contains_key(&id), player_joined);
+            assert_eq!(room.spectators.contains_key(&id), spectator_joined);
+            let record = &db.session_records.snapshot().active[0];
+            assert_eq!(record.players_joined, 1 + u64::from(player_joined));
+            assert_eq!(record.spectators_joined, u64::from(spectator_joined));
         }
     }
 

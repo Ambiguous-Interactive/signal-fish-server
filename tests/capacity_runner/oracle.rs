@@ -2206,22 +2206,20 @@ pub fn summarize(
             latency_us: LatencyStats::default(),
         };
 
-        let expected_senders: Vec<&str> = members_of_room
+        let room_members = members_of_room
             .get(room)
-            .map(|members| {
-                members
-                    .iter()
-                    .copied()
-                    .filter(|name| *name != recipient.as_str())
-                    .collect()
-            })
+            .map(Vec::as_slice)
             .unwrap_or_default();
 
         // (a) Arrival-stream validity: an arrival must come from a co-room
         // sender, carry a stream sequence the sender actually stamped in
         // that epoch, not outlive its stream (the sender rejoined past it),
         // and never repeat what the rejoin snapshot already accounted.
-        let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
+        /*
+            The arrival range sorts by sender, then epoch. Fold adjacent epochs
+            without a second tree, then bulk-build the retained outcome map.
+        */
+        let mut received_by_sender: Vec<(&str, u64)> = Vec::new();
         for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
             if stream.total() == 0 {
                 continue;
@@ -2247,7 +2245,7 @@ pub fn summarize(
                 });
                 continue;
             }
-            if !expected_senders.contains(sender) {
+            if *sender == recipient.as_str() || !room_members.contains(sender) {
                 outcome.misrouted += stream.total();
                 stream
                     .violations
@@ -2258,7 +2256,15 @@ pub fn summarize(
                 continue;
             }
             // Closed-stream and invalid-sequence arrivals still count as evidence.
-            *received_by_sender.entry(sender).or_insert(0) += stream.unique;
+            match received_by_sender.last_mut() {
+                Some((previous, count)) if *previous == *sender => *count += stream.unique,
+                _ => {
+                    if received_by_sender.is_empty() {
+                        received_by_sender.reserve_exact(room_members.len().saturating_sub(1));
+                    }
+                    received_by_sender.push((sender, stream.unique));
+                }
+            }
             if let Some(violations) = stream.violations.as_deref() {
                 outcome.misrouted += violations.misrouted.count;
                 violations
@@ -2269,7 +2275,11 @@ pub fn summarize(
 
         // (b) Validate all observed gaps, then check completeness only for
         // streams this seat still owes. Closed epochs keep their evidence.
-        for sender in expected_senders {
+        for sender in room_members
+            .iter()
+            .copied()
+            .filter(|name| *name != recipient.as_str())
+        {
             // Keep roster sender order for the first offending key, including
             // epochs that no longer owe completeness or were never adopted.
             for ((_, _, epoch), stream) in arrivals
@@ -2372,13 +2382,14 @@ pub fn summarize(
                 }
             }
         }
+
         outcome.received = received_by_sender
-            .iter()
+            .into_iter()
             .map(|(sender, count)| {
                 let name = summary_sender_names
                     .entry(sender)
-                    .or_insert_with(|| ReceiptName::from(*sender));
-                (name.clone(), *count)
+                    .or_insert_with(|| ReceiptName::from(sender));
+                (name.clone(), count)
             })
             .collect();
 
@@ -3261,6 +3272,108 @@ mod coverage_tests {
             }
         }
         assert!(missed.is_empty(), "missed observed violations: {missed:?}");
+    }
+
+    /*
+        #775/#636: a sorted borrowed count list must keep exact unique counts
+        across epochs, including malformed arrival evidence.
+    */
+    #[test]
+    fn received_sender_counts_match_independent_epoch_sets() {
+        for unusual_names in [false, true] {
+            let mut config = crate::scenario_config(crate::Encoding::V3Json);
+            config.rooms = 2;
+            config.players_per_room = 4;
+            let (mut plans, churn) = crate::build_run_shape(&config).unwrap();
+            if unusual_names {
+                for (plan, name) in plans.iter_mut().zip([
+                    "", "a", "aa", "β\"\\\n", "other", "other2", "other3", "other4",
+                ]) {
+                    plan.name = name.to_string();
+                }
+            }
+            let roster: Vec<_> = plans.iter().map(|p| (p.name.clone(), p.room)).collect();
+            let mut records = crate::complete_records(&plans);
+            let template = records.receipts[0].clone();
+            for (recipient, sender, epoch, server_seq) in [
+                (plans[0].name.as_str(), plans[1].name.as_str(), 1, 1),
+                (plans[0].name.as_str(), plans[1].name.as_str(), 2, 1),
+                (plans[0].name.as_str(), plans[1].name.as_str(), 2, 1),
+                (plans[0].name.as_str(), plans[1].name.as_str(), 2, 0),
+                (
+                    plans[0].name.as_str(),
+                    plans[1].name.as_str(),
+                    u32::MAX,
+                    u64::MAX,
+                ),
+                (plans[0].name.as_str(), plans[0].name.as_str(), 1, 1),
+                (plans[0].name.as_str(), plans[4].name.as_str(), 1, 1),
+                (plans[0].name.as_str(), "unknown", 1, 1),
+                ("unknown", plans[1].name.as_str(), 1, 1),
+            ] {
+                let mut receipt = template.clone();
+                receipt.recipient = recipient.into();
+                receipt.sender = sender.into();
+                receipt.epoch = epoch;
+                receipt.server_seq = server_seq;
+                records.receipts.push(receipt);
+            }
+            let summary = summarize(
+                &plans,
+                &roster,
+                &records,
+                1000,
+                96,
+                DeliveryClass::Reliable,
+                &churn,
+                None,
+            );
+            assert!(!summary.valid);
+            for outcome in &summary.per_recipient {
+                let mut expected: BTreeMap<&str, BTreeSet<(u32, u64)>> = BTreeMap::new();
+                for receipt in &records.receipts {
+                    if receipt.recipient != outcome.recipient
+                        || receipt.sender == outcome.recipient
+                        || !roster
+                            .iter()
+                            .any(|(name, room)| receipt.sender == *name && *room == outcome.room)
+                    {
+                        continue;
+                    }
+                    expected
+                        .entry(receipt.sender.as_str())
+                        .or_default()
+                        .insert((receipt.epoch, receipt.server_seq));
+                }
+                let expected: BTreeMap<_, _> = expected
+                    .into_iter()
+                    .map(|(name, sequences)| (name, count_u64(sequences.len())))
+                    .collect();
+                assert_eq!(
+                    serde_json::to_value(&outcome.received).unwrap(),
+                    serde_json::to_value(expected).unwrap(),
+                    "recipient {}",
+                    outcome.recipient
+                );
+            }
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            let replayed = summarize(
+                &plans,
+                &roster,
+                &replayed,
+                1000,
+                96,
+                DeliveryClass::Reliable,
+                &churn,
+                None,
+            );
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(summary).unwrap()
+            );
+        }
     }
 
     // #775/#636: fan-out summaries retain one sender spelling per run.
