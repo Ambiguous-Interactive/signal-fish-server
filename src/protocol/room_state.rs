@@ -381,14 +381,17 @@ impl Room {
     }
 
     #[allow(dead_code)]
-    /// Admit a new player without replacing an existing member.
+    /// Admit a new player without replacing an existing member or spectator.
     ///
     /// Authority follows the room's selected member. Open-room readiness
     /// follows the room's ready list. A finalized room also preserves a
     /// returning member's ready flag, which removal pruned from that list.
     /// A successful admission refreshes activity; a refusal does not.
     pub fn add_player(&mut self, mut player: PlayerInfo) -> bool {
-        if self.can_join() && !self.players.contains_key(&player.id) {
+        if self.can_join()
+            && !self.players.contains_key(&player.id)
+            && !self.spectators.contains_key(&player.id)
+        {
             player.is_authority = self.authority_player == Some(player.id);
             player.is_ready = self.ready_players.contains(&player.id)
                 || (self.lobby_state == LobbyState::Finalized && player.is_ready);
@@ -573,10 +576,13 @@ impl Room {
         }
     }
 
-    /// Admit a new spectator without replacing an existing spectator.
+    /// Admit a new spectator without replacing an existing spectator or player.
     #[allow(dead_code)]
     pub fn add_spectator(&mut self, spectator: SpectatorInfo) -> bool {
-        if self.can_spectate() && !self.spectators.contains_key(&spectator.id) {
+        if self.can_spectate()
+            && !self.spectators.contains_key(&spectator.id)
+            && !self.players.contains_key(&spectator.id)
+        {
             self.spectators.insert(spectator.id, spectator);
             self.update_activity();
             true
@@ -648,6 +654,66 @@ mod tests {
             true,
             "relay".to_string(),
         )
+    }
+
+    /// Regression #1304: a room role stays exclusive until its holder leaves.
+    #[test]
+    fn room_admission_keeps_player_and_spectator_roles_exclusive() {
+        for finalized in [false, true] {
+            for spectator_first in [false, true] {
+                let mut room = empty_room();
+                room.max_spectators = Some(2);
+                if finalized {
+                    room.lobby_state = LobbyState::Finalized;
+                }
+                let id = Uuid::from_u128(1);
+                let player = PlayerInfo {
+                    id,
+                    name: "member".into(),
+                    is_authority: false,
+                    is_ready: finalized,
+                    connected_at: None,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: DEFAULT_REGION_ID.into(),
+                };
+                if spectator_first {
+                    assert!(room.add_spectator(watcher(id)));
+                    let mut distinct_player = player.clone();
+                    distinct_player.id = Uuid::from_u128(2);
+                    assert!(room.add_player(distinct_player));
+                } else {
+                    assert!(room.add_player(player.clone()));
+                    assert!(room.set_authority(Some(id)));
+                    assert!(room.add_spectator(watcher(Uuid::from_u128(2))));
+                }
+                let before = room.clone();
+                if spectator_first {
+                    assert!(!room.add_player(player.clone()));
+                } else {
+                    assert!(!room.add_spectator(watcher(id)));
+                }
+                assert_eq!(room.last_activity, before.last_activity);
+                assert_eq!(room.authority_player, before.authority_player);
+                assert_eq!(room.ready_players, before.ready_players);
+                assert_eq!(
+                    serde_json::to_value(&room.players).unwrap(),
+                    serde_json::to_value(&before.players).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&room.spectators).unwrap(),
+                    serde_json::to_value(&before.spectators).unwrap()
+                );
+                if spectator_first {
+                    assert!(room.remove_spectator(&id).is_some());
+                    assert!(room.add_player(player));
+                } else {
+                    assert!(room.remove_player(&id).is_some());
+                    assert!(room.add_spectator(watcher(id)));
+                }
+            }
+        }
     }
 
     // #1302: membership activity must restart the public expiry window.

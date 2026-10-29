@@ -11149,3 +11149,66 @@ Single-epoch RSS growth is 2,256,896 bytes for borrowed storage and 3,215,360
 for the set reference; four-epoch growth is 2,834,432 and 3,215,360 bytes.
 These one-shot observations support only this component's storage claim.
 Strict all-target, all-feature Clippy and all 38 source-policy controls pass.
+
+### F209 — Public room admission assigns both roles to one ID (#1304)
+
+Baseline `6391c5b3`, under #826. `Room::add_player` checks only the player map;
+`Room::add_spectator` checks only the spectator map. With free capacity, ordinary
+calls admit the same ID to both maps in either order. Removing one role leaves
+the other occupancy behind. The in-memory storage delegates both operations to
+these methods under its room write lock, so concurrent requests also both win.
+The service layer already checks both role registries. This is a public Rust
+Room/storage contract defect; no live wire incident is established.
+
+Three red-first controls fail on the baseline in Nextest
+`c5557d1e-52a2-42ff-b78d-93a622dfd22e`. They cover direct Room calls, sequential
+storage admission and opposing admission futures queued behind the room lock.
+The repair checks the other role map before either insertion. Refusal leaves
+member data, authority, readiness, activity clocks and session join counts
+unchanged. Removing the existing role permits a later role switch.
+
+The Rust client manifest at `da8f2d16` has no server-crate dependency. The .NET
+project at `e467c871` is a standalone C# SDK. The Godot addon at `39085860` is
+GDScript. None calls the server Room admission methods. The server's existing
+wire role policy and messages do not change. All three clients are unaffected;
+no migration is required. The broader #826 campaign remains open.
+
+All 11 selected all-feature Room/storage controls pass in Nextest
+`14d65cf1-97e9-431e-b3d5-b6a9f0dc4322`. Three existing service controls pass in
+`1d4ac506-c4c3-43ce-9bea-4e7a8a67b57e`, including player/spectator refusal and
+spectator admission that supersedes a pending reconnection. Independent source
+review finds no further defect in these changed paths.
+
+### Borrowed recipient count scratch (#636, #775)
+
+The capacity oracle built a sender vector and a temporary count tree for each
+recipient, then copied counts into its retained report map. It now borrows room
+members and folds adjacent sender epochs into one compact list. The arrival
+index sorts by recipient, sender and epoch. The final bulk-built report map,
+shared sender names, roster violation order and serialized results stay intact.
+
+An isolated counting-allocator control measures the full production `summarize`
+call with raw records built before measurement. Each room has 16 players and
+one send per player, with all reliable receipts present. Baseline and candidate
+use the same input and compare full serialized summary digests.
+
+| Rooms | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | --- | --- | --- | --- |
+| 100 | 25,975 | 19,575 | 14,104,744 | 12,389,544 |
+| 999 | 259,212 | 195,276 | 140,773,180 | 123,638,332 |
+
+At 999 rooms, reallocations fall from 35,964 to 19,980. Both summaries contain
+6,668,621 bytes with SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
+Allocated-minus-freed bytes remain 13,882,580 in both versions. These results
+measure cumulative allocator work, not peak memory, process RSS, throughput or
+full ten-minute C3 qualification. The change runs after traffic collection and
+cannot explain or repair the live generator stalls. Both campaigns stay open.
+
+All 45 selected all-feature oracle and live relay/replay controls pass in
+Nextest `6deec54f-604d-418a-b61a-90271854c36c`. A new independent set-based
+control checks exact per-sender counts across epochs, duplicate receipts, zero
+and maximum sequences, Unicode names, self/cross-room/unknown senders and exact
+artifact replay. Existing controls retain inactive, unannounced and stale epoch
+failures, closed-epoch evidence, gap violation order and unsupported-format
+refusal. These checks do not complete the wider campaigns.
