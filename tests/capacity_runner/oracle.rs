@@ -2155,7 +2155,7 @@ pub fn summarize(
         // Receipts are complete before this pass. Insert gaps directly into
         // their compact coverage, without retaining one pointer per report.
         if gap.to_seq > total_owed {
-            gap_stream.invalid.record_violation(
+            gap_stream.invalid_mut().record_violation(
                 gap,
                 format!(
                     "gap range reaches beyond what the sender sent ({} > \
@@ -2164,7 +2164,7 @@ pub fn summarize(
                 ),
             );
         } else if !stream.observed.covered.insert(gap.from_seq, gap.to_seq) {
-            gap_stream.invalid.record_violation(
+            gap_stream.invalid_mut().record_violation(
                 gap,
                 format!(
                     "gap range {}:{} overlaps an already-covered sequence",
@@ -2302,10 +2302,10 @@ pub fn summarize(
             };
             for epoch in epochs.iter() {
                 let gaps = gap_streams.remove(&(recipient.as_str(), sender, *epoch));
-                if let Some(gaps) = &gaps {
-                    invalid_gaps.count += gaps.invalid.count;
+                if let Some(invalid) = gaps.as_ref().and_then(|gaps| gaps.invalid.as_deref()) {
+                    invalid_gaps.count += invalid.count;
                     if invalid_gaps.first.is_none() {
-                        invalid_gaps.first = gaps.invalid.first.clone();
+                        invalid_gaps.first = invalid.first.clone();
                     }
                 }
                 // A closed stream is finished: its sender rejoined past it
@@ -2612,7 +2612,13 @@ fn recipient_arrivals<'map, 'records, 'view>(
 struct GapStreamEvidence {
     total_owed: u64,
     covered: u64,
-    invalid: GapViolations,
+    invalid: Option<Box<GapViolations>>,
+}
+
+impl GapStreamEvidence {
+    fn invalid_mut(&mut self) -> &mut GapViolations {
+        self.invalid.get_or_insert_with(Box::default)
+    }
 }
 
 /// Ordered complete streams retain one range, rather than one receipt pointer.
@@ -6662,6 +6668,92 @@ mod coverage_tests {
             "covered": accounting.covered, "holes": accounting.holes,
             "first_hole": accounting.first_hole, "highest": accounting.highest})
         );
+    }
+
+    /// #775/#636: valid streams retain no failure payload; invalid streams
+    /// preserve their full count and roster-ordered first failure on replay.
+    #[test]
+    fn lazy_gap_failures_preserve_exact_summary_and_replay() {
+        let context = crate::unit_context_with_class(DeliveryClass::Latest);
+        for invalid in [false, true] {
+            let mut records = crate::complete_records(&context.plans);
+            records.receipts.retain(|receipt| {
+                !matches!(
+                    (receipt.recipient.as_str(), receipt.sender.as_str()),
+                    ("r0p1", "r0p0") | ("r0p0", "r0p1")
+                )
+            });
+            for (recipient, sender) in [("r0p1", "r0p0"), ("r0p0", "r0p1")] {
+                let mut gap = crate::gap_for(
+                    recipient,
+                    sender,
+                    0,
+                    signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                );
+                gap.to_seq = count_u64(context.plans[0].sends.len());
+                records.gaps.push(gap.clone());
+                if invalid {
+                    records.gaps.push(gap.clone());
+                    gap.from_seq = gap.to_seq + 1;
+                    gap.to_seq = gap.from_seq;
+                    records.gaps.push(gap);
+                }
+            }
+            let summarize = |records: &RunRecords| {
+                super::summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    1000,
+                    96,
+                    DeliveryClass::Latest,
+                    &ChurnPlan::default(),
+                    None,
+                )
+            };
+            let summary = summarize(&records);
+            assert_eq!(summary.valid, !invalid, "{:?}", summary.reasons);
+            assert_eq!(summary.totals.outstanding, 0);
+            assert_eq!(
+                summary.totals.gap_covered,
+                count_u64(context.plans[0].sends.len()) * 2
+            );
+            if invalid {
+                let [InvalidReason::InvalidGapReports { count, first }] =
+                    summary.reasons.as_slice()
+                else {
+                    panic!("unexpected reasons: {:?}", summary.reasons);
+                };
+                assert_eq!(*count, 4);
+                assert_eq!(first.recipient, "r0p0");
+                assert_eq!(first.sender, "r0p1");
+                assert!(first.detail.contains("overlaps"));
+            }
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&records).unwrap(),
+                serde_json::to_value(&replayed).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(summary).unwrap(),
+                serde_json::to_value(summarize(&replayed)).unwrap()
+            );
+        }
+        let mut stream = GapStreamEvidence::default();
+        assert!(stream.invalid.is_none());
+        let gap = crate::gap_for(
+            "recipient",
+            "sender",
+            0,
+            signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+        );
+        stream.invalid_mut().record_violation(&gap, "first".into());
+        stream.invalid_mut().record_violation(&gap, "second".into());
+        let invalid = stream.invalid.unwrap();
+        assert_eq!(invalid.count, 2);
+        assert_eq!(invalid.first.unwrap().detail, "first");
     }
 
     #[test]

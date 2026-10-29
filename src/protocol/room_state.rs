@@ -449,6 +449,9 @@ impl Room {
                 }
 
                 // Set new authority
+                if self.authority_player != Some(id) {
+                    self.update_activity();
+                }
                 self.authority_player = Some(id);
                 if let Some(player) = self.players.get_mut(&id) {
                     player.is_authority = true;
@@ -458,6 +461,7 @@ impl Room {
             None => {
                 // Clear authority
                 if let Some(prev_auth) = self.authority_player.take() {
+                    self.update_activity();
                     if let Some(player) = self.players.get_mut(&prev_auth) {
                         player.is_authority = false;
                     }
@@ -485,11 +489,12 @@ impl Room {
         self.lobby_state == LobbyState::Waiting && !self.players.is_empty()
     }
 
-    /// Transition room to lobby state without changing player readiness.
+    /// Transition room to lobby state and refresh activity without changing readiness.
     #[allow(dead_code)]
     pub fn enter_lobby(&mut self) -> bool {
         if self.should_enter_lobby() {
             self.lobby_state = LobbyState::Lobby;
+            self.update_activity();
             // Wall clock (durable record): lifecycle timestamps are absolute
             // by design.
             self.lobby_started_at = Some(chrono::Utc::now());
@@ -502,13 +507,20 @@ impl Room {
     /// Mark a player as ready in the lobby.
     ///
     /// Readiness can be toggled at any time before the game is `Finalized`; the
-    /// room need not be full.
+    /// room need not be full. A changed ready flag refreshes activity.
     #[allow(dead_code)]
     pub fn set_player_ready(&mut self, player_id: &PlayerId, ready: bool) -> bool {
         if self.lobby_state == LobbyState::Finalized || !self.players.contains_key(player_id) {
             return false;
         }
 
+        if self
+            .players
+            .get(player_id)
+            .is_some_and(|player| player.is_ready != ready)
+        {
+            self.update_activity();
+        }
         if ready && !self.ready_players.contains(player_id) {
             self.ready_players.push(*player_id);
         } else if !ready {
@@ -541,10 +553,12 @@ impl Room {
     /// Finalization is driven by an explicit `StartGame` (whose authorization is
     /// enforced by the handler); this transition only requires that the room is
     /// not already `Finalized` and that every current player is ready.
+    /// A successful transition refreshes activity.
     #[allow(dead_code)]
     pub fn finalize_game(&mut self) -> bool {
         if self.lobby_state != LobbyState::Finalized && self.all_players_ready() {
             self.lobby_state = LobbyState::Finalized;
+            self.update_activity();
             // Wall clock (durable record): lifecycle timestamps are absolute
             // by design.
             self.game_finalized_at = Some(chrono::Utc::now());
@@ -654,6 +668,55 @@ mod tests {
             true,
             "relay".to_string(),
         )
+    }
+
+    /// #1306: state changes renew expiry; rejected and repeated calls do not.
+    #[test]
+    fn room_state_activity_tracks_changes_only() {
+        let mut room = empty_room();
+        let member = Uuid::from_u128(1);
+        assert!(room.add_player(PlayerInfo {
+            id: member,
+            name: "member".into(),
+            is_authority: false,
+            is_ready: false,
+            connected_at: None,
+            connection_info: None,
+            epoch: None,
+            seq: None,
+            region_id: DEFAULT_REGION_ID.into(),
+        }));
+        let stale = room.created_at - chrono::Duration::hours(2);
+        for operation in ["lobby", "ready", "authority", "release", "finalize"] {
+            room.last_activity = stale;
+            match operation {
+                "lobby" => assert!(room.enter_lobby()),
+                "ready" => assert!(room.set_player_ready(&member, true)),
+                "authority" => assert!(room.set_authority(Some(member))),
+                "release" => assert!(room.clear_authority()),
+                "finalize" => assert!(room.finalize_game()),
+                _ => unreachable!(),
+            }
+            assert!(room.last_activity > stale, "{operation}");
+            room.last_activity = stale;
+            match operation {
+                "lobby" => assert!(!room.enter_lobby()),
+                "ready" => assert!(room.set_player_ready(&member, true)),
+                "authority" => assert!(room.set_authority(Some(member))),
+                "release" => assert!(room.clear_authority()),
+                "finalize" => assert!(!room.finalize_game()),
+                _ => unreachable!(),
+            }
+            assert_eq!(room.last_activity, stale, "{operation}: repeated call");
+            assert!(!room.set_player_ready(&Uuid::nil(), true));
+            assert!(!room.set_authority(Some(Uuid::nil())));
+            assert_eq!(room.last_activity, stale, "{operation}: rejected call");
+        }
+        room.last_activity = stale;
+        assert!(!room.set_player_ready(&member, false));
+        room.supports_authority = false;
+        assert!(!room.set_authority(Some(member)));
+        assert_eq!(room.last_activity, stale);
     }
 
     /// Regression #1304: a room role stays exclusive until its holder leaves.

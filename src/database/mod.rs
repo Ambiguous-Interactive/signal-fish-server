@@ -1981,9 +1981,16 @@ impl GameDatabase for InMemoryDatabase {
         authority_player: Option<PlayerId>,
     ) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
-        Ok(rooms
-            .get_mut(room_id)
-            .is_some_and(|room| room.set_authority(authority_player)))
+        let mut liveness = self.room_liveness_monotonic.write().await;
+        let Some(room) = rooms.get_mut(room_id) else {
+            return Ok(false);
+        };
+        let previous = room.authority_player;
+        let accepted = room.set_authority(authority_player);
+        if accepted && previous != room.authority_player {
+            liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        }
+        Ok(accepted)
     }
 
     async fn request_room_authority(
@@ -2000,6 +2007,7 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::bail!("injected request_room_authority failure for test");
         }
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             // Check if room supports authority
             if !room.supports_authority {
@@ -2020,11 +2028,10 @@ impl GameDatabase for InMemoryDatabase {
                 }
 
                 // Grant authority to the requesting player
-                room.authority_player = Some(*player_id);
-                if let Some(player) = room.players.get_mut(player_id) {
-                    player.is_authority = true;
-                }
+                room.set_authority(Some(*player_id));
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
+                drop(liveness);
                 drop(rooms);
                 #[cfg(test)]
                 self.pause_after_authority_request_commit_for_test().await;
@@ -2038,11 +2045,10 @@ impl GameDatabase for InMemoryDatabase {
                 }
 
                 // Release authority
-                room.authority_player = None;
-                if let Some(player) = room.players.get_mut(player_id) {
-                    player.is_authority = false;
-                }
+                room.set_authority(None);
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
+                drop(liveness);
                 drop(rooms);
                 #[cfg(test)]
                 self.pause_after_authority_request_commit_for_test().await;
@@ -2538,9 +2544,10 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()> {
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            if room.should_enter_lobby() {
-                room.enter_lobby();
+            if room.enter_lobby() {
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
             }
         }
         Ok(())
@@ -2552,12 +2559,14 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
     ) -> Result<Option<(crate::protocol::LobbyState, Vec<PlayerId>, bool)>> {
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if room.lobby_state == crate::protocol::LobbyState::Lobby {
                 let Some(player) = room.players.get(player_id) else {
                     return Ok(None);
                 };
                 room.set_player_ready(player_id, !player.is_ready);
+                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
                 let all_ready = room.all_players_ready();
                 return Ok(Some((
@@ -2576,6 +2585,7 @@ impl GameDatabase for InMemoryDatabase {
         expected: &FinalizeRoomGameExpectation,
     ) -> Result<FinalizeRoomGameOutcome> {
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         let room = rooms
             .get_mut(room_id)
             .ok_or_else(|| anyhow::anyhow!("room not found while finalizing game"))?;
@@ -2604,6 +2614,8 @@ impl GameDatabase for InMemoryDatabase {
         room.lobby_state = crate::protocol::LobbyState::Finalized;
         // Wall clock (durable record): absolute lifecycle stamp.
         room.game_finalized_at = Some(chrono::Utc::now());
+        room.update_activity();
+        liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         Ok(FinalizeRoomGameOutcome::Finalized)
     }
 
@@ -4249,6 +4261,224 @@ mod tests {
             assert!(
                 survives_cleanup(&db).await,
                 "update_room_activity must refresh the monotonic GC stamp"
+            );
+        }
+    }
+
+    /// #1306: cancellation at the second lock must leave the room untouched.
+    #[tokio::test]
+    async fn cancelled_state_change_cannot_separate_room_and_expiry_commit() {
+        for finalize in [false, true] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "activity", "CANCEL").await.unwrap();
+            let member = *room.players.keys().next().unwrap();
+            db.transition_room_to_lobby(&room.id).await.unwrap();
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let expected = FinalizeRoomGameExpectation::from_room(&before);
+            let liveness = db.room_liveness_monotonic.write().await;
+            {
+                let change = async {
+                    if finalize {
+                        db.finalize_room_game(&room.id, &expected).await.unwrap();
+                    } else {
+                        db.toggle_player_ready(&room.id, &member).await.unwrap();
+                    }
+                };
+                let mut change = std::pin::pin!(change);
+                assert!(futures_util::poll!(change.as_mut()).is_pending());
+                assert!(
+                    db.rooms.try_read().is_err(),
+                    "transition holds the first lock"
+                );
+            }
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.last_activity, before.last_activity);
+            assert_eq!(after.lobby_state, before.lobby_state);
+            assert_eq!(after.ready_players, before.ready_players);
+            assert_eq!(
+                after.players[&member].is_ready,
+                before.players[&member].is_ready
+            );
+            assert_eq!(after.game_finalized_at, before.game_finalized_at);
+            assert!(matches!(liveness[&room.id], RoomLiveness::AgedFor(_)));
+        }
+    }
+
+    /// #1306: no-op and refused transitions must not extend either clock.
+    #[tokio::test(start_paused = true)]
+    async fn refused_room_state_changes_preserve_expiry_clocks() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "activity", "REFUSE").await.unwrap();
+        let member = *room.players.keys().next().unwrap();
+        db.transition_room_to_lobby(&room.id).await.unwrap();
+        db.update_room_authority(&room.id, Some(member))
+            .await
+            .unwrap();
+        let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        let expected = FinalizeRoomGameExpectation::from_room(&before);
+        for finalized in [false, true] {
+            if finalized {
+                assert_eq!(
+                    db.finalize_room_game(&room.id, &expected).await.unwrap(),
+                    FinalizeRoomGameOutcome::Finalized
+                );
+            }
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            db.transition_room_to_lobby(&room.id).await.unwrap();
+            assert!(db
+                .update_room_authority(&room.id, Some(member))
+                .await
+                .unwrap());
+            assert!(!db
+                .update_room_authority(&room.id, Some(Uuid::nil()))
+                .await
+                .unwrap());
+            assert_eq!(
+                db.request_room_authority(&room.id, &member, true)
+                    .await
+                    .unwrap(),
+                AuthorityOutcome::Denied(AuthorityDenial::AlreadyHeld)
+            );
+            assert_eq!(
+                db.request_room_authority(&room.id, &Uuid::nil(), false)
+                    .await
+                    .unwrap(),
+                AuthorityOutcome::Denied(AuthorityDenial::NotAMember)
+            );
+            assert!(db
+                .toggle_player_ready(&room.id, &Uuid::nil())
+                .await
+                .unwrap()
+                .is_none());
+            if finalized {
+                assert!(db
+                    .toggle_player_ready(&room.id, &member)
+                    .await
+                    .unwrap()
+                    .is_none());
+            }
+            let mut changed = expected.clone();
+            changed.members.clear();
+            assert_eq!(
+                db.finalize_room_game(&room.id, &changed).await.unwrap(),
+                if finalized {
+                    FinalizeRoomGameOutcome::AlreadyFinalized
+                } else {
+                    FinalizeRoomGameOutcome::SnapshotChanged
+                }
+            );
+            assert_eq!(
+                db.get_room_by_id(&room.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .last_activity,
+                before.last_activity
+            );
+            assert!(
+                matches!(db.room_liveness_monotonic.read().await[&room.id], RoomLiveness::AgedFor(age) if age == std::time::Duration::from_secs(7200))
+            );
+        }
+        let cleanup = db
+            .cleanup_expired_rooms(
+                chrono::Duration::seconds(300),
+                chrono::Duration::hours(1),
+                &HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cleanup.inactive_rooms_cleaned, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn room_state_changes_refresh_both_expiry_clocks() {
+        for operation in [
+            "lobby",
+            "ready",
+            "authority",
+            "request",
+            "release",
+            "finalize",
+        ] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "activity", "ACTIVE").await.unwrap();
+            let member = *room.players.keys().next().unwrap();
+            db.transition_room_to_lobby(&room.id).await.unwrap();
+            if operation == "lobby" {
+                db.rooms
+                    .write()
+                    .await
+                    .get_mut(&room.id)
+                    .unwrap()
+                    .lobby_state = crate::protocol::LobbyState::Waiting;
+            }
+            db.update_room_authority(&room.id, None).await.unwrap();
+            if operation == "release" {
+                db.update_room_authority(&room.id, Some(member))
+                    .await
+                    .unwrap();
+            }
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            match operation {
+                "lobby" => db.transition_room_to_lobby(&room.id).await.unwrap(),
+                "ready" => assert!(db
+                    .toggle_player_ready(&room.id, &member)
+                    .await
+                    .unwrap()
+                    .is_some()),
+                "authority" => assert!(db
+                    .update_room_authority(&room.id, Some(member))
+                    .await
+                    .unwrap()),
+                "request" | "release" => assert_eq!(
+                    db.request_room_authority(&room.id, &member, operation == "request")
+                        .await
+                        .unwrap(),
+                    AuthorityOutcome::Granted,
+                ),
+                "finalize" => assert_eq!(
+                    db.finalize_room_game(
+                        &room.id,
+                        &FinalizeRoomGameExpectation::from_room(&before)
+                    )
+                    .await
+                    .unwrap(),
+                    FinalizeRoomGameOutcome::Finalized,
+                ),
+                _ => unreachable!(),
+            }
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert!(
+                after.last_activity > before.last_activity,
+                "{operation}: wall clock"
+            );
+            let cleanup = db
+                .cleanup_expired_rooms(
+                    chrono::Duration::seconds(300),
+                    chrono::Duration::hours(1),
+                    &HashSet::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                cleanup.inactive_rooms_cleaned, 0,
+                "{operation}: monotonic clock"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(3601)).await;
+            let cleanup = db
+                .cleanup_expired_rooms(
+                    chrono::Duration::seconds(300),
+                    chrono::Duration::hours(1),
+                    &HashSet::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                cleanup.inactive_rooms_cleaned, 1,
+                "{operation}: renewed window expires"
             );
         }
     }
