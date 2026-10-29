@@ -67,21 +67,21 @@ struct DashboardMetricsCacheState {
 
 impl DashboardMetricsCacheState {
     fn new(history_capacity: usize) -> Self {
+        let history_capacity = history_capacity.max(1);
         Self {
             snapshot: None,
             last_error: None,
             history: Vec::with_capacity(history_capacity),
-            history_capacity: history_capacity.max(1),
+            history_capacity,
         }
     }
 
     fn push_history(&mut self, snapshot: &DashboardMetricsSnapshot, fields: &HistoryFields) {
         let entry = DashboardHistoryEntry::from_snapshot(snapshot, fields);
-        self.history.push(entry);
-        if self.history.len() > self.history_capacity {
-            let overflow = self.history.len().saturating_sub(self.history_capacity);
-            self.history.drain(0..overflow);
+        if self.history.len() == self.history_capacity {
+            self.history.remove(0);
         }
+        self.history.push(entry);
     }
 }
 
@@ -232,14 +232,14 @@ impl DashboardMetricsCache {
     async fn record_refresh_result(&self, result: Result<DashboardMetricsSnapshot>) {
         match result {
             Ok(snapshot) => {
+                let fetched_at = snapshot.fetched_at;
                 {
                     let mut guard = self.inner.write().await;
-                    guard.snapshot = Some(snapshot.clone());
-                    guard.last_error = None;
                     guard.push_history(&snapshot, &self.history_fields);
+                    guard.snapshot = Some(snapshot);
+                    guard.last_error = None;
                 }
-                self.metrics
-                    .set_dashboard_cache_last_refresh(snapshot.fetched_at);
+                self.metrics.set_dashboard_cache_last_refresh(fetched_at);
             }
             Err(err) => {
                 tracing::error!(error = %err, "failed to refresh dashboard metrics cache");
@@ -589,3 +589,7 @@ mod tests {
         assert_eq!(player_data.get("p50"), Some(&3.0));
     }
 }
+
+#[cfg(test)]
+#[path = "dashboard_cache_tests.rs"]
+mod publication_tests;

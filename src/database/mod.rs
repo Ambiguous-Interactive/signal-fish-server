@@ -572,7 +572,8 @@ pub trait GameDatabase: Send + Sync {
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()>;
 
     /// Toggle player ready state and return lobby information if successful
-    /// Returns (lobby_state, ready_players, all_ready) if in lobby state
+    /// Returns (lobby_state, ready_players, all_ready) for a present lobby member.
+    /// Returns None without mutation for an absent player or a non-lobby room.
     ///
     /// Test-only parity surface today: the live ready path is the coordinator's
     /// own ready map under the room mutation gate (which accepts any
@@ -1893,7 +1894,7 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     /// Admit one new player while preserving every existing membership.
-    async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
+    async fn add_player_to_room(&self, room_id: &RoomId, player: PlayerInfo) -> Result<bool> {
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
             .fail_add_player_to_room_once
@@ -1919,39 +1920,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            if room.players.len() < room.max_players as usize
-                && !room.players.contains_key(&player.id)
-            {
-                // `authority_player` is the single source of truth for the room
-                // (see `create_room_classified`). An inbound `PlayerInfo` can be
-                // a pre-disconnect snapshot whose flag went stale while the
-                // member was away — restoring it verbatim would flag a second
-                // authority in every membership payload. Derive the flag here so
-                // no caller can insert a member that contradicts the room.
-                player.is_authority = room.authority_player == Some(player.id);
-                // Readiness has two regimes. While the room is open it is
-                // coordinator state and every stored flag is `false`, so the
-                // room's own list decides and a snapshot's flag must not
-                // resurrect readiness the membership it described has lost.
-                // Once the room is finalized the list is the frozen fact of who
-                // started the game, and removal prunes a departing member from
-                // it — so a membership being RESTORED carries the only surviving
-                // evidence that it started. A fresh joiner cannot smuggle
-                // readiness in that way, and the guarantee rests on three
-                // properties this file and the join path own: the join record is
-                // constructed with `is_ready: false`; readiness cannot be
-                // toggled in a finalized room (`toggle_player_ready` requires
-                // `Lobby`); and no production caller writes `is_ready = true`
-                // into an open room's record — `toggle_player_ready`, the only
-                // method that could, has none. So a member that disconnected
-                // before the start reconnects as the seat-filler it is.
-                let finalized = room.lobby_state == crate::protocol::LobbyState::Finalized;
-                player.is_ready =
-                    room.ready_players.contains(&player.id) || (finalized && player.is_ready);
-                if player.is_ready && !room.ready_players.contains(&player.id) {
-                    room.ready_players.push(player.id);
-                }
-                room.players.insert(player.id, player);
+            if room.add_player(player) {
                 self.session_records.record_player_joined(room_id);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
@@ -2603,13 +2572,10 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if room.lobby_state == crate::protocol::LobbyState::Lobby {
-                // Toggle player ready state
-                let current_ready = room
-                    .players
-                    .get(player_id)
-                    .map(|p| p.is_ready)
-                    .unwrap_or(false);
-                room.set_player_ready(player_id, !current_ready);
+                let Some(player) = room.players.get(player_id) else {
+                    return Ok(None);
+                };
+                room.set_player_ready(player_id, !player.is_ready);
 
                 let all_ready = room.all_players_ready();
                 return Ok(Some((
@@ -4520,6 +4486,52 @@ mod tests {
             !creator.is_authority,
             "the creator's stored flag must mirror authority_player (None)"
         );
+    }
+
+    // #1300: no mutation must not be reported as a successful toggle.
+    #[tokio::test]
+    async fn ready_toggle_refuses_absent_members_without_changing_room() {
+        let database = InMemoryDatabase::new();
+        let room = create_test_room(&database, "ready-member", "MEMBER")
+            .await
+            .unwrap();
+        database.transition_room_to_lobby(&room.id).await.unwrap();
+        let creator = *room.players.keys().next().unwrap();
+        assert!(
+            database
+                .toggle_player_ready(&room.id, &creator)
+                .await
+                .unwrap()
+                .unwrap()
+                .2
+        );
+        let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert!(database
+            .toggle_player_ready(&room.id, &Uuid::new_v4())
+            .await
+            .unwrap()
+            .is_none());
+        let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(before.ready_players, after.ready_players);
+        assert_eq!(before.authority_player, after.authority_player);
+        assert_eq!(before.last_activity, after.last_activity);
+        assert_eq!(
+            serde_json::to_value(&before.players).unwrap(),
+            serde_json::to_value(&after.players).unwrap()
+        );
+        assert!(
+            !database
+                .toggle_player_ready(&room.id, &creator)
+                .await
+                .unwrap()
+                .unwrap()
+                .2
+        );
+        assert!(database
+            .toggle_player_ready(&Uuid::new_v4(), &creator)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
