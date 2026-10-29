@@ -24,6 +24,7 @@ build = "build.rs"
 # validates that exact warning class.
 include = [
     "/src/**",
+    "!/src/database/member_mutation_tests.rs",
     "!/src/server/app_admission_tests.rs",
     "!/src/server/game_data_tests.rs",
     "!/src/server/message_coordinator_tests.rs",

@@ -2686,6 +2686,55 @@ fn sequenced_relay_trace_io_failure_does_not_double_panic_on_drop() {
     drop(auditor);
 }
 
+/// A real client EOF must preserve the server tail and release socket owners.
+#[tokio::test]
+#[serial_test::serial]
+async fn half_close_source_eof_preserves_server_tail_and_releases_owners() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = ChaosProxy::spawn_with_half_close(listener.local_addr().unwrap()).await;
+    proxy.pause(Direction::ServerToClient);
+    let mut client = TcpStream::connect(proxy.addr()).await.unwrap();
+    let (mut server, _) = tokio::time::timeout(CHAOS_EVENT_DEADLINE, listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    server.write_all(b"semantic close tail").await.unwrap();
+    client.shutdown().await.unwrap();
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(CHAOS_EVENT_DEADLINE, server.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    assert!(
+        proxy
+            .terminations()
+            .iter()
+            .any(|end| end.direction == Direction::ClientToServer
+                && end.cause == "source reached EOF")
+    );
+    assert_eq!(proxy.active_connections(), 1);
+    proxy.resume(Direction::ServerToClient);
+    server.shutdown().await.unwrap();
+    let mut tail = Vec::new();
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, client.read_to_end(&mut tail))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tail, b"semantic close tail");
+    tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
+        while proxy.active_connections() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both EOFs release socket owners");
+    assert!(proxy.control_errors().is_empty());
+}
+
+/// A failed forward pump must preserve the opposite server-tail bytes.
 #[tokio::test]
 #[serial_test::serial]
 async fn half_close_preserves_server_tail_after_client_forwarding_fails() {
@@ -2699,24 +2748,15 @@ async fn half_close_preserves_server_tail_after_client_forwarding_fails() {
         .unwrap();
     let tail = b"exact semantic close frame bytes";
     server.write_all(tail).await.unwrap();
-    server.shutdown().await.unwrap();
-    drop(server);
+    proxy.fail_writes(Direction::ClientToServer);
+    client.write_all(&[7; 4096]).await.unwrap();
     tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
         while !proxy
             .terminations()
             .iter()
             .any(|end| end.direction == Direction::ClientToServer)
         {
-            match client.write_all(&[7; 4096]).await {
-                Ok(()) => tokio::task::yield_now().await,
-                Err(error) => {
-                    assert!(matches!(
-                        error.kind(),
-                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-                    ));
-                    break;
-                }
-            }
+            tokio::task::yield_now().await;
         }
     })
     .await
@@ -2735,9 +2775,16 @@ async fn half_close_preserves_server_tail_after_client_forwarding_fails() {
         .unwrap()
         .expect("upstream write failure must not discard the queued server tail");
     assert_eq!(actual, tail);
+    assert!(proxy
+        .terminations()
+        .iter()
+        .any(|end| end.direction == Direction::ClientToServer
+            && end.cause == "destination write failed: injected write failure"));
+    server.shutdown().await.unwrap();
     client.shutdown().await.unwrap();
 }
 
+/// Explicit close controls must release sockets retained after a forward failure.
 #[tokio::test]
 #[serial_test::serial]
 async fn half_close_terminal_faults_release_draining_connections() {
@@ -2751,24 +2798,26 @@ async fn half_close_terminal_faults_release_draining_connections() {
             .unwrap()
             .unwrap();
         server.write_all(b"withheld tail").await.unwrap();
-        server.shutdown().await.unwrap();
-        drop(server);
+        proxy.fail_writes(Direction::ClientToServer);
+        client.write_all(&[7; 4096]).await.unwrap();
         tokio::time::timeout(CHAOS_EVENT_DEADLINE, async {
             while !proxy
                 .terminations()
                 .iter()
                 .any(|end| end.direction == Direction::ClientToServer)
             {
-                client
-                    .write_all(&[7; 4096])
-                    .await
-                    .expect("half-close mode retains the client read half");
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
         assert_eq!(proxy.active_connections(), 1);
+        assert_eq!(proxy.destination_write_bytes(Direction::ClientToServer), 0);
+        assert!(proxy
+            .terminations()
+            .iter()
+            .any(|end| end.direction == Direction::ClientToServer
+                && end.cause == "destination write failed: injected write failure"));
         let mut retained_proxy = Some(proxy);
         match action {
             "fin" => retained_proxy.as_ref().unwrap().kill_mid_frame(),

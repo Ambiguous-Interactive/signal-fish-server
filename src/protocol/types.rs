@@ -229,7 +229,7 @@ pub struct SessionPlanPayload {
 /// reachability. A validated Direct variant is also the execution-readiness
 /// input for electing a v3 `host + direct` host. Protocol-v3 room snapshots
 /// omit it (issue #529); the write layer enforces the per-cohort split.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionInfo {
     /// Self-declared direct IP:port endpoint metadata.

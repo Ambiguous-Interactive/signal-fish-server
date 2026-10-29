@@ -438,7 +438,7 @@ pub trait GameDatabase: Send + Sync {
         become_authority: bool,
     ) -> Result<AuthorityOutcome>;
 
-    /// Update player name in room
+    /// Update a member name and renew room activity only when the value changes.
     async fn update_player_name(
         &self,
         room_id: &RoomId,
@@ -447,6 +447,7 @@ pub trait GameDatabase: Send + Sync {
     ) -> Result<bool>;
 
     /// Update legacy self-declared peer metadata for `GameStarting`.
+    /// Renew room activity only when the stored value changes.
     async fn update_player_connection_info(
         &self,
         room_id: &RoomId,
@@ -456,6 +457,7 @@ pub trait GameDatabase: Send + Sync {
 
     /// Clear metadata from a disconnected socket before a retained room row
     /// is published by reconnect. Return false if the row no longer exists.
+    /// Renew room activity only when metadata was present.
     async fn clear_player_connection_info(
         &self,
         _room_id: &RoomId,
@@ -2060,6 +2062,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Store a changed member name and renew both room activity clocks.
     async fn update_player_name(
         &self,
         room_id: &RoomId,
@@ -2088,9 +2091,14 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::bail!("injected update_player_name failure for test");
         }
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if let Some(player) = room.players.get_mut(player_id) {
-                player.name = name.to_string();
+                if player.name != name {
+                    name.clone_into(&mut player.name);
+                    room.update_activity();
+                    liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                }
                 Ok(true)
             } else {
                 Ok(false)
@@ -2100,6 +2108,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Store changed peer metadata and renew both room activity clocks.
     async fn update_player_connection_info(
         &self,
         room_id: &RoomId,
@@ -2115,9 +2124,14 @@ impl GameDatabase for InMemoryDatabase {
             self.release_update_player_connection_info.notified().await;
         }
         let mut rooms = self.rooms.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if let Some(player) = room.players.get_mut(player_id) {
-                player.connection_info = Some(connection_info);
+                if player.connection_info.as_ref() != Some(&connection_info) {
+                    player.connection_info = Some(connection_info);
+                    room.update_activity();
+                    liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                }
                 Ok(true)
             } else {
                 Ok(false)
@@ -2127,19 +2141,24 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Clear retained peer metadata and renew activity only when metadata was present.
     async fn clear_player_connection_info(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
     ) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
-        let Some(player) = rooms
-            .get_mut(room_id)
-            .and_then(|room| room.players.get_mut(player_id))
-        else {
+        let mut liveness = self.room_liveness_monotonic.write().await;
+        let Some(room) = rooms.get_mut(room_id) else {
             return Ok(false);
         };
-        player.connection_info = None;
+        let Some(player) = room.players.get_mut(player_id) else {
+            return Ok(false);
+        };
+        if player.connection_info.take().is_some() {
+            room.update_activity();
+            liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        }
         Ok(true)
     }
 
@@ -2596,11 +2615,15 @@ impl GameDatabase for InMemoryDatabase {
         if room.lobby_state == crate::protocol::LobbyState::Finalized {
             return Ok(FinalizeRoomGameOutcome::AlreadyFinalized);
         }
-        let mut current_members: Vec<PlayerId> = room.players.keys().copied().collect();
-        current_members.sort_unstable();
         let mut expected_members = expected.members.clone();
         expected_members.sort_unstable();
-        if current_members != expected_members
+        if expected_members.len() != room.players.len()
+            || expected_members
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left == right))
+            || expected_members
+                .iter()
+                .any(|member| !room.players.contains_key(member))
             || room.authority_player != expected.authority_player
             || room.lobby_state != expected.lobby_state
         {
@@ -2890,6 +2913,9 @@ fn percentile_index(max_index: usize, per_mille: usize) -> usize {
     whole.saturating_add(rounded_remainder).min(max_index)
 }
 
+#[cfg(all(test, signal_fish_repository_tests))]
+mod member_mutation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3061,7 +3087,7 @@ mod tests {
     // interpretable) — a useful place for Miri's data-race detection.
 
     /// Helper: create a room with the given game name and room code using sensible defaults.
-    async fn create_test_room(
+    pub(super) async fn create_test_room(
         db: &InMemoryDatabase,
         game_name: &str,
         room_code: &str,
@@ -3627,7 +3653,7 @@ mod tests {
 
     /// Backdate a room's timestamps so it looks stale to the GC without waiting
     /// wall-clock time. Reaches the in-memory map directly (same module).
-    async fn age_room(db: &InMemoryDatabase, room_id: &RoomId, age: chrono::Duration) {
+    pub(super) async fn age_room(db: &InMemoryDatabase, room_id: &RoomId, age: chrono::Duration) {
         let now = chrono::Utc::now();
         {
             let mut rooms = db.rooms.write().await;

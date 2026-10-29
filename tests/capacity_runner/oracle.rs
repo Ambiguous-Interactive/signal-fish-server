@@ -703,14 +703,42 @@ where
     events
 }
 
+/// Borrow one roster index across delivery, churn, snapshot and latency checks.
+struct RosterIndex<'a> {
+    rows: &'a [(String, u32)],
+    room_of: BTreeMap<&'a str, u32>,
+    members_of_room: BTreeMap<u32, Vec<&'a str>>,
+}
+
+impl<'a> RosterIndex<'a> {
+    /// Index roster names once while preserving each room's member order.
+    fn new(rows: &'a [(String, u32)]) -> Self {
+        let room_of = rows
+            .iter()
+            .map(|(name, room)| (name.as_str(), *room))
+            .collect();
+        let mut members_of_room: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+        for (name, room) in rows {
+            members_of_room
+                .entry(*room)
+                .or_default()
+                .push(name.as_str());
+        }
+        Self {
+            rows,
+            room_of,
+            members_of_room,
+        }
+    }
+}
+
 /// Validate every observed churn action against the planned lifecycle and roster.
 fn churn_evidence(
     churn: &ChurnPlan,
-    roster: &[(String, u32)],
+    roster: &BTreeMap<&str, u32>,
     records: &RunRecords,
     reasons: &mut Vec<InvalidReason>,
 ) {
-    let roster: BTreeSet<_> = roster.iter().map(|(name, _)| name.as_str()).collect();
     let mut planned: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
     for cycle in &churn.cycles {
         for peer in &cycle.peers {
@@ -742,7 +770,7 @@ fn churn_evidence(
         let cycle = planned
             .get(event.recipient.as_str())
             .and_then(|cycles| cycles.get(*position / 2));
-        let mismatch = if !roster.contains(event.recipient.as_str()) {
+        let mismatch = if !roster.contains_key(event.recipient.as_str()) {
             Some(ChurnMismatch::UnknownRecipient)
         } else if let Some(&(disconnect, reconnect)) = cycle {
             if event.phase != expected_phase {
@@ -1252,17 +1280,18 @@ impl RecipientLatency {
     }
 }
 
+/// Preserve all samples while assigning histograms only to roster recipients.
 fn individual_recipient_latency_statistics(
     records: &RunRecords,
     sent_by_key: &SendIndex<'_>,
-    member_names: &BTreeSet<&str>,
+    room_of: &BTreeMap<&str, u32>,
     per_recipient: &mut [RecipientOutcome],
 ) -> LatencyStats {
     let mut latency = LatencyAccumulator::<u64>::default();
     let mut by_recipient = BTreeMap::<&str, RecipientLatency>::new();
     for (recipient, sample) in indexed_latency_pairs(records, sent_by_key) {
         latency.record(sample);
-        if let Some(&recipient) = member_names.get(recipient) {
+        if let Some((&recipient, _)) = room_of.get_key_value(recipient) {
             by_recipient
                 .entry(recipient)
                 .or_insert_with(RecipientLatency::new)
@@ -1503,13 +1532,10 @@ fn viewer_churn_events<'a>(
 /// to floor) or genuinely pre-seat (correctly floored).
 fn churn_views<'a>(
     records: &RunRecords,
-    roster: &'a [(String, u32)],
+    roster: &RosterIndex<'a>,
     blocks: &BTreeMap<(&str, u32), RelayBlock<'_>>,
 ) -> (BTreeMap<&'a str, Arc<ChurnView<'a>>>, Vec<String>) {
-    let room_of: BTreeMap<&str, u32> = roster
-        .iter()
-        .map(|(name, room)| (name.as_str(), *room))
-        .collect();
+    let room_of = &roster.room_of;
     let resolve =
         |records: &RunRecords, player_id: &str, unresolved: &mut Vec<String>| -> Option<u32> {
             records
@@ -1521,21 +1547,15 @@ fn churn_views<'a>(
                     None
                 })
         };
-    let mut members_by_room: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
-    for (member, room) in roster {
-        members_by_room
-            .entry(*room)
-            .or_default()
-            .push(member.as_str());
-    }
-    let events_by_room = room_churn_events(&records.churn, &room_of);
+    let members_by_room = &roster.members_of_room;
+    let events_by_room = room_churn_events(&records.churn, room_of);
     // Ordinary rooms have the same immutable initial view at every seat.
     // Keep one per room, rather than one tree of names and epochs per peer.
     // A room with any recorded churn retains the full viewer-specific path.
     let mut initial_views: BTreeMap<u32, Arc<ChurnView<'a>>> = BTreeMap::new();
     let mut views: BTreeMap<&'a str, Arc<ChurnView<'a>>> = BTreeMap::new();
     let mut unresolved: Vec<String> = Vec::new();
-    for (viewer, room) in roster {
+    for (viewer, room) in roster.rows {
         let Some(events) = events_by_room.get(room) else {
             let initial = initial_views.entry(*room).or_insert_with(|| {
                 let mut view = ChurnView::default();
@@ -1623,16 +1643,13 @@ fn churn_views<'a>(
     (views, unresolved)
 }
 
+/// Reject snapshot tails with foreign members, wrong identities or impossible progress.
 fn snapshot_tail_evidence(
     records: &RunRecords,
-    roster: &[(String, u32)],
+    rooms: &BTreeMap<&str, u32>,
     blocks: &BTreeMap<(&str, u32), RelayBlock<'_>>,
     reasons: &mut Vec<InvalidReason>,
 ) {
-    let rooms: BTreeMap<_, _> = roster
-        .iter()
-        .map(|(name, room)| (name.as_str(), *room))
-        .collect();
     let rejoined_epochs: BTreeSet<_> = records
         .churn
         .iter()
@@ -1873,6 +1890,9 @@ pub fn summarize(
     // Share exact send lookups across validation and latency passes. Arbitrary
     // replay order needs one sort and one compact offset index, not three.
     let sent_by_key = SendIndex::new(&records.sent);
+    let roster_index = RosterIndex::new(roster);
+    let room_of = &roster_index.room_of;
+    let members_of_room = &roster_index.members_of_room;
     let mut reasons = records.faults.clone();
     let payload_bytes = payload_size_evidence(
         records,
@@ -1880,7 +1900,7 @@ pub fn summarize(
         expected_application_bytes,
         &mut reasons,
     );
-    churn_evidence(churn, roster, records, &mut reasons);
+    churn_evidence(churn, room_of, records, &mut reasons);
     if !records.join_failures.is_empty() {
         reasons.push(InvalidReason::JoinFailed {
             failures: records.join_failures.clone(),
@@ -1942,7 +1962,7 @@ pub fn summarize(
     // enforce; the ledger position (`block[server_seq - 1]`) pairs the
     // stream coordinates with the sender-stamped ledger sequence.
     let blocks = indexed_relay_blocks(&records.sent, &sent_by_key);
-    snapshot_tail_evidence(records, roster, &blocks, &mut reasons);
+    snapshot_tail_evidence(records, room_of, &blocks, &mut reasons);
     let sender_epochs = sender_epoch_index(&blocks);
 
     let disconnected: BTreeSet<&str> = records
@@ -1950,15 +1970,6 @@ pub fn summarize(
         .iter()
         .map(|event| event.recipient.as_str())
         .collect();
-
-    // Roster lookups: peer -> room, room -> members.
-    let mut members_of_room: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
-    for (name, room) in roster {
-        members_of_room
-            .entry(*room)
-            .or_default()
-            .push(name.as_str());
-    }
 
     // The experiment's opaque senders: peer 0 of every room (a pure
     // function of the deterministic shape). Its binary stream is the
@@ -1982,25 +1993,20 @@ pub fn summarize(
     // per-member `(epoch, seq tail)` raises the stream's owed floor ("a
     // recipient owes no GameData at or below this sequence in the paired
     // epoch"), covering the away window loudly.
-    let (views, unresolved) = churn_views(records, roster, &blocks);
+    let (views, unresolved) = churn_views(records, &roster_index, &blocks);
     for player_id in unresolved {
         reasons.push(InvalidReason::UnresolvedSenderIdentity { player_id });
     }
 
     // Validate arrivals once, retaining exact compact coverage per stream.
     // Raw records remain unchanged for replay and latency accounting.
-    let member_names: BTreeSet<&str> = roster.iter().map(|(name, _)| name.as_str()).collect();
-    let room_of: BTreeMap<&str, u32> = roster
-        .iter()
-        .map(|(name, room)| (name.as_str(), *room))
-        .collect();
     let mut unknown_recipients = Category::default();
     let mut arrivals: BTreeMap<ArrivalKey<'_>, ArrivalEvidence<'_>> = BTreeMap::new();
     for receipt in &records.receipts {
         let recipient = receipt.recipient.as_str();
         let sender = receipt.sender.as_str();
         let epoch = receipt.epoch;
-        if !member_names.contains(recipient) {
+        if !room_of.contains_key(recipient) {
             unknown_recipients.record(DeliveryKey {
                 recipient: receipt.recipient.to_string(),
                 sender: receipt.sender.to_string(),
@@ -2086,8 +2092,8 @@ pub fn summarize(
         // The experiment's cross-format pair (opaque sender -> any co-room
         // peer): gap reports are the contract, not a violation.
         let opaque_pair = opaque_senders.contains(gap.sender.as_str());
-        if !member_names.contains(gap.recipient.as_str())
-            || !member_names.contains(gap.sender.as_str())
+        if !room_of.contains_key(gap.recipient.as_str())
+            || !room_of.contains_key(gap.sender.as_str())
         {
             detail = Some("gap references a peer outside the run roster".to_string());
         } else if gap.recipient == gap.sender {
@@ -2399,12 +2405,8 @@ pub fn summarize(
     drop(arrivals);
     drop(gap_streams);
     drop(views);
-    let latency_us = individual_recipient_latency_statistics(
-        records,
-        &sent_by_key,
-        &member_names,
-        &mut per_recipient,
-    );
+    let latency_us =
+        individual_recipient_latency_statistics(records, &sent_by_key, room_of, &mut per_recipient);
 
     if let Some(reason) =
         missing.into_reason(|count, first| InvalidReason::MissingDeliveries { count, first })
@@ -3686,8 +3688,8 @@ mod coverage_tests {
         }
     }
 
-    // #775/#636: ordinary rooms share their immutable epoch evidence while
-    // affected rooms retain exact per-seat snapshots and unresolved identities.
+    /// #775/#636: ordinary rooms share their immutable epoch evidence while
+    /// affected rooms retain exact per-seat snapshots and unresolved identities.
     #[test]
     fn churn_views_share_only_unchanged_rooms_and_preserve_exact_evidence() {
         let roster: Vec<_> = [("alice", 0), ("βob", 0), ("other", 1), ("last", 1)]
@@ -3696,7 +3698,7 @@ mod coverage_tests {
             .collect();
         let blocks = BTreeMap::new();
         let mut records = RunRecords::default();
-        let (initial, unresolved) = churn_views(&records, &roster, &blocks);
+        let (initial, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
         assert!(Arc::ptr_eq(&initial["alice"], &initial["βob"]));
         assert!(Arc::ptr_eq(&initial["other"], &initial["last"]));
@@ -3713,7 +3715,7 @@ mod coverage_tests {
                 tails: BTreeMap::new(),
             });
         }
-        let (unshared, unresolved) = churn_views(&records, &roster, &blocks);
+        let (unshared, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
         assert_eq!(initial, unshared);
         assert!(!Arc::ptr_eq(&unshared["alice"], &unshared["βob"]));
@@ -3730,7 +3732,7 @@ mod coverage_tests {
             epoch: Some(2),
             tails: BTreeMap::from([("βob".to_string(), ("bob-id".to_string(), 5))]),
         });
-        let (mixed, unresolved) = churn_views(&records, &roster, &blocks);
+        let (mixed, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
         assert!(Arc::ptr_eq(&mixed["other"], &mixed["last"]));
         assert!(!Arc::ptr_eq(&mixed["alice"], &mixed["βob"]));
@@ -3740,9 +3742,9 @@ mod coverage_tests {
         assert_eq!(mixed["βob"].adopted["alice"].as_ref(), [1, 2]);
 
         records.registry.clear();
-        let (_, unresolved) = churn_views(&records, &roster, &blocks);
+        let (_, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert_eq!(unresolved, ["bob-id"]);
-        let (empty, unresolved) = churn_views(&records, &[], &blocks);
+        let (empty, unresolved) = churn_views(&records, &RosterIndex::new(&[]), &blocks);
         assert!(empty.is_empty());
         assert!(unresolved.is_empty());
     }
@@ -3786,7 +3788,7 @@ mod coverage_tests {
         }
     }
 
-    // #775: reuse immutable roster spellings in every oracle epoch and floor map.
+    /// #775: reuse immutable roster spellings in every oracle epoch and floor map.
     #[test]
     fn churn_view_keys_borrow_roster_names() {
         let roster = vec![("αlice".to_string(), 0), ("bob".to_string(), 0)];
@@ -3802,7 +3804,7 @@ mod coverage_tests {
             ..RunRecords::default()
         };
         let blocks = BTreeMap::new();
-        let (views, unresolved) = churn_views(&records, &roster, &blocks);
+        let (views, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
         let sources: Vec<_> = roster.iter().map(|(name, _)| name.as_ptr()).collect();
         for (viewer, view) in &views {
@@ -3850,7 +3852,7 @@ mod coverage_tests {
         let blocks = BTreeMap::new();
         let before = crate::diagnostics::resident_memory_bytes(std::process::id());
         let started = std::time::Instant::now();
-        let (views, unresolved) = churn_views(&records, &roster, &blocks);
+        let (views, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
         assert_eq!(views.len(), roster.len());
         assert!(views
