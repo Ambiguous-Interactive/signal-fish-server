@@ -11401,3 +11401,12 @@ peers confirm frame 600, match all nine checksum comparisons, and send and
 receive 1,327 relay messages with matching sequence counts and hashes. These
 aggregates do not locate the recommendation. No cause or repair is claimed,
 and its zero-recommendation gate remains in force.
+
+Review also found that the new standalone database controls would enter the
+published crate. Their module now requires the repository-test cfg, and both
+build inventories and the package allowlist include its exclusion. The exact
+archive inventory omits all nine repository-only modules. The build-script
+checkout/archive/partial-source control and all four gated mutation controls
+pass. The local packaged-unit compilation stops on a confirmed disk-full error;
+its log is retained, generated package build cache is cleared, and full archive
+compilation remains a hosted gate. No test or package assertion is removed.

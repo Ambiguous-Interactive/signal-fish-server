@@ -1,6 +1,7 @@
 use std::path::Path;
 
-const REPOSITORY_ONLY_TEST_MODULES: [&str; 8] = [
+const REPOSITORY_ONLY_TEST_MODULES: [&str; 9] = [
+    "src/database/member_mutation_tests.rs",
     "src/server/app_admission_tests.rs",
     "src/server/game_data_tests.rs",
     "src/server/message_coordinator_tests.rs",

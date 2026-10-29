@@ -2910,7 +2910,7 @@ fn percentile_index(max_index: usize, per_mille: usize) -> usize {
     whole.saturating_add(rounded_remainder).min(max_index)
 }
 
-#[cfg(test)]
+#[cfg(all(test, signal_fish_repository_tests))]
 mod member_mutation_tests;
 
 #[cfg(test)]
