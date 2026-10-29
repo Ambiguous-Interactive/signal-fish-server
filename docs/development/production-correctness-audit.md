@@ -11066,3 +11066,9 @@ invalid-ledger replay, mixed unchanged/churned views and independent epoch-set
 comparisons. Both source-policy targets pass all 29 controls. Strict all-target,
 all-feature Clippy and the markdown, documentation and CI-configuration gates
 pass. These scoped checks do not complete the broader campaigns.
+
+A caller review also finds four legacy protocol fixtures that seeded authority
+through player flags or direct field assignment. They now select authority
+through `Room::set_authority` and keep their original peer-list, single-authority,
+transfer and departure assertions. All 29 selected protocol and admission controls
+pass after this fixture correction.
