@@ -62,6 +62,54 @@ use schedule::{build_run_shape, ChurnPlan, SenderPlan};
 use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 
 #[tokio::test]
+/// Byte-budget refusal must precede file and network side effects.
+async fn raw_event_budget_refuses_work_before_artifacts_or_connections() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("refused");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut config = scenario_config(Encoding::V3Json);
+    config.output_dir = output.clone();
+    config.endpoint = Some(format!("ws://{}", listener.local_addr().unwrap()));
+    config.raw_event_budget_bytes = 1;
+    let error = tokio::time::timeout(Duration::from_millis(100), runner::run(config))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("raw_event_budget_bytes is 1"), "{error}");
+    assert!(!output.exists());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+/// An exact byte budget must preserve complete live delivery and replay.
+async fn exact_raw_event_budget_preserves_complete_delivery_and_replay() {
+    let output = tempfile::tempdir().unwrap();
+    let mut config = wire_correctness_config(Encoding::V3Json);
+    config.output_dir = output.path().to_path_buf();
+    let required = config.validate_raw_event_budget().unwrap();
+    config.raw_event_budget_bytes = required;
+    let outcome = runner::run(config).await.unwrap();
+    assert!(outcome.summary.valid, "{:?}", outcome.summary.reasons);
+    assert_eq!(
+        artifacts::read_manifest(output.path())
+            .unwrap()
+            .config
+            .raw_event_budget_bytes,
+        required
+    );
+    let replay = artifacts::replay(output.path()).unwrap();
+    assert_eq!(
+        serde_json::to_value(outcome.summary).unwrap(),
+        serde_json::to_value(replay).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn planned_record_budget_refuses_large_work_before_artifacts_or_connections() {
     let parent = tempfile::tempdir().expect("output parent");
     let output = parent.path().join("refused");
@@ -3914,6 +3962,21 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
     }
     std::env::remove_var("CAPACITY_RUNNER_SENDER_PAYLOAD_BUDGET_BYTES");
 
+    for (raw, expected) in [
+        ("1234", Some(1234)),
+        ("0", Some(0)),
+        ("-1", None),
+        ("abc", None),
+    ] {
+        std::env::set_var("CAPACITY_RUNNER_RAW_EVENT_BUDGET_BYTES", raw);
+        match (RunConfig::from_env(), expected) {
+            (Ok(config), Some(expected)) => assert_eq!(config.raw_event_budget_bytes, expected),
+            (Err(error), None) => assert!(error.contains("RAW_EVENT_BUDGET_BYTES")),
+            (result, expected) => panic!("raw={raw} expected={expected:?} result={result:?}"),
+        }
+    }
+    std::env::remove_var("CAPACITY_RUNNER_RAW_EVENT_BUDGET_BYTES");
+
     // Unknown enum values fail loudly, naming the accepted values.
     std::env::set_var("CAPACITY_RUNNER_ENCODING", "cbor");
     assert!(RunConfig::from_env().is_err());
@@ -6048,6 +6111,7 @@ fn scenario_config(encoding: Encoding) -> RunConfig {
         receipt_timings: false,
         planned_record_budget: config::default_planned_record_budget(),
         sender_payload_budget_bytes: config::default_sender_payload_budget_bytes(),
+        raw_event_budget_bytes: config::default_raw_event_budget_bytes(),
         server_overlay: RunConfig::default_server_overlay(),
         pause_sends: None,
         pause_reads: None,

@@ -381,8 +381,9 @@ impl Room {
     }
 
     #[allow(dead_code)]
+    /// Admit a new player without replacing an existing member.
     pub fn add_player(&mut self, player: PlayerInfo) -> bool {
-        if self.can_join() {
+        if self.can_join() && !self.players.contains_key(&player.id) {
             self.players.insert(player.id, player);
             true
         } else {
@@ -556,10 +557,10 @@ impl Room {
         }
     }
 
-    /// Add a spectator to the room
+    /// Admit a new spectator without replacing an existing spectator.
     #[allow(dead_code)]
     pub fn add_spectator(&mut self, spectator: SpectatorInfo) -> bool {
-        if self.can_spectate() {
+        if self.can_spectate() && !self.spectators.contains_key(&spectator.id) {
             self.spectators.insert(spectator.id, spectator);
             self.update_activity();
             true
@@ -631,6 +632,54 @@ mod tests {
             true,
             "relay".to_string(),
         )
+    }
+
+    #[test]
+    /// Duplicate spectators must leave activity and the original record unchanged.
+    fn duplicate_room_spectator_admission_preserves_original() {
+        for cap in [None, Some(1), Some(2)] {
+            let mut room = empty_room();
+            room.max_spectators = cap;
+            let spectator = watcher(Uuid::from_u128(1));
+            assert!(room.add_spectator(spectator.clone()));
+            let activity = room.last_activity;
+            let mut duplicate = spectator.clone();
+            duplicate.name = "replacement".to_string();
+            assert!(!room.add_spectator(duplicate), "cap={cap:?}");
+            assert_eq!(room.spectators[&spectator.id].name, spectator.name);
+            assert_eq!(room.last_activity, activity);
+        }
+    }
+
+    #[test]
+    /// Duplicate players must not lose readiness or authority at any capacity.
+    fn duplicate_room_admission_preserves_ready_member() {
+        let mut room = empty_room();
+        let id = Uuid::from_u128(1);
+        let player = PlayerInfo {
+            id,
+            name: "original".to_string(),
+            is_authority: false,
+            is_ready: false,
+            connected_at: None,
+            connection_info: None,
+            epoch: None,
+            seq: None,
+            region_id: DEFAULT_REGION_ID.to_string(),
+        };
+        assert!(room.add_player(player.clone()));
+        assert!(room.set_player_ready(&id, true));
+        assert!(room.set_authority(Some(id)));
+        for capacity in [1, 4] {
+            room.max_players = capacity;
+            assert!(!room.add_player(player.clone()), "capacity={capacity}");
+            assert!(room.players[&id].is_ready);
+            assert!(room.players[&id].is_authority);
+            assert_eq!(room.ready_players, [id]);
+            assert_eq!(room.authority_player, Some(id));
+        }
+        assert!(room.remove_player(&id).is_some());
+        assert!(room.add_player(player));
     }
 
     #[test]

@@ -562,6 +562,27 @@ pub mod allocation_benchmark {
             self.members = decision.members;
             decision.host
         }
+
+        /// Build a host or mesh peer list using the production publication path.
+        pub fn plan_for(&mut self, mesh: bool) -> crate::protocol::SessionPlanPayload {
+            use super::session_policy::SessionPlanDecision;
+            use crate::protocol::{PlayerId, SessionGeneration, Topology, Transport};
+            for member in &mut self.members {
+                if mesh && !member.topologies.contains(&Topology::Mesh) {
+                    member.topologies.push(Topology::Mesh);
+                }
+            }
+            let decision = SessionPlanDecision {
+                generation: SessionGeneration::new_v4(),
+                topology: if mesh { Topology::Mesh } else { Topology::Host },
+                transport: Transport::WebRtc,
+                host: (!mesh).then_some(PlayerId::from_u128(1)),
+                members: std::mem::take(&mut self.members),
+            };
+            let plan = decision.plan_for(PlayerId::from_u128(1), Vec::new());
+            self.members = decision.members;
+            plan
+        }
     }
 
     /// Measure the production payload-sizing path without starting a server.

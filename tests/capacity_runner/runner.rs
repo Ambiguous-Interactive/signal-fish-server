@@ -270,6 +270,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     config.validate_planned_record_budget()?;
     config.validate_sender_payload_budget()?;
+    config.validate_raw_event_budget()?;
     let run_id = uuid::Uuid::new_v4().to_string();
     // Room codes are scoped to this run so two concurrent runs against one
     // shared external server start from distinct room namespaces (12 bits —
