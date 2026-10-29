@@ -432,6 +432,8 @@ impl Room {
         removed
     }
 
+    /// Assign or clear authority for a supported room and current member.
+    /// Only a changed authority refreshes activity; refusal and repetition do not.
     #[allow(dead_code)]
     pub fn set_authority(&mut self, player_id: Option<PlayerId>) -> bool {
         // Check if room supports authority

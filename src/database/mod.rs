@@ -1993,6 +1993,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(accepted)
     }
 
+    /// Apply the authority request policy and renew both clocks on a grant or release.
     async fn request_room_authority(
         &self,
         room_id: &RoomId,
@@ -2542,6 +2543,7 @@ impl GameDatabase for InMemoryDatabase {
             .collect())
     }
 
+    /// Enter an occupied waiting room into its lobby and renew both clocks once.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()> {
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
@@ -2553,6 +2555,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(())
     }
 
+    /// Toggle a lobby member's readiness and renew both clocks on acceptance.
     async fn toggle_player_ready(
         &self,
         room_id: &RoomId,
@@ -2579,6 +2582,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(None)
     }
 
+    /// Finalize the matching room snapshot and renew both clocks only for the winner.
     async fn finalize_room_game(
         &self,
         room_id: &RoomId,
@@ -4392,6 +4396,7 @@ mod tests {
         assert_eq!(cleanup.inactive_rooms_cleaned, 1);
     }
 
+    /// #1306: each state transition starts a full, finite expiry window.
     #[tokio::test(start_paused = true)]
     async fn room_state_changes_refresh_both_expiry_clocks() {
         for operation in [
