@@ -2615,7 +2615,9 @@ impl GameDatabase for InMemoryDatabase {
         let mut expected_members = expected.members.clone();
         expected_members.sort_unstable();
         if expected_members.len() != room.players.len()
-            || expected_members.windows(2).any(|pair| pair[0] == pair[1])
+            || expected_members
+                .windows(2)
+                .any(|pair| matches!(pair, [left, right] if left == right))
             || expected_members
                 .iter()
                 .any(|member| !room.players.contains_key(member))

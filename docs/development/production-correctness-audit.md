@@ -11389,3 +11389,15 @@ retain independent set-based receipt counts, wide latency comparisons,
 malformed identities, closed and unadopted epochs, gap violation ordering,
 complete raw artifacts and exact replay. All 43 source-policy controls and
 strict all-target, all-feature Clippy pass.
+
+The first hosted head `89cb671b` fails the additional indexing lint at the
+new two-member duplicate check. The final comparison uses a slice pattern;
+the strict hosted lint command and focused membership control pass locally.
+The allocation algorithm and membership result remain unchanged.
+
+The same head's Godot WASM released cell records one joiner wait recommendation.
+Its complete artifact and measured peer reports are retained in #1312. Both
+peers confirm frame 600, match all nine checksum comparisons, and send and
+receive 1,327 relay messages with matching sequence counts and hashes. These
+aggregates do not locate the recommendation. No cause or repair is claimed,
+and its zero-recommendation gate remains in force.
