@@ -175,9 +175,16 @@ pub fn validate_player_name_uniqueness(
     name: &str,
     existing_players: &HashMap<PlayerId, PlayerInfo>,
 ) -> Result<(), String> {
-    let name_key = canonical_player_name_key(name);
+    let mut name_key = None;
+    let ascii_name = name.is_ascii();
     for player in existing_players.values() {
-        if canonical_player_name_key(&player.name) == name_key {
+        let same_name = if ascii_name && player.name.is_ascii() {
+            name.eq_ignore_ascii_case(&player.name)
+        } else {
+            let name_key = name_key.get_or_insert_with(|| canonical_player_name_key(name));
+            canonical_player_name_key(&player.name) == *name_key
+        };
+        if same_name {
             return Err("Player name already exists in this room".to_string());
         }
     }
@@ -253,6 +260,82 @@ pub fn validate_max_players(max_players: u8) -> Result<(), &'static str> {
 mod tests {
     use super::*;
     use crate::config::ProtocolConfig;
+
+    /// Compare room admission against canonical caseless matching across both paths.
+    #[test]
+    fn name_comparison_matches_canonical_keys_for_ascii_and_unicode_rooms() {
+        let mut names: Vec<String> = (0_u8..=127)
+            .map(|byte| char::from(byte).to_string())
+            .collect();
+        names.extend(
+            [
+                "Player1",
+                "PLAYER1",
+                "Straße",
+                "STRASSE",
+                "ß",
+                "ss",
+                "ſ",
+                "S",
+                "K",
+                "K",
+                "Å",
+                "Å",
+                "A\u{030a}",
+                "café",
+                "cafe\u{0301}",
+                "각",
+                "각",
+                "ΐ",
+                "Ϊ\u{0301}",
+                "οσ",
+                "ος",
+                "ΟΣ",
+                "Ａ",
+                "I",
+                "ı",
+                "İ",
+                "i",
+                "",
+                "雪",
+            ]
+            .map(str::to_owned),
+        );
+        for member in &names {
+            let id = PlayerId::from_u128(1);
+            let mut players = HashMap::from([(
+                id,
+                PlayerInfo {
+                    id,
+                    name: member.clone(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: None,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: "test".into(),
+                },
+            )]);
+            for candidate in &names {
+                let collision =
+                    canonical_player_name_key(member) == canonical_player_name_key(candidate);
+                assert_eq!(
+                    validate_player_name_uniqueness(candidate, &players).is_err(),
+                    collision,
+                    "member={member:?} candidate={candidate:?}"
+                );
+            }
+            let other = PlayerId::from_u128(2);
+            let mut extra = players[&id].clone();
+            extra.id = other;
+            extra.name = "Unrelated-雪".into();
+            players.insert(other, extra);
+            assert!(validate_player_name_uniqueness(member, &players).is_err());
+            assert!(validate_player_name_uniqueness("Unrelated-雪", &players).is_err());
+            assert!(validate_player_name_uniqueness("AnotherPlayer", &players).is_ok());
+        }
+    }
 
     // -- Game name length boundary (validation.rs:10, `>` boundary) -----------
 
