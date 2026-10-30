@@ -990,10 +990,19 @@ impl EventLog {
             }
         }
         drop(state);
-        records.sent.shrink_to_fit();
-        records.receipts.shrink_to_fit();
+        release_unused_capacity(&mut records.sent);
+        release_unused_capacity(&mut records.receipts);
         sort_sent_events(&mut records.sent);
         records
+    }
+}
+
+/// Free empty reservations regardless of allocator shrinking behavior.
+fn release_unused_capacity<T>(rows: &mut Vec<T>) {
+    if rows.is_empty() {
+        *rows = Vec::new();
+    } else {
+        rows.shrink_to_fit();
     }
 }
 
@@ -1553,21 +1562,29 @@ mod tests {
             let mut expected = complete.clone();
             expected.sent.truncate(count.min(complete.sent.len()));
             expected.receipts.truncate(count);
+            let (sent_capacity, receipt_capacity) = {
+                let state = log.state.lock().unwrap();
+                (state.sent.capacity(), state.receipts.capacity())
+            };
             let actual = log.take_records();
             assert_eq!(
                 serde_json::to_value(&actual).unwrap(),
                 serde_json::to_value(&expected).unwrap()
             );
-            assert_eq!(
-                actual.sent.capacity(),
-                actual.sent.len(),
+            assert!(
+                actual.sent.capacity() <= sent_capacity,
                 "retained send count={count}"
             );
-            assert_eq!(
-                actual.receipts.capacity(),
-                actual.receipts.len(),
+            assert!(
+                actual.receipts.capacity() <= receipt_capacity,
                 "retained receipt count={count}"
             );
+            if actual.sent.is_empty() {
+                assert_eq!(actual.sent.capacity(), 0);
+            }
+            if actual.receipts.is_empty() {
+                assert_eq!(actual.receipts.capacity(), 0);
+            }
             let output = tempfile::tempdir().unwrap();
             crate::artifacts::write_deliveries(output.path(), &actual).unwrap();
             let replayed = crate::artifacts::read_records(output.path()).unwrap();

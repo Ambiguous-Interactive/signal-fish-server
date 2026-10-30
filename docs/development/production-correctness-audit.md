@@ -11867,12 +11867,16 @@ one receipt's `received_us` becomes `intended_us - 1`. The latency calculation
 saturates that difference to zero. Send-completion validation from #1162 does
 not validate receipt times.
 
-The repair checks each matched receipt in the existing raw-event pass. An
-`InvalidReceiptTimes` reason retains the count and first exact recipient,
+The repair checks each matched receipt in the existing raw-event pass. Matching
+uses sender, epoch and ledger sequence. Cross-epoch duplicate records cannot lend
+another incarnation's intended time. Other consumers keep their global
+sender/sequence last-key-wins lookup. An `InvalidReceiptTimes` reason retains the count and first exact recipient,
 sender, epoch, server sequence, intended time and observed time. Raw receipts,
 byte totals, latency samples and existing delivery violations remain visible.
 Unmatched receipts retain their existing misroute handling. No new index or
-per-receipt storage is added.
+per-receipt storage is added. Ordered, compact-reordered and wide lookup controls
+cover unique and repeated keys, missing epochs and raw-order ties. The original
+time lookup fails the new cross-epoch control.
 
 The red-first control fails on the baseline. Warm-up and measured controls cover
 one microsecond before, equal to, and one, five and eight microseconds after the
@@ -11920,7 +11924,9 @@ vectors before collection to avoid growth during the timed workload. Partial
 collection leaves that reservation alive throughout analysis and artifact output.
 After all producers stop, `take_records` now releases unused vector capacity
 before sorting sends and running the oracle. Receipt order and every retained
-raw event stay unchanged. The collection reservation and admission budgets remain.
+raw event stay unchanged. Empty reservations are freed directly; nonempty
+shrinking follows allocator behavior. The collection reservation and admission
+budgets remain.
 
 The isolated `generator_collected_record_storage_profile` offers one send per
 sender with 16 players per room. It measures vector capacity times row size
@@ -11945,3 +11951,13 @@ exact artifact replay. This measures retained raw-row storage, not RSS or peak
 allocator use. Shrinking can move storage after the workload. It does not reduce
 the collection peak, establish a whole-run memory bound or qualify the largest
 ten-minute C3 cell. Keep #775 and the broader #636/#826 campaigns open.
+
+
+The first hosted session head, `aa7a2977`, also exposes a synthetic fixture with
+receipts dated at zero against sends planned after 100 ms. The failed-write drain
+control advances its paused clock before receiving those frames. It retains the
+same three receipts, six terminal cases and one-second drain window. Its exact
+prefix, missing-hole and replay checks pass without weakening receipt-time
+validation. Nonempty-capacity assertions now check non-increase; empty collection
+still requires zero capacity. The storage profile records the measured reduction
+without requiring every allocator to shrink nonempty vectors exactly.

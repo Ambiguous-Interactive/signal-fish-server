@@ -578,11 +578,22 @@ impl<'a> SendIndex<'a> {
     }
 
     fn get(&self, sender: &str, seq: u64) -> Option<&'a SentEvent> {
+        self.get_with_epoch(sender, seq, None)
+    }
+
+    /// Match exact receipt incarnations while preserving raw-order ties within each epoch.
+    fn get_in_epoch(&self, sender: &str, epoch: u32, seq: u64) -> Option<&'a SentEvent> {
+        self.get_with_epoch(sender, seq, Some(epoch))
+    }
+
+    /// Share direct offsets and duplicate-key searches without another retained index.
+    fn get_with_epoch(&self, sender: &str, seq: u64, epoch: Option<u32>) -> Option<&'a SentEvent> {
         fn find<'a>(
             count: usize,
             event_at: impl Fn(usize) -> &'a SentEvent,
             sender: &str,
             seq: u64,
+            epoch: Option<u32>,
         ) -> Option<&'a SentEvent> {
             let mut left = 0;
             let mut right = count;
@@ -595,8 +606,17 @@ impl<'a> SendIndex<'a> {
                     right = middle;
                 }
             }
-            let event = event_at(left.checked_sub(1)?);
-            ((event.sender.as_str(), event.seq) == (sender, seq)).then_some(event)
+            let mut index = left.checked_sub(1)?;
+            loop {
+                let event = event_at(index);
+                if (event.sender.as_str(), event.seq) != (sender, seq) {
+                    return None;
+                }
+                if epoch.is_none_or(|epoch| event.epoch == epoch) {
+                    return Some(event);
+                }
+                index = index.checked_sub(1)?;
+            }
         }
         match self {
             Self::Ordered(senders) => {
@@ -606,13 +626,17 @@ impl<'a> SendIndex<'a> {
                 let block = &senders[index];
                 if block.contiguous {
                     let offset = usize::try_from(seq.checked_sub(block.events[0].seq)?).ok()?;
-                    block.events.get(offset)
+                    block
+                        .events
+                        .get(offset)
+                        .filter(|event| epoch.is_none_or(|epoch| event.epoch == epoch))
                 } else {
                     find(
                         block.events.len(),
                         |index| &block.events[index],
                         sender,
                         seq,
+                        epoch,
                     )
                 }
             }
@@ -637,16 +661,18 @@ impl<'a> SendIndex<'a> {
                     offsets
                         .get(offset)
                         .map(|&position| &events[position as usize])
+                        .filter(|event| epoch.is_none_or(|epoch| event.epoch == epoch))
                 } else {
                     find(
                         offsets.len(),
                         |index| &events[offsets[index] as usize],
                         sender,
                         seq,
+                        epoch,
                     )
                 }
             }
-            Self::WideReordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
+            Self::WideReordered(sent) => find(sent.len(), |index| sent[index], sender, seq, epoch),
         }
     }
 }
@@ -1910,7 +1936,10 @@ fn raw_event_evidence(
     }
     for receipt in &records.receipts {
         let sent = sent_by_key.get(receipt.sender.as_str(), receipt.seq);
-        if let Some(sent) = sent.filter(|sent| receipt.received_us < sent.intended_us) {
+        let receipt_send = sent.filter(|sent| sent.epoch == receipt.epoch).or_else(|| {
+            sent_by_key.get_in_epoch(receipt.sender.as_str(), receipt.epoch, receipt.seq)
+        });
+        if let Some(sent) = receipt_send.filter(|sent| receipt.received_us < sent.intended_us) {
             early_receipts.0 += 1;
             early_receipts
                 .1
@@ -3142,6 +3171,120 @@ mod coverage_tests {
                     serde_json::to_value(summary).unwrap()
                 );
             }
+        }
+    }
+
+    /// Cross-epoch duplicate keys must not borrow another incarnation's send time.
+    #[test]
+    fn receipt_time_lookup_matches_epochs_and_preserves_global_last_key_wins() {
+        let context = crate::unit_context();
+        let complete = crate::complete_records(&context.plans);
+        for (duplicates, reverse) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut records = RunRecords::default();
+            for (epoch, seq, intended_us) in [(1, 0, 100), (2, 0, 1000), (1, 0, 200), (3, 1, 500)] {
+                if !duplicates && seq == 0 && intended_us != 200 {
+                    continue;
+                }
+                let mut event = complete.sent[0].clone();
+                event.epoch = epoch;
+                event.seq = seq;
+                event.intended_us = intended_us;
+                event.sent_us = intended_us + 5;
+                records.sent.push(event);
+            }
+            if reverse {
+                records.sent.reverse();
+            }
+            for epoch in [1, 2, 3, 99] {
+                for received_us in [150, 250, 1050] {
+                    let mut receipt = complete.receipts[0].clone();
+                    receipt.sender = records.sent[0].sender.clone();
+                    receipt.epoch = epoch;
+                    receipt.seq = 0;
+                    receipt.server_seq = 1;
+                    receipt.received_us = received_us;
+                    records.receipts.push(receipt);
+                }
+            }
+            let reference: BTreeMap<_, _> = records
+                .sent
+                .iter()
+                .map(|sent| ((sent.sender.as_str(), sent.epoch, sent.seq), sent))
+                .collect();
+            let global: BTreeMap<_, _> = records
+                .sent
+                .iter()
+                .map(|sent| ((sent.sender.as_str(), sent.seq), sent))
+                .collect();
+            let expected: Vec<_> = records
+                .receipts
+                .iter()
+                .filter_map(|receipt| {
+                    let sent =
+                        reference.get(&(receipt.sender.as_str(), receipt.epoch, receipt.seq))?;
+                    (receipt.received_us < sent.intended_us).then(|| ReceiptTimeViolation {
+                        key: DeliveryKey {
+                            recipient: receipt.recipient.to_string(),
+                            sender: receipt.sender.to_string(),
+                            epoch: receipt.epoch,
+                            seq: receipt.server_seq,
+                        },
+                        intended_us: sent.intended_us,
+                        received_us: receipt.received_us,
+                    })
+                })
+                .collect();
+            assert!(!expected.is_empty());
+            let normal = SendIndex::new(&records.sent);
+            let wide = SendIndex::WideReordered(normal.sorted_events().collect());
+            for index in [&normal, &wide] {
+                for receipt in &records.receipts {
+                    assert_eq!(
+                        index
+                            .get_in_epoch(&receipt.sender, receipt.epoch, receipt.seq)
+                            .map(|sent| sent.intended_us),
+                        reference
+                            .get(&(receipt.sender.as_str(), receipt.epoch, receipt.seq))
+                            .map(|sent| sent.intended_us)
+                    );
+                    assert_eq!(
+                        index
+                            .get(&receipt.sender, receipt.seq)
+                            .map(|sent| sent.intended_us),
+                        global
+                            .get(&(receipt.sender.as_str(), receipt.seq))
+                            .map(|sent| sent.intended_us)
+                    );
+                }
+                let mut reasons = Vec::new();
+                raw_event_evidence(&records, index, 96, &mut reasons);
+                assert_eq!(
+                    reasons,
+                    vec![InvalidReason::InvalidReceiptTimes {
+                        count: count_u64(expected.len()),
+                        first: expected[0].clone()
+                    }]
+                );
+            }
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            let summarize = |records: &RunRecords| {
+                summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    1000,
+                    96,
+                    DeliveryClass::Reliable,
+                    &ChurnPlan::default(),
+                    None,
+                )
+            };
+            assert_eq!(
+                serde_json::to_value(summarize(&replayed)).unwrap(),
+                serde_json::to_value(summarize(&records)).unwrap()
+            );
         }
     }
 
