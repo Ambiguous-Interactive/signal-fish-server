@@ -1260,6 +1260,7 @@ fn recipient_latency_counter_bytes(receipts: u64) -> usize {
 }
 
 enum RecipientLatency {
+    Inline { samples: [u64; 16], len: usize },
     Byte(LatencyAccumulator<u8>),
     Short(LatencyAccumulator<u16>),
     Word(LatencyAccumulator<u32>),
@@ -1267,8 +1268,12 @@ enum RecipientLatency {
 }
 
 impl RecipientLatency {
+    /// Retain a bounded sample prefix without allocating histogram buckets.
     fn new() -> Self {
-        Self::Byte(LatencyAccumulator::default())
+        Self::Inline {
+            samples: [0; 16],
+            len: 0,
+        }
     }
 
     #[cfg(test)]
@@ -1281,7 +1286,20 @@ impl RecipientLatency {
         }
     }
 
+    /// Record every sample and promote storage before inline or bucket capacity is exceeded.
     fn record(&mut self, sample: u64) {
+        if let Self::Inline { samples, len } = self {
+            if *len < samples.len() {
+                samples[*len] = sample;
+                *len += 1;
+                return;
+            }
+            let mut histogram = Self::Byte(LatencyAccumulator::default());
+            for retained in samples.iter().take(*len) {
+                histogram.record(*retained);
+            }
+            *self = histogram;
+        }
         fn bucket_is_full<T: Counter>(
             value: &LatencyAccumulator<T>,
             sample: u64,
@@ -1324,6 +1342,9 @@ impl RecipientLatency {
             *self = promoted;
         }
         match self {
+            Self::Inline { .. } => {
+                unreachable!("inline samples handled before histogram recording")
+            }
             Self::Byte(histogram) => histogram.record(sample),
             Self::Short(histogram) => histogram.record(sample),
             Self::Word(histogram) => histogram.record(sample),
@@ -1331,8 +1352,32 @@ impl RecipientLatency {
         }
     }
 
+    /// Return exact HDR statistics with temporary scratch for sparse samples.
     fn stats(&self) -> LatencyStats {
+        self.stats_with_scratch(&mut None)
+    }
+
+    /// Reuse one histogram across sparse recipients while keeping HDR rounding exact.
+    /// Discard ranges over four times the next maximum, with a floor of 2,047
+    /// (the exact-value ceiling at three significant digits).
+    fn stats_with_scratch(&self, scratch: &mut Option<LatencyAccumulator<u8>>) -> LatencyStats {
         match self {
+            Self::Inline { samples, len } => {
+                if *len == 0 {
+                    return LatencyStats::default();
+                }
+                let histogram = scratch.get_or_insert_with(LatencyAccumulator::default);
+                let maximum = samples.iter().take(*len).copied().max().unwrap_or(0);
+                if histogram.histogram.high() / 4 > maximum.max(2047) {
+                    *histogram = LatencyAccumulator::default();
+                }
+                histogram.histogram.reset();
+                histogram.max_us = 0;
+                for sample in samples.iter().take(*len) {
+                    histogram.record(*sample);
+                }
+                histogram.stats()
+            }
             Self::Byte(histogram) => histogram.stats(),
             Self::Short(histogram) => histogram.stats(),
             Self::Word(histogram) => histogram.stats(),
@@ -1359,10 +1404,11 @@ fn individual_recipient_latency_statistics(
                 .record(sample);
         }
     }
+    let mut scratch = None;
     for outcome in per_recipient {
         outcome.latency_us = by_recipient
             .get(outcome.recipient.as_str())
-            .map(RecipientLatency::stats)
+            .map(|histogram| histogram.stats_with_scratch(&mut scratch))
             .unwrap_or_default();
     }
     latency.stats()
@@ -4055,6 +4101,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Keep exact latency statistics when recipients have different sample populations.
     fn individual_latency_widths_preserve_skewed_raw_and_measured_populations() {
         let context = crate::unit_context();
         let mut records = crate::complete_records(&context.plans);
@@ -4111,6 +4158,7 @@ mod coverage_tests {
         for (count, bytes) in [(255, 1), (256, 2), (65_535, 2), (65_536, 4), (u64::MAX, 8)] {
             let histogram = RecipientLatency::with_receipt_bound(count);
             let actual = match histogram {
+                RecipientLatency::Inline { .. } => 0,
                 RecipientLatency::Byte(_) => 1,
                 RecipientLatency::Short(_) => 2,
                 RecipientLatency::Word(_) => 4,
@@ -4122,6 +4170,7 @@ mod coverage_tests {
 
     #[test]
     #[ignore = "isolated skewed-recipient memory profile; run in a fresh process"]
+    /// Measure retained histogram storage for recipients with skewed receipt counts.
     fn generator_skewed_latency_memory_profile() {
         let peers = std::env::var("CAPACITY_SKEW_PROBE_PEERS")
             .unwrap_or_else(|_| "1000".into())
@@ -4154,6 +4203,7 @@ mod coverage_tests {
         let bucket_bytes: usize = histograms
             .iter()
             .map(|histogram| match histogram {
+                RecipientLatency::Inline { .. } => 0,
                 RecipientLatency::Byte(value) => value.histogram.distinct_values(),
                 RecipientLatency::Short(value) => value.histogram.distinct_values() * 2,
                 RecipientLatency::Word(value) => value.histogram.distinct_values() * 4,
@@ -4169,6 +4219,87 @@ mod coverage_tests {
             })
         );
         std::hint::black_box(histograms);
+    }
+
+    /// #775/#636: sparse samples retain no buckets and promote without changing HDR results.
+    #[test]
+    fn inline_latency_matches_hdr_before_and_after_histogram_promotion() {
+        for order in 0..3 {
+            let mut samples: Vec<_> = [0, 1, 2047, 2048, 2049, 4095, 4096, u64::MAX]
+                .into_iter()
+                .cycle()
+                .take(40)
+                .collect();
+            if order == 1 {
+                samples.reverse();
+            } else if order == 2 {
+                samples.fill(0);
+            }
+            let mut actual = RecipientLatency::new();
+            let mut expected = LatencyAccumulator::<u64>::default();
+            assert_eq!(actual.stats().samples, 0);
+            for (position, sample) in samples.into_iter().enumerate() {
+                actual.record(sample);
+                expected.record(sample);
+                assert_eq!(
+                    matches!(actual, RecipientLatency::Inline { .. }),
+                    position < 16,
+                    "order={order}, position={position}"
+                );
+                assert_eq!(
+                    serde_json::to_value(actual.stats()).unwrap(),
+                    serde_json::to_value(expected.stats()).unwrap(),
+                    "order={order}, position={position}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    /// Keep reused sparse scratch independent across recipient sizes and sample ranges.
+    fn sparse_latency_scratch_resets_counts_range_and_raw_max_between_recipients() {
+        let mut scratch = None;
+        for samples in [
+            vec![u64::MAX, 0, 2049],
+            vec![1; 16],
+            vec![],
+            vec![0],
+            (0..40).map(|sample| sample * 4096).collect(),
+            vec![2048, 2049, 4095],
+        ] {
+            let mut actual = RecipientLatency::new();
+            let mut expected = LatencyAccumulator::<u64>::default();
+            for sample in samples {
+                actual.record(sample);
+                expected.record(sample);
+            }
+            for _ in 0..2 {
+                assert_eq!(
+                    serde_json::to_value(actual.stats_with_scratch(&mut scratch)).unwrap(),
+                    serde_json::to_value(expected.stats()).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    /// Bound repeated small-recipient resets after an extreme sparse sample.
+    fn sparse_latency_scratch_releases_outlier_range_before_small_recipients() {
+        let mut scratch = None;
+        let mut outlier = RecipientLatency::new();
+        outlier.record(u64::MAX);
+        assert_eq!(outlier.stats_with_scratch(&mut scratch).max_us, u64::MAX);
+        let minimum_buckets = Histogram::<u8>::new(3).unwrap().distinct_values();
+        assert!(scratch.as_ref().unwrap().histogram.distinct_values() > minimum_buckets);
+        let mut small = RecipientLatency::new();
+        small.record(1);
+        for _ in 0..1000 {
+            assert_eq!(small.stats_with_scratch(&mut scratch).max_us, 1);
+            assert_eq!(
+                scratch.as_ref().unwrap().histogram.distinct_values(),
+                minimum_buckets
+            );
+        }
     }
 
     #[test]
@@ -4288,6 +4419,7 @@ mod coverage_tests {
 
     #[test]
     #[ignore = "distributed latency bucket memory profile; run in a fresh process"]
+    /// Compare adaptive and fixed counters for distributed latency samples.
     fn generator_distributed_latency_memory_profile() {
         let adaptive = std::env::var("CAPACITY_DISTRIBUTED_ADAPTIVE").as_deref() == Ok("1");
         let started = std::time::Instant::now();
@@ -4319,6 +4451,7 @@ mod coverage_tests {
         let bucket_bytes: usize = histograms
             .iter()
             .map(|histogram| match histogram {
+                RecipientLatency::Inline { .. } => 0,
                 RecipientLatency::Byte(value) => value.histogram.distinct_values(),
                 RecipientLatency::Short(value) => value.histogram.distinct_values() * 2,
                 RecipientLatency::Word(value) => value.histogram.distinct_values() * 4,
@@ -4597,6 +4730,51 @@ mod coverage_tests {
             8 => measure::<u64>(peers),
             _ => panic!("counter bytes must be 2, 4, or 8 for 4096 samples"),
         }
+    }
+
+    #[test]
+    #[ignore = "isolated sparse-recipient memory profile; run in a fresh process"]
+    /// Measure sparse recipient storage and compare every result with wide HDR counters.
+    fn generator_sparse_recipient_latency_memory_profile() {
+        let peers = std::env::var("CAPACITY_SPARSE_PEERS")
+            .unwrap_or_else(|_| "15984".into())
+            .parse::<usize>()
+            .unwrap();
+        let mut histograms: Vec<_> = (0..peers).map(|_| RecipientLatency::new()).collect();
+        for histogram in &mut histograms {
+            for sample in 1..=15 {
+                histogram.record(sample * 4096);
+            }
+        }
+        let bucket_bytes: usize = histograms
+            .iter()
+            .map(|histogram| match histogram {
+                RecipientLatency::Inline { .. } => 0,
+                RecipientLatency::Byte(value) => value.histogram.distinct_values(),
+                RecipientLatency::Short(value) => value.histogram.distinct_values() * 2,
+                RecipientLatency::Word(value) => value.histogram.distinct_values() * 4,
+                RecipientLatency::Wide(value) => value.histogram.distinct_values() * 8,
+            })
+            .sum();
+        let retained_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let mut reference = LatencyAccumulator::<u64>::default();
+        for sample in 1..=15 {
+            reference.record(sample * 4096);
+        }
+        let expected = serde_json::to_value(reference.stats()).unwrap();
+        for histogram in &histograms {
+            assert_eq!(serde_json::to_value(histogram.stats()).unwrap(), expected);
+        }
+        println!(
+            "SPARSE_LATENCY_PROFILE {}",
+            serde_json::json!({
+                "peers": peers, "samples_per_peer": 15, "bucket_bytes": bucket_bytes,
+                "retained_rss_bytes": retained_rss,
+                "recipient_state_bytes": std::mem::size_of::<RecipientLatency>(),
+                "stats": expected,
+            })
+        );
+        std::hint::black_box(histograms);
     }
 
     #[test]
