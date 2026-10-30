@@ -2330,8 +2330,8 @@ impl EnhancedGameServer {
                                 // ROOM_CREATION_FAILED; anything else stays
                                 // internal.
                                 let classified = if matches!(
-                                    self.database.get_room_by_id(&room.id).await,
-                                    Ok(None)
+                                    self.database.room_exists(&room.id).await,
+                                    Ok(false)
                                 ) {
                                     JoinRoomError::RoomNotFound
                                 } else {

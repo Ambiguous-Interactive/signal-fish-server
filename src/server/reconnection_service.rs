@@ -408,6 +408,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Register a disconnect and discard its record if storage proves the room is gone.
     pub(crate) async fn register_disconnection_for_reconnect(
         &self,
         player_id: &PlayerId,
@@ -453,9 +454,9 @@ impl EnhancedGameServer {
         // deletion because that GC must observe this record, while a missing
         // room means the advertised credential can no longer be fulfilled and
         // must not survive as a pending reconnect.
-        match self.database.get_room_by_id(&room_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+        match self.database.room_exists(&room_id).await {
+            Ok(true) => {}
+            Ok(false) => {
                 let discarded = reconnection_manager
                     .discard_pending_reconnection(player_id)
                     .await;
@@ -927,6 +928,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Restore claimed room membership and report precise room or storage failures.
     async fn handle_reconnect_owned(
         self: Arc<Self>,
         current_player_id: PlayerId,
@@ -1295,7 +1297,7 @@ impl EnhancedGameServer {
                     // instead of a storage fault; anything else stays
                     // internal.
                     let room_missing =
-                        matches!(self.database.get_room_by_id(room_id).await, Ok(None));
+                        matches!(self.database.room_exists(room_id).await, Ok(false));
                     let (reason, error_code) = if room_missing {
                         ("Room not found", ErrorCode::RoomNotFound)
                     } else {

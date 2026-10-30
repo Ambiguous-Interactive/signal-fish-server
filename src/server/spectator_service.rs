@@ -942,9 +942,9 @@ impl SpectatorService {
         }
         let mut missing = Vec::<(RoomId, PlayerId)>::new();
         for (room_id, player_ids) in candidates {
-            match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
+            match self.database.room_exists(&room_id).await {
+                Ok(true) => {}
+                Ok(false) => {
                     missing.extend(player_ids.into_iter().map(|player_id| (room_id, player_id)));
                 }
                 Err(err) => {
