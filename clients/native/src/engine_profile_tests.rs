@@ -972,10 +972,13 @@ async fn saturate_held_reliable_callbacks(
         .unwrap();
     let mut payload = vec![0xff; packet_bytes];
     payload[4] = payload_generation;
+    let mut sent = 0u32;
+    let mut last_snapshot = serde_json::Value::Null;
     let snapshot = tokio::time::timeout(Duration::from_secs(15), async {
         for sequence in 0u32..2048 {
             payload[..4].copy_from_slice(&sequence.to_be_bytes());
             channel.send(payload.as_slice().into()).await.unwrap();
+            sent += 1;
         }
         loop {
             let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
@@ -985,11 +988,14 @@ async fn saturate_held_reliable_callbacks(
                 assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
                 break snapshot;
             }
+            last_snapshot = snapshot;
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("held callbacks exhaust actual SCTP receive credit");
+    .unwrap_or_else(|error| panic!(
+        "held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 last_snapshot={last_snapshot}"
+    ));
     (channel, snapshot)
 }
 

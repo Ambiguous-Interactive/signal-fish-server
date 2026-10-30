@@ -11621,3 +11621,28 @@ missing-send fallback, shared identity lifetime and independent epoch counts.
 Thirty-eight source-policy controls, strict all-target/all-feature Clippy,
 Markdown, CI configuration and document consistency checks also pass locally.
 Hosted qualification remains separate from these local measurements.
+
+### Held Godot saturation setup timeout (#1319)
+
+PR #1318 head `73ee1796` fails the native active-consumer control in run
+`40999023767`, job `123878821334`. The first cell resumes all 2,048 exact
+reliable 4 KiB packets with no rejection, closure or remaining sender debt.
+The next setup times out waiting for actual SCTP receive-credit refusal,
+before callback resume. This differs from #1264's original terminal-event
+failure. The original timeout cannot locate send admission or transport progress.
+
+The helper now retains the completed send count, payload generation, packet
+size and last transport snapshot on timeout. Snapshot sampling keeps its existing
+bounded wait and partial-result markers. The 15-second setup bound, all 2,048
+packets, receive-refusal precondition, receive limits, exact reliable checks,
+offer roles and fresh-link controls remain unchanged. This adds diagnostic
+evidence; it does not repair a confirmed production defect.
+
+The instrumented local single-test control passes all four cells in 18.27
+seconds. A four-thread control passes all 11 Godot profile tests in 28.03
+seconds. Its source SHA-256 is
+`9a142560e89f17db6da5906324b48306f32eb70163f59e24e05ad3989f2f121c`.
+Strict native all-target Clippy passes. These native/native controls do not
+explain the hosted timeout, #1264's terminal event or #1244's historical Godot
+prefix loss. All three issues remain open; no attempt or original failure is
+removed from the evidence.
