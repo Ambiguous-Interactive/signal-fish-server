@@ -11675,3 +11675,79 @@ receiver snapshot after a timeout. `timeout_snapshot` is a post-timeout sample;
 it does not prove transport state at the deadline. The shared helper also keeps
 its last in-budget snapshot. Success deadlines and exact receipt requirements
 remain unchanged; only failure reporting adds the existing bounded snapshot wait.
+
+### F214 — Repeated public Room readiness retains duplicate entries (#1320)
+
+Baseline `6ec4f9ab`, A08/A18, under #826. A public Rust `Room` can carry a
+restored ready list with duplicate member IDs. `set_player_ready(id, true)`
+accepts the call but leaves those duplicates. Exact readiness stays false and
+`finalize_game` refuses. A separate list-only repair leaves `last_activity`
+unchanged when the member flag already matches the request. No live socket
+failure is established; normal service transitions already keep this list
+consistent.
+
+Both original-source controls fail. The repeated-readiness history checks two
+ready members with interleaved duplicates. Each accepted call repairs only its
+member's entries, preserves peer order, and allows finalization after both
+members are repaired. The 16-case table covers flags, zero through three list
+copies, ready/unready requests, activity, repetition, absent IDs and finalized
+refusals. The repair keeps the first matching entry for a ready member and
+removes all matching entries for an unready member. A changed flag or list
+renews activity. Consistent calls and refusals preserve activity.
+
+The Rust client manifest at `da8f2d16` has no server-crate dependency. The .NET
+SDK at `e467c871` is an independent C# project. The Godot plugin at `1ad5ff97`
+uses its own GDScript protocol client; its native smoke fixture imports server
+ICE and player-ID types but does not call `Room::set_player_ready`. None of the
+three clients calls this helper. Wire fields, normal service readiness and
+migration requirements do not change. All three clients are unaffected. The
+wider #826 campaign remains open.
+
+### Recipient-grouped stream storage (#636, #775)
+
+Baseline `6ec4f9ab`. The oracle stored a recipient name in every arrival and
+gap-stream tree key. It now keeps one recipient key and a sorted vector of
+sender/epoch entries per recipient. The initial vector reserves the ordinary
+room's peer count; additional epochs and malformed foreign senders remain
+observable and can grow it. Binary search preserves exact keys and first-failure
+order. Remaining entries keep their existing lifetime through the recipient pass,
+including malformed repeated roster rows. No raw event, offered send, receipt, gap, replay check or verdict is removed.
+
+A 16-player control compares complete reliable and all-gap summaries at 16 and
+999 rooms. Each sender offers one measured send; all 240 recipient obligations
+per room are retained. Fresh processes use the instrumented system allocator
+only around `summarize`. The unchanged fixture and serialized summary hashes
+compare the original flat tree with the final vector implementation.
+
+| Rooms | Contract | Allocations before / after | Allocated bytes before / after |
+| --- | --- | --- | --- |
+| 16 | Reliable | 2,224 / 1,930 | 1,339,512 / 963,912 |
+| 999 | Reliable | 137,871 / 119,405 | 82,350,090 / 58,785,610 |
+| 16 | All-gap latest | 1,708 / 1,120 | 1,454,448 / 850,416 |
+| 999 | All-gap latest | 105,884 / 68,952 | 89,817,658 / 51,914,306 |
+
+The 999-room reliable JSON has 6,668,621 bytes and SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
+The all-gap JSON has 3,983,700 bytes and SHA-256
+`f0a5843286e56ccbbc4946246ad4b042e964c187b0dcec46d831dd5e22c01e4c`.
+All four complete hashes match. Retained allocated-minus-freed summary bytes
+also match: 13,143,082 for reliable and 2,401,834 for all-gap at 999 rooms.
+These are cumulative allocation and retained-summary measurements, not
+whole-run peak memory, elapsed-time or throughput claims.
+
+A rejected recipient-grouped tree increases allocations and bytes. Its
+16-room all-gap case grows from 1,708 to 2,144 allocations and from 1,454,448
+to 1,624,560 bytes. The final implementation uses vectors instead. The independent
+flat-map control retains empty, prefix-related and Unicode names, epoch zero,
+maximum epochs, reverse insertion, sender ranges and partial removals. Existing
+replay and negative controls still validate duplicate, ordering, missing,
+misroute, opaque, gap and churn histories. The broad campaigns remain open;
+this does not qualify the planned ten-minute C3 workload.
+
+PR review also identified an older standalone arrival-state profile that still
+used numeric flat-tree keys. It now defaults to the actual recipient vectors
+and inserts through `stream_entry`, with shared string fixtures allocated
+before timing. `CAPACITY_ARRIVAL_PROBE_FLAT_REFERENCE=1` retains an explicit
+flat-tree comparison with the same string keys. Both modes check the full
+stream count and exact unique-arrival total. Their retained RSS includes the
+name fixture and process state; it is separate from the allocator results above.

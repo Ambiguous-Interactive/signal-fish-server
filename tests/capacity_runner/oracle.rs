@@ -2108,7 +2108,7 @@ pub fn summarize(
     // Validate arrivals once, retaining exact compact coverage per stream.
     // Raw records remain unchanged for replay and latency accounting.
     let mut unknown_recipients = Category::default();
-    let mut arrivals: BTreeMap<ArrivalKey<'_>, ArrivalEvidence<'_>> = BTreeMap::new();
+    let mut arrivals: RecipientStreams<ArrivalEvidence<'_>> = BTreeMap::new();
     for receipt in &records.receipts {
         let recipient = receipt.recipient.as_str();
         let sender = receipt.sender.as_str();
@@ -2122,28 +2122,29 @@ pub fn summarize(
             });
             continue;
         }
-        let stream = arrivals
-            .entry((recipient, sender, epoch))
-            .or_insert_with(|| {
-                let contract = if opaque_senders.contains(sender)
-                    || recipient == sender
-                    || !room_of.contains_key(sender)
-                    || room_of.get(sender) != room_of.get(recipient)
-                {
-                    None
-                } else {
-                    let view = views.get(recipient).expect("roster peer has a churn view");
-                    let stream_key = (receipt.sender.as_str(), epoch);
-                    Some(ArrivalContract {
-                        closed_after: view.closed_at.get(&stream_key),
-                        floor: view.floors.get(&stream_key),
-                    })
-                };
-                ArrivalEvidence {
-                    contract,
-                    ..ArrivalEvidence::default()
-                }
-            });
+        let streams = arrivals.entry(recipient).or_insert_with(|| {
+            Vec::with_capacity(members_of_room[&room_of[recipient]].len().saturating_sub(1))
+        });
+        let stream = stream_entry(streams, (sender, epoch), || {
+            let contract = if opaque_senders.contains(sender)
+                || recipient == sender
+                || !room_of.contains_key(sender)
+                || room_of.get(sender) != room_of.get(recipient)
+            {
+                None
+            } else {
+                let view = views.get(recipient).expect("roster peer has a churn view");
+                let stream_key = (receipt.sender.as_str(), epoch);
+                Some(ArrivalContract {
+                    closed_after: view.closed_at.get(&stream_key),
+                    floor: view.floors.get(&stream_key),
+                })
+            };
+            ArrivalEvidence {
+                contract,
+                ..ArrivalEvidence::default()
+            }
+        });
         // Opaque leaks still owe overlap, duplicate, and order evidence.
         stream.observe(receipt.server_seq);
         let Some(contract) = stream.contract else {
@@ -2193,7 +2194,7 @@ pub fn summarize(
         }
     };
     let mut invalid_gaps = GapViolations::default();
-    let mut gap_streams: BTreeMap<ArrivalKey<'_>, GapStreamEvidence> = BTreeMap::new();
+    let mut gap_streams: RecipientStreams<GapStreamEvidence> = BTreeMap::new();
     for gap in &records.gaps {
         let mut detail: Option<String> = None;
         // The experiment's cross-format pair (opaque sender -> any co-room
@@ -2250,21 +2251,25 @@ pub fn summarize(
         }
         let recipient = gap.recipient.as_str();
         let sender = gap.sender.as_str();
-        let gap_stream = gap_streams
-            .entry((recipient, sender, gap.epoch))
-            .or_insert_with(|| {
-                // Every observed report must fit the sender's recorded epoch,
-                // including streams whose completeness obligation has ended.
-                let total_owed = blocks
-                    .get(&(sender, gap.epoch))
-                    .map_or(0, |block| count_u64(block.len()));
-                GapStreamEvidence {
-                    total_owed,
-                    ..GapStreamEvidence::default()
-                }
-            });
+        let streams = gap_streams.entry(recipient).or_insert_with(|| {
+            Vec::with_capacity(members_of_room[&room_of[recipient]].len().saturating_sub(1))
+        });
+        let gap_stream = stream_entry(streams, (sender, gap.epoch), || {
+            // Every observed report must fit the sender's recorded epoch,
+            // including streams whose completeness obligation has ended.
+            let total_owed = blocks
+                .get(&(sender, gap.epoch))
+                .map_or(0, |block| count_u64(block.len()));
+            GapStreamEvidence {
+                total_owed,
+                ..GapStreamEvidence::default()
+            }
+        });
         let total_owed = gap_stream.total_owed;
-        let stream = arrivals.entry((recipient, sender, gap.epoch)).or_default();
+        let streams = arrivals.entry(recipient).or_insert_with(|| {
+            Vec::with_capacity(members_of_room[&room_of[recipient]].len().saturating_sub(1))
+        });
+        let stream = stream_entry(streams, (sender, gap.epoch), ArrivalEvidence::default);
         // Receipts are complete before this pass. Insert gaps directly into
         // their compact coverage, without retaining one pointer per report.
         if gap.to_seq > total_owed {
@@ -2330,7 +2335,7 @@ pub fn summarize(
             The arrival range sorts by sender, then epoch. Fold adjacent epochs
             without a second tree, then bulk-build the retained outcome map.
         */
-        for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
+        for ((sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
             if stream.total() == 0 {
                 continue;
             }
@@ -2391,9 +2396,7 @@ pub fn summarize(
         {
             // Keep roster sender order for the first offending key, including
             // epochs that no longer owe completeness or were never adopted.
-            for ((_, _, epoch), stream) in arrivals
-                .range((recipient.as_str(), sender, 0)..=(recipient.as_str(), sender, u32::MAX))
-            {
+            for ((_, epoch), stream) in sender_arrivals(&arrivals, recipient, sender) {
                 if let Some(violations) = stream.violations.as_deref() {
                     outcome.duplicates += violations.duplicates.count;
                     violations
@@ -2410,7 +2413,9 @@ pub fn summarize(
                 continue;
             };
             for epoch in epochs.iter() {
-                let gaps = gap_streams.remove(&(recipient.as_str(), sender, *epoch));
+                let gaps = gap_streams
+                    .get_mut(recipient.as_str())
+                    .and_then(|streams| remove_stream(streams, (sender, *epoch)));
                 if let Some(invalid) = gaps.as_ref().and_then(|gaps| gaps.invalid.as_deref()) {
                     invalid_gaps.count += invalid.count;
                     if invalid_gaps.first.is_none() {
@@ -2434,7 +2439,8 @@ pub fn summarize(
                 };
                 let total_owed = count_u64(block.len());
                 let arrival = arrivals
-                    .remove(&(recipient.as_str(), sender, *epoch))
+                    .get_mut(recipient.as_str())
+                    .and_then(|streams| remove_stream(streams, (sender, *epoch)))
                     .unwrap_or_default();
                 // The stream's rejoin floor: from this instant on, every
                 // sequence at or below the snapshot tail is not owed (the
@@ -2702,17 +2708,62 @@ struct ArrivalContract<'a> {
     floor: Option<&'a (u64, u64, bool)>,
 }
 
-type ArrivalKey<'a> = (&'a str, &'a str, u32);
+type StreamKey<'a> = (&'a str, u32);
+type StreamEntries<'a, Evidence> = Vec<(StreamKey<'a>, Evidence)>;
+type RecipientStreams<'a, Evidence> = BTreeMap<&'a str, StreamEntries<'a, Evidence>>;
 
-/// Seek directly to one recipient's streams. The empty sender and epoch zero
-/// include malformed names and epochs, which must remain delivery evidence.
+/// Insert a stream once, preserving sender and epoch order for exact first failures.
+fn stream_entry<'map, 'records, Evidence>(
+    streams: &'map mut StreamEntries<'records, Evidence>,
+    key: StreamKey<'records>,
+    create: impl FnOnce() -> Evidence,
+) -> &'map mut Evidence {
+    let index = match streams.binary_search_by_key(&key, |(key, _)| *key) {
+        Ok(index) => index,
+        Err(index) => {
+            streams.insert(index, (key, create()));
+            index
+        }
+    };
+    &mut streams[index].1
+}
+
+/// Remove one exact sender/epoch entry without changing the remaining order.
+fn remove_stream<Evidence>(
+    streams: &mut StreamEntries<'_, Evidence>,
+    key: StreamKey<'_>,
+) -> Option<Evidence> {
+    let index = streams.binary_search_by_key(&key, |(key, _)| *key).ok()?;
+    Some(streams.remove(index).1)
+}
+
+/// Borrow one recipient's sorted streams without repeating its name in every key.
 fn recipient_arrivals<'map, 'records, 'view>(
-    arrivals: &'map BTreeMap<ArrivalKey<'records>, ArrivalEvidence<'view>>,
-    recipient: &'records str,
-) -> impl Iterator<Item = (&'map ArrivalKey<'records>, &'map ArrivalEvidence<'view>)> {
+    arrivals: &'map RecipientStreams<'records, ArrivalEvidence<'view>>,
+    recipient: &str,
+) -> impl Iterator<Item = (&'map StreamKey<'records>, &'map ArrivalEvidence<'view>)> {
     arrivals
-        .range((recipient, "", 0)..)
-        .take_while(move |((name, _, _), _)| *name == recipient)
+        .get(recipient)
+        .into_iter()
+        .flat_map(|streams| streams.iter())
+        .map(|(key, stream)| (key, stream))
+}
+
+/// Seek one sender's epochs without scanning other room members.
+fn sender_arrivals<'map, 'records, 'view>(
+    arrivals: &'map RecipientStreams<'records, ArrivalEvidence<'view>>,
+    recipient: &str,
+    sender: &'map str,
+) -> impl Iterator<Item = (&'map StreamKey<'records>, &'map ArrivalEvidence<'view>)> {
+    arrivals
+        .get(recipient)
+        .into_iter()
+        .flat_map(move |streams| {
+            let start = streams.partition_point(|(key, _)| *key < (sender, 0));
+            let end = streams.partition_point(|(key, _)| *key <= (sender, u32::MAX));
+            streams[start..end].iter()
+        })
+        .map(|(key, stream)| (key, stream))
 }
 
 /// One gap-report accumulator per stream, independent of report count.
@@ -5786,54 +5837,73 @@ mod coverage_tests {
         std::hint::black_box(sent);
     }
 
-    // #636: recipient lookup must retain exact stream order and all malformed
-    // evidence while avoiding a scan of other recipients' streams.
+    /// #636: recipient and sender ranges match a flat index for malformed names and epochs.
     #[test]
     fn recipient_ranges_match_independent_full_scan() {
         let recipients = ["", "a", "a\0", "a0", "a1", "z", "未知", "\u{10ffff}"];
         let senders = ["", "a", "unknown", "未知", "\u{10ffff}"];
         let epochs = [0, 1, 2, u32::MAX];
-        let mut arrivals = BTreeMap::new();
-        for (index, recipient) in recipients.iter().enumerate().rev() {
+        let mut arrivals = RecipientStreams::new();
+        let mut reference = BTreeMap::new();
+        for recipient in recipients.into_iter().rev() {
             for sender in senders.into_iter().rev() {
                 for epoch in epochs.into_iter().rev() {
                     let mut stream = ArrivalEvidence::default();
                     for seq in [u64::MAX, 0, 1, 1, 0] {
                         stream.observe(seq);
                     }
-                    arrivals.insert((*recipient, sender, epoch), stream);
+                    reference.insert((recipient, sender, epoch), stream.unique);
+                    *stream_entry(
+                        arrivals.entry(recipient).or_default(),
+                        (sender, epoch),
+                        ArrivalEvidence::default,
+                    ) = stream;
                 }
             }
-            // Compare after every insertion group, not just a full key space.
-            for recipient in recipients.into_iter().chain(["absent", "a00", "未知x"]) {
-                let expected = arrivals
+            for query in recipients.into_iter().chain(["absent", "a00", "未知x"]) {
+                let expected: Vec<_> = reference
                     .iter()
-                    .filter(|((name, _, _), _)| *name == recipient)
-                    .map(|(key, stream)| (*key, std::ptr::from_ref(stream)))
-                    .collect::<Vec<_>>();
-                let actual = recipient_arrivals(&arrivals, recipient)
-                    .map(|(key, stream)| (*key, std::ptr::from_ref(stream)))
-                    .collect::<Vec<_>>();
-                assert_eq!(actual, expected, "recipient={recipient:?}, group={index}");
+                    .filter(|((name, _, _), _)| *name == query)
+                    .map(|((_, sender, epoch), count)| ((*sender, *epoch), *count))
+                    .collect();
+                let actual: Vec<_> = recipient_arrivals(&arrivals, query)
+                    .map(|(key, stream)| (*key, stream.unique))
+                    .collect();
+                assert_eq!(actual, expected, "recipient={query:?}");
+                for sender in senders.into_iter().chain(["absent", "a00", "未知x"]) {
+                    let expected: Vec<_> = reference
+                        .iter()
+                        .filter(|((name, source, _), _)| *name == query && *source == sender)
+                        .map(|((_, source, epoch), count)| ((*source, *epoch), *count))
+                        .collect();
+                    let actual: Vec<_> = sender_arrivals(&arrivals, query, sender)
+                        .map(|(key, stream)| (*key, stream.unique))
+                        .collect();
+                    assert_eq!(actual, expected, "recipient={query:?}, sender={sender:?}");
+                }
             }
         }
         assert_eq!(recipient_arrivals(&BTreeMap::new(), "").count(), 0);
-        // Summarization removes owed streams as recipients are completed.
-        // Retained stale and foreign streams must not affect the next lookup.
-        arrivals.retain(|(_, sender, epoch), _| *sender == "unknown" || *epoch == 0);
         for recipient in recipients {
-            let expected = arrivals
+            for sender in senders {
+                for epoch in epochs {
+                    if sender != "unknown" && epoch != 0 {
+                        let actual =
+                            remove_stream(arrivals.get_mut(recipient).unwrap(), (sender, epoch));
+                        let expected = reference.remove(&(recipient, sender, epoch));
+                        assert_eq!(actual.map(|stream| stream.unique), expected);
+                    }
+                }
+            }
+            let expected: Vec<_> = reference
                 .keys()
                 .filter(|(name, _, _)| *name == recipient)
-                .copied()
-                .collect::<Vec<_>>();
-            assert_eq!(
-                recipient_arrivals(&arrivals, recipient)
-                    .map(|(key, _)| *key)
-                    .collect::<Vec<_>>(),
-                expected,
-                "remaining recipient={recipient:?}"
-            );
+                .map(|(_, sender, epoch)| (*sender, *epoch))
+                .collect();
+            let actual: Vec<_> = recipient_arrivals(&arrivals, recipient)
+                .map(|(key, _)| *key)
+                .collect();
+            assert_eq!(actual, expected);
         }
     }
 
@@ -6425,6 +6495,7 @@ mod coverage_tests {
         }
     }
 
+    /// Compare arrival storage with identical names, counts and violations in each index.
     #[test]
     #[ignore = "isolated arrival-state memory profile; run in a fresh process"]
     fn generator_arrival_state_memory_profile() {
@@ -6435,11 +6506,16 @@ mod coverage_tests {
         assert!((1..=999).contains(&rooms));
         let invalid = std::env::var_os("CAPACITY_ARRIVAL_PROBE_INVALID").is_some();
         let fragmented = std::env::var_os("CAPACITY_ARRIVAL_PROBE_FRAGMENTED").is_some();
+        let flat_reference = std::env::var_os("CAPACITY_ARRIVAL_PROBE_FLAT_REFERENCE").is_some();
+        let names: Vec<Vec<String>> = (0..rooms)
+            .map(|room| (0..16).map(|player| format!("r{room}p{player}")).collect())
+            .collect();
         let started = std::time::Instant::now();
-        let mut arrivals = BTreeMap::new();
-        for room in 0..rooms {
-            for recipient in 0_u8..16 {
-                for sender in 0_u8..16 {
+        let mut reference = BTreeMap::new();
+        let mut arrivals = RecipientStreams::new();
+        for members in &names {
+            for recipient in members {
+                for sender in members {
                     if recipient == sender {
                         continue;
                     }
@@ -6453,11 +6529,37 @@ mod coverage_tests {
                         }
                         stream.violations_mut().misrouted.record(0);
                     }
-                    arrivals.insert((room, recipient, sender), stream);
+                    if flat_reference {
+                        reference.insert((recipient.as_str(), sender.as_str(), 1_u32), stream);
+                    } else {
+                        let streams = arrivals
+                            .entry(recipient.as_str())
+                            .or_insert_with(|| Vec::with_capacity(members.len().saturating_sub(1)));
+                        *stream_entry(streams, (sender.as_str(), 1), ArrivalEvidence::default) =
+                            stream;
+                    }
                 }
             }
         }
-        let unique: u64 = arrivals.values().map(|stream| stream.unique).sum();
+        let retained_rss_bytes = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let elapsed_us = started.elapsed().as_micros();
+        let (streams, unique) = if flat_reference {
+            (
+                reference.len(),
+                reference.values().map(|stream| stream.unique).sum::<u64>(),
+            )
+        } else {
+            assert_eq!(count_u64(arrivals.len()), u64::from(rooms) * 16);
+            (
+                arrivals.values().map(Vec::len).sum::<usize>(),
+                arrivals
+                    .values()
+                    .flat_map(|streams| streams.iter())
+                    .map(|(_, stream)| stream.unique)
+                    .sum::<u64>(),
+            )
+        };
+        assert_eq!(count_u64(streams), u64::from(rooms) * 16 * 15);
         assert_eq!(
             unique,
             u64::from(rooms) * 16 * 15 * (100 + u64::from(invalid))
@@ -6465,13 +6567,14 @@ mod coverage_tests {
         println!(
             "ARRIVAL_STATE_PROFILE {}",
             serde_json::json!({
-                "rooms": rooms, "streams": arrivals.len(), "invalid": invalid, "fragmented": fragmented,
+                "index": if flat_reference { "flat_reference" } else { "recipient_vectors" },
+                "rooms": rooms, "streams": streams, "invalid": invalid, "fragmented": fragmented,
                 "stream_bytes": std::mem::size_of::<ArrivalEvidence<'_>>(),
-                "retained_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
-                "unique": unique, "elapsed_us": started.elapsed().as_micros(),
+                "retained_rss_bytes": retained_rss_bytes,
+                "unique": unique, "elapsed_us": elapsed_us,
             })
         );
-        std::hint::black_box(arrivals);
+        std::hint::black_box((arrivals, reference));
     }
 
     #[test]
