@@ -32903,6 +32903,36 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let runner = read_file(&root.join("scripts/run-fortress-wasm-interop.sh"));
     let deny = read_file(&root.join("clients/fortress-wasm/deny.toml"));
     let workflow = read_live_file(&root.join(".github/workflows/fortress-wasm-interop.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("valid WASM workflow");
+    let uploads = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("browser-interop"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("WASM steps");
+    let success_evidence = uploads
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Upload control reports")
+        })
+        .expect("successful controls must retain reports for matched wait analysis (#1312)");
+    assert_eq!(
+        success_evidence.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("success()")
+    );
+    let options = success_evidence
+        .as_mapping_get("with")
+        .expect("report upload options");
+    assert_eq!(
+        options.as_mapping_get("path").and_then(Yaml::as_str),
+        Some("clients/fortress-wasm/artifacts/")
+    );
+    assert_eq!(
+        options
+            .as_mapping_get("retention-days")
+            .and_then(Yaml::as_integer),
+        Some(14)
+    );
 
     for dependency in [
         "fortress-rollback = \"=0.13.0\"",

@@ -84,7 +84,7 @@ impl EnhancedGameServer {
                 continue;
             }
 
-            if matches!(self.database.get_room_by_id(&room_id).await, Ok(None)) {
+            if matches!(self.database.room_exists(&room_id).await, Ok(false)) {
                 if self
                     .pending_durable_player_detaches
                     .remove(&(room_id, player_id))
@@ -146,9 +146,9 @@ impl EnhancedGameServer {
             .collect();
         let mut removed = 0usize;
         for room_id in room_ids {
-            match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
+            match self.database.room_exists(&room_id).await {
+                Ok(true) => {}
+                Ok(false) => {
                     if self.room_applications.remove(&room_id).is_some() {
                         removed = removed.saturating_add(1);
                     }
@@ -224,9 +224,9 @@ impl EnhancedGameServer {
         let room_ids = self.room_coordinator.ready_player_room_ids().await;
         let mut removed = 0usize;
         for room_id in room_ids {
-            match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
+            match self.database.room_exists(&room_id).await {
+                Ok(true) => {}
+                Ok(false) => {
                     if self
                         .room_coordinator
                         .clear_ready_players(&room_id)
@@ -328,9 +328,9 @@ impl EnhancedGameServer {
 
         let mut cleaned = 0usize;
         for (room_id, player_ids) in candidates {
-            match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(_)) => continue,
-                Ok(None) => {}
+            match self.database.room_exists(&room_id).await {
+                Ok(true) => continue,
+                Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(%room_id, %error, "Failed to verify assigned room during cleanup; retaining clients");
                     continue;
@@ -352,6 +352,7 @@ impl EnhancedGameServer {
         cleaned
     }
 
+    /// Revalidate the assigned room under the lifecycle gate before closing its client.
     async fn cleanup_client_in_missing_room(
         self: &Arc<Self>,
         player_id: PlayerId,
@@ -377,9 +378,9 @@ impl EnhancedGameServer {
         // The scan above is only a hint. Revalidate under the same lifecycle
         // gate used by join, leave, reconnect, and unregister so a client that
         // moved to a live room cannot be closed from a stale cleanup snapshot.
-        match self.database.get_room_by_id(&expected_room).await {
-            Ok(Some(_)) => return false,
-            Ok(None) => {}
+        match self.database.room_exists(&expected_room).await {
+            Ok(true) => return false,
+            Ok(false) => {}
             Err(error) => {
                 tracing::warn!(%effective_player_id, %expected_room, %error, "Failed final missing-room cleanup check; retaining client");
                 return false;

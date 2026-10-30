@@ -26,7 +26,7 @@ const reportKeys = [
   "worker_count", "callback_count", "poll_count", "active_callback_count", "callback_intervals",
   "acceptance_thresholds", "max_admissions_per_callback", "current_frame", "confirmed_frame",
   "game_frame", "game_checksum", "frames_advanced", "rollback_count", "max_rollback_depth",
-  "stall_count", "wait_recommendations", "wait_observations", "confirmation_lag_current", "confirmation_lag_max",
+  "stall_count", "wait_recommendations", "wait_observations", "wait_generation_observations", "confirmation_lag_current", "confirmation_lag_max",
   "checksums_mismatched", "checksums_compared", "checksums_matched", "events_discarded_total",
   "client_game_data_sent", "client_game_data_sent_during_run", "client_game_data_received",
   "client_messages_undecodable", "final_pipeline_queue_depth", "peak_pipeline_queue_depth",
@@ -727,6 +727,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assert(report.target === "wasm32-unknown-emscripten" && report.target_os === "emscripten", `${name}: native fallback detected`);
     assert(report.godot_threads === false && report.worker_count === 0, `${name}: Rust thread/worker claim failed`);
     validateWaitObservations(report, name);
+    validateWaitGenerationObservations(report, name);
     assert(report.callback_count === report.poll_count, `${name}: poll count differs from genuine Rust callbacks`);
     assertExactKeys(
       report.callback_intervals,
@@ -936,7 +937,7 @@ function negativeControlDrainedItsDrivenBudget(report) {
     report.client_game_data_sent_during_run * 10 >= drivenBudget * 9;
 }
 
-/** Validate bounded event evidence independently of the zero-wait health gate. */
+/** Check bounded wait counts, fields and callback order without changing health limits. */
 function validateWaitObservations(report, name) {
   const trace = report.wait_observations;
   assertExactKeys(trace, ["events", "omitted"], `${name} wait observations`);
@@ -951,7 +952,7 @@ function validateWaitObservations(report, name) {
   let previousElapsed = 0;
   for (const event of trace.events) {
     assertExactKeys(event, [
-      "elapsed_us", "callback", "poll", "callback_interval_us", "remote_poll_us",
+      "elapsed_us", "callback", "poll", "callback_interval_us", "remote_poll_us", "advance_us", "frame_before_advance",
       "frame_before_poll", "current_frame", "confirmed_frame", "frames_ahead",
       "local_frames_behind", "remote_frames_behind", "skip_frames", "relay_received",
       "relay_queue_depth",
@@ -962,6 +963,8 @@ function validateWaitObservations(report, name) {
     for (const key of ["frame_before_poll", "current_frame", "confirmed_frame", "frames_ahead"]) {
       assert(Number.isSafeInteger(event[key]), `${name}: invalid wait ${key}`);
     }
+    assert(event.advance_us === null || (Number.isSafeInteger(event.advance_us) && event.advance_us >= 0), `${name}: invalid advance duration`);
+    assert(event.frame_before_advance === null || Number.isSafeInteger(event.frame_before_advance), `${name}: invalid advance frame`);
     assert(event.callback_interval_us === null ||
       (Number.isSafeInteger(event.callback_interval_us) && event.callback_interval_us >= 0), `${name}: invalid wait callback interval`);
     for (const key of ["local_frames_behind", "remote_frames_behind"]) {
@@ -976,16 +979,58 @@ function validateWaitObservations(report, name) {
   }
 }
 
+/** Account for every generated recommendation, including events still pending consumption. */
+function validateWaitGenerationObservations(report, name) {
+  const trace = report.wait_generation_observations;
+  validateWaitObservations({ ...report, wait_observations: trace }, `${name} generation`);
+  assert(trace.events.length + trace.omitted === report.wait_recommendations, `${name}: missing wait generations`);
+  for (const event of trace.events) {
+    assert(event.advance_us !== null && event.frame_before_advance !== null, `${name}: missing advance context`);
+    assert(event.skip_frames === event.frames_ahead, `${name}: wait generation advantage`);
+  }
+  const consumed = report.wait_observations.events;
+  for (let index = 0; index < Math.min(consumed.length, trace.events.length); index += 1) {
+    const generation = trace.events[index];
+    const consumption = consumed[index];
+    assert(generation.callback < consumption.callback && generation.elapsed_us <= consumption.elapsed_us,
+      `${name}: wait consumed before generation`);
+    assert(generation.skip_frames === consumption.skip_frames, `${name}: wait skip changed`);
+  }
+}
+
 /** Reject trace overflow and invalid callback identities without changing health limits. */
 function runWaitObservationSelfTests() {
   const event = {
     elapsed_us: 100, callback: 2, poll: 2, callback_interval_us: 17_000,
-    remote_poll_us: 42, frame_before_poll: 100, current_frame: 100,
+    remote_poll_us: 42, advance_us: null, frame_before_advance: null, frame_before_poll: 100, current_frame: 100,
     confirmed_frame: 96, frames_ahead: 3, local_frames_behind: -3,
     remote_frames_behind: 3, skip_frames: 3, relay_received: 123, relay_queue_depth: 2,
   };
   const valid = { callback_count: 2, poll_count: 2, wait_recommendations: 1, wait_observations: { events: [event], omitted: 0 } };
   validateWaitObservations(valid, "valid trace");
+  const generation = { ...event, callback: 1, poll: 1, elapsed_us: 90, advance_us: 12, frame_before_advance: 99 };
+  const generated = { ...valid, wait_generation_observations: { events: [generation], omitted: 0 } };
+  validateWaitGenerationObservations(generated, "generated then consumed");
+  validateWaitGenerationObservations({ ...generated, wait_observations: { events: [], omitted: 0 } }, "generated but pending");
+  validateWaitGenerationObservations({ ...generated, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 },
+    wait_generation_observations: { events: [], omitted: 0 } }, "no generated waits");
+  validateWaitGenerationObservations({ ...generated, wait_recommendations: 71, wait_observations: { events: [], omitted: 0 },
+    wait_generation_observations: { events: Array(64).fill(generation), omitted: 7 } }, "bounded generation overflow");
+  for (const changed of [
+    { events: [], omitted: 0 },
+    { events: [{ ...generation, advance_us: null }], omitted: 0 },
+    { events: [{ ...generation, frame_before_advance: null }], omitted: 0 },
+    { events: [{ ...generation, skip_frames: 2 }], omitted: 0 },
+    { events: [{ ...generation, callback: 2, poll: 2 }], omitted: 0 },
+    { events: [{ ...generation, elapsed_us: 101 }], omitted: 0 },
+    { events: [{ ...generation, skip_frames: 2, frames_ahead: 2 }], omitted: 0 },
+  ]) {
+    let rejected = false;
+    try { validateWaitGenerationObservations({ ...generated, wait_generation_observations: changed }, "invalid generation"); }
+    catch { rejected = true; }
+    assert(rejected, `invalid wait generation passed: ${JSON.stringify(changed)}`);
+  }
+
   validateWaitObservations({ ...valid, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 } }, "no waits");
   validateWaitObservations({ ...valid, callback_count: 0, poll_count: 0, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 } }, "initial counters");
   validateWaitObservations({ ...valid, wait_observations: { events: [], omitted: 0 } }, "pending event");
@@ -1018,10 +1063,10 @@ function runWaitObservationSelfTests() {
   for (const key of [
     "elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames",
     "relay_received", "relay_queue_depth", "frame_before_poll", "current_frame",
-    "confirmed_frame", "frames_ahead", "callback_interval_us", "local_frames_behind", "remote_frames_behind",
+    "confirmed_frame", "frames_ahead", "callback_interval_us", "local_frames_behind", "remote_frames_behind", "advance_us", "frame_before_advance",
   ]) {
-    const nullable = ["callback_interval_us", "local_frames_behind", "remote_frames_behind"].includes(key);
-    const unsigned = ["elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames", "relay_received", "relay_queue_depth", "callback_interval_us"].includes(key);
+    const nullable = ["callback_interval_us", "local_frames_behind", "remote_frames_behind", "advance_us", "frame_before_advance"].includes(key);
+    const unsigned = ["elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames", "relay_received", "relay_queue_depth", "callback_interval_us", "advance_us"].includes(key);
     for (const value of [...invalidNumbers.filter((value) => !(nullable && value === null)), ...(unsigned ? [-1] : [])]) {
       invalidReports.push({ ...valid, wait_observations: { events: [{ ...event, [key]: value }], omitted: 0 } });
     }

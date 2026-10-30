@@ -963,9 +963,9 @@ impl EnhancedGameServer {
 
         let mut removed = 0usize;
         for room_id in room_ids {
-            match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => {
+            match self.database.room_exists(&room_id).await {
+                Ok(true) => {}
+                Ok(false) => {
                     if self.active_session_plans.remove(&room_id).is_some() {
                         removed = removed.saturating_add(1);
                     }

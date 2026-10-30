@@ -159,6 +159,14 @@ jobs:
         env:
           INSTALL_PLAYWRIGHT_DEPS: "1"
         run: bash scripts/run-fortress-wasm-interop.sh
+      - name: Upload control reports
+        if: success()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: fortress-wasm-${{ matrix.browser }}-controls-${{ github.run_id }}
+          path: clients/fortress-wasm/artifacts/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@v7.0.2

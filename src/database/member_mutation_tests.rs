@@ -229,3 +229,35 @@ async fn cancelled_player_metadata_preserves_room_and_clock() {
         assert!(matches!(liveness[&room.id], RoomLiveness::AgedFor(_)));
     }
 }
+
+/// #636: existence reads include pending rows and follow deletion without snapshots.
+#[tokio::test]
+async fn room_existence_tracks_pending_published_and_deleted_rows() {
+    let db = InMemoryDatabase::new();
+    assert!(!db.room_exists(&Uuid::nil()).await.unwrap());
+    let room = db
+        .create_pending_room_classified(
+            "existence-雪".into(),
+            Some("EXISTS".into()),
+            4,
+            true,
+            Uuid::new_v4(),
+            "relay".into(),
+            "default".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(db.room_exists(&room.id).await.unwrap());
+    assert!(!db.is_room_published(&room.id).await.unwrap());
+    db.publish_room(&room.id).await.unwrap();
+    assert!(db.room_exists(&room.id).await.unwrap());
+    assert!(db.is_room_published(&room.id).await.unwrap());
+    db.fail_get_room_by_id_for_test(true);
+    assert!(db.room_exists(&room.id).await.is_err());
+    db.fail_get_room_by_id_for_test(false);
+    assert!(db.delete_room(&room.id).await.unwrap());
+    assert!(!db.room_exists(&room.id).await.unwrap());
+    assert!(!db.room_exists(&Uuid::nil()).await.unwrap());
+}

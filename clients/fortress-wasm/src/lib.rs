@@ -101,7 +101,7 @@ struct CallbackIntervals {
 
 const MAX_WAIT_OBSERVATIONS: usize = 64;
 
-/// State when the callback consumes a Fortress wait event after remote polling.
+/// State captured after polling consumes a wait or after an advance generates one.
 #[derive(Debug, Clone, Serialize)]
 struct WaitObservation {
     elapsed_us: u64,
@@ -109,6 +109,8 @@ struct WaitObservation {
     poll: u64,
     callback_interval_us: Option<u64>,
     remote_poll_us: u64,
+    advance_us: Option<u64>,
+    frame_before_advance: Option<i32>,
     frame_before_poll: i32,
     current_frame: i32,
     confirmed_frame: i32,
@@ -192,6 +194,7 @@ struct Report {
     stall_count: u64,
     wait_recommendations: u64,
     wait_observations: WaitObservations,
+    wait_generation_observations: WaitObservations,
     confirmation_lag_current: u64,
     confirmation_lag_max: u64,
     checksums_mismatched: u64,
@@ -300,6 +303,7 @@ struct Runtime {
     active_callback_count: u64,
     recommended_skips: u32,
     wait_observations: WaitObservations,
+    wait_generation_observations: WaitObservations,
     relay_retries: u64,
     max_admissions_per_callback: u64,
     running_client_sent_baseline: u64,
@@ -318,6 +322,7 @@ struct Runtime {
 }
 
 impl Runtime {
+    /// Validate the browser configuration and create one released-client runtime.
     fn new(config: BrowserConfig) -> Result<Self, String> {
         if config.schema_version != REPORT_SCHEMA_VERSION {
             return Err(format!(
@@ -386,6 +391,7 @@ impl Runtime {
             active_callback_count: 0,
             recommended_skips: 0,
             wait_observations: WaitObservations::default(),
+            wait_generation_observations: WaitObservations::default(),
             relay_retries: 0,
             max_admissions_per_callback: 0,
             running_client_sent_baseline: 0,
@@ -474,6 +480,8 @@ impl Runtime {
                         .last_active_callback_at
                         .map(|previous| duration_us(previous.elapsed())),
                     remote_poll_us,
+                    advance_us: None,
+                    frame_before_advance: None,
                     frame_before_poll,
                     current_frame: fortress.current_frame().as_i32(),
                     confirmed_frame: fortress.confirmed_frame().as_i32(),
@@ -547,9 +555,43 @@ impl Runtime {
                                     )
                                     .map_err(|error| format!("add Fortress input: {error}"))?;
                             }
-                            let requests = fortress
-                                .advance_frame()
-                                .map_err(|error| format!("advance Fortress: {error}"))?;
+                            let waits_before = fortress.metrics().wait_recommendations;
+                            let advance_started = Instant::now();
+                            let requests = fortress.advance_frame();
+                            let advance_finished_at = Instant::now();
+                            let advance_us = duration_us(
+                                advance_finished_at.saturating_duration_since(advance_started),
+                            );
+                            let waits_after = fortress.metrics().wait_recommendations;
+                            if waits_after > waits_before {
+                                let remote_stats = fortress
+                                    .remote_player_handles_iter()
+                                    .next()
+                                    .and_then(|handle| fortress.network_stats(handle).ok());
+                                let mut generation = wait_observation.clone();
+                                generation.elapsed_us = duration_us(
+                                    advance_finished_at
+                                        .saturating_duration_since(self.configured_at),
+                                );
+                                generation.advance_us = Some(advance_us);
+                                generation.frame_before_advance = Some(current);
+                                generation.current_frame = fortress.current_frame().as_i32();
+                                generation.confirmed_frame = fortress.confirmed_frame().as_i32();
+                                generation.frames_ahead = fortress.frames_ahead();
+                                generation.local_frames_behind =
+                                    remote_stats.map(|stats| stats.local_frames_behind);
+                                generation.remote_frames_behind =
+                                    remote_stats.map(|stats| stats.remote_frames_behind);
+                                generation.skip_frames =
+                                    u32::try_from(generation.frames_ahead).unwrap_or(0);
+                                generation.relay_received = self.relay.counters().accepted_inbound;
+                                generation.relay_queue_depth = self.relay.queue_depth();
+                                for _ in waits_before..waits_after {
+                                    self.wait_generation_observations.record(generation.clone());
+                                }
+                            }
+                            let requests =
+                                requests.map_err(|error| format!("advance Fortress: {error}"))?;
                             apply_requests(&mut self.state, requests);
                         }
                     }
@@ -846,7 +888,7 @@ impl Runtime {
         self.room_json_pending.take()
     }
 
-    /// Snapshot runtime identity, delivery ledgers, wait observations and health metrics.
+    /// Snapshot runtime identity, delivery ledgers, both bounded wait traces and health metrics.
     fn report(&self, runtime_error: Option<String>) -> Report {
         let client_stats = self.client.stats();
         let relay_stats = self.relay.counters();
@@ -931,6 +973,7 @@ impl Runtime {
                 .as_ref()
                 .map_or(0, |metrics| metrics.wait_recommendations),
             wait_observations: self.wait_observations.clone(),
+            wait_generation_observations: self.wait_generation_observations.clone(),
             confirmation_lag_current: fortress_metrics
                 .as_ref()
                 .map_or(0, |metrics| metrics.confirmation_lag_current),
@@ -1303,6 +1346,8 @@ mod tests {
                 poll: index as u64 + 1,
                 callback_interval_us: Some(17_000),
                 remote_poll_us: 42,
+                advance_us: Some(100),
+                frame_before_advance: Some(99),
                 frame_before_poll: 100,
                 current_frame: 100,
                 confirmed_frame: 96,
@@ -1325,6 +1370,15 @@ mod tests {
             .unwrap_or_else(|error| panic!("serialize wait observations: {error}"));
         assert_eq!(json["omitted"], 7);
         assert_eq!(json["events"][0]["local_frames_behind"], -3);
+        assert_eq!(json["events"][0]["advance_us"], 100);
+        assert_eq!(json["events"][0]["frame_before_advance"], 99);
+        let mut consumed = observations.events[0].clone();
+        consumed.advance_us = None;
+        consumed.frame_before_advance = None;
+        let consumed = serde_json::to_value(consumed)
+            .unwrap_or_else(|error| panic!("serialize consumed wait: {error}"));
+        assert!(consumed["advance_us"].is_null());
+        assert!(consumed["frame_before_advance"].is_null());
         observations.omitted = u64::MAX;
         let event = observations
             .events

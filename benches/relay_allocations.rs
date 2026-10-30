@@ -640,6 +640,7 @@ fn assert_steady_state_timing_records_do_not_allocate() {
     eprintln!("response_time_tracker steady-state: {stats:?}");
 }
 
+/// Bound room-existence and metric-query allocations across increasing room counts.
 fn assert_database_metrics_reuse_game_names() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -674,6 +675,16 @@ fn assert_database_metrics_reuse_game_names() {
                     .expect("room");
                 room_ids.push(room.id);
             }
+            let region = Region::new(GLOBAL);
+            for room_id in &room_ids {
+                assert!(database.room_exists(room_id).await.expect("room existence"));
+            }
+            assert!(!database.room_exists(&PlayerId::nil()).await.expect("absent room"));
+            let existence = region.change();
+            eprintln!("rooms={room_count} existence={existence:?}");
+            assert_eq!(existence.allocations, room_count + 1, "one async-trait future per existence read");
+            assert_eq!(existence.reallocations, 0);
+
             let region = Region::new(GLOBAL);
             std::hint::black_box(database.get_rooms_by_game().await.expect("game counts"));
             let counts = region.change();
