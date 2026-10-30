@@ -11751,3 +11751,99 @@ before timing. `CAPACITY_ARRIVAL_PROBE_FLAT_REFERENCE=1` retains an explicit
 flat-tree comparison with the same string keys. Both modes check the full
 stream count and exact unique-arrival total. Their retained RSS includes the
 name fixture and process state; it is separate from the allocator results above.
+
+### Player-name comparison qualification (#826, #636)
+
+Baseline `8a889d99`, A08/A18. Room admission normalized the proposed name and
+all compared member names, even when both names were ASCII. ASCII pairs now
+use case-insensitive byte comparison. The first Unicode pair creates the
+proposed name's canonical key once; Unicode pairs retain the existing NFD,
+full case-fold, NFD comparison. Empty rosters need no key.
+
+The qualification compares all 24,649 pairs in a 157-entry corpus against the
+canonical-key reference. It includes every ASCII byte, empty names, sharp-s,
+long-s, Kelvin and Angstrom signs, composed/decomposed Latin and Hangul,
+Greek sigma and combining marks, Turkish I variants, full-width letters and
+CJK. Mixed rooms also check both collisions and a distinct proposed name.
+The comparator is tested separately from the name-character admission rules.
+The existing Unicode 17 and canonical-equivalence controls pass. This is a
+comparison-path qualification, not a new defect or a complete Unicode audit.
+
+An isolated instrumented system allocator measures new ASCII-name checks:
+
+| Existing members | Allocations before / after | Reallocations before / after | Allocated bytes before / after |
+| --- | --- | --- | --- |
+| 0 | 3 / 0 | 4 / 0 | 48 / 0 |
+| 1 | 6 / 0 | 5 / 0 | 72 / 0 |
+| 16 | 51 / 0 | 20 / 0 | 432 / 0 |
+| 64 | 195 / 0 | 68 / 0 | 1,584 / 0 |
+| 255 | 768 / 0 | 724 / 0 | 9,888 / 0 |
+
+The allocation regression fails on the original implementation. The repair
+allocates only the existing error string for an ASCII collision. These are
+allocation counts, not room-join latency or throughput measurements. The
+Rust, .NET and Godot clients need no change: name decisions, error text,
+messages, defaults and ordering remain the same.
+
+### Consumed capacity recipient storage (#775, #636)
+
+Baseline `8a889d99`. Removing the last sender entry did not free its recipient
+vector's capacity. The oracle retained those empty vectors while building the
+owned summary. It now removes each completed recipient's arrival and gap
+entries when roster names are unique. Repeated roster names keep the original
+lifetime, so foreign, closed and otherwise unconsumed evidence remains visible
+to later rows. No raw record or delivery check is removed.
+
+Fresh processes run the same 16-player reliable, all-gap latest and malformed
+zero-sequence controls at 16 and 999 rooms. Each sender offers one measured
+send. The system allocator records cumulative allocations and frees. Live
+allocated bytes are sampled before the recipient loop and after each recipient;
+the table gives the largest sampled increase over the pre-summary live total.
+These samples exclude retained inputs and are not an allocation-by-allocation
+peak, RSS measurement or whole-run memory bound.
+
+| Rooms | Contract | Sampled live bytes before / after |
+| --- | --- | --- |
+| 16 | Reliable | 727,392 / 542,420 |
+| 999 | Reliable | 45,263,402 / 33,688,460 |
+| 16 | All-gap latest | 745,448 / 744,232 |
+| 999 | All-gap latest | 46,387,154 / 46,287,016 |
+| 16 | Invalid reliable | 728,047 / 726,328 |
+| 999 | Invalid reliable | 45,264,254 / 45,196,528 |
+
+All six complete JSON hashes, cumulative allocation totals and retained summary
+bytes match the baseline. At 999 rooms, reliable summary SHA-256 is
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`;
+all-gap is `f0a5843286e56ccbbc4946246ad4b042e964c187b0dcec46d831dd5e22c01e4c`;
+invalid reliable is
+`113cc09bf3f4539a588137379ec40584eea7ae1f96c27f3bba2debb7ab4b37b6`.
+A repeated-roster control preserves two exact foreign-stream violations and
+complete artifact replay; unconditional recipient release fails that control.
+The scoped oracle controls retain missing, duplicate, order, gap, opaque and
+churn checks. The broader campaigns remain open. This does not qualify the
+ten-minute C3 workload or prove a throughput gain.
+
+### Retained stdout reader control (#1290)
+
+Baseline `8a889d99`. A portable `std::io::pipe` control creates exactly two
+parent readers and directs the production native CLI's stdout to the writer.
+It reads `connected`, closes that reader, releases the held authentication
+reply, and reads `authenticated` through the retained reader. That read proves
+the output write succeeded after the first reader closed.
+
+For each runtime, the child stays live through the original eight-second
+exit window while the last reader remains open. The control then closes that
+reader and releases `ProtocolInfo` to cause another output write. The child
+exits with code 3 within the unchanged eight-second bound. Its hard watchdog
+remains 90 seconds; the handshake bound remains 20 seconds. Child stderr is
+drained with bounded retention and included in terminal assertion failures.
+The two-runtime control passes in 16.300 seconds. The existing isolated
+`closed_stdout_fails_held_handshake` passes in 0.169 seconds in the same run.
+
+This establishes an extra reader's ability to mask broken-pipe detection and
+shows prompt failure after the last reader closes and a later write occurs.
+It does not prove temporary reader inheritance in the historical hosted
+failure, exclude an unrelated writer-notification or teardown defect there,
+or repair a production defect. Keep #1290 open for the original parallel
+versus isolated ownership investigation. No output deadline or exit contract
+is relaxed.

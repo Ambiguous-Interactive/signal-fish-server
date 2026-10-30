@@ -2305,6 +2305,7 @@ pub fn summarize(
     let mut summary_sender_names: BTreeMap<&str, ReceiptName> = BTreeMap::new();
     let mut per_recipient = Vec::with_capacity(roster.len());
     let mut received_by_sender: Vec<(&str, u64)> = Vec::new();
+    let unique_recipients = room_of.len() == roster.len();
     for (recipient, room) in roster {
         let view = views
             .get(recipient.as_str())
@@ -2512,6 +2513,10 @@ pub fn summarize(
             })
             .collect();
 
+        if unique_recipients {
+            arrivals.remove(recipient.as_str());
+            gap_streams.remove(recipient.as_str());
+        }
         per_recipient.push(outcome);
     }
 
@@ -3031,6 +3036,63 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    /// Repeated roster rows must retain foreign-stream evidence for every row.
+    #[test]
+    fn repeated_roster_recipients_keep_unconsumed_misroute_evidence() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let mut unexpected = records.receipts[0].clone();
+        unexpected.sender = "foreign-sender".into();
+        let recipient = unexpected.recipient.to_string();
+        records.receipts.push(unexpected);
+        let mut roster = context.roster.clone();
+        let repeated = roster
+            .iter()
+            .find(|(name, _)| name == &recipient)
+            .unwrap()
+            .clone();
+        roster.push(repeated);
+        let summary = summarize(
+            &context.plans,
+            &roster,
+            &records,
+            1_000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        let repeated: Vec<_> = summary
+            .per_recipient
+            .iter()
+            .filter(|outcome| outcome.recipient == recipient)
+            .collect();
+        assert_eq!(repeated.len(), 2);
+        assert!(repeated.iter().all(|outcome| outcome.misrouted == 1));
+        assert!(summary.reasons.iter().any(|reason| matches!(reason,
+            InvalidReason::MisroutedDeliveries { count: 2, first }
+                if first.recipient == recipient && first.sender == "foreign-sender"
+        )));
+        assert!(!summary.valid);
+        let output = tempfile::tempdir().unwrap();
+        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+        let replayed = crate::artifacts::read_records(output.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap(),
+            serde_json::to_value(summarize(
+                &context.plans,
+                &roster,
+                &replayed,
+                1_000,
+                96,
+                DeliveryClass::Reliable,
+                &ChurnPlan::default(),
+                None,
+            ))
+            .unwrap()
+        );
+    }
 
     /// Compare implicit initial epochs with the existing materialized interval path.
     #[test]

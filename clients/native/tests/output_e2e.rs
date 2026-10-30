@@ -232,6 +232,108 @@ async fn closed_stdout_fails_held_handshake() {
     blocked_handshake_output("current", true).await;
 }
 
+/// A second reader keeps stdout writable until it closes and another event is written.
+#[tokio::test]
+#[serial_test::serial(native_output_process)]
+async fn retained_stdout_reader_delays_broken_pipe_until_the_next_write() {
+    async fn read_event(reader: std::io::PipeReader) -> (serde_json::Value, std::io::PipeReader) {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                let mut reader = std::io::BufReader::new(reader);
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                (serde_json::from_str(&line).unwrap(), reader.into_inner())
+            }),
+        )
+        .await
+        .expect("child emits the controlled event")
+        .expect("pipe reader completes")
+    }
+
+    for runtime in ["current", "multi"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_auth, auth_ready) = tokio::sync::oneshot::channel();
+        let (release_info, info_ready) = tokio::sync::oneshot::channel();
+        let stub = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let auth = ws.next().await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(auth.to_text().unwrap()).unwrap()["type"],
+                "Authenticate"
+            );
+            auth_ready.await.unwrap();
+            let reply = json!({"type":"Authenticated","data":{"app_name":"test","rate_limits":{"per_minute":1000,"per_hour":60000,"per_day":1440000}}});
+            ws.send(Message::Text(reply.to_string().into()))
+                .await
+                .unwrap();
+            info_ready.await.unwrap();
+            let reply = json!({"type":"ProtocolInfo","data":{"protocol_version":3,"sdk_version":"test","capabilities":[],"game_data_formats":["json"]}});
+            if ws
+                .send(Message::Text(reply.to_string().into()))
+                .await
+                .is_ok()
+            {
+                while let Some(frame) = ws.next().await {
+                    if matches!(frame, Err(_) | Ok(Message::Close(_))) {
+                        break;
+                    }
+                }
+            }
+        });
+        let (reader, writer) = std::io::pipe().unwrap();
+        let extra_reader = reader.try_clone().unwrap();
+        let mut child =
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-reference-native"))
+                .args([
+                    "--server-url",
+                    &format!("ws://{addr}/v3/ws"),
+                    "--create-room",
+                    "--runtime",
+                    runtime,
+                    "--max-runtime-secs",
+                    "90",
+                ])
+                .stdout(writer)
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+        let diagnostics = tokio::spawn(read_child_diagnostics(child.stderr.take().unwrap()));
+        let (connected, reader) = read_event(reader).await;
+        assert_eq!(connected["event"], "connected");
+        drop(reader);
+        release_auth.send(()).unwrap();
+        let (authenticated, extra_reader) = read_event(extra_reader).await;
+        assert_eq!(authenticated["event"], "authenticated");
+        let held_status = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+        drop(extra_reader);
+        release_info.send(()).unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+        if status.is_err() {
+            child.kill().await.unwrap();
+        }
+        let diagnostics = tokio::time::timeout(Duration::from_secs(5), diagnostics)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stub)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(held_status.is_err(), "{runtime}: retained reader must keep output writable: {held_status:?}; diagnostics: {diagnostics}");
+        assert!(status.is_ok(), "{runtime}: final reader closure must fail the next write: {status:?}; diagnostics: {diagnostics}");
+        assert_eq!(
+            status.unwrap().unwrap().code(),
+            Some(3),
+            "{runtime}: {diagnostics}"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial(native_output_process)]
 async fn unread_stdout_fails_streaming_relay_before_the_watchdog() {
