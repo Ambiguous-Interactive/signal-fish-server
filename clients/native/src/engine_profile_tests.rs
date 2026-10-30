@@ -646,14 +646,19 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
                 .unwrap();
             let mut payload = vec![0xff; PACKET_BYTES];
             payload[4] = generation;
-            tokio::time::timeout(Duration::from_secs(15), async {
+            let mut sent = 0u32;
+            let send_result = tokio::time::timeout(Duration::from_secs(15), async {
                 for sequence in 0..PACKETS {
                     payload[..4].copy_from_slice(&sequence.to_be_bytes());
                     channel.send(payload.as_slice().into()).await.unwrap();
+                    sent += 1;
                 }
             })
-            .await
-            .expect("unbounded send admission retains the complete offered burst");
+            .await;
+            if let Err(error) = send_result {
+                let timeout_snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                panic!("unbounded send admission retains the complete offered burst: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={sent}/{PACKETS} packet_bytes={PACKET_BYTES} timeout_snapshot={timeout_snapshot}");
+            }
             let mut last_snapshot = serde_json::Value::Null;
             let held = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
@@ -1034,7 +1039,7 @@ async fn saturate_held_reliable_callbacks(
     payload[4] = payload_generation;
     let mut sent = 0u32;
     let mut last_snapshot = serde_json::Value::Null;
-    let snapshot = tokio::time::timeout(Duration::from_secs(15), async {
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
         for sequence in 0u32..2048 {
             payload[..4].copy_from_slice(&sequence.to_be_bytes());
             channel.send(payload.as_slice().into()).await.unwrap();
@@ -1042,7 +1047,10 @@ async fn saturate_held_reliable_callbacks(
         }
         loop {
             let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-            if snapshot["sctp"]["data_chunks_refused"].as_u64().is_some_and(|count| count > 0) {
+            if snapshot["sctp"]["data_chunks_refused"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            {
                 assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
                 assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
                 assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
@@ -1052,10 +1060,14 @@ async fn saturate_held_reliable_callbacks(
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .unwrap_or_else(|error| panic!(
-        "held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 last_snapshot={last_snapshot}"
-    ));
+    .await;
+    let snapshot = match result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let timeout_snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            panic!("held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 last_snapshot={last_snapshot} timeout_snapshot={timeout_snapshot}");
+        }
+    };
     (channel, snapshot)
 }
 

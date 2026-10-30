@@ -11668,3 +11668,10 @@ continues waiting with the incomplete snapshot retained, rather than panicking
 before diagnostics are saved. Success still requires an observed positive
 refusal count. Offered work, receive limits, receive-refusal deadlines and exact
 reliable receipt checks do not change.
+
+Final review also identified a send-phase evidence gap in the sibling control.
+Both saturation send paths now keep completed-send counts and capture a bounded
+receiver snapshot after a timeout. `timeout_snapshot` is a post-timeout sample;
+it does not prove transport state at the deadline. The shared helper also keeps
+its last in-budget snapshot. Success deadlines and exact receipt requirements
+remain unchanged; only failure reporting adds the existing bounded snapshot wait.
