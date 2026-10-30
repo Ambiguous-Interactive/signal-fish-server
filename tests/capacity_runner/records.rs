@@ -997,12 +997,27 @@ impl EventLog {
     }
 }
 
-/// Free empty reservations regardless of allocator shrinking behavior.
+/// Free unused storage without risking the collected evidence on allocation failure.
 fn release_unused_capacity<T>(rows: &mut Vec<T>) {
+    release_unused_capacity_with_reservation(rows, Vec::try_reserve_exact);
+}
+
+/// Move records only after a successful, sufficient replacement reservation.
+fn release_unused_capacity_with_reservation<T>(
+    rows: &mut Vec<T>,
+    reserve: impl FnOnce(&mut Vec<T>, usize) -> Result<(), std::collections::TryReserveError>,
+) {
     if rows.is_empty() {
         *rows = Vec::new();
-    } else {
-        rows.shrink_to_fit();
+    } else if rows.len() < rows.capacity() {
+        let mut compacted = Vec::new();
+        if reserve(&mut compacted, rows.len()).is_ok()
+            && compacted.is_empty()
+            && (rows.len()..rows.capacity()).contains(&compacted.capacity())
+        {
+            compacted.append(rows);
+            *rows = compacted;
+        }
     }
 }
 
@@ -1544,6 +1559,64 @@ mod tests {
             "COLLECTED_STORAGE_PROFILE {}",
             serde_json::json!({"rooms":rooms, "retained_percent":percent, "before_bytes":before, "after_bytes":after, "summary_sha256":digest.iter().map(|byte|format!("{byte:02x}")).collect::<String>()})
         );
+    }
+
+    /// Failed compaction must preserve every record, its original buffer and its capacity.
+    #[test]
+    fn failed_record_compaction_preserves_original_evidence_without_retrying() {
+        for mode in ["error", "insufficient", "oversized", "nonempty"] {
+            let mut rows = Vec::with_capacity(100);
+            rows.extend([11_u64, 22, 33]);
+            let pointer = rows.as_ptr();
+            let capacity = rows.capacity();
+            let mut calls = 0;
+            release_unused_capacity_with_reservation(&mut rows, |replacement, count| {
+                calls += 1;
+                assert_eq!(count, 3);
+                match mode {
+                    "error" => replacement.try_reserve_exact(usize::MAX),
+                    "insufficient" => Ok(()),
+                    "oversized" => replacement.try_reserve_exact(capacity + 1),
+                    "nonempty" => {
+                        replacement.try_reserve_exact(count)?;
+                        replacement.push(999);
+                        Ok(())
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            assert_eq!(calls, 1);
+            assert_eq!(rows, [11, 22, 33]);
+            assert_eq!(rows.as_ptr(), pointer);
+            assert_eq!(rows.capacity(), capacity);
+        }
+        let mut rows = Vec::with_capacity(100);
+        rows.extend([11_u64, 22, 33]);
+        let old_capacity = rows.capacity();
+        let mut replacement_capacity = 0;
+        release_unused_capacity_with_reservation(&mut rows, |replacement, count| {
+            let result = replacement.try_reserve_exact(count);
+            replacement_capacity = replacement.capacity();
+            result
+        });
+        assert_eq!(rows, [11, 22, 33]);
+        assert_eq!(
+            rows.capacity(),
+            if (rows.len()..old_capacity).contains(&replacement_capacity) {
+                replacement_capacity
+            } else {
+                old_capacity
+            }
+        );
+        for mut rows in [Vec::<u64>::with_capacity(100), vec![11, 22, 33]] {
+            let original = rows.clone();
+            let capacity = rows.capacity();
+            release_unused_capacity_with_reservation(&mut rows, |_, _| {
+                panic!("empty and full vectors must not allocate")
+            });
+            assert_eq!(rows, original);
+            assert_eq!(rows.capacity(), if rows.is_empty() { 0 } else { capacity });
+        }
     }
 
     /// #775: collection reserves the full shape; analysis keeps only retained rows.

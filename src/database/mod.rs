@@ -2996,9 +2996,13 @@ mod tests {
                 Some(state)
             );
         }
-        database.fail_get_room_by_id_for_test(true);
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(database.get_room_lobby_state(&room.id).await.is_err());
-        database.fail_get_room_by_id_for_test(false);
+        database
+            .fail_get_room_by_id
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             database
                 .get_room_lobby_state(&PlayerId::from_u128(2))

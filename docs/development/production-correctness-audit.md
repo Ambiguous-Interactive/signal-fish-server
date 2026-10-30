@@ -11924,9 +11924,10 @@ vectors before collection to avoid growth during the timed workload. Partial
 collection leaves that reservation alive throughout analysis and artifact output.
 After all producers stop, `take_records` now releases unused vector capacity
 before sorting sends and running the oracle. Receipt order and every retained
-raw event stay unchanged. Empty reservations are freed directly; nonempty
-shrinking follows allocator behavior. The collection reservation and admission
-budgets remain.
+raw event stay unchanged. Empty reservations are freed directly. Partial nonempty
+vectors move only after a fallible replacement reservation succeeds and reduces
+capacity. Failed reservations keep the original records. Fully used vectors do
+not allocate. The collection reservation and admission budgets remain.
 
 The isolated `generator_collected_record_storage_profile` offers one send per
 sender with 16 players per room. It measures vector capacity times row size
@@ -11948,7 +11949,8 @@ the complete reliable summary retains SHA-256
 `9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
 The ordinary regression also checks zero, one, half and complete collection and
 exact artifact replay. This measures retained raw-row storage, not RSS or peak
-allocator use. Shrinking can move storage after the workload. It does not reduce
+allocator use. Nonempty compaction temporarily holds replacement storage after
+the workload. It does not reduce
 the collection peak, establish a whole-run memory bound or qualify the largest
 ten-minute C3 cell. Keep #775 and the broader #636/#826 campaigns open.
 
@@ -11959,4 +11961,6 @@ same three receipts, six terminal cases and one-second drain window. Its exact
 prefix, missing-hole and replay checks pass without weakening receipt-time
 validation. Nonempty-capacity assertions now check non-increase; empty collection
 still requires zero capacity. The storage profile records the measured reduction
-without requiring every allocator to shrink nonempty vectors exactly.
+without requiring every allocator to return exact vector capacity. Failure,
+insufficient capacity and oversized replacement controls keep the original
+records and buffer. Empty and fully used vectors do not attempt a reservation.
