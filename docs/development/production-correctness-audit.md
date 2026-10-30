@@ -11689,7 +11689,7 @@ consistent.
 Both original-source controls fail. The repeated-readiness history checks two
 ready members with interleaved duplicates. Each accepted call repairs only its
 member's entries, preserves peer order, and allows finalization after both
-members are repaired. The 32-case table covers flags, zero through three list
+members are repaired. The 16-case table covers flags, zero through three list
 copies, ready/unready requests, activity, repetition, absent IDs and finalized
 refusals. The repair keeps the first matching entry for a ready member and
 removes all matching entries for an unready member. A changed flag or list
