@@ -6505,11 +6505,16 @@ mod coverage_tests {
         assert!((1..=999).contains(&rooms));
         let invalid = std::env::var_os("CAPACITY_ARRIVAL_PROBE_INVALID").is_some();
         let fragmented = std::env::var_os("CAPACITY_ARRIVAL_PROBE_FRAGMENTED").is_some();
+        let flat_reference = std::env::var_os("CAPACITY_ARRIVAL_PROBE_FLAT_REFERENCE").is_some();
+        let names: Vec<Vec<String>> = (0..rooms)
+            .map(|room| (0..16).map(|player| format!("r{room}p{player}")).collect())
+            .collect();
         let started = std::time::Instant::now();
-        let mut arrivals = BTreeMap::new();
-        for room in 0..rooms {
-            for recipient in 0_u8..16 {
-                for sender in 0_u8..16 {
+        let mut reference = BTreeMap::new();
+        let mut arrivals = RecipientStreams::new();
+        for members in &names {
+            for recipient in members {
+                for sender in members {
                     if recipient == sender {
                         continue;
                     }
@@ -6523,11 +6528,37 @@ mod coverage_tests {
                         }
                         stream.violations_mut().misrouted.record(0);
                     }
-                    arrivals.insert((room, recipient, sender), stream);
+                    if flat_reference {
+                        reference.insert((recipient.as_str(), sender.as_str(), 1_u32), stream);
+                    } else {
+                        let streams = arrivals
+                            .entry(recipient.as_str())
+                            .or_insert_with(|| Vec::with_capacity(members.len().saturating_sub(1)));
+                        *stream_entry(streams, (sender.as_str(), 1), ArrivalEvidence::default) =
+                            stream;
+                    }
                 }
             }
         }
-        let unique: u64 = arrivals.values().map(|stream| stream.unique).sum();
+        let retained_rss_bytes = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let elapsed_us = started.elapsed().as_micros();
+        let (streams, unique) = if flat_reference {
+            (
+                reference.len(),
+                reference.values().map(|stream| stream.unique).sum::<u64>(),
+            )
+        } else {
+            assert_eq!(count_u64(arrivals.len()), u64::from(rooms) * 16);
+            (
+                arrivals.values().map(Vec::len).sum::<usize>(),
+                arrivals
+                    .values()
+                    .flat_map(|streams| streams.iter())
+                    .map(|(_, stream)| stream.unique)
+                    .sum::<u64>(),
+            )
+        };
+        assert_eq!(count_u64(streams), u64::from(rooms) * 16 * 15);
         assert_eq!(
             unique,
             u64::from(rooms) * 16 * 15 * (100 + u64::from(invalid))
@@ -6535,13 +6566,14 @@ mod coverage_tests {
         println!(
             "ARRIVAL_STATE_PROFILE {}",
             serde_json::json!({
-                "rooms": rooms, "streams": arrivals.len(), "invalid": invalid, "fragmented": fragmented,
+                "index": if flat_reference { "flat_reference" } else { "recipient_vectors" },
+                "rooms": rooms, "streams": streams, "invalid": invalid, "fragmented": fragmented,
                 "stream_bytes": std::mem::size_of::<ArrivalEvidence<'_>>(),
-                "retained_rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
-                "unique": unique, "elapsed_us": started.elapsed().as_micros(),
+                "retained_rss_bytes": retained_rss_bytes,
+                "unique": unique, "elapsed_us": elapsed_us,
             })
         );
-        std::hint::black_box(arrivals);
+        std::hint::black_box((arrivals, reference));
     }
 
     #[test]

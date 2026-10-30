@@ -11743,3 +11743,11 @@ maximum epochs, reverse insertion, sender ranges and partial removals. Existing
 replay and negative controls still validate duplicate, ordering, missing,
 misroute, opaque, gap and churn histories. The broad campaigns remain open;
 this does not qualify the planned ten-minute C3 workload.
+
+PR review also identified an older standalone arrival-state profile that still
+used numeric flat-tree keys. It now defaults to the actual recipient vectors
+and inserts through `stream_entry`, with shared string fixtures allocated
+before timing. `CAPACITY_ARRIVAL_PROBE_FLAT_REFERENCE=1` retains an explicit
+flat-tree comparison with the same string keys. Both modes check the full
+stream count and exact unique-arrival total. Their retained RSS includes the
+name fixture and process state; it is separate from the allocator results above.
