@@ -624,6 +624,7 @@ async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generatio
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Drain exact reliable packets after held callbacks and SCTP backpressure in both roles.
 async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair() {
     const PACKETS: u32 = 2048;
     const PACKET_BYTES: usize = 4096;
@@ -1016,6 +1017,7 @@ async fn held_callbacks_wait_for_every_cooperative_cancellation_before_sending()
     held.await;
 }
 
+/// Offer the fixed burst after pollers stop and wait for observed SCTP refusal.
 async fn saturate_held_reliable_callbacks(
     pair: &mut LivePair,
     packet_bytes: usize,

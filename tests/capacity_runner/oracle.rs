@@ -3544,7 +3544,7 @@ mod coverage_tests {
         }
     }
 
-    // #775/#636: fan-out summaries retain one sender spelling per run.
+    /// #775/#636: summaries share raw sender identities and preserve exact JSON replay.
     #[test]
     fn summary_sender_names_share_storage_and_preserve_json_replay() {
         for unusual_names in [false, true] {
