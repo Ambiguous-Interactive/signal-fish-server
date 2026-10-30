@@ -558,7 +558,10 @@ impl Runtime {
                             let waits_before = fortress.metrics().wait_recommendations;
                             let advance_started = Instant::now();
                             let requests = fortress.advance_frame();
-                            let advance_us = duration_us(advance_started.elapsed());
+                            let advance_finished_at = Instant::now();
+                            let advance_us = duration_us(
+                                advance_finished_at.saturating_duration_since(advance_started),
+                            );
                             let waits_after = fortress.metrics().wait_recommendations;
                             if waits_after > waits_before {
                                 let remote_stats = fortress
@@ -566,7 +569,10 @@ impl Runtime {
                                     .next()
                                     .and_then(|handle| fortress.network_stats(handle).ok());
                                 let mut generation = wait_observation.clone();
-                                generation.elapsed_us = duration_us(self.configured_at.elapsed());
+                                generation.elapsed_us = duration_us(
+                                    advance_finished_at
+                                        .saturating_duration_since(self.configured_at),
+                                );
                                 generation.advance_us = Some(advance_us);
                                 generation.frame_before_advance = Some(current);
                                 generation.current_frame = fortress.current_frame().as_i32();
