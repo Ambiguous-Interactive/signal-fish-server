@@ -11823,27 +11823,39 @@ The scoped oracle controls retain missing, duplicate, order, gap, opaque and
 churn checks. The broader campaigns remain open. This does not qualify the
 ten-minute C3 workload or prove a throughput gain.
 
-### Retained stdout reader control (#1290)
+### Retained stdout reader qualification (#1290)
 
-Baseline `8a889d99`. A portable `std::io::pipe` control creates exactly two
-parent readers and directs the production native CLI's stdout to the writer.
-It reads `connected`, closes that reader, releases the held authentication
-reply, and reads `authenticated` through the retained reader. That read proves
-the output write succeeded after the first reader closed.
+Baseline `8a889d99` already contains a Linux/current-runtime extra-reader
+control. It opens `/proc/self/fd`, reads the authenticated event through the
+retained reader, checks immediate process liveness, then closes that reader
+and verifies code-3 exit on the next output write. That mechanism is existing
+coverage, not a discovery from this session.
 
-For each runtime, the child stays live through the original eight-second
-exit window while the last reader remains open. The control then closes that
-reader and releases `ProtocolInfo` to cause another output write. The child
-exits with code 3 within the unchanged eight-second bound. Its hard watchdog
-remains 90 seconds; the handshake bound remains 20 seconds. Child stderr is
-drained with bounded retention and included in terminal assertion failures.
-The two-runtime control passes in 16.300 seconds. The existing isolated
-`closed_stdout_fails_held_handshake` passes in 0.169 seconds in the same run.
+The replacement uses `std::io::pipe` and `PipeReader::try_clone`, removes the
+Linux-only gate, and runs both current-thread and multi-thread CLI runtimes.
+It creates exactly two parent readers. It reads `connected`, closes that
+reader, releases authentication, and reads `authenticated` through the
+retained reader. That read proves a write succeeded after primary-reader
+closure. The regular control observes 100 ms of retained-reader liveness,
+then closes the last reader and releases `ProtocolInfo` to cause another
+output write. It retains the original eight-second final-exit bound and
+code-3 requirement.
 
-This establishes an extra reader's ability to mask broken-pipe detection and
-shows prompt failure after the last reader closes and a later write occurs.
-It does not prove temporary reader inheritance in the historical hosted
-failure, exclude an unrelated writer-notification or teardown defect there,
-or repair a production defect. Keep #1290 open for the original parallel
-versus isolated ownership investigation. No output deadline or exit contract
-is relaxed.
+An ignored `retained_stdout_reader_survives_the_original_exit_window`
+qualification uses the same helper with the full historical eight-second
+retained-reader window in both runtimes. The hard watchdog remains 90 seconds;
+the handshake bound remains 20 seconds. This keeps routine checks short and
+retains an executable exact-window experiment. Child stderr is drained with
+bounded retention and included in terminal assertion failures.
+
+The consolidated local run passes the routine two-runtime control in 0.404
+seconds, the ignored exact-window qualification in 16.292 seconds, and the
+existing isolated `closed_stdout_fails_held_handshake` in 0.157 seconds. All
+three run together with the exact-window test explicitly enabled.
+
+The new scope is broader runtime coverage, a platform-independent pipe fixture
+and explicit original-window qualification. It does not establish temporary
+reader inheritance in the historical hosted failure, exclude an unrelated
+writer-notification or teardown defect there, or repair a production defect.
+Keep #1290 open for the original parallel-versus-isolated ownership
+investigation. No original output deadline or exit contract is relaxed.
