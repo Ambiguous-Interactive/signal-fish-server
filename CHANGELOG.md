@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Repair repeated readiness on restored public Rust rooms so duplicate ready entries do not block game start (#1320).
 - Keep public Rust Room authority flags consistent after restoring room state (#1317).
 - Require complete, consistent member readiness before public Rust Room game starts (#1315).
 - Keep active rooms alive after player metadata changes through Rust storage APIs (#1309).

@@ -497,27 +497,34 @@ impl Room {
     /// Mark a player as ready in the lobby.
     ///
     /// Readiness can be toggled at any time before the game is `Finalized`; the
-    /// room need not be full. A changed ready flag refreshes activity.
+    /// room need not be full. Keep one ready-list entry per ready member.
+    /// A changed flag or list refreshes activity.
     #[allow(dead_code)]
     pub fn set_player_ready(&mut self, player_id: &PlayerId, ready: bool) -> bool {
         if self.lobby_state == LobbyState::Finalized || !self.players.contains_key(player_id) {
             return false;
         }
 
-        if self
+        let flag_changed = self
             .players
             .get(player_id)
-            .is_some_and(|player| player.is_ready != ready)
-        {
+            .is_some_and(|player| player.is_ready != ready);
+        let previous_length = self.ready_players.len();
+        let mut retained = false;
+        self.ready_players.retain(|id| {
+            if id != player_id {
+                return true;
+            }
+            let keep = ready && !retained;
+            retained = true;
+            keep
+        });
+        if ready && !retained {
+            self.ready_players.push(*player_id);
+        }
+        if flag_changed || self.ready_players.len() != previous_length {
             self.update_activity();
         }
-        if ready && !self.ready_players.contains(player_id) {
-            self.ready_players.push(*player_id);
-        } else if !ready {
-            self.ready_players.retain(|id| id != player_id);
-        }
-
-        // Update player ready status
         if let Some(player) = self.players.get_mut(player_id) {
             player.is_ready = ready;
         }
@@ -713,6 +720,95 @@ mod tests {
         room.supports_authority = false;
         assert!(!room.set_authority(Some(member)));
         assert_eq!(room.last_activity, stale);
+    }
+
+    /// #1320: repeated readiness must repair restored duplicates before start.
+    #[test]
+    fn repeated_readiness_repairs_duplicates_without_reordering_peers() {
+        let mut room = empty_room();
+        for number in 1..=2 {
+            let id = Uuid::from_u128(number);
+            room.players.insert(
+                id,
+                PlayerInfo {
+                    id,
+                    name: format!("member-{number}"),
+                    is_authority: false,
+                    is_ready: true,
+                    connected_at: None,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: DEFAULT_REGION_ID.into(),
+                },
+            );
+        }
+        let member = Uuid::from_u128(1);
+        let peer = Uuid::from_u128(2);
+        room.ready_players = vec![peer, member, peer, member];
+        assert!(!room.all_players_ready());
+        assert!(room.set_player_ready(&member, true));
+        assert_eq!(room.ready_players, [peer, member, peer]);
+        assert!(!room.all_players_ready());
+        assert!(room.set_player_ready(&peer, true));
+        assert_eq!(room.ready_players, [peer, member]);
+        assert!(room.all_players_ready());
+        assert!(room.finalize_game());
+        assert_eq!(room.lobby_state, LobbyState::Finalized);
+    }
+
+    /// #1320: list-only changes renew activity; consistent calls do not.
+    #[test]
+    fn ready_assignment_repairs_duplicate_entries_and_tracks_list_changes() {
+        for ready in [false, true] {
+            for copies in [0, 1, 2, 3] {
+                for flag in [false, true] {
+                    let mut room = empty_room();
+                    let member = Uuid::from_u128(1);
+                    room.players.insert(
+                        member,
+                        PlayerInfo {
+                            id: member,
+                            name: "member".into(),
+                            is_authority: false,
+                            is_ready: flag,
+                            connected_at: None,
+                            connection_info: None,
+                            epoch: None,
+                            seq: None,
+                            region_id: DEFAULT_REGION_ID.into(),
+                        },
+                    );
+                    room.ready_players = vec![member; copies];
+                    let stale = room.created_at - chrono::Duration::hours(2);
+                    room.last_activity = stale;
+                    assert!(room.set_player_ready(&member, ready));
+                    assert_eq!(
+                        room.ready_players,
+                        if ready { vec![member] } else { vec![] },
+                        "ready={ready}, copies={copies}, flag={flag}"
+                    );
+                    assert_eq!(room.players[&member].is_ready, ready);
+                    assert_eq!(room.all_players_ready(), ready);
+                    let changed = flag != ready || copies != usize::from(ready);
+                    assert_eq!(
+                        room.last_activity > stale,
+                        changed,
+                        "ready={ready}, copies={copies}, flag={flag}"
+                    );
+                    room.last_activity = stale;
+                    assert!(room.set_player_ready(&member, ready));
+                    assert_eq!(room.last_activity, stale);
+                    assert!(!room.set_player_ready(&Uuid::nil(), ready));
+                    assert_eq!(room.last_activity, stale);
+                    room.lobby_state = LobbyState::Finalized;
+                    let before = room.ready_players.clone();
+                    assert!(!room.set_player_ready(&member, !ready));
+                    assert_eq!(room.ready_players, before);
+                    assert_eq!(room.last_activity, stale);
+                }
+            }
+        }
     }
 
     /// #1317: restored public room snapshots can carry stale authority flags.
