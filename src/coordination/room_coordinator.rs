@@ -562,8 +562,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         let mut completion = None;
         let result = async {
             // Get current room state to check if it has enough players for lobby actions
-            let room = match self.database.get_room_by_id(room_id).await {
-                Ok(Some(room)) => room,
+            let lobby_state = match self.database.get_room_lobby_state(room_id).await {
+                Ok(Some(state)) => state,
                 Ok(None) => {
                     return Err(PlayerReadyError::RoomNotFound);
                 }
@@ -577,7 +577,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             // Readiness can be toggled any time the room is open (`max_players`
             // is a ceiling, not a required count); only a `Finalized` room — the
             // game already started — rejects further ready toggles.
-            if room.lobby_state == crate::protocol::LobbyState::Finalized {
+            if lobby_state == crate::protocol::LobbyState::Finalized {
                 return Err(PlayerReadyError::Finalized);
             }
 
@@ -651,7 +651,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
             let message = crate::protocol::ServerMessage::LobbyStateChanged {
                 lobby_state: crate::protocol::LobbyState::Lobby,
-                ready_players: ready_players_vec.clone(),
+                ready_players: ready_players_vec,
                 all_ready,
             };
             let Some(ready_guard) = mutation_guard.take() else {
@@ -660,7 +660,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 )));
             };
             completion = Some(self.enqueue_replayable_room_event(room_id, message, ready_guard));
-            Ok((ready_players_vec, all_ready))
+            Ok(())
         }
         .await;
 
@@ -669,7 +669,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         drop(mutation_guard);
 
         match result {
-            Ok((_ready_players, _all_ready)) => {
+            Ok(()) => {
                 let Some(completion) = completion else {
                     return Err(PlayerReadyError::Internal(anyhow::anyhow!(
                         "successful ready toggle did not enqueue its publication"

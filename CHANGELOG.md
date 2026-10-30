@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce temporary allocations during room checks and expiration (#636).
 - Reduce memory allocation when checking room members before game start (#636).
 - Reduce dashboard refresh copies and keep history storage within its sample limit (#636).
-- Reduce memory allocation when publishing lobby readiness snapshots (#636).
+- Reduce memory allocation when reading room state and publishing lobby readiness snapshots (#636).
 - Reduce allocations when selecting a session host and publishing session peer lists (#636).
 - Reduce server latency metric memory and keep routine timing updates free of allocations (#1285, #636).
 - Reduce room-event copies when no player needs reconnect replay (#636, #1277).
@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and generation fields on connection, channel-open, and received-message output events.
 - Bound active-session response storage and reduce room percentile query memory and dashboard-history sizing work (#636).
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, churn index size, and retained
-  stream, sender-identity, and sparse-latency memory (#636, #775).
+  stream, sender-identity, sparse-latency, and unused record storage (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).
 - Add native SCTP, transport, and actual channel settings to gameplay diagnostics, with bounded waits and explicit partial
   results on busy links (#1240, #1244, #1287).

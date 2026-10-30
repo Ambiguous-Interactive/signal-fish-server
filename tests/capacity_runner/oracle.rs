@@ -54,6 +54,11 @@ pub enum InvalidReason {
         count: u64,
         first: ScheduledSendViolation,
     },
+    /// A receipt predates the intended send time of its matched ledger entry.
+    InvalidReceiptTimes {
+        count: u64,
+        first: ReceiptTimeViolation,
+    },
     /// A rejoin snapshot cannot prove its member identity or stream tail.
     InvalidSnapshotTails {
         count: u64,
@@ -194,6 +199,13 @@ pub struct ScheduledSendViolation {
     pub sender: String,
     pub seq: u64,
     pub mismatch: SendPlanMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReceiptTimeViolation {
+    pub key: DeliveryKey,
+    pub intended_us: u64,
+    pub received_us: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1834,9 +1846,9 @@ fn snapshot_tail_evidence(
     }
 }
 
-/// Validate every raw event before delivery filtering, including duplicates,
+/// Validate raw sizes and receipt times before delivery filtering, including duplicates,
 /// misroutes, warm-up records, and receipt keys absent from the send ledger.
-fn payload_size_evidence(
+fn raw_event_evidence(
     records: &RunRecords,
     sent_by_key: &SendIndex<'_>,
     expected_application_bytes: u32,
@@ -1846,6 +1858,7 @@ fn payload_size_evidence(
     let mut mismatches = (0_u64, None);
     let mut invalid_bodies = (0_u64, None);
     let mut overflows = (0_u64, None);
+    let mut early_receipts = (0_u64, None);
     let mut check = |direction: &str,
                      sender: Option<&str>,
                      recipient: Option<&str>,
@@ -1896,10 +1909,23 @@ fn payload_size_evidence(
         );
     }
     for receipt in &records.receipts {
-        let direction = match sent_by_key
-            .get(receipt.sender.as_str(), receipt.seq)
-            .map(|sent| sent.phase)
-        {
+        let sent = sent_by_key.get(receipt.sender.as_str(), receipt.seq);
+        if let Some(sent) = sent.filter(|sent| receipt.received_us < sent.intended_us) {
+            early_receipts.0 += 1;
+            early_receipts
+                .1
+                .get_or_insert_with(|| ReceiptTimeViolation {
+                    key: DeliveryKey {
+                        recipient: receipt.recipient.to_string(),
+                        sender: receipt.sender.to_string(),
+                        epoch: receipt.epoch,
+                        seq: receipt.server_seq,
+                    },
+                    intended_us: sent.intended_us,
+                    received_us: receipt.received_us,
+                });
+        }
+        let direction = match sent.map(|sent| sent.phase) {
             Some(Phase::Warmup) => &mut evidence.warmup.egress,
             Some(Phase::Measured) => &mut evidence.measured.egress,
             None => &mut evidence.unmatched_egress,
@@ -1939,6 +1965,12 @@ fn payload_size_evidence(
                 overflow,
             );
         }
+    }
+    if let Some(first) = early_receipts.1 {
+        reasons.push(InvalidReason::InvalidReceiptTimes {
+            count: early_receipts.0,
+            first,
+        });
     }
     if let Some(first) = overflows.1 {
         reasons.push(InvalidReason::PayloadByteTotalOverflow {
@@ -2001,7 +2033,7 @@ pub fn summarize(
     let room_of = &roster_index.room_of;
     let members_of_room = &roster_index.members_of_room;
     let mut reasons = records.faults.clone();
-    let payload_bytes = payload_size_evidence(
+    let payload_bytes = raw_event_evidence(
         records,
         &sent_by_key,
         expected_application_bytes,
@@ -3036,6 +3068,119 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    /// #1323: preserve exact causal violations in both warm-up and measured evidence.
+    #[test]
+    fn receipt_before_scheduled_send_invalidates_instead_of_becoming_zero_latency() {
+        for warmup in [false, true] {
+            let mut config = crate::scenario_config(crate::Encoding::V3Json);
+            config.warmup = if warmup {
+                std::time::Duration::from_millis(200)
+            } else {
+                std::time::Duration::ZERO
+            };
+            let (plans, churn) = crate::build_run_shape(&config).unwrap();
+            let roster: Vec<_> = plans
+                .iter()
+                .map(|plan| (plan.name.clone(), plan.room))
+                .collect();
+            let complete = crate::complete_records(&plans);
+            for offset in [-1_i64, 0, 1, 5, 8] {
+                let mut records = complete.clone();
+                let receipt = &mut records.receipts[0];
+                let sent = records
+                    .sent
+                    .iter()
+                    .find(|sent| sent.sender == receipt.sender && sent.seq == receipt.seq)
+                    .unwrap();
+                assert_eq!(sent.phase == Phase::Warmup, warmup);
+                receipt.received_us = sent.intended_us.checked_add_signed(offset).unwrap();
+                let violation = ReceiptTimeViolation {
+                    key: DeliveryKey {
+                        recipient: receipt.recipient.to_string(),
+                        sender: receipt.sender.to_string(),
+                        epoch: receipt.epoch,
+                        seq: receipt.server_seq,
+                    },
+                    intended_us: sent.intended_us,
+                    received_us: receipt.received_us,
+                };
+                let summarize_records = |records: &RunRecords| {
+                    summarize(
+                        &plans,
+                        &roster,
+                        records,
+                        1000,
+                        96,
+                        DeliveryClass::Reliable,
+                        &churn,
+                        None,
+                    )
+                };
+                let summary = summarize_records(&records);
+                assert_eq!(
+                    summary.valid,
+                    offset >= 0,
+                    "warmup={warmup} offset={offset}: {:?}",
+                    summary.reasons
+                );
+                if offset < 0 {
+                    assert_eq!(
+                        summary.reasons,
+                        vec![InvalidReason::InvalidReceiptTimes {
+                            count: 1,
+                            first: violation
+                        }]
+                    );
+                }
+                assert_eq!(summary.totals.receipts, count_u64(records.receipts.len()));
+                let output = tempfile::tempdir().unwrap();
+                crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+                let replayed = crate::artifacts::read_records(output.path()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(summarize_records(&replayed)).unwrap(),
+                    serde_json::to_value(summary).unwrap()
+                );
+            }
+        }
+    }
+
+    /// Early duplicates and foreign recipients remain raw evidence in every category.
+    #[test]
+    fn early_receipt_times_do_not_hide_duplicate_misroute_or_unmatched_evidence() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let mut early = records.receipts[0].clone();
+        early.received_us = 0;
+        records.receipts.push(early.clone());
+        early.recipient = "foreign".into();
+        records.receipts.push(early.clone());
+        early.sender = "unsent".into();
+        records.receipts.push(early);
+        let summary = summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        assert!(summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, InvalidReason::InvalidReceiptTimes { count: 2, .. })));
+        assert!(summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, InvalidReason::DuplicateDeliveries { count: 1, .. })));
+        assert!(summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, InvalidReason::MisroutedDeliveries { count: 2, .. })));
+        assert_eq!(summary.totals.receipts, count_u64(records.receipts.len()));
+    }
 
     /// Repeated roster rows must retain foreign-stream evidence for every row.
     #[test]
@@ -6208,12 +6353,8 @@ mod coverage_tests {
                         .record(receipt.application_bytes, receipt.encoded_frame_body_bytes));
                 }
                 let mut reasons = Vec::new();
-                let actual = payload_size_evidence(
-                    &records,
-                    &SendIndex::new(&records.sent),
-                    96,
-                    &mut reasons,
-                );
+                let actual =
+                    raw_event_evidence(&records, &SendIndex::new(&records.sent), 96, &mut reasons);
                 assert!(reasons.is_empty(), "{reasons:?}");
                 for (actual, expected) in [
                     (actual.warmup.egress, warmup),

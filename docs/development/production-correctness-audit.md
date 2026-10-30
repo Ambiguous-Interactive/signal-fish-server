@@ -11859,3 +11859,89 @@ reader inheritance in the historical hosted failure, exclude an unrelated
 writer-notification or teardown defect there, or repair a production defect.
 Keep #1290 open for the original parallel-versus-isolated ownership
 investigation. No original output deadline or exit contract is relaxed.
+
+### F215 — Capacity receipts can precede their scheduled sends (#1323)
+
+Confirmed on `4cecf3b6` under #826 and #775. A complete ledger stays valid after
+one receipt's `received_us` becomes `intended_us - 1`. The latency calculation
+saturates that difference to zero. Send-completion validation from #1162 does
+not validate receipt times.
+
+The repair checks each matched receipt in the existing raw-event pass. An
+`InvalidReceiptTimes` reason retains the count and first exact recipient,
+sender, epoch, server sequence, intended time and observed time. Raw receipts,
+byte totals, latency samples and existing delivery violations remain visible.
+Unmatched receipts retain their existing misroute handling. No new index or
+per-receipt storage is added.
+
+The red-first control fails on the baseline. Warm-up and measured controls cover
+one microsecond before, equal to, and one, five and eight microseconds after the
+intended send. Equal times pass. A receipt before the send future completes may
+also pass: the remote consumer can run before the sender returns. Early duplicate
+and foreign-recipient evidence keeps its other violations. JSONL replay produces
+the same full summary. These are internal evidence checks; no server timing defect
+or cause of the historical generator stalls is established.
+
+### Ready-toggle snapshot allocation (#636)
+
+Baseline `4cecf3b6`. `handle_player_ready` clones a complete room to read its lobby
+state, then reads its member list separately. The complete snapshot copies
+spectator names even though the toggle does not use them. It also clones the
+ready list before publishing it and discards the retained original.
+
+`GameDatabase::get_room_lobby_state` has a compatible default over the complete
+snapshot. The in-memory backend projects the field under its existing read lock.
+Ready toggles use that projection and move the ready list into the publication.
+Membership reads, room gates, validation, event fields and publication order stay
+the same. Pending, missing, finalized and failed-read controls preserve the
+snapshot contract. Existing database adapters can keep using their snapshot read.
+
+An isolated instrumented system allocator measures the real coordinator with one
+routed member and zero, 16 or 255 stored spectators. Each case warms the room lane
+with two toggles, then measures ready-on and ready-off through queue publication.
+
+| Spectators | Ready-on allocations before / after | Ready-off allocations before / after | Ready-on allocated bytes before / after |
+| --- | --- | --- | --- |
+| 0 | 41 / 33 | 39 / 32 | 8,187 / 6,891 |
+| 16 | 58 / 33 | 56 / 32 | 10,697 / 6,891 |
+| 255 | 297 / 33 | 295 / 32 | 48,521 / 6,891 |
+
+The new growth control fails against the original ready-toggle implementation.
+Direct projected reads allocate only their async result: one allocation and 120
+bytes in this build, compared with 264 allocations and 41,302 bytes for a complete
+255-spectator room snapshot. These are allocation counts, not throughput or
+latency gains. Rust, .NET and Godot clients need no changes: wire behavior,
+validation, ordering, defaults and reconnect rules stay the same.
+
+### Unused collected record storage (#775, #636)
+
+Baseline `4cecf3b6`. The runner reserves the complete planned send and receipt
+vectors before collection to avoid growth during the timed workload. Partial
+collection leaves that reservation alive throughout analysis and artifact output.
+After all producers stop, `take_records` now releases unused vector capacity
+before sorting sends and running the oracle. Receipt order and every retained
+raw event stay unchanged. The collection reservation and admission budgets remain.
+
+The isolated `generator_collected_record_storage_profile` offers one send per
+sender with 16 players per room. It measures vector capacity times row size
+before and after collection. The retained receipt percentages are deliberate
+prefix controls, not claims of healthy delivery. Each control compares all raw
+records and complete summary JSON against its unmodified prefix.
+
+| Rooms | Retained receipts | Raw-row bytes before / after |
+| --- | --- | --- |
+| 16 | 0% | 262,144 / 16,384 |
+| 16 | 1% | 262,144 / 18,816 |
+| 16 | 100% | 262,144 / 262,144 |
+| 999 | 0% | 16,367,616 / 1,022,976 |
+| 999 | 1% | 16,367,616 / 1,176,384 |
+| 999 | 100% | 16,367,616 / 16,367,616 |
+
+All six complete summaries and raw records match their controls. At 999 rooms,
+the complete reliable summary retains SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
+The ordinary regression also checks zero, one, half and complete collection and
+exact artifact replay. This measures retained raw-row storage, not RSS or peak
+allocator use. Shrinking can move storage after the workload. It does not reduce
+the collection peak, establish a whole-run memory bound or qualify the largest
+ten-minute C3 cell. Keep #775 and the broader #636/#826 campaigns open.

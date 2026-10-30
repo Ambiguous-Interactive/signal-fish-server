@@ -386,6 +386,18 @@ pub trait GameDatabase: Send + Sync {
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
 
+    /// Read the lobby state without requiring an owned room snapshot.
+    /// Backends may project the field directly; the default preserves snapshot semantics.
+    async fn get_room_lobby_state(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<crate::protocol::LobbyState>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|room| room.lobby_state))
+    }
+
     /// Check storage membership without requiring a room snapshot.
     /// Pending rooms count as present, as they do in `get_room_by_id`.
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
@@ -1910,6 +1922,21 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
+    /// Project the lobby state, including rooms pending publication.
+    async fn get_room_lobby_state(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<crate::protocol::LobbyState>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| room.lobby_state.clone()))
+    }
+
     /// Check all stored room rows without copying room or player state.
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
         #[cfg(test)]
@@ -2932,6 +2959,54 @@ mod tests {
     use crate::protocol::ErrorCode;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    /// Project every lifecycle state and retain snapshot failure and pending-row semantics.
+    #[tokio::test]
+    async fn lobby_state_projection_matches_pending_finalized_and_failed_reads() {
+        let database = InMemoryDatabase::new();
+        let room = database
+            .create_pending_room_classified(
+                "projection-game".into(),
+                Some("PROJ01".into()),
+                4,
+                true,
+                PlayerId::from_u128(1),
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!database.is_room_published(&room.id).await.unwrap());
+        for state in [
+            crate::protocol::LobbyState::Waiting,
+            crate::protocol::LobbyState::Lobby,
+            crate::protocol::LobbyState::Finalized,
+        ] {
+            database
+                .rooms
+                .write()
+                .await
+                .get_mut(&room.id)
+                .unwrap()
+                .lobby_state = state.clone();
+            assert_eq!(
+                database.get_room_lobby_state(&room.id).await.unwrap(),
+                Some(state)
+            );
+        }
+        database.fail_get_room_by_id_for_test(true);
+        assert!(database.get_room_lobby_state(&room.id).await.is_err());
+        database.fail_get_room_by_id_for_test(false);
+        assert_eq!(
+            database
+                .get_room_lobby_state(&PlayerId::from_u128(2))
+                .await
+                .unwrap(),
+            None
+        );
+    }
 
     /// The server-wide room-cap pause hooks must stay usable from the
     /// packaged crate's own test surface (their other caller lives in a test
