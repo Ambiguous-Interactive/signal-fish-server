@@ -11555,3 +11555,69 @@ small-recipient statistics calls retain only the minimum 2,048 counters and
 preserve exact results. No elapsed-time speedup is claimed. The review also
 adds full state-preservation assertions for invalid IDs after all member flags
 are ready.
+
+### F213 — Public Room authority changes retain stale member flags (#1317)
+
+Baseline `b69eb24d`, under #826. A restored public `Room` can have member
+`is_authority` flags that disagree with `authority_player`. Assignment updates
+only the previous and selected records. Clearing an unselected authority leaves
+stale true flags unchanged. Selecting a member can leave other members marked
+as authorities. This is a public Rust Room contract defect; no live WebSocket
+incident is established. Normal service transitions already maintain consistent
+flags.
+
+The first control fails when clearing `None` with three stale true flags in
+Nextest `4f9e6266-d4fb-4d9a-9f3b-23382d30813e`. The repair derives every member's
+flag from the accepted selection. An absent target or unsupported room refuses
+without mutation. Changed selection or flags refresh activity; a consistent
+repeated call does not. The control covers absent, current and departed previous
+selections, clearance, assignment, repetition and refusal.
+
+Storage needs the same change result for its monotonic expiry clock. Keeping
+its old selected-ID-only comparison fails the paused-clock control at
+`repaired flags must renew monotonic liveness`, even after the Room repair.
+The shared transition now returns an internal acceptance/change result, so
+storage renews both clocks on flag repair. A second consistent call preserves
+both clocks and permits the inactive room to expire.
+
+The external Rust client manifest has no server-crate dependency. The .NET SDK
+is an independent C# project, and the Godot plugin uses its own client code.
+None calls this Rust Room API. Wire fields, normal service authority outcomes
+and client migration requirements do not change. All three are unaffected.
+The wider #826 campaign remains open.
+
+### Shared summary identities and count scratch (#636, #775)
+
+The capacity oracle now shares each retained summary sender name with that
+sender's raw send ledger. The summary owns its shared references and remains
+valid after raw records are dropped. A sender with receipts but no sends keeps
+its original receipt counts and misroute evidence through an owned fallback name.
+One count vector retains capacity across recipient summaries; each drain removes
+all entries before the next recipient. Counts, sender ordering and artifact
+formats do not change.
+
+An isolated StatsAlloc control runs the full production `summarize` function
+with one reliable send per player and all receipts present. Each room has 16
+players. Raw records are built before measurement. Baseline is `b69eb24d`.
+
+| Rooms | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 2,735 | 2,224 | 1,381,328 | 1,339,512 |
+| 999 | 169,838 | 137,871 | 85,007,308 | 82,350,090 |
+
+At 999 rooms, allocated-minus-freed bytes fall from 13,882,580 to 13,143,082,
+with raw records still alive in both versions. The complete 6,668,621-byte JSON
+summary retains SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
+The 16-room JSON also matches. Exact all-gap summaries and allocation totals
+remain unchanged at both room counts. These are cumulative allocator and retained
+summary measurements, not peak-memory or throughput results. No generator stall
+or ten-minute C3 qualification is claimed. Both campaigns remain open.
+
+Twelve selected Room/storage controls pass at the repaired source, including the
+paused-clock control. Thirty selected capacity/replay controls pass across the
+final local checks, including reliable relay, lossy pressure, malformed ledgers,
+missing-send fallback, shared identity lifetime and independent epoch counts.
+Thirty-eight source-policy controls, strict all-target/all-feature Clippy,
+Markdown, CI configuration and document consistency checks also pass locally.
+Hosted qualification remains separate from these local measurements.

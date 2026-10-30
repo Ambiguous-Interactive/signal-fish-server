@@ -2299,6 +2299,7 @@ pub fn summarize(
     // summaries outlive their raw run records without changing artifact JSON.
     let mut summary_sender_names: BTreeMap<&str, ReceiptName> = BTreeMap::new();
     let mut per_recipient = Vec::with_capacity(roster.len());
+    let mut received_by_sender: Vec<(&str, u64)> = Vec::new();
     for (recipient, room) in roster {
         let view = views
             .get(recipient.as_str())
@@ -2329,7 +2330,6 @@ pub fn summarize(
             The arrival range sorts by sender, then epoch. Fold adjacent epochs
             without a second tree, then bulk-build the retained outcome map.
         */
-        let mut received_by_sender: Vec<(&str, u64)> = Vec::new();
         for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
             if stream.total() == 0 {
                 continue;
@@ -2493,11 +2493,15 @@ pub fn summarize(
         }
 
         outcome.received = received_by_sender
-            .into_iter()
+            .drain(..)
             .map(|(sender, count)| {
-                let name = summary_sender_names
-                    .entry(sender)
-                    .or_insert_with(|| ReceiptName::from(sender));
+                let name = summary_sender_names.entry(sender).or_insert_with(|| {
+                    blocks
+                        .range((sender, 0)..=(sender, u32::MAX))
+                        .next()
+                        .and_then(|(_, block)| block.get(0))
+                        .map_or_else(|| ReceiptName::from(sender), |event| event.sender.clone())
+                });
                 (name.clone(), count)
             })
             .collect();
@@ -3593,6 +3597,16 @@ mod coverage_tests {
                     legacy.keys().map(String::as_str).collect::<Vec<_>>()
                 );
                 for name in outcome.received.keys() {
+                    let source = records
+                        .sent
+                        .iter()
+                        .find(|event| event.sender == name.as_str())
+                        .unwrap();
+                    assert_eq!(
+                        name.as_ptr(),
+                        source.sender.as_ptr(),
+                        "summary must share the raw sender identity"
+                    );
                     assert_eq!(
                         outcome.received.get(name.as_str()),
                         legacy.get(name.as_str())
@@ -3637,6 +3651,60 @@ mod coverage_tests {
         );
         assert!(empty.valid);
         assert!(empty.per_recipient.is_empty());
+    }
+
+    /// Missing send ledgers keep their raw receipt counts and exact replay.
+    #[test]
+    fn summary_sender_identity_fallback_preserves_unsent_stream_evidence() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let absent = records.sent[0].sender.clone();
+        records.sent.retain(|event| event.sender != absent);
+        let summarize_records = |records: &RunRecords| {
+            summarize(
+                &context.plans,
+                &context.roster,
+                records,
+                1000,
+                96,
+                DeliveryClass::Reliable,
+                &ChurnPlan::default(),
+                None,
+            )
+        };
+        let summary = summarize_records(&records);
+        assert!(!summary.valid);
+        let mut seen = 0;
+        let mut shared = None;
+        for outcome in &summary.per_recipient {
+            if let Some((name, count)) = outcome.received.get_key_value(absent.as_str()) {
+                let expected = records
+                    .receipts
+                    .iter()
+                    .filter(|receipt| {
+                        receipt.recipient == outcome.recipient && receipt.sender == absent
+                    })
+                    .map(|receipt| (receipt.epoch, receipt.server_seq))
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(*count, count_u64(expected.len()));
+                assert_eq!(outcome.misrouted, count_u64(expected.len()));
+                if let Some(previous) = shared.replace(name.as_ptr()) {
+                    assert_eq!(previous, name.as_ptr());
+                }
+                seen += 1;
+            }
+        }
+        assert!(seen > 1);
+        let output = tempfile::tempdir().unwrap();
+        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+        let replayed = crate::artifacts::read_records(output.path()).unwrap();
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            serde_json::to_value(summarize_records(&replayed)).unwrap(),
+            json
+        );
+        drop(records);
+        assert_eq!(serde_json::to_value(&summary).unwrap(), json);
     }
 
     /// Isolate retained sender-name maps from raw records and oracle scratch.

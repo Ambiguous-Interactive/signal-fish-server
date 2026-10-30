@@ -433,45 +433,33 @@ impl Room {
     }
 
     /// Assign or clear authority for a supported room and current member.
-    /// Only a changed authority refreshes activity; refusal and repetition do not.
+    /// Reconcile every member flag. Changed authority or flags refresh activity;
+    /// refusal and consistent repetition do not.
     #[allow(dead_code)]
     pub fn set_authority(&mut self, player_id: Option<PlayerId>) -> bool {
-        // Check if room supports authority
-        if !self.supports_authority {
-            return false;
+        self.set_authority_with_change(player_id).is_some()
+    }
+
+    /// Return whether an accepted assignment changed the selected member or flags.
+    pub(crate) fn set_authority_with_change(
+        &mut self,
+        player_id: Option<PlayerId>,
+    ) -> Option<bool> {
+        if !self.supports_authority || player_id.is_some_and(|id| !self.players.contains_key(&id)) {
+            return None;
         }
 
-        match player_id {
-            Some(id) if self.players.contains_key(&id) => {
-                // Remove authority from previous player
-                if let Some(prev_auth) = self.authority_player {
-                    if let Some(player) = self.players.get_mut(&prev_auth) {
-                        player.is_authority = false;
-                    }
-                }
-
-                // Set new authority
-                if self.authority_player != Some(id) {
-                    self.update_activity();
-                }
-                self.authority_player = Some(id);
-                if let Some(player) = self.players.get_mut(&id) {
-                    player.is_authority = true;
-                }
-                true
-            }
-            None => {
-                // Clear authority
-                if let Some(prev_auth) = self.authority_player.take() {
-                    self.update_activity();
-                    if let Some(player) = self.players.get_mut(&prev_auth) {
-                        player.is_authority = false;
-                    }
-                }
-                true
-            }
-            Some(_) => false, // Player not in room
+        let mut changed = self.authority_player != player_id;
+        for (id, player) in &mut self.players {
+            let is_authority = player_id == Some(*id);
+            changed |= player.is_authority != is_authority;
+            player.is_authority = is_authority;
         }
+        self.authority_player = player_id;
+        if changed {
+            self.update_activity();
+        }
+        Some(changed)
     }
 
     #[allow(dead_code)]
@@ -725,6 +713,64 @@ mod tests {
         room.supports_authority = false;
         assert!(!room.set_authority(Some(member)));
         assert_eq!(room.last_activity, stale);
+    }
+
+    /// #1317: restored public room snapshots can carry stale authority flags.
+    #[test]
+    fn authority_assignment_reconciles_all_member_flags() {
+        for previous in [None, Some(Uuid::from_u128(1)), Some(Uuid::nil())] {
+            for selected in [None, Some(Uuid::from_u128(1)), Some(Uuid::from_u128(2))] {
+                let mut room = empty_room();
+                for number in 1..=3 {
+                    let id = Uuid::from_u128(number);
+                    room.players.insert(
+                        id,
+                        PlayerInfo {
+                            id,
+                            name: format!("member-{number}"),
+                            is_authority: true,
+                            is_ready: false,
+                            connected_at: None,
+                            connection_info: None,
+                            epoch: None,
+                            seq: None,
+                            region_id: DEFAULT_REGION_ID.into(),
+                        },
+                    );
+                }
+                room.authority_player = previous;
+                let stale = room.created_at - chrono::Duration::hours(2);
+                room.last_activity = stale;
+                let original = serde_json::to_value(&room.players).unwrap();
+                assert!(!room.set_authority(Some(Uuid::nil())));
+                assert_eq!(serde_json::to_value(&room.players).unwrap(), original);
+                assert_eq!(room.authority_player, previous);
+                assert_eq!(room.last_activity, stale);
+                assert!(room.set_authority(selected));
+                assert_eq!(room.authority_player, selected);
+                for (id, player) in &room.players {
+                    assert_eq!(
+                        player.is_authority,
+                        Some(*id) == selected,
+                        "previous={previous:?}, selected={selected:?}, member={id}"
+                    );
+                }
+                assert!(room.last_activity > stale);
+                room.last_activity = stale;
+                assert!(room.set_authority(selected));
+                assert_eq!(room.last_activity, stale);
+                let before = serde_json::to_value(&room.players).unwrap();
+                assert!(!room.set_authority(Some(Uuid::nil())));
+                assert_eq!(serde_json::to_value(&room.players).unwrap(), before);
+                assert_eq!(room.authority_player, selected);
+                assert_eq!(room.last_activity, stale);
+                room.supports_authority = false;
+                assert!(!room.clear_authority());
+                assert_eq!(serde_json::to_value(&room.players).unwrap(), before);
+                assert_eq!(room.authority_player, selected);
+                assert_eq!(room.last_activity, stale);
+            }
+        }
     }
 
     /// Regression #1304: a room role stays exclusive until its holder leaves.

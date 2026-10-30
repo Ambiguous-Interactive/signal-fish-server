@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and generation fields on connection, channel-open, and received-message output events.
 - Bound active-session response storage and reduce room percentile query memory and dashboard-history sizing work (#636).
 - Reduce capacity-run send preparation, receipt collection, analysis work, replay allocations, churn index size, and retained
-  stream and sparse-latency memory (#636, #775).
+  stream, sender-identity, and sparse-latency memory (#636, #775).
 - Add clock anchors to capacity generator lag reports (#1009).
 - Add native SCTP, transport, and actual channel settings to gameplay diagnostics, with bounded waits and explicit partial
   results on busy links (#1240, #1244, #1287).
@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep public Rust Room authority flags consistent after restoring room state (#1317).
 - Require complete, consistent member readiness before public Rust Room game starts (#1315).
 - Keep active rooms alive after player metadata changes through Rust storage APIs (#1309).
 - Keep rooms alive after lobby, ready, authority, and game-start changes through Rust Room and storage APIs (#1306).
