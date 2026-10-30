@@ -762,6 +762,7 @@ struct RoomMembers<'a> {
 }
 
 impl<'a> RoomMembers<'a> {
+    /// Yield source names in their original room-member order.
     fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.rows
             .iter()
@@ -769,10 +770,12 @@ impl<'a> RoomMembers<'a> {
             .chain(self.names.iter().copied())
     }
 
+    /// Count the borrowed or indexed members.
     fn len(&self) -> usize {
         self.rows.len() + self.names.len()
     }
 
+    /// Check exact membership without allocating another name index.
     fn contains(&self, name: &str) -> bool {
         self.iter().any(|member| member == name)
     }

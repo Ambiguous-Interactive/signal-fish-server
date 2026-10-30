@@ -966,6 +966,7 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    /// Apply the shared room-read failure and pause controls.
     #[cfg(test)]
     async fn before_room_read_for_test(&self) -> Result<()> {
         {
@@ -1900,6 +1901,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(None)
     }
 
+    /// Read a complete snapshot, including rooms pending publication.
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>> {
         #[cfg(test)]
         self.before_room_read_for_test().await?;
@@ -1908,6 +1910,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
+    /// Check all stored room rows without copying room or player state.
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
         #[cfg(test)]
         self.before_room_read_for_test().await?;

@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce allocations when rooms expire and when maintenance checks live rooms (#636).
+- Reduce memory allocation during room expiration and routine room maintenance (#636).
 - Reduce memory allocation when checking room members before game start (#636).
 - Reduce dashboard refresh copies and keep history storage within its sample limit (#636).
 - Reduce memory allocation when publishing lobby readiness snapshots (#636).

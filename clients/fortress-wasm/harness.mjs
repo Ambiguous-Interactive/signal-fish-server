@@ -937,7 +937,7 @@ function negativeControlDrainedItsDrivenBudget(report) {
     report.client_game_data_sent_during_run * 10 >= drivenBudget * 9;
 }
 
-/** Validate bounded event evidence independently of the zero-wait health gate. */
+/** Check bounded wait counts, fields and callback order without changing health limits. */
 function validateWaitObservations(report, name) {
   const trace = report.wait_observations;
   assertExactKeys(trace, ["events", "omitted"], `${name} wait observations`);

@@ -640,6 +640,7 @@ fn assert_steady_state_timing_records_do_not_allocate() {
     eprintln!("response_time_tracker steady-state: {stats:?}");
 }
 
+/// Bound room-existence and metric-query allocations across increasing room counts.
 fn assert_database_metrics_reuse_game_names() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

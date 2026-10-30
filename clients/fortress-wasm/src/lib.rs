@@ -322,6 +322,7 @@ struct Runtime {
 }
 
 impl Runtime {
+    /// Validate the browser configuration and create one released-client runtime.
     fn new(config: BrowserConfig) -> Result<Self, String> {
         if config.schema_version != REPORT_SCHEMA_VERSION {
             return Err(format!(
@@ -881,7 +882,7 @@ impl Runtime {
         self.room_json_pending.take()
     }
 
-    /// Snapshot runtime identity, delivery ledgers, wait observations and health metrics.
+    /// Snapshot runtime identity, delivery ledgers, both bounded wait traces and health metrics.
     fn report(&self, runtime_error: Option<String>) -> Report {
         let client_stats = self.client.stats();
         let relay_stats = self.relay.counters();

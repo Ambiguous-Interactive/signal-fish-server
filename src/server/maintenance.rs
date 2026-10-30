@@ -352,6 +352,7 @@ impl EnhancedGameServer {
         cleaned
     }
 
+    /// Revalidate the assigned room under the lifecycle gate before closing its client.
     async fn cleanup_client_in_missing_room(
         self: &Arc<Self>,
         player_id: PlayerId,
