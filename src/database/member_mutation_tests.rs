@@ -1,6 +1,65 @@
 use super::tests::{age_room, create_test_room};
 use super::*;
 
+/// #1317: repairing flags renews both clocks even when the selected ID stays the same.
+#[tokio::test(start_paused = true)]
+async fn authority_flag_repair_renews_both_room_clocks_once() {
+    for selected_member in [false, true] {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "authority", "REPAIR").await.unwrap();
+        let member = *room.players.keys().next().unwrap();
+        let selected = selected_member.then_some(member);
+        {
+            let mut rooms = db.rooms.write().await;
+            let stored = rooms.get_mut(&room.id).unwrap();
+            stored.authority_player = selected;
+            stored.players.get_mut(&member).unwrap().is_authority = !selected_member;
+        }
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert!(db.update_room_authority(&room.id, selected).await.unwrap());
+        let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(after.authority_player, selected);
+        assert_eq!(after.players[&member].is_authority, selected_member);
+        assert!(after.last_activity > before.last_activity);
+        let cleanup = db
+            .cleanup_expired_rooms(
+                chrono::Duration::seconds(300),
+                chrono::Duration::hours(1),
+                &HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            cleanup.is_empty(),
+            "repaired flags must renew monotonic liveness"
+        );
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert!(db.update_room_authority(&room.id, selected).await.unwrap());
+        assert_eq!(
+            db.get_room_by_id(&room.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_activity,
+            before.last_activity
+        );
+        let cleanup = db
+            .cleanup_expired_rooms(
+                chrono::Duration::seconds(300),
+                chrono::Duration::hours(1),
+                &HashSet::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cleanup.inactive_rooms_cleaned, 1,
+            "consistent repetition must expire"
+        );
+    }
+}
+
 /// #636: compare exact membership without a second current-member vector.
 #[tokio::test]
 async fn finalization_membership_requires_a_permutation_without_duplicates() {

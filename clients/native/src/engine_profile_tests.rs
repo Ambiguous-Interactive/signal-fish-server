@@ -624,6 +624,7 @@ async fn godot_profile_preserves_startup_snapshot_prefix_in_both_fresh_generatio
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Drain exact reliable packets after held callbacks and SCTP backpressure in both roles.
 async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair() {
     const PACKETS: u32 = 2048;
     const PACKET_BYTES: usize = 4096;
@@ -638,34 +639,41 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
             }
             let peer = pair.sender_id;
             let link = pair.receiver.peers.get_mut(&peer).unwrap();
-            link.stop_channel_tasks();
+            hold_channel_callbacks(&link.channel_tasks).await;
             let channel = pair
                 .sender
                 .channel(pair.receiver_id, RELIABLE_LABEL)
                 .unwrap();
             let mut payload = vec![0xff; PACKET_BYTES];
             payload[4] = generation;
-            tokio::time::timeout(Duration::from_secs(15), async {
+            let mut sent = 0u32;
+            let send_result = tokio::time::timeout(Duration::from_secs(15), async {
                 for sequence in 0..PACKETS {
                     payload[..4].copy_from_slice(&sequence.to_be_bytes());
                     channel.send(payload.as_slice().into()).await.unwrap();
+                    sent += 1;
                 }
             })
-            .await
-            .expect("unbounded send admission retains the complete offered burst");
+            .await;
+            if let Err(error) = send_result {
+                let timeout_snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+                panic!("unbounded send admission retains the complete offered burst: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={sent}/{PACKETS} packet_bytes={PACKET_BYTES} timeout_snapshot={timeout_snapshot}");
+            }
+            let mut last_snapshot = serde_json::Value::Null;
             let held = tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-                    if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+                    if snapshot["sctp"]["data_chunks_refused"].as_u64().is_some_and(|count| count > 0) {
                         break snapshot;
                     }
+                    last_snapshot = snapshot;
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect(
-                "held application polling fills downstream queues and exhausts SCTP receive credit",
-            );
+            .unwrap_or_else(|error| panic!(
+                "held application polling fills downstream queues and exhausts SCTP receive credit: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={PACKETS} packet_bytes={PACKET_BYTES} last_snapshot={last_snapshot}"
+            ));
             let received = held["transport_channels"]
                 .as_array()
                 .unwrap()
@@ -949,6 +957,72 @@ async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_r
     }
 }
 
+/// Stop every callback poller before offering a held-queue workload.
+async fn hold_channel_callbacks(tasks: &[Box<dyn JoinHandle>]) {
+    for task in tasks {
+        task.abort();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tasks.iter().all(|task| task.is_finished()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all callback pollers finish cancellation before sending");
+}
+
+/// #1319: abort requests do not prove task completion or a held queue.
+#[tokio::test]
+async fn held_callbacks_wait_for_every_cooperative_cancellation_before_sending() {
+    struct HeldTask {
+        aborted: Arc<std::sync::atomic::AtomicBool>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl JoinHandle for HeldTask {
+        fn detach(&self) {}
+        fn abort(&self) {
+            self.aborted.store(true, Ordering::SeqCst);
+        }
+        fn is_finished(&self) -> bool {
+            self.finished.load(Ordering::SeqCst)
+        }
+    }
+    let states: Vec<_> = (0..2)
+        .map(|_| {
+            (
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+        })
+        .collect();
+    let tasks: Vec<Box<dyn JoinHandle>> = states
+        .iter()
+        .map(|(aborted, finished)| {
+            Box::new(HeldTask {
+                aborted: aborted.clone(),
+                finished: finished.clone(),
+            }) as Box<dyn JoinHandle>
+        })
+        .collect();
+    let held = hold_channel_callbacks(&tasks);
+    tokio::pin!(held);
+    assert!(
+        futures_util::poll!(&mut held).is_pending(),
+        "an abort request does not establish a held callback queue"
+    );
+    assert!(states
+        .iter()
+        .all(|(aborted, _)| aborted.load(Ordering::SeqCst)));
+    states[0].1.store(true, Ordering::SeqCst);
+    assert!(
+        futures_util::poll!(&mut held).is_pending(),
+        "every poller must finish before the burst starts"
+    );
+    states[1].1.store(true, Ordering::SeqCst);
+    held.await;
+}
+
+/// Offer the fixed burst after pollers stop and wait for observed SCTP refusal.
 async fn saturate_held_reliable_callbacks(
     pair: &mut LivePair,
     packet_bytes: usize,
@@ -956,40 +1030,44 @@ async fn saturate_held_reliable_callbacks(
 ) -> (Arc<dyn DataChannel>, serde_json::Value) {
     let peer = pair.sender_id;
     let link = pair.receiver.peers.get_mut(&peer).unwrap();
-    for task in &link.channel_tasks {
-        task.abort();
-    }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !link.channel_tasks.iter().all(|task| task.is_finished()) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    hold_channel_callbacks(&link.channel_tasks).await;
     let channel = pair
         .sender
         .channel(pair.receiver_id, RELIABLE_LABEL)
         .unwrap();
     let mut payload = vec![0xff; packet_bytes];
     payload[4] = payload_generation;
-    let snapshot = tokio::time::timeout(Duration::from_secs(15), async {
+    let mut sent = 0u32;
+    let mut last_snapshot = serde_json::Value::Null;
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
         for sequence in 0u32..2048 {
             payload[..4].copy_from_slice(&sequence.to_be_bytes());
             channel.send(payload.as_slice().into()).await.unwrap();
+            sent += 1;
         }
         loop {
             let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-            if snapshot["sctp"]["data_chunks_refused"].as_u64().unwrap() > 0 {
+            if snapshot["sctp"]["data_chunks_refused"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+            {
                 assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
                 assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
                 assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
                 break snapshot;
             }
+            last_snapshot = snapshot;
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .expect("held callbacks exhaust actual SCTP receive credit");
+    .await;
+    let snapshot = match result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let timeout_snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+            panic!("held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 last_snapshot={last_snapshot} timeout_snapshot={timeout_snapshot}");
+        }
+    };
     (channel, snapshot)
 }
 

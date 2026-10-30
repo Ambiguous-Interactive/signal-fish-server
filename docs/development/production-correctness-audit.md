@@ -11555,3 +11555,123 @@ small-recipient statistics calls retain only the minimum 2,048 counters and
 preserve exact results. No elapsed-time speedup is claimed. The review also
 adds full state-preservation assertions for invalid IDs after all member flags
 are ready.
+
+### F213 — Public Room authority changes retain stale member flags (#1317)
+
+Baseline `b69eb24d`, under #826. A restored public `Room` can have member
+`is_authority` flags that disagree with `authority_player`. Assignment updates
+only the previous and selected records. Clearing an unselected authority leaves
+stale true flags unchanged. Selecting a member can leave other members marked
+as authorities. This is a public Rust Room contract defect; no live WebSocket
+incident is established. Normal service transitions already maintain consistent
+flags.
+
+The first control fails when clearing `None` with three stale true flags in
+Nextest `4f9e6266-d4fb-4d9a-9f3b-23382d30813e`. The repair derives every member's
+flag from the accepted selection. An absent target or unsupported room refuses
+without mutation. Changed selection or flags refresh activity; a consistent
+repeated call does not. The control covers absent, current and departed previous
+selections, clearance, assignment, repetition and refusal.
+
+Storage needs the same change result for its monotonic expiry clock. Keeping
+its old selected-ID-only comparison fails the paused-clock control at
+`repaired flags must renew monotonic liveness`, even after the Room repair.
+The shared transition now returns an internal acceptance/change result, so
+storage renews both clocks on flag repair. A second consistent call preserves
+both clocks and permits the inactive room to expire.
+
+The external Rust client manifest has no server-crate dependency. The .NET SDK
+is an independent C# project, and the Godot plugin uses its own client code.
+None calls this Rust Room API. Wire fields, normal service authority outcomes
+and client migration requirements do not change. All three are unaffected.
+The wider #826 campaign remains open.
+
+### Shared summary identities and count scratch (#636, #775)
+
+The capacity oracle now shares each retained summary sender name with that
+sender's raw send ledger. The summary owns its shared references and remains
+valid after raw records are dropped. A sender with receipts but no sends keeps
+its original receipt counts and misroute evidence through an owned fallback name.
+One count vector retains capacity across recipient summaries; each drain removes
+all entries before the next recipient. Counts, sender ordering and artifact
+formats do not change.
+
+An isolated StatsAlloc control runs the full production `summarize` function
+with one reliable send per player and all receipts present. Each room has 16
+players. Raw records are built before measurement. Baseline is `b69eb24d`.
+
+| Rooms | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 2,735 | 2,224 | 1,381,328 | 1,339,512 |
+| 999 | 169,838 | 137,871 | 85,007,308 | 82,350,090 |
+
+At 999 rooms, allocated-minus-freed bytes fall from 13,882,580 to 13,143,082,
+with raw records still alive in both versions. The complete 6,668,621-byte JSON
+summary retains SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`.
+The 16-room JSON also matches. Exact all-gap summaries and allocation totals
+remain unchanged at both room counts. These are cumulative allocator and retained
+summary measurements, not peak-memory or throughput results. No generator stall
+or ten-minute C3 qualification is claimed. Both campaigns remain open.
+
+Twelve selected Room/storage controls pass at the repaired source, including the
+paused-clock control. Thirty selected capacity/replay controls pass across the
+final local checks, including reliable relay, lossy pressure, malformed ledgers,
+missing-send fallback, shared identity lifetime and independent epoch counts.
+Thirty-eight source-policy controls, strict all-target/all-feature Clippy,
+Markdown, CI configuration and document consistency checks also pass locally.
+Hosted qualification remains separate from these local measurements.
+
+### Held Godot saturation setup timeout (#1319)
+
+PR #1318 head `73ee1796` fails the native active-consumer control in run
+`40999023767`, job `123878821334`. The first cell resumes all 2,048 exact
+reliable 4 KiB packets with no rejection, closure or remaining sender debt.
+The next setup times out waiting for actual SCTP receive-credit refusal,
+before callback resume. This differs from #1264's original terminal-event
+failure. The original timeout cannot locate send admission or transport progress.
+
+The helper now retains the completed send count, payload generation, packet
+size and last transport snapshot on timeout. Snapshot sampling keeps its existing
+bounded wait and partial-result markers. The 15-second setup bound, all 2,048
+packets, receive-refusal precondition, receive limits, exact reliable checks,
+offer roles and fresh-link controls remain unchanged. This adds diagnostic
+evidence; it does not repair a confirmed production defect.
+
+The instrumented local single-test control passes all four cells in 18.27
+seconds. A four-thread control passes all 11 Godot profile tests in 28.03
+seconds. Its source SHA-256 is
+`9a142560e89f17db6da5906324b48306f32eb70163f59e24e05ad3989f2f121c`.
+Strict native all-target Clippy passes. These native/native controls do not
+explain the hosted timeout, #1264's terminal event or #1244's historical Godot
+prefix loss. All three issues remain open; no attempt or original failure is
+removed from the evidence.
+
+A second hosted attempt at `7d585a07` fails the sibling raw-channel control in
+run `41000313181`, job `123882945060`. Both receiver-answerer generations drain
+all 2,048 exact packets. The next held receive-refusal wait times out before
+raw-channel polling resumes. That sibling requested cancellation and dropped
+the callback handles without observing completion. Cancellation is cooperative,
+so this did not prove its queues were held before sending.
+
+A new controlled handle history fails with the old abort-only hold step:
+`an abort request does not establish a held callback queue`. It keeps two
+pollers unfinished, then finishes each separately. The shared fixture hold step
+now waits for every poller to finish, under the existing five-second cancellation
+bound, before either saturation workload sends. The control passes after repair.
+The shared Engine-resume setup already waited for completion; this repair alone
+does not explain its earlier timeout. #1319 remains open.
+
+Both held waits now retain their last snapshot on timeout. As PR review notes,
+a bounded transport snapshot can omit SCTP fields. An absent refusal count now
+continues waiting with the incomplete snapshot retained, rather than panicking
+before diagnostics are saved. Success still requires an observed positive
+refusal count. Offered work, receive limits, receive-refusal deadlines and exact
+reliable receipt checks do not change.
+
+Final review also identified a send-phase evidence gap in the sibling control.
+Both saturation send paths now keep completed-send counts and capture a bounded
+receiver snapshot after a timeout. `timeout_snapshot` is a post-timeout sample;
+it does not prove transport state at the deadline. The shared helper also keeps
+its last in-budget snapshot. Success deadlines and exact receipt requirements
+remain unchanged; only failure reporting adds the existing bounded snapshot wait.

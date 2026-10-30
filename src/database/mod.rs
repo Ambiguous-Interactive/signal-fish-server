@@ -2009,12 +2009,11 @@ impl GameDatabase for InMemoryDatabase {
         let Some(room) = rooms.get_mut(room_id) else {
             return Ok(false);
         };
-        let previous = room.authority_player;
-        let accepted = room.set_authority(authority_player);
-        if accepted && previous != room.authority_player {
+        let changed = room.set_authority_with_change(authority_player);
+        if changed == Some(true) {
             liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }
-        Ok(accepted)
+        Ok(changed.is_some())
     }
 
     /// Apply the authority request policy and renew both clocks on a grant or release.
