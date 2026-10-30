@@ -3593,7 +3593,8 @@ mod session_poll_tests {
             };
             let mut reader = futures_util::stream::iter(frames).chain(tail);
             let epoch = Instant::now();
-            let until = epoch + Duration::from_secs(1);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let until = Instant::now() + Duration::from_secs(1);
             let mut writer = std::pin::pin!(std::future::ready(failure));
             let mut prefer_read = false;
             assert!(matches!(

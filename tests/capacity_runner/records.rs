@@ -989,8 +989,35 @@ impl EventLog {
                     });
             }
         }
+        drop(state);
+        release_unused_capacity(&mut records.sent);
+        release_unused_capacity(&mut records.receipts);
         sort_sent_events(&mut records.sent);
         records
+    }
+}
+
+/// Free unused storage without risking the collected evidence on allocation failure.
+fn release_unused_capacity<T>(rows: &mut Vec<T>) {
+    release_unused_capacity_with_reservation(rows, Vec::try_reserve_exact);
+}
+
+/// Move records only after a successful, sufficient replacement reservation.
+fn release_unused_capacity_with_reservation<T>(
+    rows: &mut Vec<T>,
+    reserve: impl FnOnce(&mut Vec<T>, usize) -> Result<(), std::collections::TryReserveError>,
+) {
+    if rows.is_empty() {
+        *rows = Vec::new();
+    } else if rows.len() < rows.capacity() {
+        let mut compacted = Vec::new();
+        if reserve(&mut compacted, rows.len()).is_ok()
+            && compacted.is_empty()
+            && (rows.len()..rows.capacity()).contains(&compacted.capacity())
+        {
+            compacted.append(rows);
+            *rows = compacted;
+        }
     }
 }
 
@@ -1461,6 +1488,184 @@ mod tests {
             })
         );
         std::hint::black_box(events);
+    }
+
+    /// Measure unused raw-row storage after an identical collected prefix in a fresh process.
+    #[test]
+    #[ignore = "isolated collected record storage profile; run in a fresh process"]
+    fn generator_collected_record_storage_profile() {
+        let rooms = std::env::var("CAPACITY_COLLECTED_STORAGE_ROOMS")
+            .unwrap_or_else(|_| "999".into())
+            .parse::<u32>()
+            .unwrap();
+        let percent = std::env::var("CAPACITY_COLLECTED_STORAGE_PERCENT")
+            .unwrap_or_else(|_| "1".into())
+            .parse::<usize>()
+            .unwrap();
+        assert!(percent <= 100);
+        let mut config = crate::scenario_config(crate::Encoding::V3Json);
+        config.rooms = rooms;
+        config.players_per_room = 16;
+        config.warmup = Duration::ZERO;
+        config.duration = Duration::from_micros(1);
+        config.send_rate_per_sender = 1_000_000.0;
+        let (plans, churn) = crate::build_run_shape(&config).unwrap();
+        let roster: Vec<_> = plans
+            .iter()
+            .map(|plan| (plan.name.clone(), plan.room))
+            .collect();
+        let mut expected = crate::complete_records(&plans);
+        expected
+            .receipts
+            .truncate(expected.receipts.len() * percent / 100);
+        let log = EventLog::for_plans(&plans, false).unwrap();
+        for event in &expected.sent {
+            log.push_sent(event.clone());
+        }
+        for event in &expected.receipts {
+            log.push_receipt(event.clone());
+        }
+        let storage_bytes = |sent: usize, receipts: usize| {
+            sent * std::mem::size_of::<SentEvent>() + receipts * std::mem::size_of::<ReceiptEvent>()
+        };
+        let before = {
+            let state = log.state.lock().unwrap();
+            storage_bytes(state.sent.capacity(), state.receipts.capacity())
+        };
+        let actual = log.take_records();
+        let after = storage_bytes(actual.sent.capacity(), actual.receipts.capacity());
+        let summarize = |records: &RunRecords| {
+            crate::oracle::summarize(
+                &plans,
+                &roster,
+                records,
+                1000,
+                96,
+                crate::DeliveryClass::Reliable,
+                &churn,
+                None,
+            )
+        };
+        let expected_summary = serde_json::to_vec(&summarize(&expected)).unwrap();
+        let actual_summary = serde_json::to_vec(&summarize(&actual)).unwrap();
+        assert_eq!(actual_summary, expected_summary);
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(&actual_summary);
+        println!(
+            "COLLECTED_STORAGE_PROFILE {}",
+            serde_json::json!({"rooms":rooms, "retained_percent":percent, "before_bytes":before, "after_bytes":after, "summary_sha256":digest.iter().map(|byte|format!("{byte:02x}")).collect::<String>()})
+        );
+    }
+
+    /// Failed compaction must preserve every record, its original buffer and its capacity.
+    #[test]
+    fn failed_record_compaction_preserves_original_evidence_without_retrying() {
+        for mode in ["error", "insufficient", "oversized", "nonempty"] {
+            let mut rows = Vec::with_capacity(100);
+            rows.extend([11_u64, 22, 33]);
+            let pointer = rows.as_ptr();
+            let capacity = rows.capacity();
+            let mut calls = 0;
+            release_unused_capacity_with_reservation(&mut rows, |replacement, count| {
+                calls += 1;
+                assert_eq!(count, 3);
+                match mode {
+                    "error" => replacement.try_reserve_exact(usize::MAX),
+                    "insufficient" => Ok(()),
+                    "oversized" => replacement.try_reserve_exact(capacity + 1),
+                    "nonempty" => {
+                        replacement.try_reserve_exact(count)?;
+                        replacement.push(999);
+                        Ok(())
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            assert_eq!(calls, 1);
+            assert_eq!(rows, [11, 22, 33]);
+            assert_eq!(rows.as_ptr(), pointer);
+            assert_eq!(rows.capacity(), capacity);
+        }
+        let mut rows = Vec::with_capacity(100);
+        rows.extend([11_u64, 22, 33]);
+        let old_capacity = rows.capacity();
+        let mut replacement_capacity = 0;
+        release_unused_capacity_with_reservation(&mut rows, |replacement, count| {
+            let result = replacement.try_reserve_exact(count);
+            replacement_capacity = replacement.capacity();
+            result
+        });
+        assert_eq!(rows, [11, 22, 33]);
+        assert_eq!(
+            rows.capacity(),
+            if (rows.len()..old_capacity).contains(&replacement_capacity) {
+                replacement_capacity
+            } else {
+                old_capacity
+            }
+        );
+        for mut rows in [Vec::<u64>::with_capacity(100), vec![11, 22, 33]] {
+            let original = rows.clone();
+            let capacity = rows.capacity();
+            release_unused_capacity_with_reservation(&mut rows, |_, _| {
+                panic!("empty and full vectors must not allocate")
+            });
+            assert_eq!(rows, original);
+            assert_eq!(rows.capacity(), if rows.is_empty() { 0 } else { capacity });
+        }
+    }
+
+    /// #775: collection reserves the full shape; analysis keeps only retained rows.
+    #[test]
+    fn collected_records_release_unused_send_and_receipt_reservations() {
+        let context = crate::unit_context();
+        let complete = crate::complete_records(&context.plans);
+        for count in [0, 1, complete.receipts.len() / 2, complete.receipts.len()] {
+            let log = EventLog::for_plans(&context.plans, false).unwrap();
+            for event in complete.sent.iter().take(count.min(complete.sent.len())) {
+                log.push_sent(event.clone());
+            }
+            for event in complete.receipts.iter().take(count) {
+                log.push_receipt(event.clone());
+            }
+            let mut expected = complete.clone();
+            expected.sent.truncate(count.min(complete.sent.len()));
+            expected.receipts.truncate(count);
+            let (sent_capacity, receipt_capacity) = {
+                let state = log.state.lock().unwrap();
+                (state.sent.capacity(), state.receipts.capacity())
+            };
+            let actual = log.take_records();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            assert!(
+                actual.sent.capacity() <= sent_capacity,
+                "retained send count={count}"
+            );
+            assert!(
+                actual.receipts.capacity() <= receipt_capacity,
+                "retained receipt count={count}"
+            );
+            if actual.sent.is_empty() {
+                assert_eq!(actual.sent.capacity(), 0);
+            }
+            if actual.receipts.is_empty() {
+                assert_eq!(actual.receipts.capacity(), 0);
+            }
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &actual).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(replayed).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
     }
 
     #[test]
