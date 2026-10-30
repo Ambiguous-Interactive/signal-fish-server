@@ -29,8 +29,9 @@ generated the event during the preceding advance. Peer lag estimates are not
 synchronized remote clock samples. A pending event can make the cumulative
 `wait_recommendations` metric exceed the consumed observation count. The existing
 zero-recommendation health gate remains unchanged. A second bounded trace,
-`wait_generation_observations`, records each recommendation inside the advance
-that produced it, even if the next callback never consumes the event. It includes
+`wait_generation_observations`, records each recommendation after the advance
+that produced it, even if the next callback never consumes the event. Its elapsed
+time marks the end of that advance, not the exact internal event time. It includes
 the advance duration and starting frame. The validator pairs the retained
 prefixes by order and checks callback order, elapsed time and requested skips.
 Generation counts must match the cumulative metric, including omitted events.

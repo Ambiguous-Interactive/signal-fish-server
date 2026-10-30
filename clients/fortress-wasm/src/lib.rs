@@ -101,7 +101,7 @@ struct CallbackIntervals {
 
 const MAX_WAIT_OBSERVATIONS: usize = 64;
 
-/// State when the callback consumes a Fortress wait event after remote polling.
+/// State captured after polling consumes a wait or after an advance generates one.
 #[derive(Debug, Clone, Serialize)]
 struct WaitObservation {
     elapsed_us: u64,
