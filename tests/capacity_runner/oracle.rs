@@ -2728,6 +2728,7 @@ fn stream_entry<'map, 'records, Evidence>(
     &mut streams[index].1
 }
 
+/// Remove one exact sender/epoch entry without changing the remaining order.
 fn remove_stream<Evidence>(
     streams: &mut StreamEntries<'_, Evidence>,
     key: StreamKey<'_>,
@@ -5836,8 +5837,7 @@ mod coverage_tests {
         std::hint::black_box(sent);
     }
 
-    // #636: recipient lookup must retain exact stream order and all malformed
-    // evidence while avoiding a scan of other recipients' streams.
+    /// #636: recipient and sender ranges match a flat index for malformed names and epochs.
     #[test]
     fn recipient_ranges_match_independent_full_scan() {
         let recipients = ["", "a", "a\0", "a0", "a1", "z", "未知", "\u{10ffff}"];
@@ -6495,6 +6495,7 @@ mod coverage_tests {
         }
     }
 
+    /// Compare arrival storage with identical names, counts and violations in each index.
     #[test]
     #[ignore = "isolated arrival-state memory profile; run in a fresh process"]
     fn generator_arrival_state_memory_profile() {
