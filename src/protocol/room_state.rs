@@ -540,14 +540,20 @@ impl Room {
     /// Check if all current players are ready (the `StartGame` precondition).
     ///
     /// True when the room is not yet `Finalized`, has at least one player, and
-    /// every current player is ready. `max_players` is not consulted — a room
+    /// every current player has a ready flag and appears exactly once in the
+    /// ready list. `max_players` is not consulted — a room
     /// can be all-ready (and so startable) before it is full.
     #[allow(dead_code)]
     pub fn all_players_ready(&self) -> bool {
         if self.lobby_state == LobbyState::Finalized {
             return false;
         }
-        self.ready_players.len() == self.players.len() && !self.players.is_empty()
+        !self.players.is_empty()
+            && self.ready_players.len() == self.players.len()
+            && self
+                .players
+                .iter()
+                .all(|(id, player)| player.is_ready && self.ready_players.contains(id))
     }
 
     /// Finalize the game and prepare legacy peer metadata.
@@ -968,6 +974,53 @@ mod tests {
             assert_eq!(room.ready_players, ready_before);
             assert_eq!(room.finalize_game(), ready_count == members.len());
         }
+    }
+
+    /// Regression #1315: stale lists and flags must not start a game.
+    #[test]
+    fn finalization_requires_exact_ready_members_and_matching_flags() {
+        let mut room = empty_room();
+        let members = [Uuid::from_u128(1), Uuid::from_u128(2)];
+        for id in members {
+            assert!(room.add_player(PlayerInfo {
+                id,
+                name: id.to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: None,
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: DEFAULT_REGION_ID.to_string(),
+            }));
+        }
+        assert!(room.enter_lobby());
+        assert!(room.set_player_ready(&members[0], true));
+        for ready in [
+            vec![members[0], members[0]],
+            vec![members[0], Uuid::nil()],
+            members.to_vec(),
+        ] {
+            let mut inconsistent = room.clone();
+            inconsistent.ready_players = ready;
+            let before = format!("{inconsistent:?}");
+            assert!(!inconsistent.all_players_ready());
+            assert!(!inconsistent.finalize_game());
+            assert_eq!(format!("{inconsistent:?}"), before);
+        }
+        assert!(room.set_player_ready(&members[1], true));
+        for ready in [vec![members[0], members[0]], vec![members[0], Uuid::nil()]] {
+            let mut inconsistent = room.clone();
+            inconsistent.ready_players = ready;
+            assert!(!inconsistent.all_players_ready());
+            assert!(!inconsistent.finalize_game());
+        }
+        room.ready_players.reverse();
+        assert!(room.all_players_ready());
+        assert!(room.finalize_game());
+        assert!(!room.all_players_ready());
+        assert!(!room.finalize_game());
+        assert!(!empty_room().all_players_ready());
     }
 
     /// `is_expired_at` times every window off `last_activity` at the caller's

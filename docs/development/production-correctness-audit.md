@@ -11473,3 +11473,75 @@ identity and invalid skip values. The existing zero-wait health gate is
 unchanged. The original attempt and released graph remain retained in #1312.
 No causal repair is claimed from these diagnostics or from a passing rerun.
 Matched runtime evidence is still required before that issue can close.
+
+### F212 — Public Room finalization accepts stale ready IDs (#1315)
+
+Baseline `e627cc77`, under #826. `Room::all_players_ready` compares only the
+ready-list and player-map lengths. With two current members, a list containing
+the first ID twice, or the first ID and an absent ID, passes while the second
+member is unready. A complete ID list also passes with a false member ready
+flag. `Room::finalize_game` then commits the game start. Both collections are
+public. This is a public Rust Room contract defect; no live socket incident
+is established. The service coordinator checks readiness separately.
+
+The red-first control fails at the first duplicate-list assertion in Nextest
+`19dc9005-7141-4754-9f1e-cccb705fab60`. The repair requires a nonempty membership, equal list
+and map lengths, and a true ready flag plus ready-list membership for every
+current member. Equal lengths and full membership exclude duplicate and absent
+IDs without allocating another set. Order and unused room capacity do not
+change the result. Refusal leaves state and timestamps unchanged.
+
+The control covers duplicate and absent IDs, inconsistent flags, reordered
+valid IDs, empty membership and one-time finalization. Ten focused Room tests
+pass. Five selected Room and service controls also pass, including concurrent
+join/start and unready/start histories. This does not complete #826.
+
+The Rust client manifest at `da8f2d16` has no server-crate dependency. The .NET
+SDK at `e467c871` is an independent C# project. The Godot addon at `ec1740df`
+uses GDScript. None calls this server
+Room API. Wire messages, the service readiness coordinator and client migration
+requirements do not change. All three external clients are unaffected.
+
+### Deferred sparse recipient histograms (#636, #775)
+
+The capacity oracle now retains up to 16 exact latency samples inline per
+recipient. A seventeenth sample promotes that recipient to the existing
+adaptive histogram. Sparse recipients reuse one scratch histogram when the
+oracle emits statistics. HDR bucket rounding, percentiles and raw maximums use
+the same histogram implementation. Raw records and replay formats are unchanged.
+
+An isolated process builds 15,984 recipient states with 15 samples each, from
+4,096 to 61,440 microseconds. Baseline retains 114,573,312 bucket bytes and
+reports RSS 141,156,352 bytes after recording. The candidate retains zero bucket
+bytes in recipient states and reports RSS 9,117,696 bytes at the same point.
+Each recipient state grows from 112 to 144 bytes. All per-recipient statistics
+match an independent wide-counter HDR accumulator. RSS is one local process
+observation, not a portable bound or whole-run peak measurement.
+
+Sparse storage is bounded. Busy recipients keep the existing adaptive bucket
+promotion and incur the 32-byte larger enum state. The aggregate histogram
+remains wide. This analysis change does not repair live generator stalls or
+prove the planned ten-minute C3 workload. Both campaigns remain open.
+
+A separate isolated StatsAlloc control runs the full production `summarize`
+function with one reliable send per player and all receipts present. Each room
+has 16 players. Raw records are built before measurement.
+
+| Rooms | Baseline allocations | Candidate allocations | Baseline allocated bytes | Candidate allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 2,990 | 2,735 | 1,890,192 | 1,381,328 |
+| 999 | 185,821 | 169,838 | 116,922,796 | 85,007,308 |
+
+The 999-room serialized summary has 6,668,621 bytes and SHA-256
+`9d4f1df36f22819d6fcc89e1a41f84ceaf20afb3c208a65faa4e29735dd10156`
+in both versions. Exact all-gap summaries also match at 16 and 999 rooms, with
+unchanged allocation totals. At 999 rooms, retained allocated-minus-freed bytes
+remain 13,882,580 for reliable and 2,401,834 for all-gap. These cumulative
+allocator results do not measure peak memory or throughput.
+
+Six final all-feature latency controls pass in Nextest
+`df087df1-937b-4c1b-8506-01a4bbe8f310`. They cover sparse-to-histogram promotion,
+zero and maximum-width samples, hot-bucket counter widening, exact percentiles,
+raw maxima and reused scratch across sparse, dense and empty recipients.
+Twenty-nine source-policy controls and strict all-target, all-feature Clippy
+also pass. The allocation and memory controls above are local measurements.
