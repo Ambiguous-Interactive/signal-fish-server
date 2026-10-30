@@ -11646,3 +11646,25 @@ Strict native all-target Clippy passes. These native/native controls do not
 explain the hosted timeout, #1264's terminal event or #1244's historical Godot
 prefix loss. All three issues remain open; no attempt or original failure is
 removed from the evidence.
+
+A second hosted attempt at `7d585a07` fails the sibling raw-channel control in
+run `41000313181`, job `123882945060`. Both receiver-answerer generations drain
+all 2,048 exact packets. The next held receive-refusal wait times out before
+raw-channel polling resumes. That sibling requested cancellation and dropped
+the callback handles without observing completion. Cancellation is cooperative,
+so this did not prove its queues were held before sending.
+
+A new controlled handle history fails with the old abort-only hold step:
+`an abort request does not establish a held callback queue`. It keeps two
+pollers unfinished, then finishes each separately. The shared fixture hold step
+now waits for every poller to finish, under the existing five-second cancellation
+bound, before either saturation workload sends. The control passes after repair.
+The shared Engine-resume setup already waited for completion; this repair alone
+does not explain its earlier timeout. #1319 remains open.
+
+Both held waits now retain their last snapshot on timeout. As PR review notes,
+a bounded transport snapshot can omit SCTP fields. An absent refusal count now
+continues waiting with the incomplete snapshot retained, rather than panicking
+before diagnostics are saved. Success still requires an observed positive
+refusal count. Offered work, receive limits, receive-refusal deadlines and exact
+reliable receipt checks do not change.
