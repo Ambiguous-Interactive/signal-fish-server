@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Refuse public Rust Room game starts when ready IDs or member flags disagree (#1315).
+- Require complete, consistent member readiness before public Rust Room game starts (#1315).
 - Keep active rooms alive after player metadata changes through Rust storage APIs (#1309).
 - Keep rooms alive after lobby, ready, authority, and game-start changes through Rust Room and storage APIs (#1306).
 - Refuse overlapping player and spectator roles in public Rust room admission (#1304).

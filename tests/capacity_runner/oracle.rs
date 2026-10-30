@@ -1355,6 +1355,8 @@ impl RecipientLatency {
     }
 
     /// Reuse one histogram across sparse recipients while keeping HDR rounding exact.
+    /// Discard ranges over four times the next maximum, with a floor of 2,047
+    /// (the exact-value ceiling at three significant digits).
     fn stats_with_scratch(&self, scratch: &mut Option<LatencyAccumulator<u8>>) -> LatencyStats {
         match self {
             Self::Inline { samples, len } => {
@@ -1362,6 +1364,10 @@ impl RecipientLatency {
                     return LatencyStats::default();
                 }
                 let histogram = scratch.get_or_insert_with(LatencyAccumulator::default);
+                let maximum = samples.iter().take(*len).copied().max().unwrap_or(0);
+                if histogram.histogram.high() / 4 > maximum.max(2047) {
+                    *histogram = LatencyAccumulator::default();
+                }
                 histogram.histogram.reset();
                 histogram.max_us = 0;
                 for sample in samples.iter().take(*len) {
@@ -4267,6 +4273,25 @@ mod coverage_tests {
                     serde_json::to_value(expected.stats()).unwrap()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sparse_latency_scratch_releases_outlier_range_before_small_recipients() {
+        let mut scratch = None;
+        let mut outlier = RecipientLatency::new();
+        outlier.record(u64::MAX);
+        assert_eq!(outlier.stats_with_scratch(&mut scratch).max_us, u64::MAX);
+        let minimum_buckets = Histogram::<u8>::new(3).unwrap().distinct_values();
+        assert!(scratch.as_ref().unwrap().histogram.distinct_values() > minimum_buckets);
+        let mut small = RecipientLatency::new();
+        small.record(1);
+        for _ in 0..1000 {
+            assert_eq!(small.stats_with_scratch(&mut scratch).max_us, 1);
+            assert_eq!(
+                scratch.as_ref().unwrap().histogram.distinct_values(),
+                minimum_buckets
+            );
         }
     }
 

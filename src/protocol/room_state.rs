@@ -1012,8 +1012,10 @@ mod tests {
         for ready in [vec![members[0], members[0]], vec![members[0], Uuid::nil()]] {
             let mut inconsistent = room.clone();
             inconsistent.ready_players = ready;
+            let before = format!("{inconsistent:?}");
             assert!(!inconsistent.all_players_ready());
             assert!(!inconsistent.finalize_game());
+            assert_eq!(format!("{inconsistent:?}"), before);
         }
         room.ready_players.reverse();
         assert!(room.all_players_ready());

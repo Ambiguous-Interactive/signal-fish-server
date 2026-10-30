@@ -11479,8 +11479,8 @@ Matched runtime evidence is still required before that issue can close.
 Baseline `e627cc77`, under #826. `Room::all_players_ready` compares only the
 ready-list and player-map lengths. With two current members, a list containing
 the first ID twice, or the first ID and an absent ID, passes while the second
-member is unready. A complete ID list also passes with a false member ready
-flag. `Room::finalize_game` then commits the game start. Both collections are
+member is unready. A complete ID list also passes with a member marked
+unready. `Room::finalize_game` then commits the game start. Both collections are
 public. This is a public Rust Room contract defect; no live socket incident
 is established. The service coordinator checks readiness separately.
 
@@ -11545,3 +11545,13 @@ zero and maximum-width samples, hot-bucket counter widening, exact percentiles,
 raw maxima and reused scratch across sparse, dense and empty recipients.
 Twenty-nine source-policy controls and strict all-target, all-feature Clippy
 also pass. The allocation and memory controls above are local measurements.
+
+PR review found that one extreme sparse sample could leave the shared scratch
+with 56,320 counters, all cleared again for each later small recipient. The
+new range control fails on that retained size before repair. The oracle now
+discards a range over four times the next recipient's maximum, with a floor at
+the three-digit HDR exact-value ceiling. After a maximum-width sample, 1,000
+small-recipient statistics calls retain only the minimum 2,048 counters and
+preserve exact results. No elapsed-time speedup is claimed. The review also
+adds full state-preservation assertions for invalid IDs after all member flags
+are ready.
