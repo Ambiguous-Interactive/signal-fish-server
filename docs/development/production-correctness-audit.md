@@ -11952,7 +11952,6 @@ allocator use. Shrinking can move storage after the workload. It does not reduce
 the collection peak, establish a whole-run memory bound or qualify the largest
 ten-minute C3 cell. Keep #775 and the broader #636/#826 campaigns open.
 
-
 The first hosted session head, `aa7a2977`, also exposes a synthetic fixture with
 receipts dated at zero against sends planned after 100 ms. The failed-write drain
 control advances its paused clock before receiving those frames. It retains the
