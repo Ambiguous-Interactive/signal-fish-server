@@ -1268,6 +1268,7 @@ enum RecipientLatency {
 }
 
 impl RecipientLatency {
+    /// Retain a bounded sample prefix without allocating histogram buckets.
     fn new() -> Self {
         Self::Inline {
             samples: [0; 16],
@@ -1285,6 +1286,7 @@ impl RecipientLatency {
         }
     }
 
+    /// Record every sample and promote storage before inline or bucket capacity is exceeded.
     fn record(&mut self, sample: u64) {
         if let Self::Inline { samples, len } = self {
             if *len < samples.len() {
@@ -1350,6 +1352,7 @@ impl RecipientLatency {
         }
     }
 
+    /// Return exact HDR statistics with temporary scratch for sparse samples.
     fn stats(&self) -> LatencyStats {
         self.stats_with_scratch(&mut None)
     }
@@ -4098,6 +4101,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Keep exact latency statistics when recipients have different sample populations.
     fn individual_latency_widths_preserve_skewed_raw_and_measured_populations() {
         let context = crate::unit_context();
         let mut records = crate::complete_records(&context.plans);
@@ -4166,6 +4170,7 @@ mod coverage_tests {
 
     #[test]
     #[ignore = "isolated skewed-recipient memory profile; run in a fresh process"]
+    /// Measure retained histogram storage for recipients with skewed receipt counts.
     fn generator_skewed_latency_memory_profile() {
         let peers = std::env::var("CAPACITY_SKEW_PROBE_PEERS")
             .unwrap_or_else(|_| "1000".into())
@@ -4251,6 +4256,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Keep reused sparse scratch independent across recipient sizes and sample ranges.
     fn sparse_latency_scratch_resets_counts_range_and_raw_max_between_recipients() {
         let mut scratch = None;
         for samples in [
@@ -4277,6 +4283,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Bound repeated small-recipient resets after an extreme sparse sample.
     fn sparse_latency_scratch_releases_outlier_range_before_small_recipients() {
         let mut scratch = None;
         let mut outlier = RecipientLatency::new();
@@ -4412,6 +4419,7 @@ mod coverage_tests {
 
     #[test]
     #[ignore = "distributed latency bucket memory profile; run in a fresh process"]
+    /// Compare adaptive and fixed counters for distributed latency samples.
     fn generator_distributed_latency_memory_profile() {
         let adaptive = std::env::var("CAPACITY_DISTRIBUTED_ADAPTIVE").as_deref() == Ok("1");
         let started = std::time::Instant::now();
@@ -4726,6 +4734,7 @@ mod coverage_tests {
 
     #[test]
     #[ignore = "isolated sparse-recipient memory profile; run in a fresh process"]
+    /// Measure sparse recipient storage and compare every result with wide HDR counters.
     fn generator_sparse_recipient_latency_memory_profile() {
         let peers = std::env::var("CAPACITY_SPARSE_PEERS")
             .unwrap_or_else(|_| "15984".into())
