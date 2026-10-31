@@ -2175,6 +2175,7 @@ async fn ghost_notify_retry_survives_a_later_rollback_for_the_same_identity() {
     );
 }
 
+/// Prove room-gate order determines spectator baselines and subsequent live events.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {

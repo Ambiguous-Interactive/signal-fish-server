@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
+/// Bound roster-copy growth while preserving both spectator admission snapshots.
 #[tokio::test]
 async fn spectator_admission_reuses_its_owned_room_and_roster() {
     let mut profiles = Vec::new();
