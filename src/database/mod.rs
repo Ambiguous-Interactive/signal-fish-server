@@ -1118,6 +1118,7 @@ impl InMemoryDatabase {
         }
     }
 
+    /// Apply shared test observation and failure controls to stored-membership reads.
     #[cfg(test)]
     async fn before_room_membership_read(&self) -> Result<()> {
         self.get_room_players_calls
@@ -2248,6 +2249,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(true)
     }
 
+    /// Return owned stored player records, including members in pending rooms.
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>> {
         #[cfg(test)]
         self.before_room_membership_read().await?;
@@ -2260,6 +2262,7 @@ impl GameDatabase for InMemoryDatabase {
         }
     }
 
+    /// Copy stored member IDs without cloning names or connection metadata.
     async fn get_room_player_ids(&self, room_id: &RoomId) -> Result<Vec<PlayerId>> {
         #[cfg(test)]
         self.before_room_membership_read().await?;
@@ -3039,6 +3042,7 @@ mod tests {
         );
     }
 
+    /// Preserve identity projection across room states, missing rooms and read failures.
     #[tokio::test]
     async fn member_id_projection_matches_pending_live_and_missing_membership() {
         let database = InMemoryDatabase::new();

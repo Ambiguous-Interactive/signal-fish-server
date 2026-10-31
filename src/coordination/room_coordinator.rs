@@ -351,6 +351,7 @@ impl InMemoryRoomOperationCoordinator {
 }
 
 impl InMemoryRoomOperationCoordinator {
+    /// Commit and publish a ready toggle even if its caller is canceled.
     async fn apply_player_ready(
         self,
         room_id: RoomId,
@@ -493,6 +494,7 @@ impl InMemoryRoomOperationCoordinator {
 
 #[async_trait]
 impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
+    /// Promote a Waiting room only when its effective seated membership is nonempty.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
 

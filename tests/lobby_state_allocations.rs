@@ -77,6 +77,7 @@ async fn lobby_state_projection_allocates_only_its_async_result() {
     readiness_allocations_do_not_copy_player_details().await;
 }
 
+/// Bound readiness storage independently of the stored member's name size.
 async fn readiness_allocations_do_not_copy_player_details() {
     let mut profiles = Vec::new();
     for name_bytes in [1, 4096, 65536] {

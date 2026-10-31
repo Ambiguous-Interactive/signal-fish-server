@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce room-state and player-detail copies during lobby promotion and readiness checks (#636).
+- Reduce memory used by lobby promotion and readiness checks (#636).
 
 ### Fixed
 
