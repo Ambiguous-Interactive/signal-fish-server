@@ -9,9 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce memory used by lobby promotion and readiness checks (#636).
+- Reduce memory used by lobby promotion and readiness checks before and after game start (#636).
 - Reduce memory used to capture a disconnected player for reconnection (#636).
-- Reduce memory used to read finalized room readiness (#636).
 
 ### Fixed
 

@@ -12523,7 +12523,12 @@ release while direct responses fail. They check exact stored authority flags,
 live event count and order, and three replay records. A second cell also fails
 the last room broadcast and still retains its committed role and replay.
 Existing cancellation, FIFO, recipient-flag and broadcast-failure controls
-continue to apply.
+continue to apply. The test coordinator records response and publication
+attempts before either injected error. A temporary source control defers the
+response until after publication; Nextest
+`128ed288-c508-4f5c-97c1-91253ebf4d60` fails with
+`[Publication, Response]` instead of `[Response, Publication]`. The control is
+removed and the production order is restored before publication.
 
 #### Finalized readiness capture (#636)
 
@@ -12579,7 +12584,7 @@ observations compare the unchanged scan with the final counter implementation:
 | 15,984 | 61,652 | 2,284 | 14,850,013 | 72,114 |
 
 Each shape includes two planned cycles and deliberately missing final rejoins.
-Both implementations return the same exact peer list. These single local
+Both implementations return the same peer list. These single local
 observations measure this analysis phase alone. The planned ten-minute large
 workload and total generator peak memory remain unqualified, so #775 remains open.
 

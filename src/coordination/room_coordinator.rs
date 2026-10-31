@@ -301,6 +301,7 @@ impl InMemoryRoomOperationCoordinator {
         )
     }
 
+    /// Attempt the response before publishing a committed role, even if the response fails.
     fn enqueue_authority_result(
         &self,
         room_id: &RoomId,
@@ -1630,6 +1631,13 @@ mod tests {
         broadcast_attempts: AtomicUsize,
         degraded_transaction_frames: AtomicUsize,
         failed_direct_messages: AtomicUsize,
+        authority_delivery_attempts: Mutex<Vec<AuthorityDeliveryAttempt>>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum AuthorityDeliveryAttempt {
+        Response,
+        Publication,
     }
 
     impl RecordingMessageCoordinator {
@@ -1661,11 +1669,18 @@ mod tests {
             self.room_events.enqueue(mutation_guard, job)
         }
 
+        /// Record authority response attempts before injecting delivery failure.
         async fn send_to_player(
             &self,
             _player_id: &PlayerId,
-            _message: Arc<ServerMessage>,
+            message: Arc<ServerMessage>,
         ) -> Result<()> {
+            if matches!(message.as_ref(), ServerMessage::AuthorityResponse { .. }) {
+                self.authority_delivery_attempts
+                    .lock()
+                    .await
+                    .push(AuthorityDeliveryAttempt::Response);
+            }
             if self.failed_direct_messages.load(Ordering::Acquire) > 0 {
                 anyhow::bail!("injected direct delivery failure");
             }
@@ -1683,11 +1698,18 @@ mod tests {
             self.send_to_player(player_id, message).await.map(|()| true)
         }
 
+        /// Record publication attempts, including broadcasts that fail.
         async fn broadcast_to_room(
             &self,
             room_id: &RoomId,
             message: Arc<ServerMessage>,
         ) -> Result<()> {
+            if matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. }) {
+                self.authority_delivery_attempts
+                    .lock()
+                    .await
+                    .push(AuthorityDeliveryAttempt::Publication);
+            }
             let call_number = self.broadcast_attempts.fetch_add(1, Ordering::SeqCst) + 1;
             let should_fail = self
                 .failed_broadcast_calls

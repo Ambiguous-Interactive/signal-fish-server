@@ -13953,6 +13953,7 @@ async fn room_player_snapshot_default_preserves_absence_metadata_and_storage_err
         .is_none());
 }
 
+/// Keep the default and shipped readiness projections consistent across state and read failures.
 #[tokio::test]
 async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_errors() {
     let inner = Arc::new(InMemoryDatabase::new());

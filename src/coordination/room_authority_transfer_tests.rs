@@ -310,6 +310,7 @@ async fn failed_authority_transfer_broadcast_preserves_committed_storage_and_rep
     assert_eq!(messages.broadcasts().await.len(), 1);
 }
 
+/// Preserve response-before-publication order, committed roles and replay through delivery errors.
 #[tokio::test]
 async fn failed_authority_response_still_publishes_committed_claim_and_release() {
     for failed_broadcast in [None, Some(3)] {
@@ -358,11 +359,23 @@ async fn failed_authority_response_still_publishes_committed_claim_and_release()
             (peer, false, None, true),
         ] {
             let before = messages.broadcasts().await.len();
+            let attempts_before = messages.authority_delivery_attempts.lock().await.len();
             let outcome = coordinator
                 .handle_authority_request(&room.id, &requester, become_authority)
                 .await
                 .unwrap();
             assert_eq!(outcome.granted(), granted);
+            assert_eq!(
+                &messages.authority_delivery_attempts.lock().await[attempts_before..],
+                if granted {
+                    &[
+                        AuthorityDeliveryAttempt::Response,
+                        AuthorityDeliveryAttempt::Publication,
+                    ][..]
+                } else {
+                    &[AuthorityDeliveryAttempt::Response][..]
+                }
+            );
             let stored = database.get_room_by_id(&room.id).await.unwrap().unwrap();
             assert_eq!(stored.authority_player, expected_authority);
             assert!(stored

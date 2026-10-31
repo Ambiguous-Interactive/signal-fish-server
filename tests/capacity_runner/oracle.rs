@@ -3159,6 +3159,7 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 mod coverage_tests {
     use super::*;
 
+    /// Preserve the original independent full-scan completion decision as a comparison control.
     fn scanned_missing_rejoins<'a>(churn: &'a ChurnPlan, events: &[ChurnEvent]) -> Vec<&'a str> {
         let mut required = BTreeMap::<&str, usize>::new();
         for cycle in &churn.cycles {
@@ -3178,6 +3179,7 @@ mod coverage_tests {
             .collect()
     }
 
+    /// Match exact missing-peer identities across malformed, partial and reordered histories.
     #[test]
     fn remaining_rejoins_match_scans_for_repeated_missing_and_unplanned_events() {
         for peers in [0, 1, 17, 129] {
@@ -3214,6 +3216,7 @@ mod coverage_tests {
         }
     }
 
+    /// Compare completion analysis on increasing histories with the same missing-peer evidence.
     #[test]
     #[ignore = "isolated churn completion scaling comparison"]
     fn generator_churn_completion_profile() {

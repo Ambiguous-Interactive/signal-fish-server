@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
+/// Copy exact ready identities with fixed allocation cost as unrelated spectator metadata grows.
 #[tokio::test]
 async fn finalized_readiness_projection_copies_only_ready_identities() {
     let mut profiles = Vec::new();
