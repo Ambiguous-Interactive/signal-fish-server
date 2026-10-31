@@ -915,6 +915,30 @@ fn churn_evidence(
     }
 }
 
+/// Count remaining rejoins once per planned peer, without retaining observed events.
+fn missing_churn_rejoins<'a>(
+    churn: &'a ChurnPlan,
+    events: &[ChurnEvent],
+) -> impl ExactSizeIterator<Item = &'a str> {
+    let mut remaining: BTreeMap<&str, usize> = BTreeMap::new();
+    for cycle in &churn.cycles {
+        for peer in &cycle.peers {
+            *remaining.entry(peer.as_str()).or_default() += 1;
+        }
+    }
+    for event in events {
+        if event.phase == ChurnPhase::Rejoined {
+            if let Some(required) = remaining.get_mut(event.recipient.as_str()) {
+                *required = required.saturating_sub(1);
+                if *required == 0 {
+                    remaining.remove(event.recipient.as_str());
+                }
+            }
+        }
+    }
+    remaining.into_keys()
+}
+
 /// Check schedule and incarnation evidence, counting each valid planned send once.
 fn scheduled_send_evidence(
     plans: &[SenderPlan],
@@ -2106,25 +2130,10 @@ pub fn summarize(
     // no-op storm — or a disconnect whose rejoin half never ran — would
     // mislabel the run as churn evidence while the new incarnation's
     // streams go unvalidated.
-    let mut required_rejoins: BTreeMap<&str, usize> = BTreeMap::new();
-    for cycle in &churn.cycles {
-        for peer in &cycle.peers {
-            *required_rejoins.entry(peer.as_str()).or_default() += 1;
-        }
-    }
-    for (peer, required) in &required_rejoins {
-        let rejoins = count_u64(
-            records
-                .churn
-                .iter()
-                .filter(|event| event.recipient == *peer && event.phase == ChurnPhase::Rejoined)
-                .count(),
-        );
-        if rejoins < count_u64(*required) {
-            reasons.push(InvalidReason::ChurnNotPerformed {
-                peer: (*peer).to_string(),
-            });
-        }
+    for peer in missing_churn_rejoins(churn, &records.churn) {
+        reasons.push(InvalidReason::ChurnNotPerformed {
+            peer: peer.to_string(),
+        });
     }
     let hook_exemptions: Vec<String> = reasons
         .iter()
@@ -3149,6 +3158,106 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    fn scanned_missing_rejoins<'a>(churn: &'a ChurnPlan, events: &[ChurnEvent]) -> Vec<&'a str> {
+        let mut required = BTreeMap::<&str, usize>::new();
+        for cycle in &churn.cycles {
+            for peer in &cycle.peers {
+                *required.entry(peer.as_str()).or_default() += 1;
+            }
+        }
+        required
+            .into_iter()
+            .filter_map(|(peer, required)| {
+                let actual = events
+                    .iter()
+                    .filter(|event| event.recipient == peer && event.phase == ChurnPhase::Rejoined)
+                    .count();
+                (actual < required).then_some(peer)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remaining_rejoins_match_scans_for_repeated_missing_and_unplanned_events() {
+        for peers in [0, 1, 17, 129] {
+            let mut records = churn_sort_fixture(511);
+            let mut churn = ChurnPlan::default();
+            for cycle in 0..4 {
+                churn.cycles.push(crate::schedule::ChurnCycle {
+                    peers: (0..peers)
+                        .filter(|peer| (peer + cycle) % 3 != 0)
+                        .map(|peer| format!("peer-{peer}"))
+                        .collect(),
+                    disconnect_us: 0,
+                    reconnects_us: BTreeMap::new(),
+                });
+            }
+            for reversed in [false, true] {
+                if reversed {
+                    records.churn.reverse();
+                }
+                for length in [0, 1, 17, 257, 511] {
+                    let events = &records.churn[..length];
+                    let remaining = missing_churn_rejoins(&churn, events);
+                    assert_eq!(
+                        remaining.len(),
+                        scanned_missing_rejoins(&churn, events).len()
+                    );
+                    assert_eq!(
+                        remaining.collect::<Vec<_>>(),
+                        scanned_missing_rejoins(&churn, events),
+                        "peers={peers} reversed={reversed} length={length}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated churn completion scaling comparison"]
+    fn generator_churn_completion_profile() {
+        for peers in [1_000, 4_000, 15_984] {
+            let mut churn = ChurnPlan::default();
+            let mut events = Vec::new();
+            for cycle in 0_u32..2 {
+                let mut names = Vec::new();
+                for peer in 0..peers {
+                    let name = format!("peer-{peer:05}");
+                    names.push(name.clone());
+                    for phase in [ChurnPhase::Disconnect, ChurnPhase::Rejoined] {
+                        if phase == ChurnPhase::Rejoined && peer % 7 == 0 && cycle == 1 {
+                            continue;
+                        }
+                        events.push(ChurnEvent {
+                            recipient: name.clone(),
+                            phase,
+                            at_us: u64::from(cycle),
+                            epoch: if phase == ChurnPhase::Rejoined {
+                                Some(2 + cycle)
+                            } else {
+                                None
+                            },
+                            tails: BTreeMap::new().into(),
+                        });
+                    }
+                }
+                churn.cycles.push(crate::schedule::ChurnCycle {
+                    peers: names,
+                    disconnect_us: u64::from(cycle),
+                    reconnects_us: BTreeMap::new(),
+                });
+            }
+            let started = std::time::Instant::now();
+            let expected = scanned_missing_rejoins(&churn, &events);
+            let old_us = started.elapsed().as_micros();
+            let started = std::time::Instant::now();
+            let actual: Vec<_> = missing_churn_rejoins(&churn, &events).collect();
+            let new_us = started.elapsed().as_micros();
+            assert_eq!(actual, expected);
+            println!("CHURN_COMPLETION_PROFILE peers={peers} events={} missing={} old_us={old_us} new_us={new_us}", events.len(), actual.len());
+        }
+    }
 
     /// #1323: preserve exact causal violations in both warm-up and measured evidence.
     #[test]

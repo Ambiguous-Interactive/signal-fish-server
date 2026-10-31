@@ -11,9 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduce memory used by lobby promotion and readiness checks (#636).
 - Reduce memory used to capture a disconnected player for reconnection (#636).
+- Reduce memory used to read finalized room readiness (#636).
 
 ### Fixed
 
+- Publish committed authority changes even when the request response cannot be sent (#1337).
 - Reject invalid authority transfers and store valid transfers before announcing the new authority (#1334).
 - Commit the Lobby state before sending an early readiness event (#1330).
 - Keep rooms in Waiting until a stored seated member is actively routed (#1328, #1332).

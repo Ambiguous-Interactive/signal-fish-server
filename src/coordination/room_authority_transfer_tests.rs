@@ -309,3 +309,95 @@ async fn failed_authority_transfer_broadcast_preserves_committed_storage_and_rep
         .unwrap());
     assert_eq!(messages.broadcasts().await.len(), 1);
 }
+
+#[tokio::test]
+async fn failed_authority_response_still_publishes_committed_claim_and_release() {
+    for failed_broadcast in [None, Some(3)] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let replay = Arc::new(crate::reconnection::ReconnectionManager::new(
+            30,
+            16,
+            Arc::new(crate::metrics::ServerMetrics::new()),
+        ));
+        let member = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let room = database
+            .create_room(
+                "authority-response-failure".into(),
+                None,
+                4,
+                true,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        database
+            .add_player_to_room(&room.id, player_fixture(peer, "Peer", false, None))
+            .await
+            .unwrap();
+        replay
+            .register_disconnection(PlayerId::from_u128(3), room.id, false, None, 0)
+            .await;
+        let coordinator = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            database.clone(),
+            Some(replay.clone()),
+        );
+        messages.failed_direct_messages.store(1, Ordering::Release);
+        if let Some(call) = failed_broadcast {
+            messages.fail_broadcast_on(call).await;
+        }
+        for (requester, become_authority, expected_authority, granted) in [
+            (member, false, None, true),
+            (peer, true, Some(peer), true),
+            (member, true, Some(peer), false),
+            (peer, false, None, true),
+        ] {
+            let before = messages.broadcasts().await.len();
+            let outcome = coordinator
+                .handle_authority_request(&room.id, &requester, become_authority)
+                .await
+                .unwrap();
+            assert_eq!(outcome.granted(), granted);
+            let stored = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(stored.authority_player, expected_authority);
+            assert!(stored
+                .players
+                .values()
+                .all(|player| player.is_authority == (Some(player.id) == expected_authority)));
+            let broadcasts = messages.broadcasts().await;
+            assert_eq!(
+                broadcasts.len(),
+                before
+                    + usize::from(
+                        granted
+                            && Some(messages.broadcast_attempts.load(Ordering::Acquire))
+                                != failed_broadcast
+                    ),
+                "committed authority changes must survive a failed direct response"
+            );
+            if granted
+                && Some(messages.broadcast_attempts.load(Ordering::Acquire)) != failed_broadcast
+            {
+                assert!(matches!(&broadcasts.last().unwrap().message,
+                ServerMessage::AuthorityChanged { authority_player, .. } if *authority_player == expected_authority));
+            }
+        }
+        let replayed = replay.get_missed_events(&room.id, 0).await;
+        let roles: Vec<_> = replayed
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::AuthorityChanged {
+                    authority_player, ..
+                } => Some(*authority_player),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(roles, vec![None, Some(peer), None]);
+    }
+}
