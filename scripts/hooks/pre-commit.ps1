@@ -69,7 +69,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     "docs/ci-cd-*", "docs/test-*", "docs/git-hooks-*", "docs/hooks-*", "docs/pre-commit-*",
     "docs/development.md", "docs/development/*", "docs/releasing.md",
     # Standalone internal files
-    "Cargo.lock", "PLAN.md", "AGENTS.md", "CLAUDE.md", "pre-push.txt", "pre-commit.txt", "logs_*.zip",
+    "Cargo.lock", "package.json", "package-lock.json", "PLAN.md", "AGENTS.md", "CLAUDE.md", "pre-push.txt", "pre-commit.txt", "logs_*.zip",
     # Linter and tool config
     ".markdownlint*", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
     # VCS and Docker ignore files

@@ -531,6 +531,7 @@ jobs:
                 fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
                 clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
                 clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
+                # Root npm files are lint tooling; client manifests remain dependency-maintenance inputs.
                 package.json|package-lock.json|clients/browser/package.json|clients/browser/package-lock.json) HAS_DEPENDENCY_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*) ;;

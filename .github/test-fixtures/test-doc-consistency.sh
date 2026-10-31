@@ -179,6 +179,8 @@ INTERNAL_PATHS=(
     "formal/model.tla"
     # Standalone internal files
     "Cargo.lock"
+    "package.json"
+    "package-lock.json"
     "PLAN.md"
     "AGENTS.md"
     "CLAUDE.md"
@@ -283,6 +285,9 @@ NON_INTERNAL_PATHS=(
     "benches/Encoding/support/model.rs"
     # Project manifests
     "Cargo.toml"
+    "clients/browser/package.json"
+    "clients/browser/package-lock.json"
+    "package.json.bak"
     # User-facing docs
     "README.md"
     "docs/guide.md"

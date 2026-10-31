@@ -44,6 +44,7 @@ include = [
 # source-owned marker opts only new artifacts into the built-in TLS feature;
 # its absence preserves the feature set of historical releases.
 [package.metadata.signal-fish-release]
+prepared-from = "e05b39cc826a379651ec18f6953b0f24475a5af3"
 built-in-tls = true
 
 [features]

@@ -38,11 +38,13 @@ missing dated release section.
 - Point `[Unreleased]` from the newest dated release to `HEAD`.
 - Link every release to the immediately adjacent older section; only the oldest
   release uses a direct tag link.
-- Before preparing a release, require `Cargo.toml` to equal the newest dated
+- Before a normal version bump, require `Cargo.toml` to equal the newest dated
   release and require its annotated `vX.Y.Z` tag to resolve to an ancestor of
   `HEAD`. Reject an existing target section or local target tag before mutation.
 
-Run `scripts/prepare-release.sh` only from this valid released baseline. Its
+An explicit `--bump refresh` can update an unpublished prepared version after
+remote-tag and registry absence checks. See [the release runbook](../../../docs/releasing.md).
+Normal version bumps still require the released baseline. The script's
 preflight and postflight checks are intentional atomicity boundaries; do not
 weaken them by widening CI checkout depth or by making correctness conditional
 on repository topology.
@@ -92,7 +94,8 @@ The following paths are classified as internal (no CHANGELOG entry required):
 - **Dev/build directories:** `scripts/`, `tests/`, `test-fixtures/`, `target/`, `progress/`
 - **Extracted Rust tests:** `*_tests.rs`, `*_test.rs`, and nested `tests.rs`
   under `src/` or `clients/native/src/`; these files contain test code only.
-- **Standalone files:** `Cargo.lock`, `PLAN.md`, `AGENTS.md`, `pre-push.txt`, `logs_*.zip`
+- **Standalone files:** `Cargo.lock`, root tooling `package.json`/`package-lock.json`,
+  `PLAN.md`, `AGENTS.md`, `pre-push.txt`, `logs_*.zip`
 - **Lint/tool configs:** `.markdownlint*`, `.lychee.toml`, `.lycheecache`, `.typos.toml`, `.yamllint.yml`
 - **VCS/Docker ignores:** `.gitignore`, `.dockerignore`
 - **Build tool configs:** `clippy.toml`, `deny.toml`, `tarpaulin.toml`, `rust-toolchain.toml`, `mkdocs.yml`, `requirements-docs.txt`
