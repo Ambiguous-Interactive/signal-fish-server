@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Reduce memory used by lobby promotion and readiness checks (#636).
+- Reduce memory used to capture a disconnected player for reconnection (#636).
 
 ### Fixed
 
+- Store authority transfers before announcing the new authority (#1334).
 - Commit the Lobby state before sending an early readiness event (#1330).
 - Keep rooms in Waiting until a stored seated member is actively routed (#1328, #1332).
 

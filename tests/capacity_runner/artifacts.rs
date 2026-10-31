@@ -1637,7 +1637,7 @@ mod tests {
             phase: ChurnPhase::Rejoined,
             at_us: 456,
             epoch: Some(2),
-            tails: BTreeMap::from([("r0p0".into(), ("id0".into(), 3))]),
+            tails: BTreeMap::from([("r0p0".into(), ("id0".into(), 3))]).into(),
         });
         expected.join_failures.push("join refused".into());
         expected.faults.push(InvalidReason::ServerTerminated);

@@ -51,6 +51,7 @@ mod received_counts;
 mod records;
 mod runner;
 mod schedule;
+mod snapshot_tails;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -4746,7 +4747,7 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         phase: records::ChurnPhase::Disconnect,
         at_us: disconnect_us,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p1".to_string(),
@@ -4758,7 +4759,8 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
             ("r0p1".to_string(), ("id-r0p1b".to_string(), 0)),
             ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
             ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
-        ]),
+        ])
+        .into(),
     });
     let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
     let sent_name = ReceiptName::from(plan.name.as_str());
@@ -4893,7 +4895,7 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         phase: records::ChurnPhase::Disconnect,
         at_us: 250_000,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     records.churn.push(records::ChurnEvent {
         recipient: "r0p0".to_string(),
@@ -4905,7 +4907,8 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
             ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
             ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
             ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
-        ]),
+        ])
+        .into(),
     });
     churn
         .cycles
@@ -4945,7 +4948,7 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         phase: records::ChurnPhase::Disconnect,
         at_us: 250_000,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     holed.churn.push(records::ChurnEvent {
         recipient: "r0p0".to_string(),
@@ -4957,7 +4960,8 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
             ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
             ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
             ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
-        ]),
+        ])
+        .into(),
     });
     let summary = oracle::summarize(
         &context.plans,
@@ -4998,7 +5002,7 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
         phase: records::ChurnPhase::Disconnect,
         at_us: 200,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     records.churn.push(records::ChurnEvent {
         recipient: "r0p0".to_string(),
@@ -5010,7 +5014,8 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
             ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
             ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
             ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
-        ]),
+        ])
+        .into(),
     });
     // The server replays an already-accounted sequence to the new seat.
     records.receipts.push(ReceiptEvent {
@@ -5154,7 +5159,7 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
             phase: records::ChurnPhase::Disconnect,
             at_us: disconnect_us,
             epoch: None,
-            tails: BTreeMap::new(),
+            tails: BTreeMap::new().into(),
         });
     }
     let mut seat_order: Vec<&str> = plans.iter().map(|plan| plan.name.as_str()).collect();
@@ -5178,7 +5183,7 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
             phase: records::ChurnPhase::Rejoined,
             at_us: reconnect,
             epoch: Some(2),
-            tails,
+            tails: tails.into(),
         });
     }
     // Sends and receipts: a frame is delivered iff its fanout found the
@@ -5312,14 +5317,14 @@ fn a_replacement_wave_whose_rejoin_never_fires_is_invalid() {
             phase: records::ChurnPhase::Disconnect,
             at_us: first.disconnect_us,
             epoch: None,
-            tails: BTreeMap::new(),
+            tails: BTreeMap::new().into(),
         });
         log.push_churn(records::ChurnEvent {
             recipient: peer,
             phase: records::ChurnPhase::Rejoined,
             at_us: first.reconnects_us.values().copied().next().unwrap_or(0),
             epoch: Some(2),
-            tails: BTreeMap::new(),
+            tails: BTreeMap::new().into(),
         });
     }
     let second = &churn.cycles[1];
@@ -5329,7 +5334,7 @@ fn a_replacement_wave_whose_rejoin_never_fires_is_invalid() {
             phase: records::ChurnPhase::Disconnect,
             at_us: second.disconnect_us,
             epoch: None,
-            tails: BTreeMap::new(),
+            tails: BTreeMap::new().into(),
         });
     }
     let records = log.take_records();
@@ -5697,14 +5702,14 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         phase: records::ChurnPhase::Disconnect,
         at_us: 249_999,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p0".to_string(),
         phase: records::ChurnPhase::Rejoined,
         at_us: 250_000,
         epoch: Some(2),
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     let sent_name = ReceiptName::from(plan.name.as_str());
     for send in &plan.sends {
@@ -5806,14 +5811,14 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         phase: records::ChurnPhase::Disconnect,
         at_us: 249_999,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p0".to_string(),
         phase: records::ChurnPhase::Rejoined,
         at_us: 250_000,
         epoch: Some(2),
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     let sent_name = ReceiptName::from(plan.name.as_str());
     for send in &plan.sends {
@@ -5923,14 +5928,14 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         phase: records::ChurnPhase::Disconnect,
         at_us: disconnect_us,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p1".to_string(),
         phase: records::ChurnPhase::Rejoined,
         at_us: 150_000,
         epoch: Some(2),
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     // The viewer rejoins at 250 ms; its snapshot names r0p1 by the
     // second-incarnation id with tail 1 (one frame already accounted).
@@ -5939,14 +5944,14 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         phase: records::ChurnPhase::Disconnect,
         at_us: 249_999,
         epoch: None,
-        tails: BTreeMap::new(),
+        tails: BTreeMap::new().into(),
     });
     log.push_churn(records::ChurnEvent {
         recipient: "r0p0".to_string(),
         phase: records::ChurnPhase::Rejoined,
         at_us: 250_000,
         epoch: Some(2),
-        tails: BTreeMap::from([("r0p1".to_string(), ("id-r0p1-bump".to_string(), 1))]),
+        tails: BTreeMap::from([("r0p1".to_string(), ("id-r0p1-bump".to_string(), 1))]).into(),
     });
     let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
     let sent_name = ReceiptName::from(plan.name.as_str());
@@ -6053,7 +6058,7 @@ fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
         phase: records::ChurnPhase::Rejoined,
         at_us: 250_000,
         epoch: Some(2),
-        tails: BTreeMap::from([("r0p1".to_string(), ("id-phantom".to_string(), 0))]),
+        tails: BTreeMap::from([("r0p1".to_string(), ("id-phantom".to_string(), 0))]).into(),
     });
     log.set_registry(BTreeMap::from([
         ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
@@ -6234,7 +6239,7 @@ fn send_plan_corruption_cannot_be_valid_capacity_evidence() {
                         phase: records::ChurnPhase::Rejoined,
                         at_us: 0,
                         epoch: Some(2),
-                        tails: BTreeMap::new(),
+                        tails: BTreeMap::new().into(),
                     });
                 }
                 for receipt in &mut records.receipts {

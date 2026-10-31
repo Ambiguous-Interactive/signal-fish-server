@@ -3469,7 +3469,7 @@ mod coverage_tests {
                     phase: ChurnPhase::Disconnect,
                     at_us: 0,
                     epoch: None,
-                    tails: BTreeMap::new(),
+                    tails: BTreeMap::new().into(),
                 });
                 let mut materialized_reasons = Vec::new();
                 let materialized = scheduled_send_evidence(
@@ -4334,7 +4334,7 @@ mod coverage_tests {
                         },
                         at_us: [0, 1, 1, 2, u64::MAX][usize::try_from((state >> 8) % 5).unwrap()],
                         epoch: Some(position),
-                        tails: BTreeMap::new(),
+                        tails: BTreeMap::new().into(),
                     }
                 })
                 .collect();
@@ -4402,7 +4402,7 @@ mod coverage_tests {
                 phase: ChurnPhase::Disconnect,
                 at_us: 10,
                 epoch: None,
-                tails: BTreeMap::new(),
+                tails: BTreeMap::new().into(),
             });
         }
         let (unshared, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
@@ -4420,7 +4420,7 @@ mod coverage_tests {
             phase: ChurnPhase::Rejoined,
             at_us: 100,
             epoch: Some(2),
-            tails: BTreeMap::from([("βob".to_string(), ("bob-id".to_string(), 5))]),
+            tails: BTreeMap::from([("βob".to_string(), ("bob-id".to_string(), 5))]).into(),
         });
         let (mixed, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
@@ -4488,7 +4488,7 @@ mod coverage_tests {
                 phase: ChurnPhase::Rejoined,
                 at_us: 100,
                 epoch: Some(2),
-                tails: BTreeMap::from([("bob".to_string(), ("bob-id".to_string(), 5))]),
+                tails: BTreeMap::from([("bob".to_string(), ("bob-id".to_string(), 5))]).into(),
             }],
             registry: BTreeMap::from([("bob-id".to_string(), ("bob".to_string(), 2))]),
             ..RunRecords::default()
@@ -4609,7 +4609,7 @@ mod coverage_tests {
                     phase: ChurnPhase::Rejoined,
                     at_us: 100,
                     epoch: Some(2),
-                    tails: BTreeMap::new(),
+                    tails: BTreeMap::new().into(),
                 });
             }
         }
@@ -5402,7 +5402,7 @@ mod coverage_tests {
                     phase,
                     at_us: base.intended_us + at_us,
                     epoch,
-                    tails: BTreeMap::new(),
+                    tails: BTreeMap::new().into(),
                 });
             }
             for reverse in [false, true] {
@@ -5835,7 +5835,7 @@ mod coverage_tests {
                 },
                 at_us: (position % 7) as u64,
                 epoch: [None, Some(0), Some(1), Some(2), Some(3), Some(u32::MAX)][position % 6],
-                tails: BTreeMap::new(),
+                tails: BTreeMap::new().into(),
             });
         }
         records
@@ -5961,7 +5961,7 @@ mod coverage_tests {
                         phase,
                         at_us,
                         epoch: (phase == ChurnPhase::Rejoined).then_some(epoch),
-                        tails: BTreeMap::new(),
+                        tails: BTreeMap::new().into(),
                     });
                 }
             }
@@ -6236,14 +6236,14 @@ mod coverage_tests {
                 phase: ChurnPhase::Disconnect,
                 at_us: snapshot_us,
                 epoch: None,
-                tails: BTreeMap::new(),
+                tails: BTreeMap::new().into(),
             });
             records.churn.push(crate::records::ChurnEvent {
                 recipient: "r0p0".into(),
                 phase: ChurnPhase::Rejoined,
                 at_us: snapshot_us,
                 epoch: Some(2),
-                tails: BTreeMap::from([("r0p1".into(), (player_id.into(), tail))]),
+                tails: BTreeMap::from([("r0p1".into(), (player_id.into(), tail))]).into(),
             });
             // The replay ledger need not arrive in sender or sequence order.
             records.sent.reverse();

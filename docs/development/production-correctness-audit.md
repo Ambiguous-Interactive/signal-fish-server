@@ -12353,3 +12353,95 @@ state and fields. These clients require no event when there are no effective
 seats. Valid promotion events, encodings and errors stay compatible. The new
 storage projection and capacity storage do not change client messages. All
 three clients are unaffected and need no tracking or migration change.
+
+### F219 — Public authority transfer announces an uncommitted role (#1334)
+
+At main `de3bd9fb`, `coordinate_authority_transfer` queues an
+`AuthorityChanged` event without changing storage. A valid transfer returns
+true while room snapshots still name the old authority. Missing rooms,
+absent target members and rooms without authority support also return true.
+This is a public library coordinator defect. The socket room-operation path
+uses a separate storage transaction; no live socket incident is established.
+
+Two red-first controls fail in Nextest
+`15e72e7e-86fe-4abd-b1f7-2c1e0467c513`: the stored authority remains player 1
+when transfer to player 2 succeeds, and an absent target is accepted. The
+repair uses the existing atomic validated storage assignment before queuing
+its live and replay event. Storage refusal returns false without publication.
+An owned task retains the room mutation guard across assignment and FIFO
+publication, so cancellation of the waiting caller cannot split the transfer.
+A later delivery error does not undo the committed role.
+
+Controls check transfer in both directions, every member's stored authority
+flag, recipient-specific flags, ordered replay, refused transfers with unchanged
+storage, cancellation after commit, and a failed broadcast followed by another
+valid transfer. The existing broadcast-failure fixture now creates a valid
+stored room so it still reaches its intended failure.
+
+#### One-player disconnect snapshots (#636)
+
+`GameDatabase::get_room_player_snapshot` returns the selected member and the
+room authority from one snapshot. Its default implementation projects one
+`get_room_by_id` result and preserves custom-backend errors and absence
+semantics. The shipped backend clones only the selected player while holding
+one room read lock. Disconnect capture retains the previous distinction
+between a missing room, missing member and failed storage read. Pending room
+visibility and the existing injected storage-read controls also apply.
+
+An isolated allocation control retains the selected player's nested connection
+metadata and increases unrelated room metadata. Setup and assertions are
+outside the measured intervals:
+
+| Members | Spectators | Old capture allocations | Old bytes | New allocations | New bytes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 18 | 2,357 | 7 | 828 |
+| 4 | 16 | 53 | 194,949 | 7 | 828 |
+| 8 | 255 | 316 | 2,490,205 | 7 | 828 |
+
+These are local allocation measurements, not throughput or network results.
+The old capture includes the full room clone and the selected-player clone.
+Controls compare player metadata, authority assignment and clearing,
+missing members and rooms, pending visibility and default-adapter errors.
+Existing disconnect failure and reconnect controls exercise the server path.
+
+#### External-client assessment
+
+Rust main `da8f2d16` validates the existing `AuthorityChanged` roster identity
+and local flag, then updates its authority in `src/client_core.rs`. .NET main
+`e467c871` decodes and emits that message in `Polling/FramePipeline.cs`.
+Godot main `689ecdfb` applies roster authority flags before emitting
+`authority_changed` in `signal_fish_client.gd`. All three clients are unaffected:
+the public coordinator now stores the role its existing event already names.
+No wire field, encoding, request/release rule or client migration changes.
+Disconnect projection and capacity storage also preserve wire behavior.
+
+#### Retained rejoin snapshot tails (#775)
+
+Capacity churn records now retain snapshot tails in sorted boxed entries
+instead of per-snapshot tree nodes. Each tail still owns its member name,
+player identity and exact sequence. Lookup remains ordered by member name.
+JSON remains the same sorted object, including omitted empty tails and
+last-value handling for duplicate keys. Historical artifact rows keep their
+existing decode and replay behavior. No workload or memory budget changes.
+
+A fresh-process profile retains 15,984 snapshots with 16 members each
+(255,744 tails). Tree storage uses 58,249,216 RSS bytes; compact storage uses
+41,771,008, a difference of 16,478,208 bytes. Both write the same
+19,188,418-byte artifact with SHA-256
+`f7bd1e17bfa129ef0af1d62332bd67f1f60bacb67e7bedae466dd38d815f2c97`.
+Construction samples are 176,555 and 113,002 microseconds respectively.
+A second shape retains 16,000 snapshots with 64 members (1,024,000 tails).
+Tree RSS is 151,080,960 bytes and compact RSS is 137,056,256 bytes.
+Both artifacts contain 76,730,882 bytes with SHA-256
+`ad84504f76d69bf879350792eb50d3a8b757f9d4c802cb23dadd0c0c9e245d33`.
+Construction samples are 488,194 and 331,813 microseconds respectively.
+These single local retained-storage observations include the process baseline;
+they do not establish peak memory, general CPU speed or server capacity.
+The live collector converts an owned tree; its source and replacement buffers
+can overlap during conversion.
+
+Independent tree-map controls cover empty and omitted tails, escaped and
+Unicode names, NUL bytes, duplicate keys, exact maximum sequences and malformed
+values. Existing oracle controls preserve exact incarnation, missing, duplicate,
+misroute, gap and replay decisions. The planned ten-minute large workload is
+still unqualified, so #775 remains open.
