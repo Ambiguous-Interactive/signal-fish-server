@@ -12022,7 +12022,8 @@ one spectator to zero, 16 or 254 stored spectators.
 | 254 | 2,205 / 1,426 | 272,167 / 212,465 |
 
 The allocation-growth ceiling fails on the original implementation in Nextest
-`3d0bd60f` and passes after the ownership change in `a70ba8b9`. Growth falls
+`3d0bd60f-c52d-4dd9-8ead-60e8f7a95515` and passes after the ownership change in
+`a70ba8b9-dce7-40b9-9cd9-2133a7937f65`. Growth falls
 from eight to five allocations per stored spectator. These are allocation
 counts and allocated bytes, not throughput, latency or peak RSS measurements.
 Rust, .NET and Godot clients need no changes: messages, membership, readiness,

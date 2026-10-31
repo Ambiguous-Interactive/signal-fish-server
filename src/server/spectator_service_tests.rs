@@ -2239,8 +2239,34 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                     None,
                 )
                 .await;
+            let joined = member_messages.try_recv().expect("member room baseline");
+            let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+                panic!("expected member room baseline, received {joined:?}");
+            };
+            assert_eq!(payload.player_id, member);
+            let lobby = member_messages.try_recv().expect("initial lobby event");
+            let ServerMessage::LobbyStateChanged {
+                all_ready,
+                ready_players,
+                ..
+            } = lobby.as_ref()
+            else {
+                panic!("expected initial lobby event, received {lobby:?}");
+            };
+            assert!(!all_ready);
+            assert!(ready_players.is_empty());
             server.handle_player_ready(&member).await;
-            while member_messages.try_recv().is_ok() {}
+            let ready = member_messages.try_recv().expect("member ready event");
+            let ServerMessage::LobbyStateChanged {
+                all_ready,
+                ready_players,
+                ..
+            } = ready.as_ref()
+            else {
+                panic!("expected member ready event, received {ready:?}");
+            };
+            assert!(*all_ready);
+            assert_eq!(ready_players, &[member]);
             let room_id = server.get_client_room(&member).await.expect("member room");
             let observer_lifecycle = server
                 .connection_manager
@@ -2283,12 +2309,14 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 .await
                 .expect("blocked roster")
                 .is_empty());
+            let blocked_observer = observer_messages.try_recv();
             assert!(matches!(
-                observer_messages.try_recv(),
+                blocked_observer,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
+            let blocked_member = member_messages.try_recv();
             assert!(matches!(
-                member_messages.try_recv(),
+                blocked_member,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
             drop(gate);
@@ -2321,7 +2349,15 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
             assert_eq!(payload.current_spectators[0].id, observer);
             let mut events = Vec::new();
             let mut session_plans = 0;
-            while let Ok(message) = member_messages.try_recv() {
+            loop {
+                let received = member_messages.try_recv();
+                let message = match received {
+                    Ok(message) => message,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("member queue disconnected")
+                    }
+                };
                 match message.as_ref() {
                     ServerMessage::NewSpectatorJoined { .. } => events.push("spectator"),
                     ServerMessage::GameStarting { peer_connections } => {
@@ -2375,8 +2411,9 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                     assert!(ready_players.is_empty());
                 }
             }
+            let trailing_observer = observer_messages.try_recv();
             assert!(matches!(
-                observer_messages.try_recv(),
+                trailing_observer,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
         }
