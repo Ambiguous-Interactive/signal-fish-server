@@ -112,6 +112,25 @@ async fn spectator_admission_reuses_its_owned_room_and_roster() {
             payload.current_spectators.len(),
             usize::try_from(spectators).unwrap() + 1
         );
+        for index in 0..spectators {
+            let expected_id = Uuid::from_u128(index + 3);
+            let expected_name = format!("Viewer{index}");
+            assert!(
+                payload.current_spectators.iter().any(|entry| {
+                    entry.id == expected_id
+                        && entry.name == expected_name
+                        && entry.connected_at.is_none()
+                }),
+                "baseline is missing spectator {expected_id}"
+            );
+        }
+        let admitted = payload
+            .current_spectators
+            .iter()
+            .find(|entry| entry.id == spectator)
+            .expect("baseline includes the admitted spectator");
+        assert_eq!(admitted.name, "Viewer");
+        assert!(admitted.connected_at.is_some());
         let notification = host_receiver.try_recv().unwrap();
         let ServerMessage::NewSpectatorJoined {
             spectator: joined,
@@ -123,6 +142,10 @@ async fn spectator_admission_reuses_its_owned_room_and_roster() {
             panic!("expected spectator notification, got {notification:?}");
         };
         assert_eq!(joined.id, spectator);
+        assert_eq!(
+            serde_json::to_value(joined).unwrap(),
+            serde_json::to_value(admitted).unwrap()
+        );
         assert_eq!(
             serde_json::to_value(current_spectators).unwrap(),
             serde_json::to_value(&payload.current_spectators).unwrap()
