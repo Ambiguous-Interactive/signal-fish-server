@@ -487,6 +487,17 @@ pub trait GameDatabase: Send + Sync {
     /// Get all players in a room
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>>;
 
+    /// Read stored member identities without copying player details.
+    /// The default preserves `get_room_players` membership and error semantics.
+    async fn get_room_player_ids(&self, room_id: &RoomId) -> Result<Vec<PlayerId>> {
+        Ok(self
+            .get_room_players(room_id)
+            .await?
+            .into_iter()
+            .map(|player| player.id)
+            .collect())
+    }
+
     /// Delete empty rooms and return their IDs for relay cleanup.
     ///
     /// Rooms in `protected` are never deleted regardless of age: they hold a
@@ -1105,6 +1116,33 @@ impl InMemoryDatabase {
             #[cfg(all(test, signal_fish_repository_tests))]
             release_get_room_players: tokio::sync::Notify::new(),
         }
+    }
+
+    #[cfg(test)]
+    async fn before_room_membership_read(&self) -> Result<()> {
+        self.get_room_players_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        #[cfg(all(test, signal_fish_repository_tests))]
+        // The one-shot pause precedes the failure injection: an armed pause
+        // is an observation point, so the caller resumes before a co-armed
+        // `fail_get_room_players` fails the same call.
+        if self
+            .pause_get_room_players
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.get_room_players_reached.notify_one();
+            self.release_get_room_players.notified().await;
+        }
+
+        if self
+            .fail_get_room_players
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected get_room_players failure for test");
+        }
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -2212,28 +2250,7 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>> {
         #[cfg(test)]
-        self.get_room_players_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        #[cfg(all(test, signal_fish_repository_tests))]
-        // The one-shot pause precedes the failure injection: an armed pause
-        // is an observation point, so the caller resumes before a co-armed
-        // `fail_get_room_players` fails the same call.
-        if self
-            .pause_get_room_players
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
-            self.get_room_players_reached.notify_one();
-            self.release_get_room_players.notified().await;
-        }
-
-        #[cfg(test)]
-        if self
-            .fail_get_room_players
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            anyhow::bail!("injected get_room_players failure for test");
-        }
+        self.before_room_membership_read().await?;
 
         let rooms = self.rooms.read().await;
         if let Some(room) = rooms.get(room_id) {
@@ -2241,6 +2258,16 @@ impl GameDatabase for InMemoryDatabase {
         } else {
             Ok(Vec::new())
         }
+    }
+
+    async fn get_room_player_ids(&self, room_id: &RoomId) -> Result<Vec<PlayerId>> {
+        #[cfg(test)]
+        self.before_room_membership_read().await?;
+        let rooms = self.rooms.read().await;
+        Ok(rooms
+            .get(room_id)
+            .map(|room| room.players.keys().copied().collect())
+            .unwrap_or_default())
     }
 
     /// Remove expired empty published rooms, preserving protected rooms and all live indexes.
@@ -3010,6 +3037,72 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn member_id_projection_matches_pending_live_and_missing_membership() {
+        let database = InMemoryDatabase::new();
+        let member = PlayerId::from_u128(1);
+        let room = database
+            .create_pending_room_classified(
+                "id-projection".into(),
+                None,
+                4,
+                false,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        for state in [
+            crate::protocol::LobbyState::Waiting,
+            crate::protocol::LobbyState::Lobby,
+            crate::protocol::LobbyState::Finalized,
+        ] {
+            database
+                .rooms
+                .write()
+                .await
+                .get_mut(&room.id)
+                .unwrap()
+                .lobby_state = state;
+            let mut expected: Vec<_> = database
+                .get_room_players(&room.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|p| p.id)
+                .collect();
+            let mut actual = database.get_room_player_ids(&room.id).await.unwrap();
+            expected.sort_unstable();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
+            assert_eq!(actual, vec![member]);
+        }
+        database.fail_get_room_players_for_test(true);
+        assert!(database.get_room_player_ids(&room.id).await.is_err());
+        database.fail_get_room_players_for_test(false);
+        database
+            .rooms
+            .write()
+            .await
+            .get_mut(&room.id)
+            .unwrap()
+            .players
+            .clear();
+        assert!(database
+            .get_room_player_ids(&room.id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(database
+            .get_room_player_ids(&PlayerId::from_u128(2))
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// The server-wide room-cap pause hooks must stay usable from the

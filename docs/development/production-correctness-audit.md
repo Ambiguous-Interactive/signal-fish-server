@@ -12285,3 +12285,71 @@ known state and existing fields. The repair changes no wire field, ready list,
 explicit start rule or encoding. It commits the state those clients already
 receive. The snapshot allocation change and capacity summary storage are also
 wire-compatible. No Waiting event is introduced.
+
+### F218 — Lobby promotion accepts an empty effective roster (#1332)
+
+At main `45a9486d`, promotion rejects empty stored membership before intersecting
+it with routed seats. A stored member with no active route still promotes the
+room, changes its activity time and starts its lobby timer. A read-only spectator
+can receive that false Lobby event. This is a public coordinator contract defect;
+no remote gameplay incident is established.
+
+The red-first control uses the shipped database and message coordinator. With
+one stored member and no routes, promotion returns true instead of false in
+Nextest `9d42fce3-9f10-43d6-8e16-be093d1a34ca`. The repair rejects an empty
+intersection before mutation. The final control also covers disjoint routes and
+spectator-only routing, stale ready IDs, unchanged activity and start time,
+subsequent valid promotion, spectator delivery and duplicate suppression.
+Coordinators without a routed snapshot retain their stored-membership fallback.
+The room mutation gate still serializes cooperating operations; direct storage
+mutation outside that gate is not made atomic by this repair.
+
+#### Identity-only readiness reads (#636)
+
+`GameDatabase::get_room_player_ids` has a default implementation that projects
+`get_room_players`, preserving custom backends' membership and error behavior.
+The shipped backend copies only stored IDs under its room read lock. Ready
+toggles, promotion and live readiness snapshots use this projection. Start-game
+publication still captures full player records. The existing injected storage
+failures and paused-read controls also apply to the projection.
+
+The isolated allocation control varies one member's name from 1 to 4,096 to
+65,536 bytes. Setup and assertions are outside each measured interval:
+
+| Name bytes | Old snapshot bytes | New snapshot bytes | Old toggle bytes | New toggle bytes |
+| --- | --- | --- | --- | --- |
+| 1 | 1,153 | 476 | 7,325 | 6,648 |
+| 4,096 | 5,248 | 476 | 11,420 | 6,648 |
+| 65,536 | 66,688 | 476 | 72,860 | 6,648 |
+
+Snapshots drop from seven allocations to five; toggles drop from 33 to 31.
+These are local allocation measurements, not throughput or network results.
+Pending, Waiting, Lobby, Finalized, empty and missing storage controls preserve
+membership semantics. Existing cancellation and typed-error controls remain.
+
+#### Collected omission and lifecycle storage (#775)
+
+The capacity collector already releases spare send and receipt row storage.
+It now applies the same fallible compaction to gap reports, unsupported notices,
+disconnects, churn, join failures and faults. It retains every row and its order;
+failed reservation leaves the original evidence intact. Empty buffers release
+their storage. Existing workload and event budgets do not change.
+
+At 1,048,577 retained gap reports, row-buffer capacity falls from 83,886,080 to
+41,943,080 bytes. Collection takes 25,011 microseconds in this isolated control.
+This measures retained row storage, not peak RSS: replacement allocation can
+coexist with its source during compaction. Controls cover empty and growing
+buffers, exact raw JSON, unchanged replay summaries, and failed reservations.
+The planned ten-minute large workload remains unqualified; #775 stays open.
+
+#### External-client assessment
+
+Current Rust main `da8f2d16` gates lobby updates on room membership and applies
+the existing state in `src/client_core.rs`. .NET main `e467c871` decodes and
+emits the existing Lobby payload in `Polling/FramePipeline.cs`. Godot main
+`57d342e0` applies server lobby state and ready flags while preserving the
+spectator role in `signal_fish_client.gd`; `sf_events.gd` accepts the existing
+state and fields. These clients require no event when there are no effective
+seats. Valid promotion events, encodings and errors stay compatible. The new
+storage projection and capacity storage do not change client messages. All
+three clients are unaffected and need no tracking or migration change.

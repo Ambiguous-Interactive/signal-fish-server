@@ -74,6 +74,76 @@ async fn lobby_state_projection_allocates_only_its_async_result() {
     untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters().await;
     ready_toggle_allocations_do_not_grow_with_spectator_rosters().await;
     lobby_promotion_allocations_do_not_grow_with_spectator_rosters().await;
+    readiness_allocations_do_not_copy_player_details().await;
+}
+
+async fn readiness_allocations_do_not_copy_player_details() {
+    let mut profiles = Vec::new();
+    for name_bytes in [1, 4096, 65536] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let member = Uuid::from_u128(1);
+        let room = database
+            .create_room(
+                "details".into(),
+                None,
+                4,
+                false,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut player = database
+            .get_room_players(&room.id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        player.name = "x".repeat(name_bytes);
+        assert!(database
+            .remove_player_from_room(&room.id, &member)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(database.add_player_to_room(&room.id, player).await.unwrap());
+        let messages = Arc::new(InMemoryMessageCoordinator::new());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        messages
+            .register_local_client(
+                member,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        let coordinator = InMemoryRoomOperationCoordinator::new(messages, database, None);
+        coordinator
+            .handle_player_ready(&room.id, &member, None)
+            .await
+            .unwrap();
+        assert_ready_publication(&receiver.try_recv().unwrap(), member, true);
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        let ready = coordinator.current_ready_players(&room.id).await;
+        let snapshot = region.change();
+        assert_eq!(ready, vec![member]);
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        coordinator
+            .handle_player_ready(&room.id, &member, None)
+            .await
+            .unwrap();
+        let toggle = region.change();
+        assert_ready_publication(&receiver.try_recv().unwrap(), member, false);
+        println!(
+            "READY_DETAILS_PROFILE name_bytes={name_bytes} snapshot={snapshot:?} toggle={toggle:?}"
+        );
+        profiles.push((snapshot.bytes_allocated, toggle.bytes_allocated));
+    }
+    assert!(
+        profiles.iter().all(|profile| *profile == profiles[0]),
+        "readiness copied player names: {profiles:?}"
+    );
 }
 
 /// Keep the ceiling on the actual ready-toggle path, including its queued publication.

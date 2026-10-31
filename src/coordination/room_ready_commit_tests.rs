@@ -1,5 +1,154 @@
 use super::*;
 
+/// #1332: durable rows alone cannot promote a room with no effective seats.
+#[tokio::test]
+async fn lobby_promotion_requires_an_effective_routed_member() {
+    for route in ["absent", "disjoint", "spectator"] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let member = PlayerId::from_u128(1);
+        let other = PlayerId::from_u128(2);
+        let room = database
+            .create_room(
+                "routed-lobby".into(),
+                None,
+                4,
+                false,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        let (other_sender, mut other_receiver) = mpsc::channel(4);
+        if route == "disjoint" {
+            messages
+                .register_local_client(
+                    other,
+                    Some(room.id),
+                    ClientDeliveryHandle::new(other_sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        } else if route == "spectator" {
+            database
+                .add_spectator_to_room(
+                    &room.id,
+                    crate::protocol::SpectatorInfo {
+                        id: other,
+                        name: "Observer".into(),
+                        connected_at: None,
+                    },
+                )
+                .await
+                .unwrap();
+            messages
+                .register_local_spectator_with_initial_message_async(
+                    other,
+                    room.id,
+                    ClientDeliveryHandle::new(other_sender, ConnectionCloseSignal::detached()),
+                    &|| true,
+                    None,
+                    None,
+                    Box::new(|_| {
+                        Box::pin(async {
+                            Ok(Arc::new(ServerMessage::LobbyStateChanged {
+                                lobby_state: LobbyState::Waiting,
+                                ready_players: vec![],
+                                all_ready: false,
+                            }))
+                        })
+                    }),
+                )
+                .await
+                .unwrap();
+            let baseline = other_receiver.try_recv().unwrap();
+            assert!(
+                matches!(baseline.as_ref(), ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Waiting, ready_players, all_ready: false,
+            } if ready_players.is_empty())
+            );
+        } else {
+            drop(other_sender);
+        }
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([other]));
+        let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert!(
+            !coordinator
+                .transition_room_to_lobby(&room.id)
+                .await
+                .unwrap(),
+            "route={route}"
+        );
+        let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(after.lobby_state, LobbyState::Waiting);
+        assert_eq!(after.last_activity, before.last_activity);
+        assert!(after.lobby_started_at.is_none());
+        assert_eq!(after.players.len(), 1);
+        let other_pending = other_receiver.try_recv();
+        if route == "absent" {
+            assert!(matches!(
+                other_pending,
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ));
+        } else {
+            assert!(matches!(
+                other_pending,
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        let (sender, mut receiver) = mpsc::channel(4);
+        messages
+            .register_local_client(
+                member,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        assert!(coordinator
+            .transition_room_to_lobby(&room.id)
+            .await
+            .unwrap());
+        let event = receiver.try_recv().unwrap();
+        assert!(matches!(event.as_ref(), ServerMessage::LobbyStateChanged {
+            lobby_state: LobbyState::Lobby, ready_players, all_ready: false,
+        } if ready_players.is_empty()));
+        if route != "absent" {
+            let observed = other_receiver.try_recv().unwrap();
+            assert_eq!(
+                serde_json::to_value(observed.as_ref()).unwrap(),
+                serde_json::to_value(event.as_ref()).unwrap()
+            );
+        }
+        assert!(!coordinator
+            .transition_room_to_lobby(&room.id)
+            .await
+            .unwrap());
+        let trailing = receiver.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+        let other_pending = other_receiver.try_recv();
+        if route == "absent" {
+            assert!(matches!(
+                other_pending,
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ));
+        } else {
+            assert!(matches!(
+                other_pending,
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+}
+
 #[tokio::test]
 async fn ready_toggle_promotes_waiting_storage_before_its_lobby_event() {
     for state in [LobbyState::Waiting, LobbyState::Lobby] {
