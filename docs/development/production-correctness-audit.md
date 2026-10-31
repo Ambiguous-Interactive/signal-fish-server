@@ -12111,8 +12111,8 @@ No raw event changes, and every disconnect identity remains present once.
 Ordinary controls compare compact and wide indexes with an independent stable
 sort across empty, sparse, reversed and tied histories with malformed epochs.
 They check the complete offset set, sorted semantic keys and retained storage.
-Existing active-incarnation, delayed repeated-churn, invalid-send and exact replay
-controls pass on the replacement. The one-million-row profile retains 333,334
+Existing controls for active incarnations, delayed repeated churn, invalid sends
+and exact artifact replay pass on the replacement. The one-million-row profile retains 333,334
 disconnects and checks the same recipient/time digest, `12681057109706136158`,
 for the original pointer implementation and replacement in separate processes.
 

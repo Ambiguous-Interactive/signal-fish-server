@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Reduce room-state copies during lobby promotion (#636).
-- Reduce capacity-run disconnect validation storage (#775).
 
 ### Fixed
 
