@@ -2184,6 +2184,7 @@ struct SpectatorLobbyFixture {
     room_id: RoomId,
 }
 
+/// Create a ready member and a connected observer for ordered lobby histories.
 async fn spectator_lobby_fixture() -> SpectatorLobbyFixture {
     use crate::config::{
         CoordinationConfig, MetricsConfig, RelayTypeConfig, SessionConfig, TransportSecurityConfig,

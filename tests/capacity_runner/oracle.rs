@@ -1570,10 +1570,12 @@ impl ChurnPositions {
         }
     }
 
+    /// Order room churn by timestamp and retain raw order for ties.
     fn sort(&mut self, events: &[ChurnEvent]) {
         self.sort_by_key(|position| (events[position].at_us, position));
     }
 
+    /// Sort either offset width by the caller's semantic key.
     fn sort_by_key<Key: Ord>(&mut self, mut key: impl FnMut(usize) -> Key) {
         match self {
             Self::Compact(positions) => {
