@@ -992,6 +992,12 @@ impl EventLog {
         drop(state);
         release_unused_capacity(&mut records.sent);
         release_unused_capacity(&mut records.receipts);
+        release_unused_capacity(&mut records.gaps);
+        release_unused_capacity(&mut records.unsupported_notices);
+        release_unused_capacity(&mut records.disconnects);
+        release_unused_capacity(&mut records.churn);
+        release_unused_capacity(&mut records.join_failures);
+        release_unused_capacity(&mut records.faults);
         sort_sent_events(&mut records.sent);
         records
     }
@@ -1561,6 +1567,51 @@ mod tests {
         );
     }
 
+    /// Isolate retained omission-row storage from delivery and oracle scratch.
+    #[test]
+    #[ignore = "isolated collected gap storage profile; run in a fresh process"]
+    fn generator_collected_gap_storage_profile() {
+        let count = std::env::var("CAPACITY_COLLECTED_GAPS")
+            .unwrap_or_else(|_| "1000001".into())
+            .parse::<u64>()
+            .unwrap();
+        assert!((1..=2_000_000).contains(&count));
+        let log = EventLog::default();
+        let recipient = ReceiptName::from("r0p1");
+        let sender = ReceiptName::from("r0p0");
+        for seq in 1..=count {
+            log.push_gap(GapEvent {
+                recipient: recipient.clone(),
+                sender: sender.clone(),
+                epoch: 1,
+                from_seq: seq,
+                to_seq: seq,
+                reason: signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+            });
+        }
+        let before_bytes =
+            log.state.lock().unwrap().gaps.capacity() * std::mem::size_of::<GapEvent>();
+        let started = Instant::now();
+        let records = log.take_records();
+        let elapsed_us = started.elapsed().as_micros();
+        assert_eq!(crate::config::count_u64(records.gaps.len()), count);
+        for (index, event) in records.gaps.iter().enumerate() {
+            assert_eq!(event.recipient, recipient);
+            assert_eq!(event.sender, sender);
+            assert_eq!(event.from_seq, crate::config::count_u64(index) + 1);
+            assert_eq!(event.to_seq, event.from_seq);
+        }
+        println!(
+            "COLLECTED_GAP_STORAGE_PROFILE {}",
+            serde_json::json!({
+                "gaps": count, "before_bytes": before_bytes,
+                "after_bytes": records.gaps.capacity() * std::mem::size_of::<GapEvent>(),
+                "elapsed_us": elapsed_us,
+            })
+        );
+        std::hint::black_box(records);
+    }
+
     /// Failed compaction must preserve every record, its original buffer and its capacity.
     #[test]
     fn failed_record_compaction_preserves_original_evidence_without_retrying() {
@@ -1664,6 +1715,126 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(replayed).unwrap(),
                 serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+
+    /// #775: lossy and lifecycle evidence must not retain collection growth slack.
+    #[test]
+    fn collected_control_records_release_slack_and_preserve_exact_replay() {
+        let context = crate::unit_context();
+        for count in [0, 1, 9, 17] {
+            let log = EventLog::for_plans(&context.plans, false).unwrap();
+            for index in 0..count {
+                log.push_gap(GapEvent {
+                    recipient: "r0p1".into(),
+                    sender: "r0p0".into(),
+                    epoch: 1,
+                    from_seq: index + 1,
+                    to_seq: index + 1,
+                    reason: signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                });
+                log.push_unsupported_notice(UnsupportedNoticeEvent {
+                    recipient: "r0p1".into(),
+                    at_us: index,
+                });
+                log.push_disconnect(DisconnectEvent {
+                    recipient: "r0p1".into(),
+                    observation: DisconnectObservation::StreamEnded,
+                });
+                log.push_churn(ChurnEvent {
+                    recipient: "r0p1".into(),
+                    phase: ChurnPhase::Disconnect,
+                    at_us: index,
+                    epoch: None,
+                    tails: BTreeMap::new(),
+                });
+                log.push_join_failure(format!("join-{index}"));
+                log.push_fault(InvalidReason::SendFailed {
+                    sender: "r0p0".into(),
+                    detail: format!("failure-{index}"),
+                });
+            }
+            let expected = {
+                let mut state = log.state.lock().unwrap();
+                // Force retained spare capacity, including the empty-vector case.
+                state.gaps.reserve(256);
+                state.unsupported_notices.reserve(256);
+                state.disconnects.reserve(256);
+                state.churn.reserve(256);
+                state.join_failures.reserve(256);
+                state.faults.reserve(256);
+                RunRecords {
+                    gaps: state.gaps.clone(),
+                    unsupported_notices: state.unsupported_notices.clone(),
+                    disconnects: state.disconnects.clone(),
+                    churn: state.churn.clone(),
+                    join_failures: state.join_failures.clone(),
+                    faults: state.faults.clone(),
+                    ..RunRecords::default()
+                }
+            };
+            let capacities_before = {
+                let state = log.state.lock().unwrap();
+                [
+                    state.gaps.capacity(),
+                    state.unsupported_notices.capacity(),
+                    state.disconnects.capacity(),
+                    state.churn.capacity(),
+                    state.join_failures.capacity(),
+                    state.faults.capacity(),
+                ]
+            };
+            let actual = log.take_records();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            for ((length, capacity), before) in [
+                (actual.gaps.len(), actual.gaps.capacity()),
+                (
+                    actual.unsupported_notices.len(),
+                    actual.unsupported_notices.capacity(),
+                ),
+                (actual.disconnects.len(), actual.disconnects.capacity()),
+                (actual.churn.len(), actual.churn.capacity()),
+                (actual.join_failures.len(), actual.join_failures.capacity()),
+                (actual.faults.len(), actual.faults.capacity()),
+            ]
+            .into_iter()
+            .zip(capacities_before)
+            {
+                if length == 0 {
+                    assert_eq!(capacity, 0, "count={count}");
+                } else {
+                    assert!(
+                        (length..before).contains(&capacity),
+                        "count={count}: length={length}, capacity={capacity}, before={before}"
+                    );
+                }
+            }
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &actual).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&replayed).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            let summarize = |records: &RunRecords| {
+                crate::oracle::summarize(
+                    &context.plans,
+                    &context.roster,
+                    records,
+                    1000,
+                    96,
+                    crate::DeliveryClass::Volatile,
+                    &crate::schedule::ChurnPlan::default(),
+                    None,
+                )
+            };
+            assert_eq!(
+                serde_json::to_value(summarize(&actual)).unwrap(),
+                serde_json::to_value(summarize(&replayed)).unwrap()
             );
         }
     }
