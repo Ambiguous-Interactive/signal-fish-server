@@ -1783,6 +1783,12 @@ esac
     );
     let resolver = root.join("scripts/resolve-prepared-release.sh");
     let current_version = env!("CARGO_PKG_VERSION");
+    // A refreshed checkout contains a real preparation marker. These remote
+    // state cases own their manifest so that marker cannot change the fixture.
+    write(
+        &temp.path().join("Cargo.toml"),
+        &format!("[package]\nname = \"resolver-fixture\"\nversion = \"{current_version}\"\n"),
+    );
 
     for (description, tag_status, branch_status, tree_status, fetched_sha, success, expected) in [
         (
@@ -1853,7 +1859,7 @@ esac
         let git_log = temp.path().join(format!("{description}.git.log"));
         let output = Command::new("bash")
             .arg(&resolver)
-            .current_dir(root)
+            .current_dir(temp.path())
             .env("PATH", &path)
             .env("GH_TOKEN", "test-token")
             .env("GITHUB_OUTPUT", &github_output)
