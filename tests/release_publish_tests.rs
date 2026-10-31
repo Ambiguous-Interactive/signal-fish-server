@@ -42,6 +42,97 @@ fn write_release_metadata(root: &Path, version: &str) {
     );
 }
 
+#[test]
+fn release_resolver_selects_reviewed_refresh_and_pins_later_retries() {
+    let fixture = ReleaseFixture::new("1.2.3");
+    let original = fixture.head();
+    let base = fixture.commit("changes after original preparation");
+    let manifest = fs::read_to_string(fixture.root.join("Cargo.toml")).expect("read manifest");
+    write_file(
+        &fixture.root.join("Cargo.toml"),
+        &format!(
+            "{manifest}\n[package.metadata.signal-fish-release]\nprepared-from = \"{base}\"\n"
+        ),
+    );
+    git(&fixture.root, &["add", "Cargo.toml"]);
+    git(
+        &fixture.root,
+        &["commit", "-m", "refresh unpublished release"],
+    );
+    git(&fixture.root, &["push", "origin", "main"]);
+    let refreshed = fixture.head();
+    fixture.commit("later workflow repair");
+    let output = fixture.resolve("workflow_dispatch", "refs/heads/main");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(&fixture.output)
+            .expect("read source identity")
+            .contains(&format!("source_revision={refreshed}")),
+        "refresh selected original {original}"
+    );
+    fixture.tag(true, &refreshed);
+    git(&fixture.root, &["checkout", "main"]);
+    fixture.commit_version("1.2.4", "prepare next release");
+    git(&fixture.root, &["checkout", "--detach", &refreshed]);
+    let output = fixture.resolve("push", "refs/tags/v1.2.3");
+    assert!(
+        output.status.success(),
+        "refreshed retry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn release_resolver_rejects_invalid_refresh_provenance() {
+    for case in [
+        "malformed",
+        "unknown base",
+        "wrong version",
+        "removed",
+        "reused",
+    ] {
+        let fixture = ReleaseFixture::new("1.2.2");
+        let old_version = fixture.head();
+        fixture.commit_version("1.2.3", "first candidate");
+        let base = fixture.commit("current release changes");
+        let marker = match case {
+            "malformed" => "not-a-commit",
+            "unknown base" => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "wrong version" => &old_version,
+            _ => &base,
+        };
+        let manifest = fs::read_to_string(fixture.root.join("Cargo.toml")).expect("read manifest");
+        let refreshed = format!(
+            "{manifest}\n[package.metadata.signal-fish-release]\nprepared-from = \"{marker}\"\n"
+        );
+        write_file(&fixture.root.join("Cargo.toml"), &refreshed);
+        git(&fixture.root, &["add", "Cargo.toml"]);
+        fixture.commit("refresh candidate");
+        if matches!(case, "removed" | "reused") {
+            write_file(&fixture.root.join("Cargo.toml"), &manifest);
+            git(&fixture.root, &["add", "Cargo.toml"]);
+            fixture.commit("remove marker");
+            if case == "reused" {
+                write_file(&fixture.root.join("Cargo.toml"), &refreshed);
+                git(&fixture.root, &["add", "Cargo.toml"]);
+                fixture.commit("reuse marker");
+            }
+        }
+        let output = fixture.resolve("workflow_dispatch", "refs/heads/main");
+        assert!(!output.status.success(), "accepted {case}");
+        assert!(!fixture.output.exists(), "published identity for {case}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Release refresh"),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 struct ReleaseFixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -485,7 +576,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
             event: "workflow_dispatch",
             event_ref: "refs/heads/main",
             succeeds: false,
-            diagnostic: "not the unique first-parent version-introduction commit",
+            diagnostic: "not the reviewed first-parent release source commit",
         },
         Case {
             name: "lightweight tag is rejected",
@@ -539,7 +630,7 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
             event: "push",
             event_ref: "refs/tags/v1.2.3",
             succeeds: false,
-            diagnostic: "not the unique first-parent version-introduction commit",
+            diagnostic: "not the reviewed first-parent release source commit",
         },
         Case {
             name: "manual retry rejects a tagged second parent",

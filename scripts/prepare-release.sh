@@ -10,11 +10,12 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/prepare-release.sh [--bump <auto|major|minor|patch>] [--date YYYY-MM-DD]
+Usage: scripts/prepare-release.sh [--bump <auto|major|minor|patch|refresh>] [--date YYYY-MM-DD]
 
 Options:
   --bump  Version increment. Defaults to auto: patch for nonbreaking notes,
           minor for breaking notes at 0.x, major for breaking notes at 1.x or later.
+          refresh keeps the current unpublished version and merges its notes.
   --date  UTC release date. Defaults to today's UTC date.
 USAGE
 }
@@ -55,9 +56,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$BUMP" in
-    auto|major|minor|patch) ;;
+    auto|major|minor|patch|refresh) ;;
     *)
-        echo "ERROR: --bump must be one of: auto, major, minor, patch." >&2
+        echo "ERROR: --bump must be one of: auto, major, minor, patch, refresh." >&2
         exit 2
         ;;
 esac
@@ -244,8 +245,11 @@ fi
 # increment. Reject explicit increments below the compatibility floor before
 # mutation. Breaking changes require a minor release during 0.x development
 # and a major release once 1.0 ships.
-if grep -Eq '^[[:space:]]*([-*][[:space:]]+)?\*\*Breaking([[:space:]]+\([^*]+\))?(:\*\*|\*\*:)' \
-    <<< "$UNRELEASED_BODY"; then
+has_breaking_notes() {
+    grep -Eq '^[[:space:]]*([-*][[:space:]]+)?\*\*Breaking([[:space:]]+\([^*]+\))?(:\*\*|\*\*:)' \
+        <<< "$UNRELEASED_BODY"
+}
+if [ "$BUMP" != "refresh" ] && has_breaking_notes; then
     if [ "$BUMP" = "auto" ]; then
         if [ "$CURRENT_MAJOR" = "0" ]; then
             BUMP="minor"
@@ -282,6 +286,9 @@ increment_component() {
 }
 
 case "$BUMP" in
+    refresh)
+        NEXT_VERSION="$CURRENT_VERSION"
+        ;;
     major)
         NEXT_VERSION="$(increment_component "$CURRENT_MAJOR").0.0"
         ;;
@@ -293,7 +300,7 @@ case "$BUMP" in
         ;;
 esac
 
-if grep -Eq "^## \\[${NEXT_VERSION//./\\.}\\]([[:space:]]|$)" CHANGELOG.md; then
+if [ "$BUMP" != "refresh" ] && grep -Eq "^## \\[${NEXT_VERSION//./\\.}\\]([[:space:]]|$)" CHANGELOG.md; then
     echo "ERROR: CHANGELOG.md already contains a release section for $NEXT_VERSION." >&2
     exit 1
 fi
@@ -306,23 +313,75 @@ if [ -z "$LATEST_CHANGELOG_VERSION" ] || [ "$LATEST_CHANGELOG_VERSION" != "$CURR
     exit 1
 fi
 
+if [ "$BUMP" = "refresh" ] && has_breaking_notes; then
+    previous_version=$(awk '
+        /^## \[[0-9]+\.[0-9]+\.[0-9]+\] - / {
+            count++
+            if (count == 2) { sub(/^## \[/, ""); sub(/\].*$/, ""); print; exit }
+        }
+    ' CHANGELOG.md)
+    if [ -n "$previous_version" ]; then
+        IFS=. read -r previous_major previous_minor _ <<< "$previous_version"
+        if ! ((CURRENT_MAJOR > previous_major \
+            || (CURRENT_MAJOR == 0 && previous_major == 0 && CURRENT_MINOR > previous_minor))); then
+            echo "ERROR: Refreshed breaking notes require a new compatibility version above $previous_version." >&2
+            exit 1
+        fi
+    fi
+fi
+
 CURRENT_TAG="refs/tags/v$CURRENT_VERSION"
-if ! git rev-parse --verify --quiet "$CURRENT_TAG" >/dev/null; then
-    echo "ERROR: Baseline tag v$CURRENT_VERSION is missing." >&2
-    exit 1
-fi
-if [ "$(git cat-file -t "$CURRENT_TAG")" != "tag" ]; then
-    echo "ERROR: Baseline tag v$CURRENT_VERSION must be annotated." >&2
-    exit 1
-fi
-CURRENT_TAG_COMMIT=$(git rev-parse "$CURRENT_TAG^{commit}")
-if ! git merge-base --is-ancestor "$CURRENT_TAG_COMMIT" HEAD; then
-    echo "ERROR: Baseline tag v$CURRENT_VERSION must resolve to an ancestor of HEAD." >&2
-    exit 1
+if [ "$BUMP" != "refresh" ]; then
+    if ! git rev-parse --verify --quiet "$CURRENT_TAG" >/dev/null; then
+        echo "ERROR: Baseline tag v$CURRENT_VERSION is missing. Use --bump refresh to review the unpublished version with current changes." >&2
+        exit 1
+    fi
+    if [ "$(git cat-file -t "$CURRENT_TAG")" != "tag" ]; then
+        echo "ERROR: Baseline tag v$CURRENT_VERSION must be annotated." >&2
+        exit 1
+    fi
+    CURRENT_TAG_COMMIT=$(git rev-parse "$CURRENT_TAG^{commit}")
+    if ! git merge-base --is-ancestor "$CURRENT_TAG_COMMIT" HEAD; then
+        echo "ERROR: Baseline tag v$CURRENT_VERSION must resolve to an ancestor of HEAD." >&2
+        exit 1
+    fi
 fi
 if git rev-parse --verify --quiet "refs/tags/v$NEXT_VERSION" >/dev/null; then
     echo "ERROR: Target tag v$NEXT_VERSION already exists locally." >&2
     exit 1
+fi
+
+if [ "$BUMP" = "refresh" ]; then
+    # A missing local tag alone cannot prove that a release was abandoned.
+    # Check the remote and registry before editing, and fail on unknown state.
+    if ! git remote get-url origin >/dev/null; then
+        echo "ERROR: Cannot verify unpublished remote tag: origin is not configured." >&2
+        exit 1
+    fi
+    if remote_tag=$(git ls-remote --exit-code --tags origin "$CURRENT_TAG" 2>&1); then
+        remote_status=0
+    else
+        remote_status=$?
+    fi
+    if [ "$remote_status" -eq 0 ]; then
+        echo "ERROR: Cannot refresh v$CURRENT_VERSION: its remote tag already exists." >&2
+        exit 1
+    elif [ "$remote_status" -ne 2 ]; then
+        echo "ERROR: Cannot verify unpublished remote tag: $remote_tag" >&2
+        exit 1
+    fi
+    registry_status=$("${PREPARE_RELEASE_CURL_BIN:-curl}" --silent --show-error \
+        --user-agent "signal-fish-server-release-workflow (https://github.com/Ambiguous-Interactive/signal-fish-server)" \
+        --retry 3 --connect-timeout 10 --max-time 30 --output /dev/null \
+        --write-out '%{http_code}' \
+        "https://crates.io/api/v1/crates/signal-fish-server/$CURRENT_VERSION")
+    if [ "$registry_status" != "404" ]; then
+        echo "ERROR: Cannot refresh v$CURRENT_VERSION: crates.io must confirm absence (HTTP $registry_status)." >&2
+        exit 1
+    fi
+    bash "$SCRIPT_DIR/find-release-version-introduction.sh" \
+        "$REPO_ROOT" HEAD "$CURRENT_VERSION" "$SCRIPT_DIR/read-toml-string.sh" >/dev/null
+    REFRESH_BASE=$(git rev-parse HEAD)
 fi
 
 # These two overrides are narrow test seams. Production and the workflow use
@@ -617,6 +676,91 @@ cut_changelog_release() {
     rm -f "$count_file"
 }
 
+# Refresh only the current release boundary. Keep older releases and all
+# reference links byte-for-byte, and combine each category exactly once.
+refresh_changelog_release() {
+    local output
+    output=$(mktemp)
+    if ! awk -v version="$CURRENT_VERSION" -v release_date="$RELEASE_DATE" '
+        function emit(    i, category) {
+            print "## [Unreleased]\n"
+            print "## [" version "] - " release_date "\n"
+            for (i = 1; i <= 6; i++) {
+                category = categories[i]
+                if (body[category] !~ /[^[:space:]]/) continue
+                print "### " category "\n"
+                text = body[category]
+                sub(/^[\n]+/, "", text)
+                sub(/[\n]+$/, "", text)
+                print text "\n"
+            }
+        }
+        BEGIN { split("Added Changed Deprecated Removed Fixed Security", categories, " ") }
+        /^## \[Unreleased\]$/ { collecting = 1; next }
+        collecting && $0 ~ "^## \\[" version "\\] - " {
+            category = ""; found++; next
+        }
+        collecting && (/^## \[/ || /^\[Unreleased\]:/) {
+            emit(); collecting = 0
+        }
+        collecting {
+            if ($0 ~ /^### (Added|Changed|Deprecated|Removed|Fixed|Security)$/) {
+                category = substr($0, 5)
+                sub(/[\n]+$/, "", body[category])
+                if (body[category] != "") body[category] = body[category] "\n"
+                skip_leading = 1; next
+            }
+            if ($0 ~ /^###([[:space:]]|$)/) {
+                print "ERROR: Release notes contain an unsupported category heading: " $0 > "/dev/stderr"
+                invalid = 1
+                exit 1
+            }
+            if (category == "" && $0 ~ /[^[:space:]]/) {
+                print "ERROR: Release notes contain uncategorized text." > "/dev/stderr"
+                invalid = 1
+            }
+            if (skip_leading && $0 !~ /[^[:space:]]/) next
+            skip_leading = 0
+            if (category != "") body[category] = body[category] $0 "\n"
+            next
+        }
+        { print }
+        END {
+            if (collecting) emit()
+            if (found != 1 || invalid) exit 1
+        }
+    ' CHANGELOG.md > "$output"; then
+        rm -f "$output"
+        echo "ERROR: Could not merge the unpublished release notes." >&2
+        return 1
+    fi
+    mv "$output" CHANGELOG.md
+}
+
+set_prepared_source() {
+    local output
+    output=$(mktemp)
+    # A version-specific marker records the reviewed refresh base. Normal bumps
+    # remove it so a later release cannot inherit this recovery identity.
+    awk -v base="${REFRESH_BASE:-}" '
+        /^[[:space:]]*\[/ {
+            section = $0
+            sub(/[[:space:]]*#.*$/, "", section)
+            gsub(/^[[:space:]]*|[[:space:]]*$/, "", section)
+        }
+        section == "[package.metadata.signal-fish-release]" && /^[[:space:]]*prepared-from[[:space:]]*=/ { next }
+        { print }
+        /^[[:space:]]*\[/ && section == "[package.metadata.signal-fish-release]" && base != "" {
+            print "prepared-from = \"" base "\""; inserted = 1
+        }
+        END {
+            if (base != "" && !inserted)
+                print "\n[package.metadata.signal-fish-release]\nprepared-from = \"" base "\""
+        }
+    ' Cargo.toml > "$output"
+    mv "$output" Cargo.toml
+}
+
 ROLLBACK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/signal-fish-release-rollback.XXXXXX")
 for file in "${RELEASE_FILES[@]}"; do
     mkdir -p "$ROLLBACK_DIR/$(dirname -- "$file")"
@@ -637,17 +781,24 @@ restore_on_failure() {
 }
 trap restore_on_failure EXIT
 
-replace_root_package_version Cargo.toml "$NEXT_VERSION"
-replace_fuzz_root_dependency_version fuzz/Cargo.toml "$CURRENT_VERSION" "$NEXT_VERSION"
-for lockfile in "${RELEASE_LOCKFILES[@]}"; do
-    replace_locked_path_package_version "$lockfile" "$NEXT_VERSION"
-done
-replace_documented_version docs/library-usage.md "$CURRENT_VERSION" "$NEXT_VERSION"
-replace_release_config_url docs/getting-started.md "$CURRENT_VERSION" "$NEXT_VERSION"
-replace_context_version .llm/context.md "$CURRENT_VERSION" "$NEXT_VERSION"
-replace_v3_sample_implementation_version \
-    .llm/code-samples/protocol/v3-server-messages.jsonl "$CURRENT_VERSION" "$NEXT_VERSION"
-cut_changelog_release CHANGELOG.md "$NEXT_VERSION" "$RELEASE_DATE" "$CURRENT_VERSION"
+if [ "$BUMP" != "refresh" ]; then
+    replace_root_package_version Cargo.toml "$NEXT_VERSION"
+    replace_fuzz_root_dependency_version fuzz/Cargo.toml "$CURRENT_VERSION" "$NEXT_VERSION"
+    for lockfile in "${RELEASE_LOCKFILES[@]}"; do
+        replace_locked_path_package_version "$lockfile" "$NEXT_VERSION"
+    done
+    replace_documented_version docs/library-usage.md "$CURRENT_VERSION" "$NEXT_VERSION"
+    replace_release_config_url docs/getting-started.md "$CURRENT_VERSION" "$NEXT_VERSION"
+    replace_context_version .llm/context.md "$CURRENT_VERSION" "$NEXT_VERSION"
+    replace_v3_sample_implementation_version \
+        .llm/code-samples/protocol/v3-server-messages.jsonl "$CURRENT_VERSION" "$NEXT_VERSION"
+fi
+if [ "$BUMP" = "refresh" ]; then
+    refresh_changelog_release
+else
+    cut_changelog_release CHANGELOG.md "$NEXT_VERSION" "$RELEASE_DATE" "$CURRENT_VERSION"
+fi
+set_prepared_source
 
 if [ "$(read_package_version)" != "$NEXT_VERSION" ]; then
     echo "ERROR: Cargo.toml version update did not persist." >&2

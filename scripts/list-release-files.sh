@@ -22,6 +22,18 @@ release_files=(
     docs/library-usage.md
     fuzz/Cargo.toml
 )
+# A refresh changes the release boundary and source marker, not the version.
+if [ "$#" -gt 0 ]; then
+    if [ "$#" -ne 2 ] || [ "$1" != "--bump" ]; then
+        echo "Usage: $0 [--bump <auto|major|minor|patch|refresh>]" >&2
+        exit 2
+    fi
+    case "$2" in
+        refresh) release_files=(Cargo.toml CHANGELOG.md) ;;
+        auto|major|minor|patch) ;;
+        *) echo "ERROR: Unknown preparation mode: $2" >&2; exit 2 ;;
+    esac
+fi
 for release_file in "${release_files[@]}"; do
     if ! git cat-file -e "HEAD:$release_file" 2>/dev/null; then
         echo "ERROR: Canonical release file is not tracked at HEAD: $release_file" >&2
@@ -31,4 +43,6 @@ done
 
 printf '%s\0' "${release_files[@]}"
 
-bash "$SCRIPT_DIR/list-release-lockfiles.sh"
+if [ "${2:-}" != "refresh" ]; then
+    bash "$SCRIPT_DIR/list-release-lockfiles.sh"
+fi
