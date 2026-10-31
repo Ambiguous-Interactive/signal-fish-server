@@ -13952,3 +13952,79 @@ async fn room_player_snapshot_default_preserves_absence_metadata_and_storage_err
         .unwrap()
         .is_none());
 }
+
+/// Keep the default and shipped readiness projections consistent across state and read failures.
+#[tokio::test]
+async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_errors() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let creator = PlayerId::from_u128(1);
+    let room = inner
+        .create_room(
+            "ready-adapter".into(),
+            None,
+            4,
+            false,
+            creator,
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let adapter = DrainAfterCreateDatabase::new(inner.clone());
+    for finalize in [false, true] {
+        if finalize {
+            inner
+                .finalize_room_game(
+                    &room.id,
+                    &crate::database::FinalizeRoomGameExpectation {
+                        members: vec![creator],
+                        authority_player: None,
+                        lobby_state: LobbyState::Waiting,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let expected = if finalize { vec![creator] } else { vec![] };
+        assert_eq!(
+            adapter
+                .get_finalized_room_ready_players(&room.id)
+                .await
+                .unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            inner
+                .get_finalized_room_ready_players(&room.id)
+                .await
+                .unwrap(),
+            Some(expected)
+        );
+    }
+    inner.fail_get_room_by_id_for_test(true);
+    assert!(adapter
+        .get_finalized_room_ready_players(&room.id)
+        .await
+        .is_err());
+    assert!(inner
+        .get_finalized_room_ready_players(&room.id)
+        .await
+        .is_err());
+    inner.fail_get_room_by_id_for_test(false);
+    inner.delete_room(&room.id).await.unwrap();
+    assert_eq!(
+        adapter
+            .get_finalized_room_ready_players(&room.id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        inner
+            .get_finalized_room_ready_players(&room.id)
+            .await
+            .unwrap(),
+        None
+    );
+}

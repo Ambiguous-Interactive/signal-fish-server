@@ -424,6 +424,22 @@ pub trait GameDatabase: Send + Sync {
             .map(|room| room.lobby_state))
     }
 
+    /// Read persisted readiness only when the room is finalized.
+    /// Open rooms return an empty list; missing rooms return `None`.
+    /// The default projects one complete snapshot and preserves storage errors.
+    async fn get_finalized_room_ready_players(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<Vec<PlayerId>>> {
+        Ok(self.get_room_by_id(room_id).await?.map(|room| {
+            if room.lobby_state == crate::protocol::LobbyState::Finalized {
+                room.ready_players
+            } else {
+                Vec::new()
+            }
+        }))
+    }
+
     /// Check storage membership without requiring a room snapshot.
     /// Pending rooms count as present, as they do in `get_room_by_id`.
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
@@ -2002,6 +2018,22 @@ impl GameDatabase for InMemoryDatabase {
             .map(|room| room.lobby_state.clone()))
     }
 
+    /// Copy finalized readiness without copying member or spectator metadata.
+    async fn get_finalized_room_ready_players(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<Vec<PlayerId>>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self.rooms.read().await.get(room_id).map(|room| {
+            if room.lobby_state == crate::protocol::LobbyState::Finalized {
+                room.ready_players.clone()
+            } else {
+                Vec::new()
+            }
+        }))
+    }
+
     /// Copy only the selected member while holding one room read lock.
     async fn get_room_player_snapshot(
         &self,
@@ -3069,6 +3101,13 @@ mod tests {
             assert_eq!(
                 database.get_room_lobby_state(&room.id).await.unwrap(),
                 Some(state)
+            );
+            assert_eq!(
+                database
+                    .get_finalized_room_ready_players(&room.id)
+                    .await
+                    .unwrap(),
+                Some(vec![])
             );
         }
         database

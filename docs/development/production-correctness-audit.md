@@ -12502,3 +12502,100 @@ scheduling without requiring a future mutex implementation to remain unfair.
 The native fixture change does not alter client protocol or gameplay behavior.
 The hosted failure was not reproduced locally, and #1319 remains open for its
 cause and full qualification.
+
+### F221 — A direct response error suppresses a committed authority event (#1337)
+
+At main `6611624e`, `enqueue_authority_result` returns on a failed
+`AuthorityResponse` send before it publishes or records `AuthorityChanged`.
+Storage has already committed the role. A public `MessageCoordinator` backend
+that reports a direct-send error can therefore leave live peers and replay on
+the old authority. The shipped in-memory message coordinator returns success
+after its delivery attempt, so no shipped socket incident is established.
+
+The red-first control fails in Nextest
+`b724d357-977f-4e40-aa11-54a05c68b1e8`: the release commits but produces zero
+room broadcasts instead of one. The repair retains the response result,
+attempts the ordered room publication, then reports the response error.
+A denial still produces no authority event. No storage mutation is undone.
+
+Controls cover release, a new claim, a denied conflicting claim and another
+release while direct responses fail. They check exact stored authority flags,
+live event count and order, and three replay records. A second cell also fails
+the last room broadcast and still retains its committed role and replay.
+Existing cancellation, FIFO, recipient-flag and broadcast-failure controls
+continue to apply. The test coordinator records response and publication
+attempts before either injected error. A temporary source control defers the
+response until after publication; Nextest
+`128ed288-c508-4f5c-97c1-91253ebf4d60` fails with
+`[Publication, Response]` instead of `[Response, Publication]`. The control is
+removed and the production order is restored before publication.
+
+#### Finalized readiness capture (#636)
+
+The finalized readiness fallback previously loaded lobby state and then cloned
+the entire room to move out its ready identities. The new database projection
+reads state and persisted readiness under one room read lock and copies only
+the ready identities. The default backend adapter projects one full snapshot
+and preserves missing-room and storage-error behavior. Open rooms return an
+empty list, including pending rooms; finalized rooms return their durable set.
+The live readiness path and snapshot routing are unchanged.
+
+An isolated allocation control holds eight members and their nested metadata
+constant while increasing spectator metadata. Setup and assertions are outside
+the measured intervals:
+
+| Spectators | Full-room allocations | Full-room bytes | Projection allocations | Projection bytes |
+| --- | --- | --- | --- | --- |
+| 0 | 51 | 108,595 | 2 | 248 |
+| 16 | 68 | 258,395 | 2 | 248 |
+| 255 | 307 | 2,496,059 | 2 | 248 |
+
+The baseline measures the full-room read alone, excluding the preceding state
+read. These are local allocation measurements, not network or throughput
+results. Controls check exact finalized identities, open and pending states,
+missing rooms, read failures, default-adapter behavior and the existing
+finalization-straddling readiness snapshot.
+
+An initial routing-filter proposal was rejected during source inspection.
+Join and reconnect baseline builders already apply routing while owning the
+routing write gate. Reading routing again inside `current_ready_players` would
+deadlock those builders. The experimental filter and its tests were removed;
+Issue #1336 records the rejected report and is closed without a repair claim.
+
+#### Bounded churn completion accounting (#775)
+
+The capacity oracle previously scanned every churn event once per planned peer
+to find missing rejoins. It now stores remaining counts for planned identities
+and walks events once. A completed identity is removed immediately. Unplanned
+identities do not extend the map, excess rejoins do not recreate entries, and
+output retains sorted missing-peer order. The peak counter bound remains one
+entry per distinct planned identity; no per-event validation index is added.
+
+Independent scan controls compare empty, repeated, missing, excess, unplanned,
+reversed and malformed histories. The existing churn evidence and replay
+controls retain their exact invalidations. This changes neither offered work
+nor the separate lifecycle, delivery, gap or incarnation checks. Local scaling
+observations compare the unchanged scan with the final counter implementation:
+
+| Planned peers | Raw events | Missing peers | Scan microseconds | Counter microseconds |
+| --- | --- | --- | --- | --- |
+| 1,000 | 3,857 | 143 | 55,703 | 2,713 |
+| 4,000 | 15,428 | 572 | 912,781 | 13,743 |
+| 15,984 | 61,652 | 2,284 | 14,850,013 | 72,114 |
+
+Each shape includes two planned cycles and deliberately missing final rejoins.
+Both implementations return the same peer list. These single local
+observations measure this analysis phase alone. The planned ten-minute large
+workload and total generator peak memory remain unqualified, so #775 remains open.
+
+#### External-client assessment
+
+Rust main `da8f2d16` validates the existing authority identity and recipient
+flag in `src/client_core.rs`. .NET main `e467c871` decodes authority changes
+and responses separately in `Polling/FramePipeline.cs`. Godot main `c6fc227c`
+applies authority flags before emitting its existing event in
+`signal_fish_client.gd`. All three clients are unaffected: the public
+coordinator preserves the existing message schema and response-before-event
+order, and the shipped socket backend does not report this direct-send error.
+The readiness projection preserves snapshot values and the capacity change is
+internal. No client tracking issue or migration is needed.
