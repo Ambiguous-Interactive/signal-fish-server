@@ -1,6 +1,8 @@
 use super::*;
+use crate::socket_tests::TRANSPORT_OBSERVATION_POLL_INTERVAL;
 
 // Regressions #1053/#1276: terminal pairs stop sibling input and connection readiness.
+/// Terminal peer pairs refuse later sibling input and readiness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_pair_does_not_admit_later_sibling_messages() {
     for failure in [
@@ -89,7 +91,7 @@ async fn terminal_pair_does_not_admit_later_sibling_messages() {
             reliable.send_text("after-sibling-loss").await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while reliable.outstanding_bytes().await.unwrap() != 0 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -922,6 +924,7 @@ async fn live_sibling_closure_fences_gameplay_before_its_poller_runs() {
     }
 }
 
+/// Queued reliable input drains before its channel completes graceful closure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_reliable_input_drains_before_its_own_graceful_close() {
     for initiator_receives in [false, true] {
@@ -952,7 +955,7 @@ async fn queued_reliable_input_drains_before_its_own_graceful_close() {
         reliable.send_text("queued-before-own-close").await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while reliable.outstanding_bytes().await.unwrap() != 0 {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
             }
         })
         .await
@@ -964,7 +967,7 @@ async fn queued_reliable_input_drains_before_its_own_graceful_close() {
                 local.ready_state().await,
                 Ok(rtc::data_channel::RTCDataChannelState::Open)
             ) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
             }
         })
         .await

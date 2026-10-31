@@ -12445,3 +12445,60 @@ Unicode names, NUL bytes, duplicate keys, exact maximum sequences and malformed
 values. Existing oracle controls preserve exact incarnation, missing, duplicate,
 misroute, gap and replay decisions. The planned ten-minute large workload is
 still unqualified, so #775 remains open.
+
+### F220 — Held-receive diagnostics repeatedly reacquire the reactor core (#1319)
+
+PR #1335 head `951b5862` fails Native Client Interop run `41243959421`,
+job `124663419695`, during held-callback setup. All 2,048 sends are admitted.
+The timeout retains 3,086 accepted SCTP chunks, zero refusals, 527 completed
+reliable transport messages and 68 acknowledgement timeouts. Engine raw,
+admitted, rejected and pending receipts remain zero. ICE and DTLS remain
+connected, with no recorded channel closure. This excludes incomplete send
+admission in that attempt; it does not establish a transport stall or its cause.
+The job records 324 passes and this one failure. The unchanged local control
+passes all four cells in 16.807 seconds. That pass does not repair the failure.
+
+Each full transport snapshot takes the shared WebRTC core lock repeatedly.
+The shipped futures mutex permits an observer to reacquire the lock before a
+woken reactor runs. An isolated real peer-connection control holds the core,
+registers a waiting driver timeout, releases the core and observes its wake.
+It then completes 128 public stats queries before polling the driver again.
+The driver subsequently completes. This qualifies the reacquisition mechanism;
+it uses the standalone wrapper's locked dependency graph, no negotiated network,
+and does not establish the hosted timeout's cause. Its temporary test is removed.
+
+Instrumented four-cell controls retain the same offered packets, deadlines,
+refusal precondition and exact receipts:
+
+| Available CPUs | Tight full snapshots | 10 ms full snapshots |
+| --- | --- | --- |
+| 12 | 23,509 | 305 |
+| 2 | 30,698 | 525 |
+
+Both versions pass. A two-CPU, four-thread profile cohort also passes with both
+samplers: 23.03 seconds for tight sampling and 24.23 seconds for spaced sampling.
+These are observations of sampler work, not a generalized speed improvement or
+historical-cause proof. Exact source identities and every attempt are retained.
+An uncompiled dependency test probe was removed between cohort builds; no
+native runtime change from that probe is claimed.
+
+The fixtures now wait 10 ms after failed transport-core observations: full
+snapshots, outstanding bytes, channel state and physical receipt counters.
+One shared test-only interval covers the engine profile, receive and close
+controls and the client receive control. Offered-traffic yields, one-shot
+assertions, task completion and local atomic waits keep their existing rules.
+A successful observation still returns immediately.
+Both saturation paths share the same refusal predicate and retain the original
+15-second deadlines, 2,048 offered packets, receive limits, role and generation
+checks, and exact receipt requirements. Timeout evidence adds observation counts,
+elapsed setup time and a bounded sender snapshot. Missing, null and malformed
+refusal fields still cannot establish saturation.
+
+The paused-clock regression uses the shipped runtime mutex and a waiting worker.
+The busy-yield negative control samples twice before worker progress and fails.
+The spaced observer does not take another sample during its wait; the worker
+then progresses and the next synthetic observation detects refusal. This checks observer
+scheduling without requiring a future mutex implementation to remain unfair.
+The native fixture change does not alter client protocol or gameplay behavior.
+The hosted failure was not reproduced locally, and #1319 remains open for its
+cause and full qualification.

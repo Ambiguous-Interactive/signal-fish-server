@@ -1,6 +1,8 @@
 use super::{receive_tests::LivePair, *};
+use crate::socket_tests::TRANSPORT_OBSERVATION_POLL_INTERVAL;
 
 // Regression #1219: empty-message SCTP padding is not an application byte.
+/// Empty messages preserve exact application-byte statistics through reset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_channel_messages_count_zero_application_bytes_through_reset() {
     async fn assert_stats(
@@ -101,7 +103,7 @@ async fn empty_channel_messages_count_zero_application_bytes_through_reset() {
                     if local_removed && remote_removed {
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -125,6 +127,7 @@ async fn empty_channel_messages_count_zero_application_bytes_through_reset() {
 }
 
 // Regression #1214: completed SCTP reset must preserve idempotent cleanup.
+/// Completed resets leave repeated public close calls harmless.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_channel_reset_keeps_public_close_idempotent() {
     for initiator_closes in [true, false] {
@@ -148,7 +151,7 @@ async fn completed_channel_reset_keeps_public_close_idempotent() {
                     if local_removed && remote_removed {
                         break;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -434,6 +437,7 @@ async fn queued_channel_opens_do_not_connect_a_closed_pair() {
 }
 
 // Regression #1188: delayed channel admission must retain its terminal callback.
+/// Delayed remote channel setup preserves accepted input before closure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_remote_channel_admission_preserves_accepted_input_and_close() {
     for (held_label, handle_queued_opens) in [
@@ -499,7 +503,7 @@ async fn delayed_remote_channel_admission_preserves_accepted_input_and_close() {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while channel.outstanding_bytes().await.unwrap() != 0 {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
             }
         })
         .await
@@ -510,7 +514,7 @@ async fn delayed_remote_channel_admission_preserves_accepted_input_and_close() {
                 held.ready_state().await,
                 Err(_) | Ok(rtc::data_channel::RTCDataChannelState::Closed)
             ) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
             }
         })
         .await
@@ -1199,6 +1203,7 @@ impl Runtime for PausableReactor {
 }
 
 // Regression #1071: local closing must retire the pair before reciprocal reset.
+/// Local closure retires the pair before the remote reset completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_channel_closing_retires_pair_before_remote_reset() {
     for initiator_closes in [true, false] {
@@ -1287,7 +1292,7 @@ async fn local_channel_closing_retires_pair_before_remote_reset() {
             sibling.send_text("after-local-close").await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 while sibling.outstanding_bytes().await.unwrap() != 0 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -1334,6 +1339,7 @@ async fn local_channel_closing_retires_pair_before_remote_reset() {
 }
 
 // Regression #1076: retain immediate send/close while the receiver cannot progress.
+/// A paused remote reactor preserves input accepted immediately before closure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn immediate_send_then_close_with_remote_reactor_paused() {
     for initiator_sends in [true, false] {
@@ -1375,7 +1381,7 @@ async fn immediate_send_then_close_with_remote_reactor_paused() {
                 if acknowledged {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while channel.outstanding_bytes().await.unwrap() != 0 {
-                            tokio::task::yield_now().await;
+                            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                         }
                     })
                     .await
@@ -1470,6 +1476,7 @@ async fn immediate_send_then_close_with_remote_reactor_paused() {
 }
 
 // Investigations #853/#889/#826: qualify native SCTP fragmentation through reset.
+/// Same-stream resets preserve all accepted fragmented gameplay receipts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fragmented_gameplay_preserves_receipts_through_same_stream_reset() {
     for initiator_sends in [true, false] {
@@ -1531,7 +1538,7 @@ async fn fragmented_gameplay_preserves_receipts_through_same_stream_reset() {
                                 }
                             }
                             while channel.outstanding_bytes().await.unwrap() != 0 {
-                                tokio::task::yield_now().await;
+                                tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                             }
                         })
                         .await
@@ -1583,7 +1590,7 @@ async fn fragmented_gameplay_preserves_receipts_through_same_stream_reset() {
                             channel.outstanding_bytes().await,
                             Ok(0) | Err(webrtc::error::Error::ErrDataChannelClosed)
                         ) {
-                            tokio::task::yield_now().await;
+                            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                         }
                     })
                     .await
@@ -1791,6 +1798,7 @@ fn assert_channel_closed(result: webrtc::error::Result<()>) {
 }
 
 // Regression #1088: a full channel must release every kind of sender on local close.
+/// Local closure releases blocked senders while the remote reset is held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_channel_local_close_releases_senders_before_remote_reset() {
     for initiator_sends in [true, false] {
@@ -1892,7 +1900,7 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                         channel.outstanding_bytes().await,
                         Ok(0) | Err(webrtc::error::Error::ErrDataChannelClosed)
                     ) {
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                     }
                 })
                 .await
@@ -1917,7 +1925,7 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
                         }) {
                             break;
                         }
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                     }
                 })
                 .await
@@ -1950,6 +1958,7 @@ async fn full_channel_local_close_releases_senders_before_remote_reset() {
 }
 
 // Regression #1126: physical receipt does not bypass observed pair-loss admission.
+/// Observed sibling loss fences queued input before its channel poller resumes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sibling_loss_fences_queued_target_input_before_own_poller_resumes() {
     let mut pair = LivePair::connect().await;
@@ -1980,7 +1989,7 @@ async fn sibling_loss_fences_queued_target_input_before_own_poller_resumes() {
             != 1
             || target.outstanding_bytes().await.unwrap() != 0
         {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
         }
     })
     .await
@@ -1992,7 +2001,7 @@ async fn sibling_loss_fences_queued_target_input_before_own_poller_resumes() {
             local_target.ready_state().await,
             Ok(rtc::data_channel::RTCDataChannelState::Open)
         ) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
         }
     })
     .await
@@ -2010,7 +2019,7 @@ async fn sibling_loss_fences_queued_target_input_before_own_poller_resumes() {
             .await
             != 1
         {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
         }
     })
     .await
@@ -2096,6 +2105,7 @@ async fn sibling_loss_fences_queued_target_input_before_own_poller_resumes() {
 }
 
 // Regression #1088: default and zero (unlimited) limits still obey channel state.
+/// Unlimited channels reject writes after local or remote closure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unlimited_channel_writable_rejects_local_closing_and_remote_closed() {
     for limit in [None, Some(0), Some(usize::MAX)] {
@@ -2124,7 +2134,7 @@ async fn unlimited_channel_writable_rejects_local_closing_and_remote_closed() {
                     Ok(rtc::data_channel::RTCDataChannelState::Closed)
                         | Err(webrtc::error::Error::ErrDataChannelClosed)
                 ) {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -2210,6 +2220,7 @@ async fn full_channel_remote_reset_starts_before_accepted_data_reaches_udp() {
     remote_reset_with_packet_history(false, false, true).await;
 }
 
+/// Check blocked senders across reset with the selected packet-loss and pause history.
 async fn remote_reset_with_packet_history(
     drop_remote_application_transmit: bool,
     drop_local_application_transmit: bool,
@@ -2302,7 +2313,7 @@ async fn remote_reset_with_packet_history(
                         Ok(rtc::data_channel::RTCDataChannelState::Closed)
                             | Err(webrtc::error::Error::ErrDataChannelClosed)
                     ) {
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                     }
                 })
                 .await;
@@ -2434,6 +2445,7 @@ async fn channel_capacity_checks_preserve_connecting_and_peer_shutdown() {
 }
 
 // Regression #1260: empty packets must consume and release send capacity.
+/// Empty sends obey backpressure and preserve exact receipts after resume.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_channel_sends_respect_backpressure_and_resume_exact_receipts() {
     for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
@@ -2508,7 +2520,7 @@ async fn empty_channel_sends_respect_backpressure_and_resume_exact_receipts() {
                         }
                         assert_eq!(bodies, vec![Vec::new(), "tail 鱼".as_bytes().to_vec()]);
                         while channel.outstanding_bytes().await.unwrap() != 0 {
-                            tokio::task::yield_now().await;
+                            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                         }
                     })
                     .await
@@ -2571,6 +2583,7 @@ async fn empty_channel_sends_respect_backpressure_and_resume_exact_receipts() {
 }
 
 // Issues #1240/#1244: finite-lifetime loss must not consume reliable snapshots.
+/// Finite-lifetime expiry releases credit while preserving the reliable prefix.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn godot_lifetime_expiry_releases_credit_without_losing_reliable_prefix() {
     for initiator_sends in [true, false] {
@@ -2618,7 +2631,7 @@ async fn godot_lifetime_expiry_releases_credit_without_losing_reliable_prefix() 
             assert_eq!(reliable.outstanding_bytes().await.unwrap(), 16384);
             tokio::time::timeout(Duration::from_secs(5), async {
                 while expired.outstanding_bytes().await.unwrap() != 0 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -2655,7 +2668,7 @@ async fn godot_lifetime_expiry_releases_credit_without_losing_reliable_prefix() 
                     }
                 }
                 while reliable.outstanding_bytes().await.unwrap() != 0 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             }).await.expect("every reliable prefix byte survives finite-lifetime loss");
             expired
@@ -2685,7 +2698,7 @@ async fn godot_lifetime_expiry_releases_credit_without_losing_reliable_prefix() 
                     }
                 }
                 while reliable.outstanding_bytes().await.unwrap() != 0 || expired.outstanding_bytes().await.unwrap() != 0 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
                 let snapshot = pair.receiver.transport_diagnostic_snapshot(pair.sender_id).await;
                 let finite_received = snapshot["transport_channels"].as_array().unwrap().iter()

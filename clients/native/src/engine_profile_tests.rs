@@ -1,4 +1,5 @@
 use super::{receive_tests::LivePair, *};
+use crate::socket_tests::TRANSPORT_OBSERVATION_POLL_INTERVAL;
 
 fn unconnected_negotiated_pair() -> LivePair {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
@@ -331,6 +332,7 @@ async fn godot_profile_preserves_non_utf8_gameplay_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Separate SCTP reassembly, retained callbacks, and exact application admission in both roles.
 async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_polling() {
     for receiver_offers in [false, true] {
         let mut pair = unconnected_negotiated_pair();
@@ -436,7 +438,7 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
                         assert_eq!(stats["bytes_received"], 16384);
                         break snapshot;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -506,7 +508,7 @@ async fn godot_transport_diagnostics_distinguish_reassembly_from_held_callback_p
                     if snapshot["channels"][RELIABLE_LABEL]["receipts"]["admitted"] == 4 {
                         break snapshot;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             })
             .await
@@ -660,20 +662,29 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
                 panic!("unbounded send admission retains the complete offered burst: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={sent}/{PACKETS} packet_bytes={PACKET_BYTES} timeout_snapshot={timeout_snapshot}");
             }
             let mut last_snapshot = serde_json::Value::Null;
-            let held = tokio::time::timeout(Duration::from_secs(15), async {
-                loop {
-                    let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-                    if snapshot["sctp"]["data_chunks_refused"].as_u64().is_some_and(|count| count > 0) {
-                        break snapshot;
-                    }
-                    last_snapshot = snapshot;
-                    tokio::task::yield_now().await;
-                }
-            })
+            let mut polls = 0;
+            let wait_started = std::time::Instant::now();
+            let held = match tokio::time::timeout(
+                Duration::from_secs(15),
+                wait_for_held_sctp_refusal(
+                    || pair.receiver.transport_diagnostic_snapshot(peer),
+                    &mut last_snapshot,
+                    &mut polls,
+                ),
+            )
             .await
-            .unwrap_or_else(|error| panic!(
-                "held application polling fills downstream queues and exhausts SCTP receive credit: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={PACKETS} packet_bytes={PACKET_BYTES} last_snapshot={last_snapshot}"
-            ));
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let wait_us = wait_started.elapsed().as_micros();
+                    let sender_snapshot = pair
+                        .sender
+                        .transport_diagnostic_snapshot(pair.receiver_id)
+                        .await;
+                    panic!("held application polling fills downstream queues and exhausts SCTP receive credit: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={PACKETS} packet_bytes={PACKET_BYTES} polls={polls} wait_us={wait_us} last_snapshot={last_snapshot} sender_snapshot={sender_snapshot}");
+                }
+            };
+            println!("GODOT_HELD_REFUSAL receiver_offers={receiver_offers} payload_generation={generation} polls={polls} wait_us={}", wait_started.elapsed().as_micros());
             let received = held["transport_channels"]
                 .as_array()
                 .unwrap()
@@ -704,7 +715,7 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
                     }
                 }
                 while channel.outstanding_bytes().await.unwrap() != 0 {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                 }
             }).await.expect("resuming channel polling drains every exact reliable packet and sender credit");
             assert_eq!(
@@ -725,6 +736,7 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Verify exact byte and message admission limits, permit release, and fresh-link recovery.
 async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_recovery() {
     for receiver_offers in [false, true] {
         for (packet_bytes, retained_packets) in [(8192, 128), (2048, 256)] {
@@ -905,7 +917,7 @@ async fn godot_receive_limits_distinguish_byte_and_message_credit_before_fresh_r
                 if release_one {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while channel.outstanding_bytes().await.unwrap() != 0 {
-                            tokio::task::yield_now().await;
+                            tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                         }
                     })
                     .await
@@ -1022,6 +1034,119 @@ async fn held_callbacks_wait_for_every_cooperative_cancellation_before_sending()
     held.await;
 }
 
+/// Sample held transport state without repeatedly taking its driver's shared core lock.
+/// The caller owns the deadline and retains the last failed sample.
+async fn wait_for_held_sctp_refusal<Sample, Snapshot>(
+    mut sample: Sample,
+    last_snapshot: &mut serde_json::Value,
+    polls: &mut u64,
+) -> serde_json::Value
+where
+    Sample: FnMut() -> Snapshot,
+    Snapshot: std::future::Future<Output = serde_json::Value>,
+{
+    loop {
+        let snapshot = sample().await;
+        *polls = polls.saturating_add(1);
+        if snapshot["sctp"]["data_chunks_refused"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+        {
+            return snapshot;
+        }
+        *last_snapshot = snapshot;
+        tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
+    }
+}
+
+/// A failed observer must leave the shared core available to an already-woken worker.
+#[tokio::test(start_paused = true)]
+async fn held_refusal_observation_allows_transport_progress_between_failed_snapshots() {
+    let core = webrtc::runtime::Mutex::new(0_u64);
+    let samples = std::cell::Cell::new(0_u32);
+    let mut last_snapshot = serde_json::Value::Null;
+    let mut polls = 0;
+    let waiting = wait_for_held_sctp_refusal(
+        || async {
+            let refused = *core.lock().await;
+            samples.set(samples.get() + 1);
+            serde_json::json!({"sctp": {"data_chunks_refused": refused}})
+        },
+        &mut last_snapshot,
+        &mut polls,
+    );
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    assert_eq!(samples.get(), 1);
+    let guard = core.lock().await;
+    let progress = async {
+        *core.lock().await = 1;
+    };
+    tokio::pin!(progress);
+    assert!(futures_util::poll!(&mut progress).is_pending());
+    drop(guard);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    assert_eq!(
+        samples.get(),
+        1,
+        "the observer cannot immediately retake the core"
+    );
+    assert!(futures_util::poll!(&mut progress).is_ready());
+    tokio::time::advance(Duration::from_millis(10)).await;
+    let snapshot = tokio::time::timeout(Duration::from_millis(20), waiting)
+        .await
+        .expect("the worker supplies an observed refusal before the test deadline");
+    assert_eq!(snapshot["sctp"]["data_chunks_refused"], 1);
+    assert_eq!(samples.get(), 2);
+}
+
+/// Preserve incomplete snapshots and wait until a positive integer refusal is observed.
+#[tokio::test(start_paused = true)]
+async fn held_refusal_observation_preserves_incomplete_evidence_until_positive_count() {
+    for initial in [
+        serde_json::Value::Null,
+        serde_json::json!({}),
+        serde_json::json!({"sctp": null}),
+        serde_json::json!({"sctp": {}}),
+        serde_json::json!({"sctp": {"data_chunks_refused": null}}),
+        serde_json::json!({"sctp": {"data_chunks_refused": 0}}),
+        serde_json::json!({"sctp": {"data_chunks_refused": -1}}),
+        serde_json::json!({"sctp": {"data_chunks_refused": 1.0}}),
+        serde_json::json!({"sctp": {"data_chunks_refused": "1"}}),
+        serde_json::json!({"sctp": {"data_chunks_refused": true}}),
+    ] {
+        let samples = std::cell::Cell::new(0_u32);
+        let mut last_snapshot = serde_json::Value::Null;
+        let mut polls = 0;
+        let positive = serde_json::json!({"sctp": {"data_chunks_refused": u64::MAX}});
+        let observed = {
+            let waiting = wait_for_held_sctp_refusal(
+                || {
+                    let snapshot = if samples.replace(samples.get() + 1) == 0 {
+                        initial.clone()
+                    } else {
+                        positive.clone()
+                    };
+                    std::future::ready(snapshot)
+                },
+                &mut last_snapshot,
+                &mut polls,
+            );
+            tokio::pin!(waiting);
+            assert!(futures_util::poll!(&mut waiting).is_pending(), "{initial}");
+            assert!(futures_util::poll!(&mut waiting).is_pending(), "{initial}");
+            assert_eq!(samples.get(), 1, "{initial}");
+            tokio::time::advance(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
+            tokio::time::timeout(Duration::from_millis(20), waiting)
+                .await
+                .expect("a later positive refusal ends the wait")
+        };
+        assert_eq!(observed, positive);
+        assert_eq!(last_snapshot, initial);
+        assert_eq!(polls, 2);
+    }
+}
+
 /// Offer the fixed burst after pollers stop and wait for observed SCTP refusal.
 async fn saturate_held_reliable_callbacks(
     pair: &mut LivePair,
@@ -1039,35 +1164,39 @@ async fn saturate_held_reliable_callbacks(
     payload[4] = payload_generation;
     let mut sent = 0u32;
     let mut last_snapshot = serde_json::Value::Null;
+    let mut polls = 0;
+    let started = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         for sequence in 0u32..2048 {
             payload[..4].copy_from_slice(&sequence.to_be_bytes());
             channel.send(payload.as_slice().into()).await.unwrap();
             sent += 1;
         }
-        loop {
-            let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-            if snapshot["sctp"]["data_chunks_refused"]
-                .as_u64()
-                .is_some_and(|count| count > 0)
-            {
-                assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
-                assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
-                assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
-                break snapshot;
-            }
-            last_snapshot = snapshot;
-            tokio::task::yield_now().await;
-        }
+        let snapshot = wait_for_held_sctp_refusal(
+            || pair.receiver.transport_diagnostic_snapshot(peer),
+            &mut last_snapshot,
+            &mut polls,
+        )
+        .await;
+        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 0);
+        assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+        assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+        snapshot
     })
     .await;
     let snapshot = match result {
         Ok(snapshot) => snapshot,
         Err(error) => {
+            let elapsed_us = started.elapsed().as_micros();
             let timeout_snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
-            panic!("held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 last_snapshot={last_snapshot} timeout_snapshot={timeout_snapshot}");
+            let sender_snapshot = pair
+                .sender
+                .transport_diagnostic_snapshot(pair.receiver_id)
+                .await;
+            panic!("held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 polls={polls} elapsed_us={elapsed_us} last_snapshot={last_snapshot} timeout_snapshot={timeout_snapshot} sender_snapshot={sender_snapshot}");
         }
     };
+    println!("GODOT_HELD_REFUSAL payload_generation={payload_generation} packet_bytes={packet_bytes} polls={polls} elapsed_us={}", started.elapsed().as_micros());
     (channel, snapshot)
 }
 
@@ -1269,6 +1398,7 @@ async fn godot_saturated_engine_callbacks_report_exact_limit_and_recover_fresh_l
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Require exact reliable recovery or an explicit admission refusal across roles and generations.
 async fn godot_active_consumer_classifies_saturated_recovery_without_silent_prefix_loss() {
     const PACKETS: u32 = 2048;
     const PACKET_BYTES: usize = 4096;
@@ -1361,7 +1491,7 @@ async fn godot_active_consumer_classifies_saturated_recovery_without_silent_pref
             } else {
                 tokio::time::timeout(Duration::from_secs(15), async {
                     while channel.outstanding_bytes().await.unwrap() != 0 {
-                        tokio::task::yield_now().await;
+                        tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
                     }
                 })
                 .await
