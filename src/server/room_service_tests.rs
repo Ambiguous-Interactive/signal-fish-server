@@ -13897,3 +13897,58 @@ async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
         "the member's final authority view must match storage, not the stale grant"
     );
 }
+
+/// Keep default backend projections consistent for missing rows, metadata and errors.
+#[tokio::test]
+async fn room_player_snapshot_default_preserves_absence_metadata_and_storage_errors() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let creator = PlayerId::from_u128(1);
+    let room = inner
+        .create_room(
+            "snapshot-adapter".into(),
+            None,
+            4,
+            true,
+            creator,
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let adapter = DrainAfterCreateDatabase::new(inner.clone());
+    let projected = adapter
+        .get_room_player_snapshot(&room.id, &creator)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = inner.get_room_by_id(&room.id).await.unwrap().unwrap();
+    assert_eq!(projected.authority_player, expected.authority_player);
+    assert_eq!(
+        serde_json::to_value(projected.player.unwrap()).unwrap(),
+        serde_json::to_value(expected.players.get(&creator).unwrap()).unwrap()
+    );
+    let absent_member = adapter
+        .get_room_player_snapshot(&room.id, &PlayerId::nil())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(absent_member.player.is_none());
+    assert_eq!(absent_member.authority_player, expected.authority_player);
+    inner.fail_get_room_by_id_for_test(true);
+    assert!(adapter
+        .get_room_player_snapshot(&room.id, &creator)
+        .await
+        .is_err());
+    assert!(inner
+        .get_room_player_snapshot(&room.id, &creator)
+        .await
+        .is_err());
+    inner.fail_get_room_by_id_for_test(false);
+    assert!(inner.delete_room(&room.id).await.unwrap());
+    assert!(adapter
+        .get_room_player_snapshot(&room.id, &creator)
+        .await
+        .unwrap()
+        .is_none());
+}

@@ -6,6 +6,9 @@ use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::wire::WsStream;
 
+/// Allow driver progress between fixture observations that share the transport core lock.
+pub(crate) const TRANSPORT_OBSERVATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 pub(crate) async fn websocket_pair() -> (WsStream, WebSocketStream<TcpStream>) {
     let listener_socket = TcpSocket::new_v4().unwrap();
     listener_socket.set_recv_buffer_size(1024).unwrap();

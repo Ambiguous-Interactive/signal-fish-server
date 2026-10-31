@@ -1548,7 +1548,7 @@ async fn peer_task(
                             phase: ChurnPhase::Rejoined,
                             at_us: micros(epoch.elapsed()),
                             epoch: Some(incarnation),
-                            tails,
+                            tails: tails.into(),
                         });
                         (next_sink, next_rx)
                     }
@@ -1765,7 +1765,7 @@ async fn peer_task(
                         phase: ChurnPhase::Disconnect,
                         at_us: micros(epoch.elapsed()),
                         epoch: None,
-                        tails: BTreeMap::new(),
+                        tails: BTreeMap::new().into(),
                     });
                     churn_cursor += 1;
                     // The pending writer has dropped before either socket half

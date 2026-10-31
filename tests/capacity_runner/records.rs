@@ -193,8 +193,11 @@ pub struct ChurnEvent {
     /// where the connection is simply gone).
     pub epoch: Option<u32>,
     /// For `rejoined`: the snapshot's member `(PlayerId, seq tail)` stamps.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tails: BTreeMap<String, (String, u64)>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::snapshot_tails::SnapshotTails::is_empty"
+    )]
+    pub tails: crate::snapshot_tails::SnapshotTails,
 }
 
 /// Which half of a churn cycle an event records.
@@ -1747,7 +1750,7 @@ mod tests {
                     phase: ChurnPhase::Disconnect,
                     at_us: index,
                     epoch: None,
-                    tails: BTreeMap::new(),
+                    tails: BTreeMap::new().into(),
                 });
                 log.push_join_failure(format!("join-{index}"));
                 log.push_fault(InvalidReason::SendFailed {
@@ -2279,6 +2282,7 @@ mod tests {
     }
 
     #[test]
+    /// Retain each event that crosses a collection budget and preserve its replay verdict.
     fn every_unplanned_event_kind_keeps_the_crossing_event_and_exact_replay() {
         let context = crate::unit_context_with_class(crate::DeliveryClass::Reliable);
         let events = vec![
@@ -2302,7 +2306,7 @@ mod tests {
                 phase: ChurnPhase::Disconnect,
                 at_us: 3,
                 epoch: None,
-                tails: BTreeMap::new(),
+                tails: BTreeMap::new().into(),
             }),
             DeliveryEvent::JoinFailure {
                 detail: "join failed".into(),

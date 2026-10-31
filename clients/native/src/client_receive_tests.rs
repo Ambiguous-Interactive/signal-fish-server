@@ -1,4 +1,5 @@
 use super::*;
+use crate::socket_tests::TRANSPORT_OBSERVATION_POLL_INTERVAL;
 use clap::Parser;
 use futures_util::StreamExt;
 
@@ -1414,6 +1415,7 @@ async fn relay_receipts_keep_their_observed_run_hold_and_linger_windows() {
 
 // Audit #853/#889: a remote probe can precede local remote-channel admission.
 #[tokio::test]
+/// Preserve exact exchange probes that arrive before their remote channel is admitted.
 async fn delayed_remote_channel_admission_preserves_early_exchange_probes() {
     for held_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
         let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
@@ -1502,7 +1504,7 @@ async fn delayed_remote_channel_admission_preserves_early_exchange_probes() {
                 .await
                 != 1
             {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
             }
         })
         .await

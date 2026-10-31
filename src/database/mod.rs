@@ -51,6 +51,15 @@ pub struct RoomCleanupOutcome {
     pub inactive_rooms_cleaned: usize,
 }
 
+/// One room member and the authority identity from the same storage snapshot.
+#[derive(Debug, Clone)]
+pub struct RoomPlayerSnapshot {
+    /// The selected member, or `None` if the room has no such player.
+    pub player: Option<PlayerInfo>,
+    /// The authority identity stored alongside the selected member.
+    pub authority_player: Option<PlayerId>,
+}
+
 /// Result of atomically transitioning a room into the finalized state.
 ///
 /// Callers use this compare-and-set result to ensure only the winner publishes
@@ -385,6 +394,23 @@ pub trait GameDatabase: Send + Sync {
 
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
+
+    /// Read one player's metadata and room authority atomically.
+    /// A missing member remains distinct from a missing room. Pending rooms
+    /// have the same visibility as in [`Self::get_room_by_id`].
+    async fn get_room_player_snapshot(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<RoomPlayerSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|mut room| RoomPlayerSnapshot {
+                player: room.players.remove(player_id),
+                authority_player: room.authority_player,
+            }))
+    }
 
     /// Read the lobby state without requiring an owned room snapshot.
     /// Backends may project the field directly; the default preserves snapshot semantics.
@@ -1974,6 +2000,25 @@ impl GameDatabase for InMemoryDatabase {
             .await
             .get(room_id)
             .map(|room| room.lobby_state.clone()))
+    }
+
+    /// Copy only the selected member while holding one room read lock.
+    async fn get_room_player_snapshot(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<RoomPlayerSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomPlayerSnapshot {
+                player: room.players.get(player_id).cloned(),
+                authority_player: room.authority_player,
+            }))
     }
 
     /// Check all stored room rows without copying room or player state.

@@ -142,7 +142,9 @@ pub trait RoomOperationCoordinatorTrait: Send + Sync {
     /// Promote an occupied Waiting room; return false when no transition applies.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool>;
 
-    /// Coordinate authority transfer between players
+    /// Store and announce a transfer to a current member of an authority-enabled room.
+    ///
+    /// Return false without publication when storage refuses the assignment.
     async fn coordinate_authority_transfer(
         &self,
         room_id: &RoomId,
@@ -588,25 +590,36 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             .map_err(|error| anyhow::anyhow!("Owned lobby transition task failed: {error}"))?
     }
 
+    /// Commit a validated role assignment before publishing its ordered event.
     async fn coordinate_authority_transfer(
         &self,
         room_id: &RoomId,
         new_authority: &PlayerId,
     ) -> Result<bool> {
-        // For in-memory implementation, just simulate the operation
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-
-        let message = crate::protocol::ServerMessage::AuthorityChanged {
-            authority_player: Some(*new_authority),
-            you_are_authority: false, // Will be customized per client
-        };
-        let completion = self.enqueue_replayable_room_event(room_id, message, mutation_guard);
-
-        // Nothing to mutate for the in-memory simulation; enqueue under the
-        // ordering gate, then await delivery outside of it.
-        completion.await?;
-        tracing::info!(%room_id, %new_authority, "Authority transferred (in-memory)");
-        Ok(true)
+        let coordinator = self.clone();
+        let room_id = *room_id;
+        let new_authority = *new_authority;
+        tokio::spawn(async move {
+            if !coordinator
+                .database
+                .update_room_authority(&room_id, Some(new_authority))
+                .await?
+            {
+                return Ok(false);
+            }
+            let message = crate::protocol::ServerMessage::AuthorityChanged {
+                authority_player: Some(new_authority),
+                you_are_authority: false,
+            };
+            coordinator
+                .enqueue_replayable_room_event(&room_id, message, mutation_guard)
+                .await?;
+            tracing::info!(%room_id, %new_authority, "Room authority transferred");
+            Ok(true)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Owned authority transfer task failed: {error}"))?
     }
 
     async fn execute_distributed_operation(&self, operation: &str, room_id: &RoomId) -> Result<()> {
@@ -1032,6 +1045,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod authority_transfer_tests {
+        include!("room_authority_transfer_tests.rs");
+    }
 
     mod ready_commit_tests {
         include!("room_ready_commit_tests.rs");
@@ -1839,17 +1856,25 @@ mod tests {
 
     struct BlockingBroadcastMessageCoordinator {
         room_events: Arc<RoomEventSequencer>,
+        broadcasts: Mutex<Vec<BroadcastEvent>>,
         broadcast_started: Notify,
         release_broadcast: Notify,
     }
 
     impl BlockingBroadcastMessageCoordinator {
+        /// Create a coordinator that pauses and records each completed broadcast.
         fn new() -> Self {
             Self {
                 room_events: Arc::new(RoomEventSequencer::default()),
+                broadcasts: Mutex::new(Vec::new()),
                 broadcast_started: Notify::new(),
                 release_broadcast: Notify::new(),
             }
+        }
+
+        /// Return completed broadcasts in their publication order.
+        async fn broadcasts(&self) -> Vec<BroadcastEvent> {
+            self.broadcasts.lock().await.clone()
         }
 
         async fn wait_for_broadcast_start(&self) {
@@ -1894,13 +1919,18 @@ mod tests {
             self.send_to_player(player_id, message).await.map(|()| true)
         }
 
+        /// Record the room event only after the test releases its delivery pause.
         async fn broadcast_to_room(
             &self,
-            _room_id: &RoomId,
-            _message: Arc<ServerMessage>,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
         ) -> Result<()> {
             self.broadcast_started.notify_one();
             self.release_broadcast.notified().await;
+            self.broadcasts.lock().await.push(BroadcastEvent {
+                room_id: *room_id,
+                message: message.as_ref().clone(),
+            });
             Ok(())
         }
 
@@ -2192,6 +2222,7 @@ mod tests {
         drop(room_guard);
     }
 
+    /// Room operations return delivery errors after reaching their publication step.
     #[tokio::test]
     async fn room_operations_propagate_broadcast_failures() {
         let room_id = RoomId::from_u128(0x1234567890abcdef1234567890abcdef);
@@ -2210,11 +2241,24 @@ mod tests {
 
         // Authority transfer propagates its broadcast failure.
         let database = Arc::new(InMemoryDatabase::new());
+        let room = database
+            .create_room(
+                "transfer-broadcast-failure".into(),
+                None,
+                2,
+                true,
+                player_id,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
         let coordinator = Arc::new(RecordingMessageCoordinator::default());
         coordinator.fail_broadcast_on(1).await;
         let room_coordinator = InMemoryRoomOperationCoordinator::new(coordinator, database, None);
         let result = room_coordinator
-            .coordinate_authority_transfer(&room_id, &player_id)
+            .coordinate_authority_transfer(&room.id, &player_id)
             .await;
         assert!(
             result.is_err(),

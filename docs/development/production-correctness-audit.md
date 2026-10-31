@@ -12353,3 +12353,152 @@ state and fields. These clients require no event when there are no effective
 seats. Valid promotion events, encodings and errors stay compatible. The new
 storage projection and capacity storage do not change client messages. All
 three clients are unaffected and need no tracking or migration change.
+
+### F219 — Public authority transfer announces an uncommitted role (#1334)
+
+At main `de3bd9fb`, `coordinate_authority_transfer` queues an
+`AuthorityChanged` event without changing storage. A valid transfer returns
+true while room snapshots still name the old authority. Missing rooms,
+absent target members and rooms without authority support also return true.
+This is a public library coordinator defect. The socket room-operation path
+uses a separate storage transaction; no live socket incident is established.
+
+Two red-first controls fail in Nextest
+`15e72e7e-86fe-4abd-b1f7-2c1e0467c513`: the stored authority remains player 1
+when transfer to player 2 succeeds, and an absent target is accepted. The
+repair uses the existing atomic validated storage assignment before queuing
+its live and replay event. Storage refusal returns false without publication.
+An owned task retains the room mutation guard across assignment and FIFO
+publication, so cancellation of the waiting caller cannot split the transfer.
+A later delivery error does not undo the committed role.
+
+Controls check transfer in both directions, every member's stored authority
+flag, recipient-specific flags, ordered replay, refused transfers with unchanged
+storage, cancellation after commit, and a failed broadcast followed by another
+valid transfer. The existing broadcast-failure fixture now creates a valid
+stored room so it still reaches its intended failure.
+
+#### One-player disconnect snapshots (#636)
+
+`GameDatabase::get_room_player_snapshot` returns the selected member and the
+room authority from one snapshot. Its default implementation projects one
+`get_room_by_id` result and preserves custom-backend errors and absence
+semantics. The shipped backend clones only the selected player while holding
+one room read lock. Disconnect capture retains the previous distinction
+between a missing room, missing member and failed storage read. Pending room
+visibility and the existing injected storage-read controls also apply.
+
+An isolated allocation control retains the selected player's nested connection
+metadata and increases unrelated room metadata. Setup and assertions are
+outside the measured intervals:
+
+| Members | Spectators | Old capture allocations | Old bytes | New allocations | New bytes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 18 | 2,357 | 7 | 828 |
+| 4 | 16 | 53 | 194,949 | 7 | 828 |
+| 8 | 255 | 316 | 2,490,205 | 7 | 828 |
+
+These are local allocation measurements, not throughput or network results.
+The old capture includes the full room clone and the selected-player clone.
+Controls compare player metadata, authority assignment and clearing,
+missing members and rooms, pending visibility and default-adapter errors.
+Existing disconnect failure and reconnect controls exercise the server path.
+
+#### External-client assessment
+
+Rust main `da8f2d16` validates the existing `AuthorityChanged` roster identity
+and local flag, then updates its authority in `src/client_core.rs`. .NET main
+`e467c871` decodes and emits that message in `Polling/FramePipeline.cs`.
+Godot main `689ecdfb` applies roster authority flags before emitting
+`authority_changed` in `signal_fish_client.gd`. All three clients are unaffected:
+the public coordinator now stores the role its existing event already names.
+No wire field, encoding, request/release rule or client migration changes.
+Disconnect projection and capacity storage also preserve wire behavior.
+
+#### Retained rejoin snapshot tails (#775)
+
+Capacity churn records now retain snapshot tails in sorted boxed entries
+instead of per-snapshot tree nodes. Each tail still owns its member name,
+player identity and exact sequence. Lookup remains ordered by member name.
+JSON remains the same sorted object, including omitted empty tails and
+last-value handling for duplicate keys. Historical artifact rows keep their
+existing decode and replay behavior. No workload or memory budget changes.
+
+A fresh-process profile retains 15,984 snapshots with 16 members each
+(255,744 tails). Tree storage uses 58,249,216 RSS bytes; compact storage uses
+41,771,008, a difference of 16,478,208 bytes. Both write the same
+19,188,418-byte artifact with SHA-256
+`f7bd1e17bfa129ef0af1d62332bd67f1f60bacb67e7bedae466dd38d815f2c97`.
+Construction samples are 176,555 and 113,002 microseconds respectively.
+A second shape retains 16,000 snapshots with 64 members (1,024,000 tails).
+Tree RSS is 151,080,960 bytes and compact RSS is 137,056,256 bytes.
+Both artifacts contain 76,730,882 bytes with SHA-256
+`ad84504f76d69bf879350792eb50d3a8b757f9d4c802cb23dadd0c0c9e245d33`.
+Construction samples are 488,194 and 331,813 microseconds respectively.
+These single local retained-storage observations include the process baseline;
+they do not establish peak memory, general CPU speed or server capacity.
+The live collector converts an owned tree; its source and replacement buffers
+can overlap during conversion.
+
+Independent tree-map controls cover empty and omitted tails, escaped and
+Unicode names, NUL bytes, duplicate keys, exact maximum sequences and malformed
+values. Existing oracle controls preserve exact incarnation, missing, duplicate,
+misroute, gap and replay decisions. The planned ten-minute large workload is
+still unqualified, so #775 remains open.
+
+### F220 — Held-receive diagnostics repeatedly reacquire the reactor core (#1319)
+
+PR #1335 head `951b5862` fails Native Client Interop run `41243959421`,
+job `124663419695`, during held-callback setup. All 2,048 sends are admitted.
+The timeout retains 3,086 accepted SCTP chunks, zero refusals, 527 completed
+reliable transport messages and 68 acknowledgement timeouts. Engine raw,
+admitted, rejected and pending receipts remain zero. ICE and DTLS remain
+connected, with no recorded channel closure. This excludes incomplete send
+admission in that attempt; it does not establish a transport stall or its cause.
+The job records 324 passes and this one failure. The unchanged local control
+passes all four cells in 16.807 seconds. That pass does not repair the failure.
+
+Each full transport snapshot takes the shared WebRTC core lock repeatedly.
+The shipped futures mutex permits an observer to reacquire the lock before a
+woken reactor runs. An isolated real peer-connection control holds the core,
+registers a waiting driver timeout, releases the core and observes its wake.
+It then completes 128 public stats queries before polling the driver again.
+The driver subsequently completes. This qualifies the reacquisition mechanism;
+it uses the standalone wrapper's locked dependency graph, no negotiated network,
+and does not establish the hosted timeout's cause. Its temporary test is removed.
+
+Instrumented four-cell controls retain the same offered packets, deadlines,
+refusal precondition and exact receipts:
+
+| Available CPUs | Tight full snapshots | 10 ms full snapshots |
+| --- | --- | --- |
+| 12 | 23,509 | 305 |
+| 2 | 30,698 | 525 |
+
+Both versions pass. A two-CPU, four-thread profile cohort also passes with both
+samplers: 23.03 seconds for tight sampling and 24.23 seconds for spaced sampling.
+These are observations of sampler work, not a generalized speed improvement or
+historical-cause proof. Exact source identities and every attempt are retained.
+An uncompiled dependency test probe was removed between cohort builds; no
+native runtime change from that probe is claimed.
+
+The fixtures now wait 10 ms after failed transport-core observations: full
+snapshots, outstanding bytes, channel state and physical receipt counters.
+One shared test-only interval covers the engine profile, receive and close
+controls and the client receive control. Offered-traffic yields, one-shot
+assertions, task completion and local atomic waits keep their existing rules.
+A successful observation still returns immediately.
+Both saturation paths share the same refusal predicate and retain the original
+15-second deadlines, 2,048 offered packets, receive limits, role and generation
+checks, and exact receipt requirements. Timeout evidence adds observation counts,
+elapsed setup time and a bounded sender snapshot. Missing, null and malformed
+refusal fields still cannot establish saturation.
+
+The paused-clock regression uses the shipped runtime mutex and a waiting worker.
+The busy-yield negative control samples twice before worker progress and fails.
+The spaced observer does not take another sample during its wait; the worker
+then progresses and the next synthetic observation detects refusal. This checks observer
+scheduling without requiring a future mutex implementation to remain unfair.
+The native fixture change does not alter client protocol or gameplay behavior.
+The hosted failure was not reproduced locally, and #1319 remains open for its
+cause and full qualification.
