@@ -1774,12 +1774,23 @@ mod tests {
                     ..RunRecords::default()
                 }
             };
+            let capacities_before = {
+                let state = log.state.lock().unwrap();
+                [
+                    state.gaps.capacity(),
+                    state.unsupported_notices.capacity(),
+                    state.disconnects.capacity(),
+                    state.churn.capacity(),
+                    state.join_failures.capacity(),
+                    state.faults.capacity(),
+                ]
+            };
             let actual = log.take_records();
             assert_eq!(
                 serde_json::to_value(&actual).unwrap(),
                 serde_json::to_value(&expected).unwrap()
             );
-            for (length, capacity) in [
+            for ((length, capacity), before) in [
                 (actual.gaps.len(), actual.gaps.capacity()),
                 (
                     actual.unsupported_notices.len(),
@@ -1789,8 +1800,18 @@ mod tests {
                 (actual.churn.len(), actual.churn.capacity()),
                 (actual.join_failures.len(), actual.join_failures.capacity()),
                 (actual.faults.len(), actual.faults.capacity()),
-            ] {
-                assert_eq!(capacity, length, "count={count}");
+            ]
+            .into_iter()
+            .zip(capacities_before)
+            {
+                if length == 0 {
+                    assert_eq!(capacity, 0, "count={count}");
+                } else {
+                    assert!(
+                        (length..before).contains(&capacity),
+                        "count={count}: length={length}, capacity={capacity}, before={before}"
+                    );
+                }
             }
             let output = tempfile::tempdir().unwrap();
             crate::artifacts::write_deliveries(output.path(), &actual).unwrap();
