@@ -139,9 +139,9 @@ if ! grep -Eq "^## \\[${escaped_version}\\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CH
     exit 1
 fi
 
-introduction_revision=$(find_version_introduction "origin/${DEFAULT_BRANCH}" "$version")
-if [ "$source_revision" != "$introduction_revision" ]; then
-    echo "ERROR: Release source ${source_revision} is not the unique first-parent version-introduction commit ${introduction_revision} for ${version}." >&2
+reviewed_revision=$(find_version_introduction "origin/${DEFAULT_BRANCH}" "$version")
+if [ "$source_revision" != "$reviewed_revision" ]; then
+    echo "ERROR: Release source ${source_revision} is not the reviewed first-parent release source commit ${reviewed_revision} for ${version}." >&2
     exit 1
 fi
 

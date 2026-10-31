@@ -221,11 +221,11 @@ jobs:
               echo "ERROR: Release source $source_revision is not on the first-parent history of ${DEFAULT_BRANCH}." >&2
               exit 1
             fi
-            introduction_revision=$(bash publication-tools/scripts/find-release-version-introduction.sh \
+            reviewed_revision=$(bash publication-tools/scripts/find-release-version-introduction.sh \
               source "refs/remotes/origin/${DEFAULT_BRANCH}" "$release_version" \
               publication-tools/scripts/read-toml-string.sh)
-            if [ "$source_revision" != "$introduction_revision" ]; then
-              echo "ERROR: Release source $source_revision is not the unique first-parent version-introduction commit $introduction_revision for $release_version." >&2
+            if [ "$source_revision" != "$reviewed_revision" ]; then
+              echo "ERROR: Release source $source_revision is not the reviewed first-parent release source commit $reviewed_revision for $release_version." >&2
               exit 1
             fi
             escaped_version=${release_version//./\\.}

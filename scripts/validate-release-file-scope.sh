@@ -25,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bash "$SCRIPT_DIR/list-release-files.sh" > "$inventory_file"
+bash "$SCRIPT_DIR/list-release-files.sh" "$@" > "$inventory_file"
 git diff --name-only --no-renames -z HEAD -- > "$actual_file"
 git diff --name-only --no-renames --diff-filter=d -z HEAD -- > "$present_file"
 git ls-files --others --exclude-standard -z -- > "$untracked_file"

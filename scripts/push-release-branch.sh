@@ -9,8 +9,8 @@ fi
 
 branch=$1
 expected_head_sha=$2
-if [[ ! "$branch" =~ ^release/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-    echo "ERROR: Release branch is not release/vX.Y.Z: ${branch}" >&2
+if [[ ! "$branch" =~ ^release/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-refresh-[0-9a-f]{40})?$ ]]; then
+    echo "ERROR: Release branch is not release/vX.Y.Z[-refresh-SHA]: ${branch}" >&2
     exit 2
 fi
 if [[ ! "$expected_head_sha" =~ ^[0-9a-f]{40}$ ]]; then

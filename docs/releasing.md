@@ -51,19 +51,52 @@ normally:
 bash scripts/prepare-release.sh --bump auto
 ```
 
+### An Earlier Preparation Was Not Published
+
+The 0.12.0 preparation merged in [PR #1113](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1113),
+but publication did not create its tag.
+[Run 41159412801](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/41159412801)
+then failed with `Baseline tag v0.12.0 is missing.` Preparation required proof of
+publication and had no refresh path. Publication also selected the first version
+introduction, which would exclude changes made after that trial preparation.
+
+The preparation workflow can merge a version before publication creates its tag.
+Run **Prepare Release** with `bump=refresh` to include current changes in that
+unpublished version. Use `dry_run` to inspect the result first.
+
+Refresh requires both local and remote version tags to be absent and crates.io
+to return HTTP 404 for that version. Lookup errors stop preparation. The script
+keeps the version, merges `[Unreleased]` notes into the existing release by
+category, updates its date, and preserves older notes and comparison links.
+
+The refreshed manifest records `prepared-from` under
+`[package.metadata.signal-fish-release]`. This records the checkout used for
+preparation. Review and merge the generated release pull request. Publication
+selects the first-parent commit that introduced that exact marker. Later source
+or workflow changes do not enter the candidate. A later refresh writes a new
+base marker. Each refresh uses `release/vX.Y.Z-refresh-<base SHA>`, so an old
+trial branch can remain without blocking or being overwritten. Normal version
+bumps remove the marker.
+
+A published or partially tagged version cannot be refreshed. Retry its original
+source, or prepare a new version. Publication still checks registry bytes and
+source identity before creating artifacts.
+
+## Publish the Prepared Version
+
 Do not create or move the version tag by hand for the normal manual path. Run
 the **Release - Publish Crate** workflow from the default branch without a
 version input. It derives the reviewed version from `Cargo.toml`, eliminating a
 second operator-entered identity. When the tag is absent, it walks the complete
-first-parent history and selects the unique commit that introduced that package
-version. This preserves the reviewed release candidate if documentation or
-workflow fixes reach the default branch before publication, and it fails closed
-if history is shallow or a version was reused. If the matching tag already
+first-parent history and selects the reviewed preparation commit: the unique
+version-introduction commit, or the explicit refresh commit described above.
+This preserves the reviewed release candidate if documentation or workflow fixes
+reach the default branch before publication. Shallow history or a reused version
+stops source selection. If the matching tag already
 exists after a partial run, the workflow requires that it is annotated, on the
 default branch's first-parent history, reachable from the dispatched
-default-branch commit, exactly at the unique commit that introduced the
-version, and consistent with the tagged Cargo and changelog metadata; the retry
-then publishes that immutable source commit.
+default-branch commit, exactly at the reviewed preparation commit, and consistent
+with the tagged Cargo and changelog metadata; the retry then publishes that immutable source commit.
 
 The release workflow directly calls the reusable container workflow. It does
 not depend on a tag created with `GITHUB_TOKEN` starting a second workflow.
@@ -100,8 +133,9 @@ silently changing the package contents. Never bypass that boundary with
 ## Direct Tags and Historical Backfills
 
 A human-pushed annotated `vX.Y.Z` tag remains supported. Its target must be the
-unique commit on the default branch's first-parent history that introduced
-`X.Y.Z` in `Cargo.toml`; a later same-version commit is not a release source. It
+reviewed preparation commit on the default branch's first-parent history
+for `X.Y.Z` in `Cargo.toml`; a later same-version commit without a new refresh
+marker is not a release source. It
 does not have to remain the current default-branch tip, so a queued run remains
 valid if the branch advances. For that introduction commit, each required CI
 workflow must pass one of two preflight legs: an exact successful
@@ -119,8 +153,8 @@ unproven tag.
 
 To backfill GHCR tags for a historical release, dispatch **Docker Publish** from
 the default branch with `release_tag=vX.Y.Z`. The workflow checks out that tag,
-requires its annotated source commit to remain the unique first-parent commit
-that introduced `X.Y.Z`, and builds from it. It never aliases a
+requires its annotated source commit to remain the reviewed first-parent
+preparation commit for `X.Y.Z`, and builds from it. It never aliases a
 historical version to `latest`, and it updates the mutable `X.Y` alias only when
 `vX.Y.Z` is the highest canonical annotated patch tag in that release line.
 Older backfills and delayed retries still repair missing immutable `sha-*`,

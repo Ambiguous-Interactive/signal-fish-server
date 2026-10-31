@@ -1174,6 +1174,304 @@ fn prepare_release_accepts_bumps_at_or_above_the_breaking_change_floor() {
     }
 }
 
+fn configure_unpublished_refresh(fixture: &Fixture, registry_status: &str) -> PathBuf {
+    let tag = git_at(&fixture.root)
+        .args(["tag", "--list"])
+        .output()
+        .expect("read unpublished version tag");
+    let tag = String::from_utf8(tag.stdout).expect("tag is UTF-8");
+    assert!(git_at(&fixture.root)
+        .args(["tag", "--delete", tag.trim()])
+        .output()
+        .expect("remove unpublished tag")
+        .status
+        .success());
+    let remote = fixture._temp.path().join("origin.git");
+    assert!(git_at(&fixture.root)
+        .args(["init", "--bare"])
+        .arg(&remote)
+        .output()
+        .expect("create refresh remote")
+        .status
+        .success());
+    assert!(git_at(&fixture.root)
+        .args(["remote", "add", "origin"])
+        .arg(&remote)
+        .output()
+        .expect("configure refresh remote")
+        .status
+        .success());
+    let curl = fixture._temp.path().join("registry-probe");
+    write(
+        &curl,
+        &format!("#!/bin/sh\ncase \"$*\" in *signal-fish-server-release-workflow*) ;; *) exit 9 ;; esac\nprintf '%s' '{registry_status}'\n"),
+    );
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).expect("make probe executable");
+    write(
+        &fixture.root.join(".git/info/exclude"),
+        "/origin.git/\n/registry-probe\n",
+    );
+    curl
+}
+
+fn run_refresh(fixture: &Fixture, curl: &Path) -> Output {
+    Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/prepare-release.sh"))
+        .args(["--bump", "refresh", "--date", RELEASE_DATE])
+        .current_dir(&fixture.root)
+        .env_remove("GIT_INDEX_FILE")
+        .env("PREPARE_RELEASE_CARGO_BIN", "true")
+        .env("PREPARE_RELEASE_CURL_BIN", curl)
+        .output()
+        .expect("refresh unpublished release")
+}
+
+#[test]
+fn prepare_release_refresh_preserves_version_and_merges_all_notes() {
+    let fixture = Fixture::new("0.12.0");
+    let curl = configure_unpublished_refresh(&fixture, "404");
+    let changelog = read(fixture.root.join("CHANGELOG.md"))
+        .replace(
+            "[Unreleased]:",
+            "## [0.11.0] - 2026-06-01\n\n### Fixed\n\n- Keep this older release.\n\n[Unreleased]:",
+        )
+        .replace("/releases/tag/v0.12.0", "/compare/v0.11.0...v0.12.0");
+    let changelog = format!("{changelog}[0.11.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.11.0\n");
+    write(&fixture.root.join("CHANGELOG.md"), &changelog);
+    let old_history = changelog
+        .split("## [0.11.0]")
+        .nth(1)
+        .expect("older release")
+        .to_owned();
+    let output = run_refresh(&fixture, &curl);
+    assert!(
+        output.status.success(),
+        "refresh failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(read(fixture.root.join("Cargo.toml")).contains("version = \"0.12.0\""));
+    let changelog = read(fixture.root.join("CHANGELOG.md"));
+    assert!(changelog.contains(&format!("## [0.12.0] - {RELEASE_DATE}")));
+    assert!(changelog.contains("- Ship the release preparation workflow.\n- Previous release."));
+    assert!(changelog.contains("- Ship the release preparation workflow."));
+    assert!(changelog.contains("- Preserve categorized notes."));
+    assert_eq!(changelog.matches("### Added").count(), 1);
+    assert_eq!(changelog.matches("## [0.12.0]").count(), 1);
+    assert_eq!(
+        changelog.split("## [0.11.0]").nth(1),
+        Some(old_history.as_str())
+    );
+    let scope = Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/validate-release-file-scope.sh"))
+        .args(["--bump", "refresh"])
+        .current_dir(&fixture.root)
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("check refresh scope");
+    assert!(
+        scope.status.success(),
+        "refresh scope: {}",
+        String::from_utf8_lossy(&scope.stderr)
+    );
+    let parent = git_at(&fixture.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read refresh base");
+    assert!(read(fixture.root.join("Cargo.toml")).contains(&format!(
+        "prepared-from = \"{}\"",
+        String::from_utf8_lossy(&parent.stdout).trim()
+    )));
+}
+
+#[test]
+fn prepared_refresh_uses_a_new_branch_without_overwriting_the_trial() {
+    let fixture = Fixture::new("0.12.0");
+    let curl = configure_unpublished_refresh(&fixture, "404");
+    assert!(git_at(&fixture.root)
+        .args(["push", "origin", "HEAD:refs/heads/release/v0.12.0"])
+        .output()
+        .expect("retain original trial branch")
+        .status
+        .success());
+    let base = git_at(&fixture.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read preparation base");
+    let base = String::from_utf8(base.stdout)
+        .expect("base is UTF-8")
+        .trim()
+        .to_owned();
+    let refresh = run_refresh(&fixture, &curl);
+    assert!(
+        refresh.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refresh.stderr)
+    );
+    let output_file = fixture.root.join(".git/refresh-output");
+    let output = Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/resolve-prepared-release.sh"))
+        .current_dir(&fixture.root)
+        .env_remove("GIT_INDEX_FILE")
+        .env("GH_TOKEN", "fixture")
+        .env("GITHUB_OUTPUT", &output_file)
+        .output()
+        .expect("resolve fresh release branch");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let branch = format!("release/v0.12.0-refresh-{base}");
+    assert!(read(&output_file).contains(&format!("branch={branch}\n")));
+    assert!(git_at(&fixture.root)
+        .args(["add", "Cargo.toml", "CHANGELOG.md"])
+        .output()
+        .expect("stage refresh")
+        .status
+        .success());
+    assert!(git_at(&fixture.root)
+        .args(["commit", "-m", "refreshed release"])
+        .output()
+        .expect("commit refresh")
+        .status
+        .success());
+    let head = git_at(&fixture.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read refresh commit");
+    let head = String::from_utf8(head.stdout)
+        .expect("head is UTF-8")
+        .trim()
+        .to_owned();
+    let push = Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/push-release-branch.sh"))
+        .args([&branch, &head])
+        .current_dir(&fixture.root)
+        .env_remove("GIT_INDEX_FILE")
+        .env("GH_TOKEN", "fixture")
+        .output()
+        .expect("push isolated refresh branch");
+    assert!(
+        push.status.success(),
+        "{}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+    let trial = git_at(&fixture.root)
+        .args(["ls-remote", "origin", "refs/heads/release/v0.12.0"])
+        .output()
+        .expect("verify trial branch");
+    assert!(
+        String::from_utf8_lossy(&trial.stdout).starts_with(&base),
+        "trial branch moved"
+    );
+}
+
+#[test]
+fn prepare_release_normal_bump_removes_the_refresh_marker() {
+    let fixture = Fixture::new("1.2.3");
+    let manifest = read(fixture.root.join("Cargo.toml"));
+    write(&fixture.root.join("Cargo.toml"), &format!(
+        "{manifest}\n[package.metadata.signal-fish-release] # preserve features\nbuilt-in-tls = true\nprepared-from = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"));
+    let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = read(fixture.root.join("Cargo.toml"));
+    assert!(!manifest.contains("prepared-from"));
+    assert!(manifest.contains("built-in-tls = true"));
+}
+
+#[test]
+fn prepare_release_refresh_keeps_the_breaking_change_floor() {
+    let fixture = Fixture::new("1.2.3");
+    let curl = configure_unpublished_refresh(&fixture, "404");
+    let changelog = read(fixture.root.join("CHANGELOG.md"))
+        .replace(
+            "- Ship the release preparation workflow.",
+            "- **Breaking:** Change the public API.",
+        )
+        .replace(
+            "[Unreleased]:",
+            "## [1.2.2] - 2026-06-01\n\n### Added\n\n- Older release.\n\n[Unreleased]:",
+        )
+        .replace("/releases/tag/v1.2.3", "/compare/v1.2.2...v1.2.3");
+    write(&fixture.root.join("CHANGELOG.md"), &format!(
+        "{changelog}[1.2.2]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v1.2.2\n"));
+    let before = release_file_snapshot(&fixture);
+    let output = run_refresh(&fixture, &curl);
+    assert!(
+        !output.status.success(),
+        "patch refresh absorbed a breaking change"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("compatibility version"));
+    assert_release_files_unchanged(&fixture, &before);
+}
+
+#[test]
+fn prepare_release_refresh_rejects_publication_and_probe_errors_without_mutation() {
+    for case in [
+        "crate exists",
+        "registry outage",
+        "remote tag",
+        "missing remote",
+    ] {
+        let fixture = Fixture::new("0.12.0");
+        let curl = configure_unpublished_refresh(
+            &fixture,
+            match case {
+                "crate exists" => "200",
+                "registry outage" => "503",
+                _ => "404",
+            },
+        );
+        if case == "remote tag" {
+            assert!(git_at(&fixture.root)
+                .args(["tag", "-a", "v0.12.0", "-m", "published"])
+                .output()
+                .expect("create published tag")
+                .status
+                .success());
+            assert!(git_at(&fixture.root)
+                .args(["push", "origin", "refs/tags/v0.12.0"])
+                .output()
+                .expect("publish remote tag")
+                .status
+                .success());
+            assert!(git_at(&fixture.root)
+                .args(["tag", "--delete", "v0.12.0"])
+                .output()
+                .expect("remove local copy")
+                .status
+                .success());
+        } else if case == "missing remote" {
+            assert!(git_at(&fixture.root)
+                .args(["remote", "remove", "origin"])
+                .output()
+                .expect("remove remote")
+                .status
+                .success());
+        }
+        let before = release_file_snapshot(&fixture);
+        let output = run_refresh(&fixture, &curl);
+        assert!(!output.status.success(), "accepted {case}");
+        let diagnostic = match case {
+            "crate exists" => "HTTP 200",
+            "registry outage" => "HTTP 503",
+            "remote tag" => "remote tag already exists",
+            "missing remote" => "origin is not configured",
+            _ => unreachable!(),
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_release_files_unchanged(&fixture, &before);
+    }
+}
+
 #[test]
 fn prepare_release_rejects_invalid_tag_baselines_before_mutation() {
     for tag_kind in ["missing", "lightweight", "non-ancestor", "target-exists"] {

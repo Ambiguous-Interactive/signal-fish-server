@@ -6898,7 +6898,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     assert_eq!(extract_yaml_field_values(&bump, "default"), ["auto"]);
     assert_eq!(
         extract_yaml_field_values(&bump, "options"),
-        ["auto", "patch", "minor", "major"]
+        ["auto", "patch", "minor", "major", "refresh"]
     );
 
     assert!(workflow.contains("name: Prepare Release"));
@@ -6927,7 +6927,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency",
         "bash scripts/list-release-files.sh",
         "release_inventory=$(mktemp)",
-        "bash scripts/list-release-files.sh > \"$release_inventory\"",
+        "bash scripts/list-release-files.sh --bump \"$BUMP\" > \"$release_inventory\"",
         "done < \"$release_inventory\"",
         "git add -- \"${release_files[@]}\"",
         "bash scripts/resolve-prepared-release.sh",
@@ -8139,7 +8139,7 @@ fn test_container_publish_supports_release_and_backfill_entry_points() {
         "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
         "git -C source rev-list --first-parent",
         "publication-tools/scripts/find-release-version-introduction.sh",
-        "not the unique first-parent version-introduction commit",
+        "not the reviewed first-parent release source commit",
         "group: container-publish",
     ] {
         assert!(

@@ -10,13 +10,14 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump (auto selects the minimum safe bump from release notes)"
+        description: "Version bump (refresh updates the current unpublished release)"
         type: choice
         options:
           - auto
           - patch
           - minor
           - major
+          - refresh
         default: auto
       dry_run:
         description: "Validate and print the release diff without opening a pull request"
@@ -132,7 +133,9 @@ jobs:
         run: bash scripts/prepare-release.sh --bump "$BUMP"
 
       - name: Validate prepared diff scope
-        run: bash scripts/validate-release-file-scope.sh
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: bash scripts/validate-release-file-scope.sh --bump "$BUMP"
 
       - name: Validate prepared release state
         run: cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency
@@ -169,6 +172,7 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ steps.app-token-client.outputs.token || steps.app-token-id.outputs.token }}
+          BUMP: ${{ inputs.bump }}
           VERSION: ${{ steps.release.outputs.version }}
           TAG: ${{ steps.release.outputs.tag }}
           BRANCH: ${{ steps.release.outputs.branch }}
@@ -187,7 +191,7 @@ jobs:
             git checkout -b "$BRANCH"
             release_inventory=$(mktemp)
             trap 'rm -f "$release_inventory"' EXIT
-            bash scripts/list-release-files.sh > "$release_inventory"
+            bash scripts/list-release-files.sh --bump "$BUMP" > "$release_inventory"
             release_files=()
             while IFS= read -r -d '' release_file; do
               release_files+=("$release_file")

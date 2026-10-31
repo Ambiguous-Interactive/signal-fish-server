@@ -19,6 +19,15 @@ if ! base_sha=$(git rev-parse --verify HEAD 2>&1); then
     exit 1
 fi
 
+refresh_base=$(bash "$SCRIPT_DIR/read-toml-string.sh" Cargo.toml prepared-from package.metadata.signal-fish-release || true)
+if [ -n "$refresh_base" ]; then
+    if [[ ! "$refresh_base" =~ ^[0-9a-f]{40}$ ]] || [ "$refresh_base" != "$base_sha" ]; then
+        echo "ERROR: Refresh preparation base must equal local HEAD $base_sha." >&2
+        exit 1
+    fi
+    branch="release/v${version}-refresh-${refresh_base}"
+fi
+
 remote_git() {
     git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
 }
