@@ -37,21 +37,13 @@ set -euo pipefail
 # [advisories] ignore. An entry must still be reported by `npm audit` for its
 # graph; when an advisory disappears, remove the entry.
 ROOT_ALLOWED_ADVISORIES=(
-    # GHSA-vfj7-8cjw-p6xm (CVE-2026-93687; braces <= 3.0.3, stack-exhaustion DoS
-    # through deeply nested glob patterns): no patched braces release exists and
-    # npm's only "fix" is downgrading markdownlint-cli2 to 0.0.4, which is a
-    # non-remediation. The chain is dev tooling only
-    # (markdownlint-cli2 -> micromatch -> braces) over maintainer-controlled
-    # patterns, not untrusted input. Tracked upstream: micromatch/braces#70.
-    # Revisit by 2026-12-01.
-    "GHSA-vfj7-8cjw-p6xm"
     # GHSA-238p-pmpm-9mq7 (katex 0.11.0-0.18.1, prototype pollution can bypass
     # trust restrictions): the chain markdownlint-cli2 -> markdownlint ->
     # micromark-extension-math 3.1.0 (latest) pins katex ^0.16.0, and every
     # patched katex (0.18.2+) is outside that range, so the fix is unreachable
     # without an upstream release. Dev tooling only: markdownlint lints
     # maintainer-controlled repository markdown and never renders katex output
-    # to a consumer. Revisit by 2026-12-01 together with the braces entry.
+    # to a consumer. Revisit by 2026-12-01.
     "GHSA-238p-pmpm-9mq7"
 )
 BROWSER_ALLOWED_ADVISORIES=()

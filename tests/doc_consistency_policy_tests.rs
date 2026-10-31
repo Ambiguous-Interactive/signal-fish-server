@@ -41,6 +41,36 @@ fn test_run_local_ci_includes_doc_consistency_check() {
 }
 
 #[test]
+fn test_root_npm_tooling_updates_do_not_require_release_notes() {
+    let root = repo_root();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read_live_file(&root.join("package.json")))
+            .expect("root package.json must parse");
+    for key in ["dependencies", "optionalDependencies", "peerDependencies"] {
+        assert!(
+            manifest.get(key).is_none_or(|value| value.as_object().is_some_and(|deps| deps.is_empty())),
+            "root npm paths are internal tooling; {key} requires reassessing their changelog classification"
+        );
+    }
+    let output = bash_command()
+        .args([
+            "scripts/check-doc-consistency.sh",
+            "--changed-files",
+            "package.json",
+            "package-lock.json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("check root npm tooling scope");
+    assert!(
+        output.status.success(),
+        "tooling updates must not require runtime release notes:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_ci_workflow_runs_doc_consistency_check_with_changed_files() {
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
@@ -282,6 +312,8 @@ fn test_ci_dep_detect_internal_paths_match_script() {
     // Standalone internal files that both should recognize.
     let shared_standalone_files = [
         "Cargo.lock",
+        "package.json",
+        "package-lock.json",
         "docs/releasing.md",
         "PLAN.md",
         "AGENTS.md",
