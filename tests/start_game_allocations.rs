@@ -69,8 +69,9 @@ async fn start_game_does_not_copy_spectator_metadata() {
                     .handle_player_ready(&room.id, &member, None)
                     .await
                     .unwrap();
+                let readiness = receiver.try_recv().unwrap();
                 assert!(matches!(
-                    receiver.try_recv().unwrap().as_ref(),
+                    readiness.as_ref(),
                     ServerMessage::LobbyStateChanged {
                         all_ready: true,
                         ..
@@ -96,7 +97,14 @@ async fn start_game_does_not_copy_spectator_metadata() {
                 ("forbidden", StartGameOutcome::Forbidden)
                 | ("not-ready", StartGameOutcome::NotReady)
                 | ("already-started", StartGameOutcome::AlreadyStarted) => {
-                    assert!(receiver.try_recv().is_err());
+                    let unexpected = receiver.try_recv();
+                    assert!(
+                        matches!(
+                            unexpected,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                        ),
+                        "rejected start emitted an unexpected message: {unexpected:?}"
+                    );
                 }
                 ("started", StartGameOutcome::Started(finalized)) => {
                     assert_eq!(finalized.game_name, "start-game");
