@@ -71,6 +71,7 @@ async fn lobby_state_projection_allocates_only_its_async_result() {
             assert_eq!(stats.reallocations, 0);
         }
     }
+    untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters().await;
     ready_toggle_allocations_do_not_grow_with_spectator_rosters().await;
     lobby_promotion_allocations_do_not_grow_with_spectator_rosters().await;
 }
@@ -216,11 +217,6 @@ async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
             .await
             .unwrap();
         let coordinator = InMemoryRoomOperationCoordinator::new(messages, database.clone(), None);
-        coordinator
-            .handle_player_ready(&room.id, &member, None)
-            .await
-            .unwrap();
-        assert_ready_publication(&receiver.try_recv().unwrap(), member, true);
         let region = stats_alloc::Region::new(ALLOCATOR);
         assert!(coordinator
             .transition_room_to_lobby(&room.id)
@@ -230,7 +226,7 @@ async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
         profiles.push((stats.allocations, stats.bytes_allocated));
         println!("LOBBY_PROMOTION_PROFILE spectators={spectators} stats={stats:?}");
         let message = receiver.try_recv().unwrap();
-        assert_ready_publication(&message, member, true);
+        assert_ready_publication(&message, member, false);
         assert!(matches!(
             message.as_ref(),
             ServerMessage::LobbyStateChanged {
@@ -259,5 +255,58 @@ async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
     assert!(
         profiles.iter().all(|profile| *profile == profiles[0]),
         "lobby promotion copied spectator state: {profiles:?}"
+    );
+}
+
+async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters() {
+    let mut profiles = Vec::new();
+    for spectators in [0_u128, 16, 255] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let room = database
+            .create_room(
+                "snapshot-game".into(),
+                None,
+                4,
+                true,
+                Uuid::from_u128(1),
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        for index in 0..spectators {
+            assert!(database
+                .add_spectator_to_room(
+                    &room.id,
+                    SpectatorInfo {
+                        id: Uuid::from_u128(index + 2),
+                        name: format!("Spectator{index}"),
+                        connected_at: None
+                    }
+                )
+                .await
+                .unwrap());
+        }
+        let coordinator = InMemoryRoomOperationCoordinator::new(
+            Arc::new(InMemoryMessageCoordinator::new()),
+            database.clone(),
+            None,
+        );
+        for state in [LobbyState::Waiting, LobbyState::Lobby] {
+            if state == LobbyState::Lobby {
+                database.transition_room_to_lobby(&room.id).await.unwrap();
+            }
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            let ready = coordinator.current_ready_players(&room.id).await;
+            let stats = region.change();
+            assert!(ready.is_empty());
+            println!("UNTOUCHED_READY_SNAPSHOT_PROFILE spectators={spectators} state={state:?} stats={stats:?}");
+            profiles.push((stats.allocations, stats.bytes_allocated));
+        }
+    }
+    assert!(
+        profiles.iter().all(|profile| *profile == profiles[0]),
+        "untouched ready snapshots copied spectator state: {profiles:?}"
     );
 }

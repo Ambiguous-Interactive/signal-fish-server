@@ -23,6 +23,7 @@ use std::sync::Arc;
 use hdrhistogram::{Counter, Histogram};
 
 use crate::config::{count_u64, DeliveryClass, Experiment};
+use crate::received_counts::ReceivedCounts;
 use crate::records::{ChurnEvent, ChurnPhase, GapEvent, ReceiptName, RunRecords, SentEvent};
 use crate::schedule::{ChurnPlan, Phase, SenderPlan};
 
@@ -264,7 +265,7 @@ pub struct RecipientOutcome {
     /// False once a disconnect was recorded for this recipient.
     pub connected_through: bool,
     /// Unique deliveries received, per sender.
-    pub received: BTreeMap<ReceiptName, u64>,
+    pub received: ReceivedCounts,
     /// Owed-but-unreceived count for connected recipients.
     pub missing: u64,
     /// Tail a disconnected recipient never saw (permitted with a disconnect).
@@ -2411,7 +2412,7 @@ pub fn summarize(
             recipient: recipient.clone(),
             room: *room,
             connected_through,
-            received: BTreeMap::new(),
+            received: ReceivedCounts::default(),
             missing: 0,
             undelivered_at_disconnect: 0,
             gap_covered: 0,
@@ -4169,18 +4170,29 @@ mod coverage_tests {
             .parse::<u32>()
             .expect("rooms");
         assert!((1..=1000).contains(&rooms));
-        fn measure<Name: From<String> + Clone + Ord + serde::Serialize>(rooms: u32) {
+        let players = std::env::var("CAPACITY_SUMMARY_NAMES_PLAYERS")
+            .unwrap_or_else(|_| "64".into())
+            .parse::<u32>()
+            .expect("players");
+        assert!((2..=64).contains(&players));
+        fn measure<
+            Name: From<String> + Clone + Ord + serde::Serialize,
+            Counts: FromIterator<(Name, u64)> + serde::Serialize,
+        >(
+            rooms: u32,
+            players: u32,
+        ) {
             let started = std::time::Instant::now();
-            let mut outcomes = Vec::with_capacity(rooms as usize * 64);
+            let mut outcomes = Vec::with_capacity(rooms as usize * players as usize);
             for room in 0..rooms {
-                let names: Vec<Name> = (0..64)
+                let names: Vec<Name> = (0..players)
                     .map(|player| crate::config::RunConfig::peer_name(room, player).into())
                     .collect();
-                for player in 0..64 {
-                    let received: BTreeMap<Name, u64> = names
+                for player in 0..players {
+                    let received: Counts = names
                         .iter()
                         .enumerate()
-                        .filter(|(sender, _)| *sender != player)
+                        .filter(|(sender, _)| *sender != player as usize)
                         .map(|(_, name)| (name.clone(), 43_200))
                         .collect();
                     outcomes.push(received);
@@ -4206,18 +4218,20 @@ mod coverage_tests {
             println!(
                 "SUMMARY_SENDER_NAMES_PROFILE {}",
                 serde_json::json!({
-                    "rooms": rooms, "players_per_room": 64, "name_bytes": std::mem::size_of::<Name>(),
-                    "entries": u64::from(rooms) * 64 * 63, "retained_rss_bytes": retained_rss,
+                    "rooms": rooms, "players_per_room": players, "name_bytes": std::mem::size_of::<Name>(),
+                    "entries": u64::from(rooms) * u64::from(players) * u64::from(players - 1), "retained_rss_bytes": retained_rss,
                     "build_us": build_us, "json_bytes": std::fs::metadata(path).unwrap().len(),
                     "sha256": digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
                 })
             );
             std::hint::black_box(outcomes);
         }
-        if std::env::var_os("CAPACITY_SUMMARY_NAMES_STRINGS").is_some() {
-            measure::<String>(rooms);
+        if std::env::var_os("CAPACITY_SUMMARY_COUNTS_COMPACT").is_some() {
+            measure::<ReceiptName, ReceivedCounts>(rooms, players);
+        } else if std::env::var_os("CAPACITY_SUMMARY_NAMES_STRINGS").is_some() {
+            measure::<String, BTreeMap<String, u64>>(rooms, players);
         } else {
-            measure::<ReceiptName>(rooms);
+            measure::<ReceiptName, BTreeMap<ReceiptName, u64>>(rooms, players);
         }
     }
 

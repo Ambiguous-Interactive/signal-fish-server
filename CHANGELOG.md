@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce room-state copies during lobby promotion (#636).
+- Reduce room-state copies during lobby promotion and untouched readiness snapshots (#636).
 
 ### Fixed
 
+- Commit the Lobby state before sending an early readiness event (#1330).
 - Stop lobby promotion from reporting success or sending a Lobby event when no seated member remains (#1328).
 
 ## [0.12.0] - 2026-10-31

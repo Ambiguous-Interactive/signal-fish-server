@@ -1049,8 +1049,10 @@ Lobby state transitioned.
 ```
 
 The broadcast always carries `lobby`: the one-time `Waiting→Lobby` promotion
-snapshot (delivered to the first member inside its own `RoomJoined` flow) and
-every later readiness toggle. The move into `finalized` is signaled by
+snapshot and every readiness toggle. The first member's `RoomJoined` flow normally
+promotes the room. An early readiness toggle commits the same promotion before
+sending its event; the later explicit promotion then does nothing.
+The move into `finalized` is signaled by
 [`GameStarting`](#gamestarting) itself — no `LobbyStateChanged` carries
 `finalized`.
 
