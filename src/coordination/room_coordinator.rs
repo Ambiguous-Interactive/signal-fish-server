@@ -350,6 +350,147 @@ impl InMemoryRoomOperationCoordinator {
     }
 }
 
+impl InMemoryRoomOperationCoordinator {
+    async fn apply_player_ready(
+        self,
+        room_id: RoomId,
+        player_id: PlayerId,
+        room_guard: RoomEventMutationGuard,
+    ) -> std::result::Result<(), PlayerReadyError> {
+        let room_id = &room_id;
+        let player_id = &player_id;
+        let mut mutation_guard = Some(room_guard);
+
+        let mut completion = None;
+        let result = async {
+            // Get current room state to check if it has enough players for lobby actions
+            let lobby_state = match self.database.get_room_lobby_state(room_id).await {
+                Ok(Some(state)) => state,
+                Ok(None) => {
+                    return Err(PlayerReadyError::RoomNotFound);
+                }
+                Err(e) => {
+                    return Err(PlayerReadyError::Internal(
+                        e.context("failed to load room for ready toggle"),
+                    ));
+                }
+            };
+
+            // Readiness can be toggled any time the room is open (`max_players`
+            // is a ceiling, not a required count); only a `Finalized` room — the
+            // game already started — rejects further ready toggles.
+            if lobby_state == crate::protocol::LobbyState::Finalized {
+                return Err(PlayerReadyError::Finalized);
+            }
+
+            // Fetch the live membership first so readiness is computed over the
+            // current players (a departed player must not count toward
+            // `all_ready`, nor linger in the broadcast ready list).
+            let room_players = match self.database.get_room_players(room_id).await {
+                Ok(players) => players,
+                Err(e) => {
+                    return Err(PlayerReadyError::Internal(
+                        e.context("failed to load room membership for ready toggle"),
+                    ));
+                }
+            };
+            let routed_players = self
+                .coordinator
+                .routed_player_ids(room_id)
+                .await
+                .map_err(PlayerReadyError::Internal)?;
+            let room_players: Vec<PlayerInfo> = match routed_players {
+                Some(routed_players) => {
+                    let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
+                    room_players
+                        .into_iter()
+                        .filter(|player| routed.contains(&player.id))
+                        .collect()
+                }
+                None => room_players,
+            };
+            let current_ids: HashSet<PlayerId> = room_players.iter().map(|p| p.id).collect();
+
+            // Membership gates the toggle: a caller whose membership row just
+            // vanished (teardown racing the toggle between the caller's room
+            // lookup and the membership read above) is refused exactly like any
+            // other unknown membership. Toggling anyway would mint an empty
+            // ready entry for a live room and publish a stale lobby snapshot.
+            if !current_ids.contains(player_id) {
+                return Err(PlayerReadyError::RoomNotFound);
+            }
+
+            if lobby_state == crate::protocol::LobbyState::Waiting {
+                self.database.transition_room_to_lobby(room_id).await.map_err(|error| {
+                    PlayerReadyError::Internal(error.context("failed to promote room for ready toggle"))
+                })?;
+            }
+
+            // Toggle player ready state in ready_players map
+            let mut ready_map = self.ready_players.write().await;
+            let room_ready_players = ready_map.entry(*room_id).or_insert_with(HashSet::new);
+
+            let was_ready = room_ready_players.contains(player_id);
+            if was_ready {
+                room_ready_players.remove(player_id);
+            } else {
+                room_ready_players.insert(*player_id);
+            }
+            // Drop any ids that are no longer current members (departed players).
+            room_ready_players.retain(|id| current_ids.contains(id));
+
+            let ready_players_vec: Vec<PlayerId> = room_ready_players.iter().copied().collect();
+
+            // Every current player ready (min 1). Robust to a ready id that just
+            // departed: membership, not a raw count, decides `all_ready`.
+            let all_ready = !room_players.is_empty()
+                && room_players
+                    .iter()
+                    .all(|p| room_ready_players.contains(&p.id));
+
+            drop(ready_map); // Release write lock
+
+            // Readiness no longer starts the game. `max_players` is a ceiling,
+            // not a required count, and the game begins only on an explicit
+            // `StartGame` (see `handle_start_game`) — so a `PlayerReady` toggle
+            // just records readiness; the new lobby snapshot (with `all_ready`
+            // so clients know `StartGame` is now permitted) is broadcast after
+            // the lock releases below.
+            tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
+            let message = crate::protocol::ServerMessage::LobbyStateChanged {
+                lobby_state: crate::protocol::LobbyState::Lobby,
+                ready_players: ready_players_vec,
+                all_ready,
+            };
+            let Some(ready_guard) = mutation_guard.take() else {
+                return Err(PlayerReadyError::Internal(anyhow::anyhow!(
+                    "ready mutation guard was unavailable before publication"
+                )));
+            };
+            completion = Some(self.enqueue_replayable_room_event(room_id, message, ready_guard));
+            Ok(())
+        }
+        .await;
+
+        // Broadcast outside the critical section: delivery can be
+        // backpressured by a slow recipient and must never hold the room gate.
+        drop(mutation_guard);
+
+        match result {
+            Ok(()) => {
+                let Some(completion) = completion else {
+                    return Err(PlayerReadyError::Internal(anyhow::anyhow!(
+                        "successful ready toggle did not enqueue its publication"
+                    )));
+                };
+                completion.await.map_err(PlayerReadyError::Internal)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
 #[async_trait]
 impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool> {
@@ -559,130 +700,19 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         player_id: &PlayerId,
         _app_id: Option<Uuid>,
     ) -> std::result::Result<(), PlayerReadyError> {
-        // For in-memory implementation, simulate player ready toggle
-        let mut mutation_guard = Some(self.coordinator.lock_room_event_mutation(room_id).await);
-
-        let mut completion = None;
-        let result = async {
-            // Get current room state to check if it has enough players for lobby actions
-            let lobby_state = match self.database.get_room_lobby_state(room_id).await {
-                Ok(Some(state)) => state,
-                Ok(None) => {
-                    return Err(PlayerReadyError::RoomNotFound);
-                }
-                Err(e) => {
-                    return Err(PlayerReadyError::Internal(
-                        e.context("failed to load room for ready toggle"),
-                    ));
-                }
-            };
-
-            // Readiness can be toggled any time the room is open (`max_players`
-            // is a ceiling, not a required count); only a `Finalized` room — the
-            // game already started — rejects further ready toggles.
-            if lobby_state == crate::protocol::LobbyState::Finalized {
-                return Err(PlayerReadyError::Finalized);
-            }
-
-            // Fetch the live membership first so readiness is computed over the
-            // current players (a departed player must not count toward
-            // `all_ready`, nor linger in the broadcast ready list).
-            let room_players = match self.database.get_room_players(room_id).await {
-                Ok(players) => players,
-                Err(e) => {
-                    return Err(PlayerReadyError::Internal(
-                        e.context("failed to load room membership for ready toggle"),
-                    ));
-                }
-            };
-            let routed_players = self
-                .coordinator
-                .routed_player_ids(room_id)
+        let room_guard = self.coordinator.lock_room_event_mutation(room_id).await;
+        let coordinator = self.clone();
+        let room_id = *room_id;
+        let player_id = *player_id;
+        tokio::spawn(async move {
+            coordinator
+                .apply_player_ready(room_id, player_id, room_guard)
                 .await
-                .map_err(PlayerReadyError::Internal)?;
-            let room_players: Vec<PlayerInfo> = match routed_players {
-                Some(routed_players) => {
-                    let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
-                    room_players
-                        .into_iter()
-                        .filter(|player| routed.contains(&player.id))
-                        .collect()
-                }
-                None => room_players,
-            };
-            let current_ids: HashSet<PlayerId> = room_players.iter().map(|p| p.id).collect();
-
-            // Membership gates the toggle: a caller whose membership row just
-            // vanished (teardown racing the toggle between the caller's room
-            // lookup and the membership read above) is refused exactly like any
-            // other unknown membership. Toggling anyway would mint an empty
-            // ready entry for a live room and publish a stale lobby snapshot.
-            if !current_ids.contains(player_id) {
-                return Err(PlayerReadyError::RoomNotFound);
-            }
-
-            // Toggle player ready state in ready_players map
-            let mut ready_map = self.ready_players.write().await;
-            let room_ready_players = ready_map.entry(*room_id).or_insert_with(HashSet::new);
-
-            let was_ready = room_ready_players.contains(player_id);
-            if was_ready {
-                room_ready_players.remove(player_id);
-            } else {
-                room_ready_players.insert(*player_id);
-            }
-            // Drop any ids that are no longer current members (departed players).
-            room_ready_players.retain(|id| current_ids.contains(id));
-
-            let ready_players_vec: Vec<PlayerId> = room_ready_players.iter().copied().collect();
-
-            // Every current player ready (min 1). Robust to a ready id that just
-            // departed: membership, not a raw count, decides `all_ready`.
-            let all_ready = !room_players.is_empty()
-                && room_players
-                    .iter()
-                    .all(|p| room_ready_players.contains(&p.id));
-
-            drop(ready_map); // Release write lock
-
-            // Readiness no longer starts the game. `max_players` is a ceiling,
-            // not a required count, and the game begins only on an explicit
-            // `StartGame` (see `handle_start_game`) — so a `PlayerReady` toggle
-            // just records readiness; the new lobby snapshot (with `all_ready`
-            // so clients know `StartGame` is now permitted) is broadcast after
-            // the lock releases below.
-            tracing::info!(%room_id, %player_id, ready = !was_ready, "Player ready state toggled (in-memory)");
-            let message = crate::protocol::ServerMessage::LobbyStateChanged {
-                lobby_state: crate::protocol::LobbyState::Lobby,
-                ready_players: ready_players_vec,
-                all_ready,
-            };
-            let Some(ready_guard) = mutation_guard.take() else {
-                return Err(PlayerReadyError::Internal(anyhow::anyhow!(
-                    "ready mutation guard was unavailable before publication"
-                )));
-            };
-            completion = Some(self.enqueue_replayable_room_event(room_id, message, ready_guard));
-            Ok(())
-        }
-        .await;
-
-        // Broadcast outside the critical section: delivery can be
-        // backpressured by a slow recipient and must never hold the room gate.
-        drop(mutation_guard);
-
-        match result {
-            Ok(()) => {
-                let Some(completion) = completion else {
-                    return Err(PlayerReadyError::Internal(anyhow::anyhow!(
-                        "successful ready toggle did not enqueue its publication"
-                    )));
-                };
-                completion.await.map_err(PlayerReadyError::Internal)?;
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        })
+        .await
+        .map_err(|error| {
+            PlayerReadyError::Internal(anyhow::anyhow!("Owned ready toggle task failed: {error}"))
+        })?
     }
 
     /// Handle an explicit `StartGame`: finalize the room with its *current*
@@ -920,6 +950,14 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             // the durable record so a snapshot that straddles finalization
             // reports the finalized ready set instead of an all-unready game;
             // an open room falls through to empty (nobody ready yet).
+            match self.database.get_room_lobby_state(room_id).await {
+                Ok(Some(crate::protocol::LobbyState::Finalized)) => {}
+                Ok(_) => return Vec::new(),
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to load room state for the readiness snapshot");
+                    return Vec::new();
+                }
+            }
             return match self.database.get_room_by_id(room_id).await {
                 Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Finalized => {
                     room.ready_players
@@ -989,6 +1027,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod ready_commit_tests {
+        include!("room_ready_commit_tests.rs");
+    }
     use crate::coordination::{
         ClientDeliveryHandle, ConnectionCloseSignal, MembershipUpdate, MessageCoordinator,
         RoomEventCompletion, RoomEventJob, RoomEventMutationGuard, RoomEventSequencer,
@@ -1175,13 +1217,13 @@ mod tests {
             .handle_player_ready(&room.id, &player, None)
             .await
             .expect("ready toggle succeeds while room is Waiting");
-        assert!(coord
+        assert!(!coord
             .transition_room_to_lobby(&room.id)
             .await
-            .expect("lobby transition succeeds"));
+            .expect("early ready toggle already promoted the room"));
 
         let broadcasts = messages.broadcasts().await;
-        assert_eq!(broadcasts.len(), 2);
+        assert_eq!(broadcasts.len(), 1);
         for event in broadcasts {
             match event.message {
                 ServerMessage::LobbyStateChanged {

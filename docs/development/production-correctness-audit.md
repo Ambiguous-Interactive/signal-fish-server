@@ -12200,3 +12200,88 @@ Lobby event when a room has no seated members. The repair suppresses a false
 event, adds no message or error code, and preserves valid promotion and join
 behavior. All three clients are unaffected and need no migration or tracking
 change. The wider #826 campaign remains open.
+
+### F217 — An early ready toggle announces an uncommitted lobby (#1330)
+
+At main `dcae839a`, `InMemoryRoomOperationCoordinator::handle_player_ready`
+accepts an occupied Waiting room and sends `LobbyStateChanged { lobby_state:
+Lobby }` without changing storage. A readiness operation that reaches the
+coordinator before the join flow's separate promotion can therefore disagree
+with an authoritative room snapshot. The direct coordinator history establishes
+the contract defect; it does not reproduce a remote gameplay incident.
+
+`ready_toggle_promotes_waiting_storage_before_its_lobby_event` checks ready and
+unready operations from both open states. The original source fails with
+`Some(Waiting)` where the delivered Lobby event requires `Some(Lobby)` in
+Nextest `76f410b9-4636-41a3-964b-ccbf0f5e2eea`.
+The repair promotes only after effective membership validation. It preserves the
+documented Lobby-only event and makes subsequent explicit promotion a no-op.
+An owned task retains the room mutation guard through storage, ready-set update
+and FIFO publication. Missing members and finalized rooms still fail before
+mutation. Storage failures keep their existing typed error classification.
+
+The cancellation history holds a ready-map read guard, starts the real toggle,
+and observes committed Lobby storage while the toggle waits for the write
+lock. It cancels the caller, releases the read guard, and requires the exact
+ready list and one all-ready Lobby event. Removing task ownership leaves no
+publication and fails this control in Nextest
+`d8631494-9d79-4a16-a6bb-564e68888cd3`. Restored ownership passes in Nextest
+`d08eab7c-3803-4b0b-b375-4c66c2c9f20d`. This isolates cancellation after promotion;
+it does not claim to cover every executor or storage-backend failure.
+
+The initial hypothesis that wire snapshots leak unrouted ready IDs is excluded
+by source inspection: join and reconnect builders filter ready IDs against the
+captured routed player list, and spectator snapshots expose readiness only on
+filtered player records. No routing read was added to `current_ready_players`:
+join and reconnect builders call it while holding the routing write gate.
+
+#### Untouched readiness snapshot storage (#636)
+
+When no live ready entry exists, open-room snapshots now read only lobby state.
+Finalized rooms still load the durable ready set. In the isolated allocation
+control, an untouched snapshot previously allocated 1,123 bytes in 9 allocations
+with no spectators, 3,633 bytes in 26 allocations with 16 spectators, and
+41,457 bytes in 265 allocations with 255 spectators. Waiting and Lobby match.
+The repair uses 272 bytes in 2 allocations in every case. These measurements
+include the asynchronous result and exclude setup. Existing finalized-readiness
+and membership-read-failure controls remain required. This is an allocation
+result, not a gameplay throughput measurement.
+
+#### Retained summary sender counts (#775)
+
+`ReceivedCounts` retains sorted owned sender/count pairs in one vector per
+recipient. It preserves the previous tree map's JSON object, key order,
+last-value rule for duplicate keys, exact u64 values, shared sender identities,
+and summary lifetime after raw records drop. Arbitrary decoded key order and
+malformed numeric values have independent tree-map comparison controls.
+Existing epoch-set and replay comparisons exercise the production summary path.
+All 67 scoped oracle/count controls pass in the final local run.
+All 49 scoped coordinator and server readiness controls also pass.
+
+Fresh-process profiles compare shared-name trees with compact counts using the
+same binary and artifact writer:
+
+| Rooms × players | Sender entries | Tree RSS bytes | Compact RSS bytes | JSON bytes |
+| --- | --- | --- | --- | --- |
+| 999 × 16 | 239,760 | 22,032,384 | 13,791,232 | 5,226,344 |
+| 250 × 64 | 1,008,000 | 36,184,064 | 26,890,240 | 21,702,982 |
+
+Both variants produce the same SHA-256 for each shape: respectively
+`d45e13ac6c28416eb42b0088d48b83d4bc282f7635107334a76355f436c3e181` and
+`42dee19aae9773dcce5cf2912b1b247dae4542ca302c51b5002e0a5913b89890`.
+These RSS readings include the process baseline and are single retained-storage
+observations. The 999 × 16 construction took 74,710 µs for trees and 88,821 µs
+for compact counts; the 250 × 64 control took 275,163 µs and 227,324 µs.
+No CPU improvement is claimed. The profile retains summary counts, not the
+planned ten-minute raw delivery ledger. #775 stays open for its full workload
+qualification and remaining generator-memory work.
+
+#### External-client assessment
+
+Rust client `da8f2d16`, .NET client `e467c871`, and Godot client `379cd9ab` need
+no changes. Rust's `client_core.rs` accepts the existing Lobby event; .NET's
+`FramePipeline.cs` decodes and forwards it; Godot's `sf_events.gd` accepts its
+known state and existing fields. The repair changes no wire field, ready list,
+explicit start rule or encoding. It commits the state those clients already
+receive. The snapshot allocation change and capacity summary storage are also
+wire-compatible. No Waiting event is introduced.

@@ -47,6 +47,7 @@ mod artifacts;
 mod config;
 mod diagnostics;
 mod oracle;
+mod received_counts;
 mod records;
 mod runner;
 mod schedule;
