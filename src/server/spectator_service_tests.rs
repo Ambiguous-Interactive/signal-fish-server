@@ -2175,100 +2175,208 @@ async fn ghost_notify_retry_survives_a_later_rollback_for_the_same_identity() {
     );
 }
 
-/// Prove room-gate order determines spectator baselines and subsequent live events.
-#[tokio::test(start_paused = true)]
-#[cfg_attr(miri, ignore)]
-async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
+#[derive(Default)]
+struct RoomGateWake(AtomicBool);
+
+impl futures_util::task::ArcWake for RoomGateWake {
+    fn wake_by_ref(wake: &Arc<Self>) {
+        wake.0.store(true, Ordering::SeqCst);
+    }
+}
+
+struct RoomGateWaiters {
+    first: Arc<RoomGateWake>,
+    second: Arc<RoomGateWake>,
+}
+
+impl RoomGateWaiters {
+    /// Poll both operations without cooperative yields and retain their distinct wakes.
+    fn poll<First: std::future::Future, Second: std::future::Future>(
+        first: std::pin::Pin<&mut First>,
+        second: std::pin::Pin<&mut Second>,
+    ) -> Self {
+        let first_wake = Arc::new(RoomGateWake::default());
+        let second_wake = Arc::new(RoomGateWake::default());
+        let poll = |future: std::pin::Pin<&mut dyn std::future::Future<Output = ()>>,
+                    wake: &Arc<RoomGateWake>| {
+            let waker = futures_util::task::waker(Arc::clone(wake));
+            let mut context = std::task::Context::from_waker(&waker);
+            let future = tokio::task::unconstrained(future);
+            tokio::pin!(future);
+            assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
+        };
+        let first = async {
+            let _result = first.await;
+        };
+        let second = async {
+            let _result = second.await;
+        };
+        tokio::pin!(first, second);
+        poll(first.as_mut(), &first_wake);
+        poll(second.as_mut(), &second_wake);
+        Self {
+            first: first_wake,
+            second: second_wake,
+        }
+    }
+
+    /// Prove releasing this gate assigns its first permit to the expected operation.
+    fn release(self, gate: RoomEventMutationGuard) {
+        assert!(!self.first.0.load(Ordering::SeqCst));
+        assert!(!self.second.0.load(Ordering::SeqCst));
+        drop(gate);
+        assert!(
+            self.first.0.load(Ordering::SeqCst),
+            "first operation was not waiting on the held room gate"
+        );
+        assert!(
+            !self.second.0.load(Ordering::SeqCst),
+            "the second operation overtook the first gate waiter"
+        );
+    }
+}
+
+/// Reject generic pending work that has not reached the intended room gate.
+#[tokio::test]
+#[should_panic(expected = "first operation was not waiting on the held room gate")]
+async fn room_gate_waiter_probe_rejects_an_unrelated_pending_operation() {
+    let sequencer = Arc::new(RoomEventSequencer::default());
+    let room_id = RoomId::from_u128(1);
+    let gate = sequencer.lock(room_id).await;
+    let stalled = async {
+        std::future::pending::<()>().await;
+        sequencer.lock(room_id).await
+    };
+    let waiting = sequencer.lock(room_id);
+    tokio::pin!(stalled, waiting);
+    let waiters = RoomGateWaiters::poll(stalled.as_mut(), waiting.as_mut());
+    waiters.release(gate);
+}
+
+struct SpectatorLobbyFixture {
+    server: Arc<crate::server::EnhancedGameServer>,
+    member: PlayerId,
+    member_messages: tokio::sync::mpsc::Receiver<Arc<ServerMessage>>,
+    observer: PlayerId,
+    observer_messages: tokio::sync::mpsc::Receiver<Arc<ServerMessage>>,
+    room_id: RoomId,
+}
+
+/// Create a ready member and a connected observer for ordered lobby histories.
+async fn spectator_lobby_fixture() -> SpectatorLobbyFixture {
     use crate::config::{
         CoordinationConfig, MetricsConfig, RelayTypeConfig, SessionConfig, TransportSecurityConfig,
         TurnConfig,
     };
     use crate::database::DatabaseConfig;
-    use crate::protocol::LobbyState;
     use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
+
+    let server = EnhancedGameServer::new(
+        ServerConfig::default(),
+        ProtocolConfig::default(),
+        RelayTypeConfig::default(),
+        SessionConfig::default(),
+        TurnConfig::default(),
+        DatabaseConfig::InMemory,
+        MetricsConfig::default(),
+        CoordinationConfig::default(),
+        TransportSecurityConfig::default(),
+        Vec::new(),
+    )
+    .await
+    .expect("test server");
+    let mut clients = Vec::new();
+    for port in [35_080, 35_081] {
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        let id = server
+            .connection_manager
+            .register_client(
+                sender,
+                crate::coordination::ConnectionCloseSignal::detached(),
+                format!("127.0.0.1:{port}").parse().expect("test address"),
+                server.instance_id,
+            )
+            .await
+            .expect("register client");
+        server.set_client_protocol(
+            &id,
+            NegotiatedProtocol {
+                version: 3,
+                ..Default::default()
+            },
+        );
+        clients.push((id, receiver));
+    }
+    let (observer, observer_messages) = clients.pop().expect("observer");
+    let (member, mut member_messages) = clients.pop().expect("member");
+    server
+        .handle_join_room(
+            &member,
+            "spectator-lobby-order".into(),
+            Some("WATCH8".into()),
+            "Member".into(),
+            Some(2),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let joined = member_messages.try_recv().expect("member room baseline");
+    let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+        panic!("expected member room baseline, received {joined:?}");
+    };
+    assert_eq!(payload.player_id, member);
+    let lobby = member_messages.try_recv().expect("initial lobby event");
+    let ServerMessage::LobbyStateChanged {
+        all_ready,
+        ready_players,
+        ..
+    } = lobby.as_ref()
+    else {
+        panic!("expected initial lobby event, received {lobby:?}");
+    };
+    assert!(!all_ready);
+    assert!(ready_players.is_empty());
+    server.handle_player_ready(&member).await;
+    let ready = member_messages.try_recv().expect("member ready event");
+    let ServerMessage::LobbyStateChanged {
+        all_ready,
+        ready_players,
+        ..
+    } = ready.as_ref()
+    else {
+        panic!("expected member ready event, received {ready:?}");
+    };
+    assert!(*all_ready);
+    assert_eq!(ready_players, &[member]);
+    let room_id = server.get_client_room(&member).await.expect("member room");
+    SpectatorLobbyFixture {
+        server,
+        member,
+        member_messages,
+        observer,
+        observer_messages,
+        room_id,
+    }
+}
+
+/// Prove room-gate order determines spectator baselines and subsequent live events.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
+    use crate::protocol::LobbyState;
 
     for start_game in [false, true] {
         for spectator_first in [false, true] {
-            let server = EnhancedGameServer::new(
-                ServerConfig::default(),
-                ProtocolConfig::default(),
-                RelayTypeConfig::default(),
-                SessionConfig::default(),
-                TurnConfig::default(),
-                DatabaseConfig::InMemory,
-                MetricsConfig::default(),
-                CoordinationConfig::default(),
-                TransportSecurityConfig::default(),
-                Vec::new(),
-            )
-            .await
-            .expect("test server");
-            let mut clients = Vec::new();
-            for port in [35_080, 35_081] {
-                let (sender, receiver) = tokio::sync::mpsc::channel(16);
-                let id = server
-                    .connection_manager
-                    .register_client(
-                        sender,
-                        crate::coordination::ConnectionCloseSignal::detached(),
-                        format!("127.0.0.1:{port}").parse().expect("test address"),
-                        server.instance_id,
-                    )
-                    .await
-                    .expect("register client");
-                server.set_client_protocol(
-                    &id,
-                    NegotiatedProtocol {
-                        version: 3,
-                        ..Default::default()
-                    },
-                );
-                clients.push((id, receiver));
-            }
-            let (observer, mut observer_messages) = clients.pop().expect("observer");
-            let (member, mut member_messages) = clients.pop().expect("member");
-            server
-                .handle_join_room(
-                    &member,
-                    "spectator-lobby-order".into(),
-                    Some("WATCH8".into()),
-                    "Member".into(),
-                    Some(2),
-                    Some(true),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-            let joined = member_messages.try_recv().expect("member room baseline");
-            let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
-                panic!("expected member room baseline, received {joined:?}");
-            };
-            assert_eq!(payload.player_id, member);
-            let lobby = member_messages.try_recv().expect("initial lobby event");
-            let ServerMessage::LobbyStateChanged {
-                all_ready,
-                ready_players,
-                ..
-            } = lobby.as_ref()
-            else {
-                panic!("expected initial lobby event, received {lobby:?}");
-            };
-            assert!(!all_ready);
-            assert!(ready_players.is_empty());
-            server.handle_player_ready(&member).await;
-            let ready = member_messages.try_recv().expect("member ready event");
-            let ServerMessage::LobbyStateChanged {
-                all_ready,
-                ready_players,
-                ..
-            } = ready.as_ref()
-            else {
-                panic!("expected member ready event, received {ready:?}");
-            };
-            assert!(*all_ready);
-            assert_eq!(ready_players, &[member]);
-            let room_id = server.get_client_room(&member).await.expect("member room");
+            let SpectatorLobbyFixture {
+                server,
+                member,
+                mut member_messages,
+                observer,
+                mut observer_messages,
+                room_id,
+            } = spectator_lobby_fixture().await;
             let observer_lifecycle = server
                 .connection_manager
                 .client_lifecycle(&observer)
@@ -2297,13 +2405,11 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 }
             };
             tokio::pin!(join, change);
-            if spectator_first {
-                assert!(futures_util::poll!(&mut join).is_pending());
-                assert!(futures_util::poll!(&mut change).is_pending());
+            let waiters = if spectator_first {
+                RoomGateWaiters::poll(join.as_mut(), change.as_mut())
             } else {
-                assert!(futures_util::poll!(&mut change).is_pending());
-                assert!(futures_util::poll!(&mut join).is_pending());
-            }
+                RoomGateWaiters::poll(change.as_mut(), join.as_mut())
+            };
             assert!(server
                 .database
                 .get_room_spectators(&room_id)
@@ -2320,7 +2426,7 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 blocked_member,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
-            drop(gate);
+            waiters.release(gate);
             let (joined, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                 tokio::join!(join, change)
             })
@@ -2415,6 +2521,224 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
             let trailing_observer = observer_messages.try_recv();
             assert!(matches!(
                 trailing_observer,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+}
+
+/// #826: departure and lobby publication must share the room's mutation gate.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
+    use crate::protocol::LobbyState;
+
+    for start_game in [false, true] {
+        for departure_first in [false, true] {
+            let SpectatorLobbyFixture {
+                server,
+                member,
+                mut member_messages,
+                observer,
+                mut observer_messages,
+                room_id,
+            } = spectator_lobby_fixture().await;
+            server
+                .handle_join_as_spectator(
+                    &observer,
+                    "spectator-lobby-order".into(),
+                    "WATCH8".into(),
+                    "Observer".into(),
+                    None,
+                )
+                .await;
+            let spectator_baseline = observer_messages.try_recv().unwrap();
+            assert!(matches!(
+                spectator_baseline.as_ref(),
+                ServerMessage::SpectatorJoined(_)
+            ));
+            let spectator_notification = member_messages.try_recv().unwrap();
+            assert!(matches!(
+                spectator_notification.as_ref(),
+                ServerMessage::NewSpectatorJoined { .. }
+            ));
+            let lifecycle = server
+                .connection_manager
+                .client_lifecycle(&observer)
+                .unwrap();
+            let _lifecycle_guard = lifecycle.lock().await;
+            let gate = server
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await;
+            let (_drain_owner, drain) = tokio::sync::watch::channel(false);
+            let departure = server.spectator_service.clone().detach_owned(
+                observer,
+                SpectatorStateChangeReason::VoluntaryLeave,
+                true,
+                drain,
+                None,
+                None,
+            );
+            let change = async {
+                if start_game {
+                    server.handle_start_game(&member).await;
+                } else {
+                    server.handle_player_ready(&member).await;
+                }
+            };
+            tokio::pin!(departure, change);
+            let waiters = if departure_first {
+                RoomGateWaiters::poll(departure.as_mut(), change.as_mut())
+            } else {
+                RoomGateWaiters::poll(change.as_mut(), departure.as_mut())
+            };
+            assert_eq!(
+                server
+                    .database
+                    .get_room_spectators(&room_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                server.spectator_service.spectator_room(&observer),
+                Some(room_id)
+            );
+            let observer_read = observer_messages.try_recv();
+            assert!(matches!(
+                observer_read,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            let member_read = member_messages.try_recv();
+            assert!(matches!(
+                member_read,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            waiters.release(gate);
+            let (departed, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::join!(departure, change)
+            })
+            .await
+            .expect("departure and change finish");
+            assert!(departed);
+            assert!(server
+                .database
+                .get_room_spectators(&room_id)
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(server.spectator_service.spectator_room(&observer), None);
+            let room = server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                room.lobby_state,
+                if start_game {
+                    LobbyState::Finalized
+                } else {
+                    LobbyState::Lobby
+                }
+            );
+            assert_eq!(room.players.len(), 1);
+            assert!(room.players.contains_key(&member));
+            let mut events = Vec::new();
+            let mut session_plans = 0;
+            loop {
+                let member_read = member_messages.try_recv();
+                let message = match member_read {
+                    Ok(message) => message,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("member queue disconnected")
+                    }
+                };
+                match message.as_ref() {
+                    ServerMessage::SpectatorDisconnected {
+                        spectator_id,
+                        reason,
+                        current_spectators,
+                        spectator_count,
+                    } => {
+                        assert_eq!(*spectator_id, observer);
+                        assert_eq!(*reason, Some(SpectatorStateChangeReason::VoluntaryLeave));
+                        assert!(current_spectators.is_empty());
+                        assert_eq!(*spectator_count, Some(0));
+                        events.push("departure");
+                    }
+                    ServerMessage::GameStarting { peer_connections } if start_game => {
+                        assert_eq!(peer_connections.len(), 1);
+                        assert_eq!(peer_connections[0].player_id, member);
+                        events.push("change");
+                    }
+                    ServerMessage::LobbyStateChanged {
+                        all_ready,
+                        ready_players,
+                        ..
+                    } if !start_game => {
+                        assert!(!all_ready);
+                        assert!(ready_players.is_empty());
+                        events.push("change");
+                    }
+                    ServerMessage::SessionPlan(plan) if start_game => {
+                        assert!(plan.peers.is_empty());
+                        session_plans += 1;
+                    }
+                    other => panic!("unexpected member message: {other:?}"),
+                }
+            }
+            assert_eq!(
+                events,
+                if departure_first {
+                    vec!["departure", "change"]
+                } else {
+                    vec!["change", "departure"]
+                }
+            );
+            assert_eq!(session_plans, usize::from(start_game));
+            if !departure_first {
+                let change = observer_messages
+                    .try_recv()
+                    .expect("room event before departure");
+                match change.as_ref() {
+                    ServerMessage::GameStarting { peer_connections } if start_game => {
+                        assert_eq!(peer_connections.len(), 1);
+                        assert_eq!(peer_connections[0].player_id, member);
+                    }
+                    ServerMessage::LobbyStateChanged {
+                        all_ready,
+                        ready_players,
+                        ..
+                    } if !start_game => {
+                        assert!(!all_ready);
+                        assert!(ready_players.is_empty());
+                    }
+                    other => panic!("unexpected observer update: {other:?}"),
+                }
+            }
+            let left = observer_messages
+                .try_recv()
+                .expect("departure acknowledgement");
+            let ServerMessage::SpectatorLeft {
+                room_id: left_room,
+                room_code,
+                reason,
+                current_spectators,
+            } = left.as_ref()
+            else {
+                panic!("expected departure acknowledgement, got {left:?}");
+            };
+            assert_eq!(*left_room, Some(room_id));
+            assert_eq!(room_code.as_deref(), Some("WATCH8"));
+            assert_eq!(*reason, Some(SpectatorStateChangeReason::VoluntaryLeave));
+            assert!(current_spectators.is_empty());
+            let observer_read = observer_messages.try_recv();
+            assert!(matches!(
+                observer_read,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
         }

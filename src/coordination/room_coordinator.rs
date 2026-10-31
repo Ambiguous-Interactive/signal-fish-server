@@ -139,7 +139,7 @@ impl std::error::Error for PlayerReadyError {}
 /// Trait for room operation coordination
 #[async_trait]
 pub trait RoomOperationCoordinatorTrait: Send + Sync {
-    /// Transition a room to lobby state
+    /// Promote an occupied Waiting room; return false when no transition applies.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool>;
 
     /// Coordinate authority transfer between players
@@ -359,8 +359,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         // before persistence changes. The room-event guard keeps membership
         // and ready-state mutations out of this snapshot until the resulting
         // event has committed.
-        match self.database.get_room_by_id(room_id).await {
-            Ok(Some(room)) if room.lobby_state == crate::protocol::LobbyState::Waiting => {}
+        match self.database.get_room_lobby_state(room_id).await {
+            Ok(Some(crate::protocol::LobbyState::Waiting)) => {}
             Ok(Some(_)) => {
                 drop(mutation_guard);
                 return Ok(false);
@@ -376,6 +376,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         }
 
         let room_players = self.database.get_room_players(room_id).await?;
+        if room_players.is_empty() {
+            return Ok(false);
+        }
         let routed_players = self.coordinator.routed_player_ids(room_id).await?;
         let current_ids: HashSet<PlayerId> = match routed_players {
             Some(routed_players) => {
@@ -1069,6 +1072,83 @@ mod tests {
             .clear_ready_players(&room.id)
             .await
             .expect("repeat clear is a no-op");
+    }
+
+    /// #1328: an empty or spectator-only room cannot publish a false lobby transition.
+    #[tokio::test]
+    async fn lobby_transition_without_members_preserves_waiting_state_and_emits_nothing() {
+        for spectators in [0, 1] {
+            let database = Arc::new(InMemoryDatabase::new());
+            let messages = Arc::new(RecordingMessageCoordinator::default());
+            let member = PlayerId::from_u128(1);
+            let room = database
+                .create_room(
+                    "empty-lobby".into(),
+                    Some("EMPTY1".into()),
+                    2,
+                    true,
+                    member,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let removed = database
+                .remove_player_from_room(&room.id, &member)
+                .await
+                .unwrap()
+                .unwrap();
+            if spectators != 0 {
+                assert!(database
+                    .add_spectator_to_room(
+                        &room.id,
+                        crate::protocol::SpectatorInfo {
+                            id: PlayerId::from_u128(2),
+                            name: "Observer".into(),
+                            connected_at: None,
+                        }
+                    )
+                    .await
+                    .unwrap());
+            }
+            let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let coordinator =
+                InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+            assert!(
+                !coordinator
+                    .transition_room_to_lobby(&room.id)
+                    .await
+                    .unwrap(),
+                "spectators={spectators}"
+            );
+            let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.lobby_state, crate::protocol::LobbyState::Waiting);
+            assert_eq!(after.last_activity, before.last_activity);
+            assert!(after.lobby_started_at.is_none());
+            assert!(after.players.is_empty());
+            assert_eq!(after.spectators.len(), spectators);
+            assert!(messages.broadcasts().await.is_empty());
+            assert_eq!(
+                serde_json::to_value(&after.spectators).unwrap(),
+                serde_json::to_value(&before.spectators).unwrap()
+            );
+            assert!(database
+                .add_player_to_room(&room.id, removed)
+                .await
+                .unwrap());
+            assert!(coordinator
+                .transition_room_to_lobby(&room.id)
+                .await
+                .unwrap());
+            let broadcasts = messages.broadcasts().await;
+            assert_eq!(broadcasts.len(), 1);
+            assert!(
+                matches!(&broadcasts[0].message, ServerMessage::LobbyStateChanged {
+                lobby_state: crate::protocol::LobbyState::Lobby, ready_players, all_ready: false,
+            } if ready_players.is_empty())
+            );
+        }
     }
 
     #[tokio::test]

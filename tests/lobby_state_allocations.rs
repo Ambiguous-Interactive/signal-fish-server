@@ -72,6 +72,7 @@ async fn lobby_state_projection_allocates_only_its_async_result() {
         }
     }
     ready_toggle_allocations_do_not_grow_with_spectator_rosters().await;
+    lobby_promotion_allocations_do_not_grow_with_spectator_rosters().await;
 }
 
 /// Keep the ceiling on the actual ready-toggle path, including its queued publication.
@@ -169,5 +170,94 @@ fn assert_ready_publication(message: &ServerMessage, member: Uuid, ready: bool) 
         } else {
             &[]
         }
+    );
+}
+
+/// Lobby promotion must not copy spectator names when it reads the room state.
+async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
+    let mut profiles = Vec::new();
+    for spectators in [0_u128, 16, 255] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let member = Uuid::from_u128(1);
+        let room = database
+            .create_room(
+                "promotion-game".into(),
+                Some("PROMO1".into()),
+                4,
+                true,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        for index in 0..spectators {
+            assert!(database
+                .add_spectator_to_room(
+                    &room.id,
+                    SpectatorInfo {
+                        id: Uuid::from_u128(index + 2),
+                        name: format!("Spectator{index}"),
+                        connected_at: None,
+                    },
+                )
+                .await
+                .unwrap());
+        }
+        let messages = Arc::new(InMemoryMessageCoordinator::new());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        messages
+            .register_local_client(
+                member,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        let coordinator = InMemoryRoomOperationCoordinator::new(messages, database.clone(), None);
+        coordinator
+            .handle_player_ready(&room.id, &member, None)
+            .await
+            .unwrap();
+        assert_ready_publication(&receiver.try_recv().unwrap(), member, true);
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        assert!(coordinator
+            .transition_room_to_lobby(&room.id)
+            .await
+            .unwrap());
+        let stats = region.change();
+        profiles.push((stats.allocations, stats.bytes_allocated));
+        println!("LOBBY_PROMOTION_PROFILE spectators={spectators} stats={stats:?}");
+        let message = receiver.try_recv().unwrap();
+        assert_ready_publication(&message, member, true);
+        assert!(matches!(
+            message.as_ref(),
+            ServerMessage::LobbyStateChanged {
+                lobby_state: LobbyState::Lobby,
+                ..
+            }
+        ));
+        assert_eq!(
+            database.get_room_lobby_state(&room.id).await.unwrap(),
+            Some(LobbyState::Lobby)
+        );
+        assert!(!coordinator
+            .transition_room_to_lobby(&room.id)
+            .await
+            .unwrap());
+        let trailing = receiver.try_recv();
+        assert!(matches!(
+            trailing,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            database.get_room_spectators(&room.id).await.unwrap().len(),
+            usize::try_from(spectators).unwrap()
+        );
+    }
+    assert!(
+        profiles.iter().all(|profile| *profile == profiles[0]),
+        "lobby promotion copied spectator state: {profiles:?}"
     );
 }

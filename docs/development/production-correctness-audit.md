@@ -50,10 +50,10 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589 |
-| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589 |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
-| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589 |
+| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123 |
@@ -12069,3 +12069,134 @@ these overlapping observations establish no speed gain. Dense recipients pay
 one additional buffer growth each. This bounds one analysis index for the
 measured shapes. It does not bound total runner memory, reduce collection
 storage or qualify the ten-minute C3 cell. Keep #775 and #636 open.
+
+### Lobby promotion state projection (#636)
+
+Baseline `92842406`. Lobby promotion reads a full owned room only to check its
+state. The replacement uses the existing `get_room_lobby_state` projection.
+The default backend path still delegates to the complete snapshot. The in-memory
+path retains pending-row and read-failure semantics without copying member maps,
+spectator names or room strings. Membership reads, ready-state derivation,
+mutation ownership and publication order stay the same.
+
+An isolated allocator measures actual coordinator promotion after a ready toggle
+warms its event lane. Each shape retains one ready member and zero, 16 or 255
+spectators. The control requires the exact ready lobby event, durable Lobby state,
+unchanged spectator count, and a repeated promotion with no extra event.
+
+| Spectators | Allocations before / after | Allocated bytes before / after |
+| --- | --- | --- |
+| 0 | 43 / 36 | 8,379 / 7,527 |
+| 16 | 60 / 36 | 10,889 / 7,527 |
+| 255 | 299 / 36 | 48,713 / 7,527 |
+
+The growth ceiling fails on the baseline in Nextest `0ad3591f` and the retained
+repeat `8023ceed`. The repaired implementation passes in Nextest `7f5e6aa7`.
+These are allocation counts and allocated bytes, not latency, throughput or RSS.
+The existing projected-read failure, pending-row and finalized-state controls
+remain applicable. Rust, .NET and Godot clients need no changes: protocol,
+membership, defaults and event order stay the same. Keep #636 open.
+
+### Compact scheduled-send disconnect index (#775, #636)
+
+Baseline `92842406`. Scheduled-send validation stores and sorts a pointer for
+every disconnect while reconstructing active send epochs. The replacement counts
+those rows first, reserves exactly their offset count, and uses four-byte raw
+offsets when the full history fits. Larger histories retain the usize fallback.
+The shared room-churn offset container keeps its existing timestamp/raw-offset
+order; disconnect validation sorts by recipient and timestamp. Equal disconnect
+keys have the same effect on epoch end times, independent of their raw tie order.
+No raw event changes, and every disconnect identity remains present once.
+
+Ordinary controls compare compact and wide indexes with an independent stable
+sort across empty, sparse, reversed and tied histories with malformed epochs.
+They check the complete offset set, sorted semantic keys and retained storage.
+Existing controls for active incarnations, delayed repeated churn, invalid sends
+and exact artifact replay pass on the replacement. The one-million-row profile retains 333,334
+disconnects and checks the same recipient/time digest, `12681057109706136158`,
+for the original pointer implementation and replacement in separate processes.
+
+| Index | Retained buffer bytes | Three construction times in milliseconds |
+| --- | --- | --- |
+| Original pointers | 4,194,304 | 786, 786, 674 |
+| Compact offsets | 1,333,336 | 1,012, 845, 783 |
+
+Retained index storage falls by 68.2 percent on this 64-bit host. The compact
+index takes longer to construct in these debug-profile attempts; no speed gain
+is claimed. Earlier diagnostic attempts with raw-offset tie sorting are retained
+locally and are not included in this final-source table. The index is built after
+collection, outside offered gameplay. This is one analysis buffer, not a whole-run
+memory bound, peak RSS measurement or qualification of the ten-minute C3 cell.
+Keep #775 and #636 open.
+
+### A08/A10 — Spectator departure and lobby publication order
+
+Baseline `92842406`, under #826. Four new histories race the owned spectator
+detach body against ready-off or game start, placing each operation first on the
+held room gate. The fixture retains the spectator lifecycle guard. Before gate
+release, the spectator must remain stored and locally routed, and both client
+queues must stay empty. After release, the exact member events follow gate order.
+The spectator receives the lobby change only when that change won the gate,
+then exactly one departure acknowledgement with an empty roster. The final room
+retains its member, correct lobby state, no spectator role, and no spectator row.
+Game start publishes one member-only peer list and one member session plan.
+
+The negative control changes only detach's room-gate key to an unrelated lane.
+Nextest `63debed4` fails before release because the spectator row is already
+removed. Production source is restored byte-for-byte. The restored source and
+shared fixture pass both admission and departure histories in Nextest `311362c2`.
+The existing ready-before-lobby and cancelled-promotion-after-commit controls also
+pass. These are local queue histories, not socket, replay, storage-failure or
+spawned-detach-wrapper qualification. No production defect is inferred.
+Rust, .NET and Godot clients need no changes: runtime behavior and wire format
+stay the same. Keep A08, A10 and #826 open.
+
+The first hosted head `d018da94` fails the test-read policy scanner at seven new
+read sites, including the member-drain loop (CI run `41172572497`, job
+`124453951203`). The fix names each result, checks Empty explicitly and treats
+a disconnected member queue as a failure. The scanner itself is unchanged.
+Nextest `dafd6b25` passes the focused scanner; `176d240c` and `bf348be9` pass the
+same departure history and lobby allocation contract after the read changes.
+
+Review of `2c16c03d` also identifies that Pending alone does not prove where an
+operation waits. Both ordering histories now poll with distinct wake observers
+and disable cooperative yields during that poll. Before either operation is
+polled again, releasing the held gate must wake the expected first operation
+and must not wake its competitor. This proves FIFO permit assignment at gate
+release, rather than inferring it from Pending or `join!` poll order. A negative
+control stalls the expected first operation before the gate; the same probe must
+reject that false synchronization. All eight admission/departure cells and this
+negative control pass in Nextest `56c067c2`. No runtime code changes.
+
+### F216 — Coordinator publishes Lobby for a room without members (#1328)
+
+Baseline `92842406`, under #826. The public in-memory coordinator checks Waiting
+state, reads an empty player list, then calls the database transition. Storage
+returns success without entering Lobby because `Room::enter_lobby` requires a
+seated member. The coordinator treats that no-op as a transition and publishes
+`LobbyStateChanged(Lobby)`. Its return value and event contradict stored Waiting
+state. A spectator-only room can receive this false update.
+
+The red-first regression fails at the success-result assertion in Nextest
+`802aa875`. The repair returns false immediately after an empty membership read,
+before route queries, mutation or event enqueue. The regression checks empty and
+spectator-only rooms, exact before/after spectator serialization, unchanged activity
+and lobby timestamp, no broadcast, then readmits a member and requires one valid
+Lobby event. Occupied readiness, cancellation ownership, repeated promotion,
+read failures and broadcast failures retain their existing controls.
+All five focused controls pass in Nextest `341bf441`.
+
+This is a confirmed public coordinator/API defect. The server's normal join path
+admits its player before promotion; no production socket incident is established.
+The room gate still serializes cooperating room operations. This does not claim
+atomicity against an embedder that mutates storage outside that gate.
+
+External-client assessment uses current main sources: Rust `client_core.rs` at
+`da8f2d16`, .NET `Polling/FramePipeline.cs` at `e467c871`, and Godot
+`signal_fish_client.gd` at `7ac2578e`. Rust applies Lobby updates to current room
+membership; .NET decodes and emits the existing lobby payload; Godot applies
+state and ready flags while preserving its spectator role. None requires a
+Lobby event when a room has no seated members. The repair suppresses a false
+event, adds no message or error code, and preserves valid promotion and join
+behavior. All three clients are unaffected and need no migration or tracking
+change. The wider #826 campaign remains open.

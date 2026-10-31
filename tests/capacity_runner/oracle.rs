@@ -946,14 +946,11 @@ fn scheduled_send_evidence(
             }
         }
     }
-    let mut disconnects: Vec<_> = records
-        .churn
-        .iter()
-        .filter(|event| event.phase == ChurnPhase::Disconnect)
-        .collect();
-    disconnects.sort_unstable_by_key(|event| (event.recipient.as_str(), event.at_us));
+    let disconnects =
+        disconnect_positions(&records.churn, u32::try_from(records.churn.len()).is_ok());
     let mut closing_epochs: BTreeMap<&str, u32> = BTreeMap::new();
-    for event in disconnects {
+    for offset in 0..disconnects.len() {
+        let event = &records.churn[disconnects.get(offset).expect("indexed disconnect")];
         let epoch = closing_epochs.entry(event.recipient.as_str()).or_insert(1);
         if let Some((_, end)) = epoch_times.get_mut(&(event.recipient.as_str(), *epoch)) {
             *end = Some(event.at_us);
@@ -1573,13 +1570,18 @@ impl ChurnPositions {
         }
     }
 
+    /// Order room churn by timestamp and retain raw order for ties.
     fn sort(&mut self, events: &[ChurnEvent]) {
+        self.sort_by_key(|position| (events[position].at_us, position));
+    }
+
+    /// Sort either offset width by the caller's semantic key.
+    fn sort_by_key<Key: Ord>(&mut self, mut key: impl FnMut(usize) -> Key) {
         match self {
-            Self::Compact(positions) => positions
-                .sort_unstable_by_key(|&position| (events[position as usize].at_us, position)),
-            Self::Wide(positions) => {
-                positions.sort_unstable_by_key(|&position| (events[position].at_us, position))
+            Self::Compact(positions) => {
+                positions.sort_unstable_by_key(|&position| key(position as usize))
             }
+            Self::Wide(positions) => positions.sort_unstable_by_key(|&position| key(position)),
         }
     }
 
@@ -1590,6 +1592,29 @@ impl ChurnPositions {
             Self::Wide(positions) => positions.capacity() * std::mem::size_of::<usize>(),
         }
     }
+}
+
+/// Retain only disconnect offsets while preserving recipient/time ordering.
+fn disconnect_positions(events: &[ChurnEvent], compact: bool) -> ChurnPositions {
+    let count = events
+        .iter()
+        .filter(|event| event.phase == ChurnPhase::Disconnect)
+        .count();
+    let mut positions = if compact {
+        ChurnPositions::Compact(Vec::with_capacity(count))
+    } else {
+        ChurnPositions::Wide(Vec::with_capacity(count))
+    };
+    for (position, event) in events.iter().enumerate() {
+        if event.phase == ChurnPhase::Disconnect {
+            positions.push(position);
+        }
+    }
+    positions.sort_by_key(|position| {
+        let event = &events[position];
+        (event.recipient.as_str(), event.at_us)
+    });
+    positions
 }
 
 fn room_churn_events(
@@ -5651,6 +5676,104 @@ mod coverage_tests {
                 }
             }
         }
+    }
+
+    /// #775: keep exact disconnect identities with four-byte offsets when they fit.
+    #[test]
+    fn disconnect_index_preserves_tied_shuffled_and_malformed_churn() {
+        for count in [0, 1, 2, 17, 257, 4096] {
+            let mut records = churn_sort_fixture(count);
+            for reverse in [false, true] {
+                if reverse {
+                    records.churn.reverse();
+                }
+                let mut expected: Vec<_> = records
+                    .churn
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, event)| event.phase == ChurnPhase::Disconnect)
+                    .map(|(position, _)| position)
+                    .collect();
+                expected.sort_by_key(|&position| {
+                    let event = &records.churn[position];
+                    (event.recipient.as_str(), event.at_us)
+                });
+                for compact in [false, true] {
+                    let actual = disconnect_positions(&records.churn, compact);
+                    let mut offsets: Vec<_> = (0..actual.len())
+                        .map(|index| actual.get(index).unwrap())
+                        .collect();
+                    let keys = |offsets: &[usize]| {
+                        offsets
+                            .iter()
+                            .map(|&position| {
+                                let event = &records.churn[position];
+                                (event.recipient.as_str(), event.at_us)
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(keys(&offsets), keys(&expected));
+                    offsets.sort_unstable();
+                    let mut expected_identities = expected.clone();
+                    expected_identities.sort_unstable();
+                    assert_eq!(offsets, expected_identities);
+                    assert_eq!(
+                        actual.retained_bytes(),
+                        expected.len()
+                            * if compact {
+                                4
+                            } else {
+                                std::mem::size_of::<usize>()
+                            }
+                    );
+                }
+            }
+        }
+    }
+
+    /// Compare old pointer storage with compact offsets over one million raw rows.
+    #[test]
+    #[ignore = "isolated disconnect index profile; run in a fresh process"]
+    fn generator_disconnect_index_memory_profile() {
+        let records = churn_sort_fixture(1_000_000);
+        let started = std::time::Instant::now();
+        let digest = |events: &mut dyn Iterator<Item = &ChurnEvent>| {
+            events.fold(0_u64, |hash, event| {
+                event
+                    .recipient
+                    .bytes()
+                    .chain(event.at_us.to_le_bytes())
+                    .fold(hash, |hash, byte| {
+                        hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+                    })
+            })
+        };
+        let pointers = std::env::var_os("CAPACITY_DISCONNECT_POINTERS").is_some();
+        let (count, bytes, checksum) = if pointers {
+            let mut events: Vec<_> = records
+                .churn
+                .iter()
+                .filter(|event| event.phase == ChurnPhase::Disconnect)
+                .collect();
+            events.sort_unstable_by_key(|event| (event.recipient.as_str(), event.at_us));
+            let checksum = digest(&mut events.iter().copied());
+            (
+                events.len(),
+                events.capacity() * std::mem::size_of::<&ChurnEvent>(),
+                checksum,
+            )
+        } else {
+            let offsets =
+                disconnect_positions(&records.churn, u32::try_from(records.churn.len()).is_ok());
+            let checksum = digest(
+                &mut (0..offsets.len()).map(|index| &records.churn[offsets.get(index).unwrap()]),
+            );
+            (offsets.len(), offsets.retained_bytes(), checksum)
+        };
+        println!("DISCONNECT_INDEX_PROFILE pointers={pointers} count={count} bytes={bytes} checksum={checksum} elapsed_us={}", started.elapsed().as_micros());
+        assert_eq!(count, 333_334);
+        assert_eq!(checksum, 12_681_057_109_706_136_158);
+        std::hint::black_box(&records);
     }
 
     fn stable_churn_order(records: &RunRecords) -> Vec<(usize, usize)> {
