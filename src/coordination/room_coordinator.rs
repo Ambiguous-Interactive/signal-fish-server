@@ -351,6 +351,7 @@ impl InMemoryRoomOperationCoordinator {
 }
 
 impl InMemoryRoomOperationCoordinator {
+    /// Commit and publish a ready toggle even if its caller is canceled.
     async fn apply_player_ready(
         self,
         room_id: RoomId,
@@ -386,7 +387,7 @@ impl InMemoryRoomOperationCoordinator {
             // Fetch the live membership first so readiness is computed over the
             // current players (a departed player must not count toward
             // `all_ready`, nor linger in the broadcast ready list).
-            let room_players = match self.database.get_room_players(room_id).await {
+            let room_players = match self.database.get_room_player_ids(room_id).await {
                 Ok(players) => players,
                 Err(e) => {
                     return Err(PlayerReadyError::Internal(
@@ -399,17 +400,17 @@ impl InMemoryRoomOperationCoordinator {
                 .routed_player_ids(room_id)
                 .await
                 .map_err(PlayerReadyError::Internal)?;
-            let room_players: Vec<PlayerInfo> = match routed_players {
+            let room_players: Vec<PlayerId> = match routed_players {
                 Some(routed_players) => {
                     let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
                     room_players
                         .into_iter()
-                        .filter(|player| routed.contains(&player.id))
+                        .filter(|player| routed.contains(player))
                         .collect()
                 }
                 None => room_players,
             };
-            let current_ids: HashSet<PlayerId> = room_players.iter().map(|p| p.id).collect();
+            let current_ids: HashSet<PlayerId> = room_players.iter().copied().collect();
 
             // Membership gates the toggle: a caller whose membership row just
             // vanished (teardown racing the toggle between the caller's room
@@ -446,7 +447,7 @@ impl InMemoryRoomOperationCoordinator {
             let all_ready = !room_players.is_empty()
                 && room_players
                     .iter()
-                    .all(|p| room_ready_players.contains(&p.id));
+                    .all(|player| room_ready_players.contains(player));
 
             drop(ready_map); // Release write lock
 
@@ -493,6 +494,7 @@ impl InMemoryRoomOperationCoordinator {
 
 #[async_trait]
 impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
+    /// Promote a Waiting room only when its effective seated membership is nonempty.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
 
@@ -516,7 +518,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             }
         }
 
-        let room_players = self.database.get_room_players(room_id).await?;
+        let room_players = self.database.get_room_player_ids(room_id).await?;
         if room_players.is_empty() {
             return Ok(false);
         }
@@ -526,12 +528,15 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
                 room_players
                     .iter()
-                    .filter(|player| routed.contains(&player.id))
-                    .map(|player| player.id)
+                    .filter(|player| routed.contains(player))
+                    .copied()
                     .collect()
             }
-            None => room_players.iter().map(|player| player.id).collect(),
+            None => room_players.iter().copied().collect(),
         };
+        if current_ids.is_empty() {
+            return Ok(false);
+        }
         let ready_set = self
             .ready_players
             .read()
@@ -977,9 +982,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         // never reported as ready. A failed membership read fails closed to an
         // empty set: reporting the unfiltered set would fabricate readiness for
         // departed members precisely when the data is known-stale.
-        match self.database.get_room_players(room_id).await {
+        match self.database.get_room_player_ids(room_id).await {
             Ok(players) => {
-                let current: HashSet<PlayerId> = players.iter().map(|p| p.id).collect();
+                let current: HashSet<PlayerId> = players.into_iter().collect();
                 ready_players.retain(|id| current.contains(id));
                 ready_players
             }
