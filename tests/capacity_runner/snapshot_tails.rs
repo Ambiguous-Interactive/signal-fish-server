@@ -18,6 +18,7 @@ impl SnapshotTails {
         self.0.is_empty()
     }
 
+    /// Find a member or its sorted insertion position without allocating.
     fn position(&self, member: &str) -> Result<usize, usize> {
         self.0
             .binary_search_by(|(name, _)| name.as_str().cmp(member))
@@ -59,12 +60,14 @@ impl SnapshotTails {
 }
 
 impl From<BTreeMap<String, Tail>> for SnapshotTails {
+    /// Consume a sorted snapshot map without copying its owned strings.
     fn from(tails: BTreeMap<String, Tail>) -> Self {
         Self(tails.into_iter().collect())
     }
 }
 
 impl FromIterator<Entry> for SnapshotTails {
+    /// Sort owned entries and retain the final tail for each repeated member.
     fn from_iter<T: IntoIterator<Item = Entry>>(entries: T) -> Self {
         let mut entries: Vec<Entry> = entries.into_iter().collect();
         if !entries.is_sorted_by(|left, right| left.0 <= right.0) {
@@ -85,6 +88,7 @@ impl<'a> IntoIterator for &'a SnapshotTails {
     type Item = (&'a String, &'a Tail);
     type IntoIter = std::iter::Map<std::slice::Iter<'a, Entry>, fn(&'a Entry) -> Self::Item>;
 
+    /// Borrow snapshot entries in the same member order as artifact serialization.
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter().map(|(member, tail)| (member, tail))
     }
@@ -94,27 +98,32 @@ impl<'a> IntoIterator for &'a SnapshotTails {
 impl std::ops::Index<&str> for SnapshotTails {
     type Output = Tail;
 
+    /// Select a fixture member and fail when the fixture lacks its required tail.
     fn index(&self, member: &str) -> &Self::Output {
         self.get(member).expect("snapshot member")
     }
 }
 
 impl Serialize for SnapshotTails {
+    /// Write the historical JSON object with sorted member names.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_map(self)
     }
 }
 
 impl<'de> Deserialize<'de> for SnapshotTails {
+    /// Read historical snapshot objects while retaining exact identities and duplicate semantics.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct TailsVisitor;
         impl<'de> Visitor<'de> for TailsVisitor {
             type Value = SnapshotTails;
 
+            /// Describe the member-to-identity-and-tail object required by the decoder.
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("an object of member names and player identity/sequence tails")
             }
 
+            /// Collect decoded entries and preserve the final value for repeated member keys.
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut entries: Vec<Entry> = Vec::new();
                 while let Some(entry) = map.next_entry()? {
@@ -132,6 +141,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Compare compact storage with independent map decoding for exact values and errors.
     fn compact_snapshot_tails_preserve_exact_map_json_and_duplicate_keys() {
         for json in [
             "{}",
@@ -178,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    /// Compare full historical churn rows, including omitted and explicitly empty snapshots.
     fn snapshot_tail_storage_preserves_historical_churn_rows_and_empty_omission() {
         #[derive(Serialize, Deserialize)]
         struct HistoricalChurn {
@@ -207,6 +218,7 @@ mod tests {
 
     #[test]
     #[ignore = "isolated retained snapshot-tail memory profile; run in a fresh process"]
+    /// Measure retained snapshot storage and artifact hashes in isolated comparison processes.
     fn generator_snapshot_tail_storage_profile() {
         let snapshots = std::env::var("CAPACITY_SNAPSHOTS")
             .unwrap_or_else(|_| "15984".into())
@@ -218,6 +230,7 @@ mod tests {
             .unwrap();
         assert!((1..=1_000_000).contains(&snapshots));
         assert!((1..=64).contains(&members));
+        /// Retain the selected snapshot shape and report its storage sample and exact artifact hash.
         fn measure<T: FromIterator<Entry> + Serialize>(snapshots: usize, members: usize) {
             let started = std::time::Instant::now();
             let tails: Vec<T> = (0..snapshots)

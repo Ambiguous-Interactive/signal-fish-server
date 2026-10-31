@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Store authority transfers before announcing the new authority (#1334).
+- Reject invalid authority transfers and store valid transfers before announcing the new authority (#1334).
 - Commit the Lobby state before sending an early readiness event (#1330).
 - Keep rooms in Waiting until a stored seated member is actively routed (#1328, #1332).
 

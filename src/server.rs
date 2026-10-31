@@ -1759,6 +1759,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Capture reconnect state and detach the client while its lifecycle is locked.
     async fn unregister_client_locked(self: &Arc<Self>, player_id: &PlayerId) {
         let room_id_opt = self.get_client_room(player_id).await;
         // One authoritative snapshot supplies every reconnect-restoration

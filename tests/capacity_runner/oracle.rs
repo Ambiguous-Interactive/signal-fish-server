@@ -4308,6 +4308,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Compare both churn index widths with independent per-viewer ordering controls.
     fn indexed_churn_events_match_independent_viewer_sorts() {
         let room_of = BTreeMap::from([
             ("", 0),
@@ -5367,6 +5368,7 @@ mod coverage_tests {
 
     // #1159: an announced epoch does not prove that a send occurred while live.
     #[test]
+    /// Reject sends outside their recorded incarnation lifetime, including exact boundaries.
     fn scheduled_sends_require_an_active_incarnation_at_completion() {
         let context = crate::unit_context();
         let base = crate::complete_records(&context.plans).sent[0].clone();
@@ -5823,6 +5825,7 @@ mod coverage_tests {
         events
     }
 
+    /// Build tied and malformed churn rows for independent ordering comparisons.
     fn churn_sort_fixture(count: usize) -> RunRecords {
         let mut records = RunRecords::default();
         for position in 0..count {
@@ -5941,6 +5944,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Accept repeated valid churn cycles despite delayed, tied, or shuffled observations.
     fn churn_evidence_accepts_delayed_tied_and_shuffled_repeated_cycles() {
         let roster = vec![("a".into(), 0), ("b".into(), 0)];
         let churn = crate::snapshot_churn_plan(&[
@@ -6192,6 +6196,7 @@ mod coverage_tests {
     }
 
     #[test]
+    /// Accept snapshot tails whose writes or epoch announcements complete after observation.
     fn snapshot_evidence_accepts_write_completion_and_rejoin_timestamp_inversions() {
         let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
         for inversion in ["write_completion", "epoch_announcement"] {

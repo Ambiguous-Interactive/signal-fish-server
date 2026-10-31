@@ -1613,6 +1613,7 @@ mod tests {
     }
 
     #[test]
+    /// Verify typed and generic JSONL readers retain every event and its original order.
     fn jsonl_readers_preserve_every_event_and_arrival_order() {
         let context = crate::unit_context();
         let mut expected = crate::complete_records(&context.plans);

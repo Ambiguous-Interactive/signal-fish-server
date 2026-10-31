@@ -6198,6 +6198,7 @@ fn unannounced_send_epochs_cannot_hide_delivery_obligations() {
 }
 
 #[test]
+/// Reject altered send plans while preserving exact violation counts and replay results.
 fn send_plan_corruption_cannot_be_valid_capacity_evidence() {
     use oracle::SendPlanMismatch;
     for (mutation, mismatch, count, unsent) in [

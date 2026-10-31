@@ -7,6 +7,7 @@ use uuid::Uuid;
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
+/// Bound reconnect capture allocations independently of unrelated room metadata.
 #[tokio::test]
 async fn room_player_projection_preserves_metadata_without_copying_other_members() {
     let mut profiles = Vec::new();

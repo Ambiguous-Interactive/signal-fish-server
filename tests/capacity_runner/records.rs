@@ -2282,6 +2282,7 @@ mod tests {
     }
 
     #[test]
+    /// Retain each event that crosses a collection budget and preserve its replay verdict.
     fn every_unplanned_event_kind_keeps_the_crossing_event_and_exact_replay() {
         let context = crate::unit_context_with_class(crate::DeliveryClass::Reliable);
         let events = vec![

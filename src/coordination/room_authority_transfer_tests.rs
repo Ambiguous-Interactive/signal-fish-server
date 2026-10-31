@@ -1,5 +1,6 @@
 use super::*;
 
+/// Accepted transfers keep storage, recipient flags and replay in agreement.
 #[tokio::test]
 async fn authority_transfer_commits_storage_before_live_and_replay_events() {
     let database = Arc::new(InMemoryDatabase::new());
@@ -63,12 +64,14 @@ async fn authority_transfer_commits_storage_before_live_and_replay_events() {
             (authority, &mut authority_receiver),
             (successor, &mut successor_receiver),
         ] {
+            let received = receiver.try_recv().unwrap();
             assert!(matches!(
-                receiver.try_recv().unwrap().as_ref(),
+                received.as_ref(),
                 ServerMessage::AuthorityChanged { authority_player: Some(id), you_are_authority }
                     if *id == target && *you_are_authority == (recipient == target)
             ));
-            assert!(receiver.try_recv().is_err());
+            let unexpected = receiver.try_recv();
+            assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)));
         }
     }
     let replayed = replay.get_missed_events(&room.id, 0).await;
@@ -85,6 +88,7 @@ async fn authority_transfer_commits_storage_before_live_and_replay_events() {
     assert_eq!(authorities, vec![Some(successor), Some(authority)]);
 }
 
+/// Refused transfers preserve room state without publishing a role change.
 #[tokio::test]
 async fn refused_authority_transfer_preserves_storage_and_emits_nothing() {
     for supports_authority in [false, true] {
@@ -153,6 +157,7 @@ async fn refused_authority_transfer_preserves_storage_and_emits_nothing() {
     }
 }
 
+/// Caller cancellation preserves the committed role and completes live and replay events.
 #[tokio::test]
 async fn canceling_committed_authority_transfer_preserves_storage_and_replay() {
     let database = Arc::new(InMemoryDatabase::new());
@@ -216,6 +221,17 @@ async fn canceling_committed_authority_transfer_preserves_storage_and_replay() {
     .await
     .unwrap();
     drop(guard);
+    let broadcasts = messages.broadcasts().await;
+    assert!(matches!(
+        broadcasts.as_slice(),
+        [BroadcastEvent {
+            room_id,
+            message: ServerMessage::AuthorityChanged {
+                authority_player: Some(id),
+                you_are_authority: false,
+            },
+        }] if *room_id == room.id && *id == target
+    ));
     let replayed = replay.get_missed_events(&room.id, 0).await;
     assert!(
         matches!(replayed.events.as_slice(), [ServerMessage::AuthorityChanged { authority_player: Some(id), .. }] if *id == target)
@@ -231,6 +247,7 @@ async fn canceling_committed_authority_transfer_preserves_storage_and_replay() {
     );
 }
 
+/// A delivery failure preserves the committed role and its replay record.
 #[tokio::test]
 async fn failed_authority_transfer_broadcast_preserves_committed_storage_and_replay() {
     let database = Arc::new(InMemoryDatabase::new());

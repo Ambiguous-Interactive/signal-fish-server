@@ -13898,6 +13898,7 @@ async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
     );
 }
 
+/// Keep default backend projections consistent for missing rows, metadata and errors.
 #[tokio::test]
 async fn room_player_snapshot_default_preserves_absence_metadata_and_storage_errors() {
     let inner = Arc::new(InMemoryDatabase::new());

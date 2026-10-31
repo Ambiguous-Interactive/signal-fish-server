@@ -590,6 +590,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             .map_err(|error| anyhow::anyhow!("Owned lobby transition task failed: {error}"))?
     }
 
+    /// Commit a validated role assignment before publishing its ordered event.
     async fn coordinate_authority_transfer(
         &self,
         room_id: &RoomId,
@@ -1855,17 +1856,25 @@ mod tests {
 
     struct BlockingBroadcastMessageCoordinator {
         room_events: Arc<RoomEventSequencer>,
+        broadcasts: Mutex<Vec<BroadcastEvent>>,
         broadcast_started: Notify,
         release_broadcast: Notify,
     }
 
     impl BlockingBroadcastMessageCoordinator {
+        /// Create a coordinator that pauses and records each completed broadcast.
         fn new() -> Self {
             Self {
                 room_events: Arc::new(RoomEventSequencer::default()),
+                broadcasts: Mutex::new(Vec::new()),
                 broadcast_started: Notify::new(),
                 release_broadcast: Notify::new(),
             }
+        }
+
+        /// Return completed broadcasts in their publication order.
+        async fn broadcasts(&self) -> Vec<BroadcastEvent> {
+            self.broadcasts.lock().await.clone()
         }
 
         async fn wait_for_broadcast_start(&self) {
@@ -1910,13 +1919,18 @@ mod tests {
             self.send_to_player(player_id, message).await.map(|()| true)
         }
 
+        /// Record the room event only after the test releases its delivery pause.
         async fn broadcast_to_room(
             &self,
-            _room_id: &RoomId,
-            _message: Arc<ServerMessage>,
+            room_id: &RoomId,
+            message: Arc<ServerMessage>,
         ) -> Result<()> {
             self.broadcast_started.notify_one();
             self.release_broadcast.notified().await;
+            self.broadcasts.lock().await.push(BroadcastEvent {
+                room_id: *room_id,
+                message: message.as_ref().clone(),
+            });
             Ok(())
         }
 
@@ -2208,6 +2222,7 @@ mod tests {
         drop(room_guard);
     }
 
+    /// Room operations return delivery errors after reaching their publication step.
     #[tokio::test]
     async fn room_operations_propagate_broadcast_failures() {
         let room_id = RoomId::from_u128(0x1234567890abcdef1234567890abcdef);
