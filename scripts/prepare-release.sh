@@ -358,10 +358,11 @@ if [ "$BUMP" = "refresh" ]; then
         echo "ERROR: Cannot verify unpublished remote tag: origin is not configured." >&2
         exit 1
     fi
-    set +e
-    remote_tag=$(git ls-remote --exit-code --tags origin "$CURRENT_TAG" 2>&1)
-    remote_status=$?
-    set -e
+    if remote_tag=$(git ls-remote --exit-code --tags origin "$CURRENT_TAG" 2>&1); then
+        remote_status=0
+    else
+        remote_status=$?
+    fi
     if [ "$remote_status" -eq 0 ]; then
         echo "ERROR: Cannot refresh v$CURRENT_VERSION: its remote tag already exists." >&2
         exit 1
@@ -708,6 +709,11 @@ refresh_changelog_release() {
                 sub(/[\n]+$/, "", body[category])
                 if (body[category] != "") body[category] = body[category] "\n"
                 skip_leading = 1; next
+            }
+            if ($0 ~ /^###([[:space:]]|$)/) {
+                print "ERROR: Release notes contain an unsupported category heading: " $0 > "/dev/stderr"
+                invalid = 1
+                exit 1
             }
             if (category == "" && $0 ~ /[^[:space:]]/) {
                 print "ERROR: Release notes contain uncategorized text." > "/dev/stderr"

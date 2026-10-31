@@ -1367,6 +1367,39 @@ fn prepared_refresh_uses_a_new_branch_without_overwriting_the_trial() {
 }
 
 #[test]
+fn prepare_release_refresh_rejects_unsupported_category_headings_without_mutation() {
+    for position in ["after category", "before category"] {
+        let fixture = Fixture::new("0.12.0");
+        let curl = configure_unpublished_refresh(&fixture, "404");
+        let changelog = read(fixture.root.join("CHANGELOG.md"));
+        let changelog = if position == "after category" {
+            changelog.replace(
+                "- Previous release.",
+                "- Previous release.\n\n### Performance\n\n- Uncategorized release note.",
+            )
+        } else {
+            changelog.replace(
+                "## [0.12.0] - 2026-07-01",
+                "## [0.12.0] - 2026-07-01\n\n### Performance\n\n- Uncategorized release note.",
+            )
+        };
+        write(&fixture.root.join("CHANGELOG.md"), &changelog);
+        let before = release_file_snapshot(&fixture);
+        let output = run_refresh(&fixture, &curl);
+        assert!(
+            !output.status.success(),
+            "accepted unsupported heading {position}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unsupported category heading"),
+            "{position}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_release_files_unchanged(&fixture, &before);
+    }
+}
+
+#[test]
 fn prepare_release_normal_bump_removes_the_refresh_marker() {
     let fixture = Fixture::new("1.2.3");
     let manifest = read(fixture.root.join("Cargo.toml"));
