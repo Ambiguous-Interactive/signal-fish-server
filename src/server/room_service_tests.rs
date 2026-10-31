@@ -13986,6 +13986,24 @@ async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_
                 .await
                 .unwrap();
         }
+        let start = crate::database::RoomStartSnapshot {
+            game_name: room.game_name.clone(),
+            relay_type: room.relay_type.clone(),
+            authority_player: room.authority_player,
+            lobby_state: if finalize {
+                LobbyState::Finalized
+            } else {
+                LobbyState::Waiting
+            },
+        };
+        assert_eq!(
+            adapter.get_room_start_snapshot(&room.id).await.unwrap(),
+            Some(start.clone())
+        );
+        assert_eq!(
+            inner.get_room_start_snapshot(&room.id).await.unwrap(),
+            Some(start)
+        );
         let expected = if finalize { vec![creator] } else { vec![] };
         assert_eq!(
             adapter
@@ -14003,6 +14021,8 @@ async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_
         );
     }
     inner.fail_get_room_by_id_for_test(true);
+    assert!(adapter.get_room_start_snapshot(&room.id).await.is_err());
+    assert!(inner.get_room_start_snapshot(&room.id).await.is_err());
     assert!(adapter
         .get_finalized_room_ready_players(&room.id)
         .await
@@ -14013,6 +14033,11 @@ async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_
         .is_err());
     inner.fail_get_room_by_id_for_test(false);
     inner.delete_room(&room.id).await.unwrap();
+    assert_eq!(
+        adapter.get_room_start_snapshot(&room.id).await.unwrap(),
+        None
+    );
+    assert_eq!(inner.get_room_start_snapshot(&room.id).await.unwrap(), None);
     assert_eq!(
         adapter
             .get_finalized_room_ready_players(&room.id)
@@ -14026,5 +14051,297 @@ async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_
             .await
             .unwrap(),
         None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn durable_detach_repair_publishes_authority_cleared_after_double_storage_failure() {
+    authority_residue_repair_publishes_committed_release(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_membership_repair_publishes_authority_cleared_after_double_storage_failure() {
+    authority_residue_repair_publishes_committed_release(true).await;
+}
+
+async fn cleanup_authority_residue(server: &Arc<EnhancedGameServer>, expired: bool) -> usize {
+    if expired {
+        server.cleanup_expired_reconnections().await
+    } else {
+        server.cleanup_pending_durable_player_detaches().await
+    }
+}
+
+async fn authority_residue_repair_publishes_committed_release(expired: bool) {
+    let mut fixture = setup_joined_pair_with_reconnection_and_config(|config| {
+        config.reconnection_window = Duration::from_secs(1);
+    })
+    .await;
+    fixture.database.fail_remove_player_from_room_for_test(true);
+    fixture.database.fail_next_request_room_authority_for_test();
+    fixture.server.unregister_client(&fixture.leaver).await;
+    let departure = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(
+        matches!(departure.as_slice(), [message] if matches!(message.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == fixture.leaver))
+    );
+    let manager = fixture.server.reconnection_manager().unwrap();
+    if expired {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        manager
+            .register_disconnection(PlayerId::from_u128(99), fixture.room_id, false, None, 0)
+            .await;
+    }
+    let before = manager.get_missed_events(&fixture.room_id, 0).await;
+    let before_authority_count = before
+        .events
+        .iter()
+        .filter(|event| matches!(event, ServerMessage::AuthorityChanged { .. }))
+        .count();
+    assert_eq!(
+        fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        Some(fixture.leaver)
+    );
+    assert_eq!(cleanup_authority_residue(&fixture.server, expired).await, 0);
+    assert_no_queued_message(
+        &mut fixture.survivor_rx,
+        "failed repair cannot announce an uncommitted authority release",
+    );
+    fixture
+        .database
+        .fail_remove_player_from_room_for_test(false);
+    assert_eq!(cleanup_authority_residue(&fixture.server, expired).await, 1);
+    assert_eq!(
+        fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        None
+    );
+    let events = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(
+        matches!(events.as_slice(), [message] if matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: None, you_are_authority: false })),
+        "repair must announce its committed authority release: {events:?}"
+    );
+    let after = manager.get_missed_events(&fixture.room_id, 0).await;
+    assert_eq!(
+        after
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                }
+            ))
+            .count(),
+        before_authority_count + 1
+    );
+    assert_eq!(cleanup_authority_residue(&fixture.server, expired).await, 0);
+    assert_no_queued_message(
+        &mut fixture.survivor_rx,
+        "completed repair must not repeat its event",
+    );
+    fixture
+        .server
+        .handle_authority_request(&fixture.survivor, true)
+        .await;
+    let successor = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(successor.iter().any(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(player), you_are_authority: true } if *player == fixture.survivor)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn authority_residue_repair_preserves_a_committed_successor_and_shutdown_drain() {
+    for expired in [false, true] {
+        for draining in [false, true] {
+            let mut fixture = setup_joined_pair_with_reconnection_and_config(|config| {
+                config.reconnection_window = Duration::from_secs(1);
+            })
+            .await;
+            fixture.database.fail_remove_player_from_room_for_test(true);
+            fixture.database.fail_next_request_room_authority_for_test();
+            fixture.server.unregister_client(&fixture.leaver).await;
+            drain_queued_messages(&mut fixture.survivor_rx);
+            let manager = fixture.server.reconnection_manager().unwrap();
+            if expired {
+                tokio::time::advance(Duration::from_secs(2)).await;
+                manager
+                    .register_disconnection(
+                        PlayerId::from_u128(99),
+                        fixture.room_id,
+                        false,
+                        None,
+                        0,
+                    )
+                    .await;
+            }
+            if draining {
+                fixture.server.begin_shutdown_drain();
+            } else {
+                assert!(fixture
+                    .database
+                    .update_room_authority(&fixture.room_id, Some(fixture.survivor))
+                    .await
+                    .unwrap());
+            }
+            let before = manager.get_missed_events(&fixture.room_id, 0).await.events;
+            fixture
+                .database
+                .fail_remove_player_from_room_for_test(false);
+            assert_eq!(cleanup_authority_residue(&fixture.server, expired).await, 1);
+            let stored = fixture
+                .database
+                .get_room_by_id(&fixture.room_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                stored.authority_player,
+                if draining {
+                    None
+                } else {
+                    Some(fixture.survivor)
+                }
+            );
+            assert_no_queued_message(
+                &mut fixture.survivor_rx,
+                "cleanup must preserve a successor and suppress drain traffic",
+            );
+            let after = manager.get_missed_events(&fixture.room_id, 0).await.events;
+            assert_eq!(
+                serde_json::to_value(after).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_authority_residue_repair_finishes_before_the_next_claim() {
+    for expired in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection_and_config(|config| {
+            config.reconnection_window = Duration::from_secs(1);
+        })
+        .await;
+        fixture.database.fail_remove_player_from_room_for_test(true);
+        fixture.database.fail_next_request_room_authority_for_test();
+        fixture.server.unregister_client(&fixture.leaver).await;
+        drain_queued_messages(&mut fixture.survivor_rx);
+        let manager = fixture.server.reconnection_manager().unwrap();
+        if expired {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            manager
+                .register_disconnection(PlayerId::from_u128(99), fixture.room_id, false, None, 0)
+                .await;
+        }
+        fixture
+            .database
+            .fail_remove_player_from_room_for_test(false);
+        fixture.database.pause_next_removed_player_for_test();
+        let cleanup = {
+            let server = fixture.server.clone();
+            tokio::spawn(async move { cleanup_authority_residue(&server, expired).await })
+        };
+        timeout(
+            Duration::from_secs(1),
+            fixture.database.wait_for_removed_player_for_test(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fixture
+                .database
+                .get_room_by_id(&fixture.room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .authority_player,
+            None
+        );
+        let mut claim = Box::pin(
+            fixture
+                .server
+                .handle_authority_request(&fixture.survivor, true),
+        );
+        assert!(futures_util::poll!(&mut claim).is_pending());
+        cleanup.abort();
+        assert!(cleanup.await.unwrap_err().is_cancelled());
+        fixture.database.release_removed_player_for_test();
+        timeout(Duration::from_secs(1), claim).await.unwrap();
+        let messages = drain_queued_messages(&mut fixture.survivor_rx);
+        assert!(
+            matches!(messages.as_slice(), [cleared, response, claimed]
+            if matches!(cleared.as_ref(), ServerMessage::AuthorityChanged { authority_player: None, you_are_authority: false })
+            && matches!(response.as_ref(), ServerMessage::AuthorityResponse { granted: true, .. })
+            && matches!(claimed.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(id), you_are_authority: true } if *id == fixture.survivor)),
+            "cleanup publication must precede the next claim: {messages:?}"
+        );
+        let replayed = manager.get_missed_events(&fixture.room_id, 0).await.events;
+        let roles: Vec<_> = replayed
+            .iter()
+            .filter_map(|event| match event {
+                ServerMessage::AuthorityChanged {
+                    authority_player, ..
+                } => Some(*authority_player),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(roles, vec![None, Some(fixture.survivor)]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn authority_residue_repair_publishes_even_when_application_rollback_fails() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture.database.fail_remove_player_from_room_for_test(true);
+    fixture.database.fail_next_request_room_authority_for_test();
+    fixture.server.unregister_client(&fixture.leaver).await;
+    drain_queued_messages(&mut fixture.survivor_rx);
+    fixture.server.pending_durable_player_detaches.insert(
+        (fixture.room_id, fixture.leaver),
+        Some(PendingApplicationClaimRollback {
+            application_id: uuid::Uuid::new_v4(),
+        }),
+    );
+    fixture
+        .database
+        .fail_remove_player_from_room_for_test(false);
+    fixture
+        .database
+        .fail_clear_room_application_id_for_test(true);
+    assert_eq!(
+        fixture
+            .server
+            .cleanup_pending_durable_player_detaches()
+            .await,
+        0
+    );
+    let messages = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(
+        matches!(messages.as_slice(), [cleared] if matches!(cleared.as_ref(), ServerMessage::AuthorityChanged { authority_player: None, you_are_authority: false })),
+        "application rollback failure must not hide a committed authority release: {messages:?}"
+    );
+    fixture
+        .database
+        .fail_clear_room_application_id_for_test(false);
+    assert_eq!(
+        fixture
+            .server
+            .cleanup_pending_durable_player_detaches()
+            .await,
+        1
+    );
+    assert_no_queued_message(
+        &mut fixture.survivor_rx,
+        "application rollback retry cannot repeat the authority event",
     );
 }

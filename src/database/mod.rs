@@ -151,6 +151,19 @@ impl AuthorityOutcome {
     }
 }
 
+/// Room policy fields used to prepare a game-start publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomStartSnapshot {
+    /// Game identity retained in the finalized member snapshot.
+    pub game_name: String,
+    /// Legacy relay label used in game-start peer metadata.
+    pub relay_type: String,
+    /// Member allowed to start, or `None` when any member may start.
+    pub authority_player: Option<PlayerId>,
+    /// Lifecycle state used by the finalization compare-and-set.
+    pub lobby_state: crate::protocol::LobbyState,
+}
+
 /// Exact room state from which a game-start publication was prepared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeRoomGameExpectation {
@@ -394,6 +407,21 @@ pub trait GameDatabase: Send + Sync {
 
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
+
+    /// Read game-start policy fields from one room snapshot.
+    /// Pending rooms and storage errors match [`Self::get_room_by_id`].
+    /// Membership is read separately through [`Self::get_room_players`].
+    async fn get_room_start_snapshot(&self, room_id: &RoomId) -> Result<Option<RoomStartSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|room| RoomStartSnapshot {
+                game_name: room.game_name,
+                relay_type: room.relay_type,
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state,
+            }))
+    }
 
     /// Read one player's metadata and room authority atomically.
     /// A missing member remains distinct from a missing room. Pending rooms
@@ -950,6 +978,12 @@ pub struct InMemoryDatabase {
     release_get_room_by_id: tokio::sync::Notify,
     #[cfg(test)]
     fail_remove_player_from_room: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pause_removed_player: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    removed_player_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_removed_player: tokio::sync::Notify,
     /// One-shot injection: the next `add_player_to_room` first deletes the
     /// target room, reproducing inactive-room GC winning the race against a
     /// reconnect's membership restore — the exact storage state whose wire
@@ -1103,6 +1137,12 @@ impl InMemoryDatabase {
             release_get_room_by_id: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_remove_player_from_room: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            pause_removed_player: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            removed_player_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_removed_player: tokio::sync::Notify::new(),
             #[cfg(all(test, signal_fish_repository_tests))]
             delete_room_during_add_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -1354,6 +1394,22 @@ impl InMemoryDatabase {
     pub(crate) fn fail_remove_player_from_room_for_test(&self, fail: bool) {
         self.fail_remove_player_from_room
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_next_removed_player_for_test(&self) {
+        self.pause_removed_player
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn wait_for_removed_player_for_test(&self) {
+        self.removed_player_reached.notified().await;
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn release_removed_player_for_test(&self) {
+        self.release_removed_player.notify_one();
     }
 
     /// Arms the one-shot "delete the room at the next membership write"
@@ -2003,6 +2059,23 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
+    /// Copy game-start policy fields without member or spectator metadata.
+    async fn get_room_start_snapshot(&self, room_id: &RoomId) -> Result<Option<RoomStartSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomStartSnapshot {
+                game_name: room.game_name.clone(),
+                relay_type: room.relay_type.clone(),
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
     /// Project the lobby state, including rooms pending publication.
     async fn get_room_lobby_state(
         &self,
@@ -2133,6 +2206,17 @@ impl GameDatabase for InMemoryDatabase {
             if removed_player.is_some() {
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 self.session_records.record_player_left(room_id);
+            }
+
+            #[cfg(test)]
+            if self
+                .pause_removed_player
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                drop(liveness);
+                drop(rooms);
+                self.removed_player_reached.notify_one();
+                self.release_removed_player.notified().await;
             }
 
             Ok(removed_player)
@@ -3100,7 +3184,16 @@ mod tests {
                 .lobby_state = state.clone();
             assert_eq!(
                 database.get_room_lobby_state(&room.id).await.unwrap(),
-                Some(state)
+                Some(state.clone())
+            );
+            assert_eq!(
+                database.get_room_start_snapshot(&room.id).await.unwrap(),
+                Some(RoomStartSnapshot {
+                    game_name: room.game_name.clone(),
+                    relay_type: room.relay_type.clone(),
+                    authority_player: room.authority_player,
+                    lobby_state: state,
+                })
             );
             assert_eq!(
                 database
@@ -3114,12 +3207,20 @@ mod tests {
             .fail_get_room_by_id
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(database.get_room_lobby_state(&room.id).await.is_err());
+        assert!(database.get_room_start_snapshot(&room.id).await.is_err());
         database
             .fail_get_room_by_id
             .store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             database
                 .get_room_lobby_state(&PlayerId::from_u128(2))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .get_room_start_snapshot(&PlayerId::from_u128(2))
                 .await
                 .unwrap(),
             None

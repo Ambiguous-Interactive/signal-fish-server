@@ -1,5 +1,5 @@
-use crate::coordination::CloseReason;
-use crate::protocol::{ErrorCode, PlayerId, RoomId};
+use crate::coordination::{CloseReason, RoomEventCompletion, RoomEventMutationGuard};
+use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,79 +61,140 @@ impl EnhancedGameServer {
     /// Retry player-row removals that failed after a dead connection had to be
     /// unrouted. The room mutation gate orders this check with reconnect/join,
     /// preventing cleanup from deleting a newly restored live membership.
-    pub(crate) async fn cleanup_pending_durable_player_detaches(&self) -> usize {
+    pub(crate) async fn cleanup_pending_durable_player_detaches(self: &Arc<Self>) -> usize {
         let candidates: Vec<(RoomId, PlayerId)> = self
             .pending_durable_player_detaches
             .iter()
             .map(|entry| *entry.key())
             .collect();
         let mut cleaned = 0_usize;
-
         for (room_id, player_id) in candidates {
-            let _guard = self
-                .message_coordinator
-                .lock_room_event_mutation(&room_id)
-                .await;
-            if self
-                .connection_manager
-                .current_relay_stamp_in_room(&player_id, &room_id)
-                .is_some()
+            let server = Arc::clone(self);
+            match tokio::spawn(async move {
+                server
+                    .cleanup_pending_durable_player_detach(room_id, player_id)
+                    .await
+            })
+            .await
             {
-                self.pending_durable_player_detaches
-                    .remove(&(room_id, player_id));
-                continue;
-            }
-
-            if matches!(self.database.room_exists(&room_id).await, Ok(false)) {
-                if self
-                    .pending_durable_player_detaches
-                    .remove(&(room_id, player_id))
-                    .is_some()
-                {
-                    cleaned = cleaned.saturating_add(1);
-                }
-                continue;
-            }
-
-            // Re-read rollback provenance only after entering the room event
-            // lane. A successfully published same-app admission clears it
-            // under this same lane so a stale pre-lock snapshot cannot erase
-            // ownership that admission adopted.
-            let application_claim_rollback = self
-                .pending_durable_player_detaches
-                .get(&(room_id, player_id))
-                .and_then(|entry| entry.value().clone());
-
-            match self
-                .database
-                .remove_player_from_room(&room_id, &player_id)
-                .await
-            {
-                Ok(_) => {
-                    if let Some(rollback) = application_claim_rollback.as_ref() {
-                        if let Err(error) = self
-                            .rollback_room_application_claim_if_unchanged(&room_id, rollback)
-                            .await
-                        {
-                            tracing::warn!(%player_id, %room_id, %error, "Failed pending room application-claim rollback; retaining it for retry");
-                            continue;
-                        }
-                    }
-                    if self
-                        .pending_durable_player_detaches
-                        .remove(&(room_id, player_id))
-                        .is_some()
-                    {
-                        cleaned = cleaned.saturating_add(1);
-                    }
-                }
+                Ok(true) => cleaned = cleaned.saturating_add(1),
+                Ok(false) => {}
                 Err(error) => {
-                    tracing::warn!(%player_id, %room_id, %error, "Failed pending durable player detach; retaining it for retry");
+                    tracing::error!(%room_id, %player_id, %error, "Durable player cleanup task failed")
                 }
             }
         }
-
         cleaned
+    }
+
+    async fn cleanup_pending_durable_player_detach(
+        &self,
+        room_id: RoomId,
+        player_id: PlayerId,
+    ) -> bool {
+        let guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        if self
+            .connection_manager
+            .current_relay_stamp_in_room(&player_id, &room_id)
+            .is_some()
+        {
+            self.pending_durable_player_detaches
+                .remove(&(room_id, player_id));
+            return false;
+        }
+        if matches!(self.database.room_exists(&room_id).await, Ok(false)) {
+            return self
+                .pending_durable_player_detaches
+                .remove(&(room_id, player_id))
+                .is_some();
+        }
+        let application_claim_rollback = self
+            .pending_durable_player_detaches
+            .get(&(room_id, player_id))
+            .and_then(|entry| entry.value().clone());
+        let removed = match self
+            .database
+            .remove_player_from_room(&room_id, &player_id)
+            .await
+        {
+            Ok(removed) => removed,
+            Err(error) => {
+                tracing::warn!(%player_id, %room_id, %error, "Failed pending durable player detach; retaining it for retry");
+                return false;
+            }
+        };
+        let rollback_result = if let Some(rollback) = application_claim_rollback.as_ref() {
+            self.rollback_room_application_claim_if_unchanged(&room_id, rollback)
+                .await
+        } else {
+            Ok(())
+        };
+        let completion = self.enqueue_removed_member_authority(&room_id, removed.as_ref(), guard);
+        let cleaned = match rollback_result {
+            Ok(()) => self
+                .pending_durable_player_detaches
+                .remove(&(room_id, player_id))
+                .is_some(),
+            Err(error) => {
+                tracing::warn!(%player_id, %room_id, %error, "Failed pending room application-claim rollback; retaining it for retry");
+                false
+            }
+        };
+        if let Some(completion) = completion {
+            if let Err(error) = completion.await {
+                tracing::warn!(%player_id, %room_id, %error, "Failed to publish repaired authority departure");
+            }
+        }
+        cleaned
+    }
+
+    fn enqueue_removed_member_authority(
+        &self,
+        room_id: &RoomId,
+        removed: Option<&PlayerInfo>,
+        guard: RoomEventMutationGuard,
+    ) -> Option<RoomEventCompletion> {
+        let removed = removed.filter(|player| player.is_authority)?;
+        let player_id = removed.id;
+        let drain = self.shutdown_drain_receiver();
+        let predicate_drain = drain.clone();
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let replay = self.reconnection_manager.clone();
+        let room_id = *room_id;
+        Some(self.message_coordinator.enqueue_room_event(
+            guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    let message = Arc::new(ServerMessage::AuthorityChanged {
+                        authority_player: None,
+                        you_are_authority: false,
+                    });
+                    let replay_message = Arc::clone(&message);
+                    let should_send = || !*predicate_drain.borrow();
+                    coordinator
+                        .broadcast_to_room_except_if_with_hook(
+                            &room_id,
+                            &player_id,
+                            message,
+                            &should_send,
+                            drain,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(replay) = replay {
+                                        replay
+                                            .record_room_event(&room_id, replay_message.as_ref())
+                                            .await;
+                                    }
+                                })
+                            }),
+                        )
+                        .await
+                })
+            }),
+        ))
     }
 
     /// Drop process-local application mappings for rooms removed by any
@@ -254,7 +315,7 @@ impl EnhancedGameServer {
     /// The room mutation gate excludes fresh admissions. Revalidate the
     /// expired record under the replay-state write lock, and keep that lock
     /// through durable removal so a new disconnection cannot replace it.
-    pub(crate) async fn cleanup_expired_reconnections(&self) -> usize {
+    pub(crate) async fn cleanup_expired_reconnections(self: &Arc<Self>) -> usize {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return 0;
         };
@@ -266,48 +327,75 @@ impl EnhancedGameServer {
     }
 
     pub(super) async fn cleanup_expired_reconnection_candidates(
-        &self,
+        self: &Arc<Self>,
         candidates: Vec<(PlayerId, RoomId)>,
     ) -> usize {
-        let Some(reconnection_manager) = &self.reconnection_manager else {
-            return 0;
-        };
         let mut count = 0_usize;
         for (player_id, room_id) in candidates {
-            let _guard = self
-                .message_coordinator
-                .lock_room_event_mutation(&room_id)
-                .await;
-            if self
-                .connection_manager
-                .current_relay_stamp_in_room(&player_id, &room_id)
-                .is_some()
-            {
-                continue;
-            }
-            match reconnection_manager
-                .cleanup_expired_membership(
-                    &player_id,
-                    &room_id,
-                    self.database.remove_player_from_room(&room_id, &player_id),
-                )
-                .await
+            let server = Arc::clone(self);
+            match tokio::spawn(async move {
+                server
+                    .cleanup_expired_reconnection_candidate(player_id, room_id)
+                    .await
+            })
+            .await
             {
                 Ok(true) => count = count.saturating_add(1),
                 Ok(false) => {}
                 Err(error) => {
-                    tracing::warn!(%player_id, %room_id, %error, "Failed durable cleanup for expired reconnection; retaining it for retry");
+                    tracing::error!(%room_id, %player_id, %error, "Expired membership cleanup task failed")
                 }
             }
         }
         if count > 0 {
-            tracing::info!(
-                count,
-                instance_id = %self.instance_id,
-                "Cleaned up expired reconnection records"
-            );
+            tracing::info!(count, instance_id = %self.instance_id, "Cleaned up expired reconnection records");
         }
         count
+    }
+
+    async fn cleanup_expired_reconnection_candidate(
+        &self,
+        player_id: PlayerId,
+        room_id: RoomId,
+    ) -> bool {
+        let Some(reconnection_manager) = &self.reconnection_manager else {
+            return false;
+        };
+        let guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        if self
+            .connection_manager
+            .current_relay_stamp_in_room(&player_id, &room_id)
+            .is_some()
+        {
+            return false;
+        }
+        match reconnection_manager
+            .cleanup_expired_membership(
+                &player_id,
+                &room_id,
+                self.database.remove_player_from_room(&room_id, &player_id),
+            )
+            .await
+        {
+            Ok(Some(removed)) => {
+                if let Some(completion) =
+                    self.enqueue_removed_member_authority(&room_id, removed.as_ref(), guard)
+                {
+                    if let Err(error) = completion.await {
+                        tracing::warn!(%player_id, %room_id, %error, "Failed to publish expired authority departure");
+                    }
+                }
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%player_id, %room_id, %error, "Failed durable cleanup for expired reconnection; retaining it for retry");
+                false
+            }
+        }
     }
 
     /// Terminally reconcile connected players whose assigned room no longer

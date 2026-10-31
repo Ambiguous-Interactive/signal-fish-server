@@ -770,12 +770,12 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         let mut relay_type_for_broadcast: Option<String> = None;
         let mut lobby_state_for_finalize = None;
         let result = async {
-            let room = match self.database.get_room_by_id(room_id).await {
+            let room = match self.database.get_room_start_snapshot(room_id).await {
                 Ok(Some(room)) => room,
                 Ok(None) => return Err(anyhow::anyhow!("Room not found")),
                 Err(e) => return Err(anyhow::anyhow!("Failed to get room: {e}")),
             };
-            relay_type_for_broadcast = Some(room.relay_type.clone());
+            relay_type_for_broadcast = Some(room.relay_type);
             lobby_state_for_finalize = Some(room.lobby_state.clone());
 
             // Already started: a finalized room cannot be started again.
@@ -821,7 +821,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             }
 
             Ok(StartGameOutcome::Started(FinalizedRoom {
-                game_name: room.game_name.clone(),
+                game_name: room.game_name,
                 authority_player: room.authority_player,
                 members: room_players,
             }))
