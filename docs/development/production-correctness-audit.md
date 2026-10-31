@@ -50,10 +50,10 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
-| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589 |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
-| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
+| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123 |
@@ -11964,3 +11964,100 @@ still requires zero capacity. The storage profile records the measured reduction
 without requiring every allocator to return exact vector capacity. Failure,
 insufficient capacity and oversized replacement controls keep the original
 records and buffer. Empty and fully used vectors do not attempt a reservation.
+
+### A08/A10 — Spectator baseline and lobby event order
+
+Baseline `538dfe1b`, under #826. A new four-cell history runs the actual server,
+in-memory database, message coordinator and client queues. One ready member
+races spectator admission with either ready-off or game start. Each operation
+wins the held room gate in turn. The test polls the owned spectator admission
+body with its connection lifecycle guard retained, so wrapper-task scheduling
+does not choose the gate order.
+
+Before gate release, no spectator row or client frame may appear. After release,
+the spectator baseline contains exactly the member and spectator. Its ready flag
+and lobby state match the winning operation. A spectator admitted first receives
+exactly the later readiness or game-start event after its baseline. An admission
+that follows the change receives only the updated baseline. The member receives
+the spectator notification and lobby change in gate order. Game-start receipts
+contain exactly the seated member; only that member receives one session plan.
+
+An incorrect initial test expectation rejected a live spectator update. Source
+inspection confirmed that current room routing includes spectators; the test
+now requires the exact update instead of excluding it. No production defect is
+inferred from that fixture error.
+
+The negative control changes only spectator admission's room-gate key to an
+unrelated room lane. Nextest `ded1c0c9-88fa-4e32-9a8b-b8511cfd071b` fails before
+release because a spectator row has already appeared. The original source is
+restored byte-for-byte. Nextest `b25e3875-0f0e-4399-8e3d-a8e8a97581bc` passes all
+four restored-source cells in 0.027 seconds. The unchanged gate therefore prevents
+a demonstrated premature admission, rather than merely coinciding with a passing
+receipt check.
+
+This qualifies four local queue histories for one seated member and one
+spectator. It does not exercise socket transport, multiple member changes,
+process cancellation, storage failures, or the spawned admission wrapper.
+No server behavior or client wire format changes. Rust, .NET and Godot clients
+need no changes. A08, A10 and the broader #826 campaign remain open.
+
+### Spectator admission snapshot copies (#636)
+
+Baseline `538dfe1b`. Spectator admission copies the fresh room, its player map,
+and spectator names after acquiring the room gate. It also copies the roster
+again for the member notification. The replacement consumes the owned room's
+maps and strings. Only the separate baseline roster needs a copy. The original
+database row, routing checks, readiness derivation, publication order, replay
+and rollback rules stay the same.
+
+An isolated instrumented allocator measures the warmed actual server admission.
+The control checks the exact room identity and member, and compares the complete
+spectator roster in the baseline with the member notification. Each shape adds
+one spectator to zero, 16 or 254 stored spectators.
+
+| Existing spectators | Allocations before / after | Allocated bytes before / after |
+| --- | --- | --- |
+| 0 | 173 / 156 | 26,835 / 24,969 |
+| 16 | 301 / 236 | 40,519 / 35,359 |
+| 254 | 2,205 / 1,426 | 272,167 / 212,465 |
+
+The allocation-growth ceiling fails on the original implementation in Nextest
+`3d0bd60f` and passes after the ownership change in `a70ba8b9`. Growth falls
+from eight to five allocations per stored spectator. These are allocation
+counts and allocated bytes, not throughput, latency or peak RSS measurements.
+Rust, .NET and Godot clients need no changes: messages, membership, readiness,
+defaults and event order stay the same. The broader #636 campaign remains open.
+
+### Sparse recipient stream reservations (#775, #636)
+
+Baseline `538dfe1b`. On the first observed arrival or gap, the capacity oracle
+reserves every co-room sender slot for that recipient. A recipient with only
+one observed sender retains the same reservation as a complete room. The
+replacement reserves one slot first and the planned fan-out only on the second
+distinct sender/epoch. Repeated observations reuse the slot. Additional epochs
+and unexpected senders still grow the vector and retain their exact evidence.
+The existing sorted-key insertion and validation rules stay the same.
+
+The storage regression fails with the original reservation in Nextest
+`1e6b6d14` and passes in `c5ff1e36`. Four 16-player controls combine sparse or
+complete receipts with valid or duplicate gaps. Every raw record and complete
+summary survives artifact replay. All four summary SHA-256 values match the
+original implementation. Controls also retain repeated and reverse-order keys,
+removal and more epochs than the planned room fan-out.
+
+The existing isolated arrival-state profile compares both reservation methods
+in fresh processes. Each of 999 rooms has 16 recipients and 100 observations
+per stream. Three paired attempts are retained for each shape.
+
+| Observed senders per recipient | Stream slots in bytes before / after | Buffer allocations before / after | Buffer growths before / after |
+| --- | --- | --- | --- |
+| 1 | 24,935,040 / 1,662,336 | 15,984 / 15,984 | 0 / 0 |
+| 15 | 24,935,040 / 24,935,040 | 15,984 / 15,984 | 0 / 15,984 |
+
+Sparse retained stream storage falls by 93.3 percent. Sparse process RSS ranges
+from 36,880,384–36,892,672 bytes before and 13,684,736–13,815,808 bytes after.
+Dense construction takes 2.472–2.719 seconds before and 2.259–2.642 seconds after;
+these overlapping observations establish no speed gain. Dense recipients pay
+one additional buffer growth each. This bounds one analysis index for the
+measured shapes. It does not bound total runner memory, reduce collection
+storage or qualify the ten-minute C3 cell. Keep #775 and #636 open.

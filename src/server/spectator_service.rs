@@ -654,7 +654,7 @@ impl SpectatorService {
                 // this room's mutation guard was held, so it is the
                 // authoritative roster for both the baseline and broadcast.
                 // Never turn a storage read failure into an empty roster.
-                let spectator_snapshot = current_room.get_spectators();
+                let spectator_snapshot: Vec<_> = current_room.spectators.into_values().collect();
 
                 let join_reason = SpectatorStateChangeReason::Joined;
                 let drain = self.shutdown_drain_rx.clone();
@@ -668,7 +668,6 @@ impl SpectatorService {
                         Some(ErrorCode::SpectatorJoinFailed),
                     ));
                 };
-                let snapshot_room = current_room.clone();
                 let snapshot_spectators = spectator_snapshot.clone();
                 let connection_manager = Arc::clone(&self.connection_manager);
                 let baseline_delivered = self
@@ -682,13 +681,11 @@ impl SpectatorService {
                         Some(drain),
                         Box::new(move |routed_player_ids| {
                             Box::pin(async move {
-                                let current_room = snapshot_room;
                                 let routed_player_ids: HashSet<_> =
                                     routed_player_ids.into_iter().collect();
                                 let current_players: Vec<PlayerInfo> = current_room
                                     .players
-                                    .values()
-                                    .cloned()
+                                    .into_values()
                                     .filter_map(|mut player| {
                                         // Same derivation as `RoomJoined` / `Reconnected`: the
                                         // stored flag is only written at finalize.
@@ -714,12 +711,12 @@ impl SpectatorService {
                                     (ServerMessage::SpectatorJoined(Box::new(
                                         SpectatorJoinedPayload {
                                             room_id: current_room.id,
-                                            room_code: current_room.code.clone(),
+                                            room_code: current_room.code,
                                             spectator_id: *player_id,
-                                            game_name: current_room.game_name.clone(),
+                                            game_name: current_room.game_name,
                                             current_players,
                                             current_spectators: snapshot_spectators,
-                                            lobby_state: current_room.lobby_state.clone(),
+                                            lobby_state: current_room.lobby_state,
                                             reason: Some(SpectatorStateChangeReason::Joined),
                                         },
                                     )))
@@ -778,15 +775,12 @@ impl SpectatorService {
                         .await;
                 }
 
+                let spectator_count =
+                    Some(u32::try_from(spectator_snapshot.len()).unwrap_or(u32::MAX));
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
-                    spectator: spectator.clone(),
-                    current_spectators: spectator_snapshot.clone(),
-                    // The roster is u8-capped (`max_spectators`), so the
-                    // saturating fallback is unreachable; it keeps the
-                    // explicit-narrowing lint honest without a panic path.
-                    spectator_count: Some(
-                        u32::try_from(spectator_snapshot.len()).unwrap_or(u32::MAX),
-                    ),
+                    spectator,
+                    current_spectators: spectator_snapshot,
+                    spectator_count,
                     reason: Some(join_reason),
                 });
                 let replay_notification = Arc::clone(&notification);
