@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
   (#636, #775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
-- Update server builds to Tokio 1.54.0 and Unicode normalization 0.1.26.
+- Update Unicode normalization to 0.1.26.
 - Remove temporary payload allocation when measuring JSON gameplay, signaling, and peer metadata bytes (#636).
 - Reduce dashboard room-query allocations and release room locks before percentile sorting (#636).
 - Reduce the cost of average timing queries in the Rust library (#636).
