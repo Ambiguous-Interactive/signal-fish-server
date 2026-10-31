@@ -12158,6 +12158,16 @@ a disconnected member queue as a failure. The scanner itself is unchanged.
 Nextest `dafd6b25` passes the focused scanner; `176d240c` and `bf348be9` pass the
 same departure history and lobby allocation contract after the read changes.
 
+Review of `2c16c03d` also identifies that Pending alone does not prove where an
+operation waits. Both ordering histories now poll with distinct wake observers
+and disable cooperative yields during that poll. Before either operation is
+polled again, releasing the held gate must wake the expected first operation
+and must not wake its competitor. This proves FIFO permit assignment at gate
+release, rather than inferring it from Pending or `join!` poll order. A negative
+control stalls the expected first operation before the gate; the same probe must
+reject that false synchronization. All eight admission/departure cells and this
+negative control pass in Nextest `56c067c2`. No runtime code changes.
+
 ### F216 — Coordinator publishes Lobby for a room without members (#1328)
 
 Baseline `92842406`, under #826. The public in-memory coordinator checks Waiting

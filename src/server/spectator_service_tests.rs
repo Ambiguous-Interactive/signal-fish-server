@@ -2175,6 +2175,84 @@ async fn ghost_notify_retry_survives_a_later_rollback_for_the_same_identity() {
     );
 }
 
+#[derive(Default)]
+struct RoomGateWake(AtomicBool);
+
+impl futures_util::task::ArcWake for RoomGateWake {
+    fn wake_by_ref(wake: &Arc<Self>) {
+        wake.0.store(true, Ordering::SeqCst);
+    }
+}
+
+struct RoomGateWaiters {
+    first: Arc<RoomGateWake>,
+    second: Arc<RoomGateWake>,
+}
+
+impl RoomGateWaiters {
+    /// Poll both operations without cooperative yields and retain their distinct wakes.
+    fn poll<First: std::future::Future, Second: std::future::Future>(
+        first: std::pin::Pin<&mut First>,
+        second: std::pin::Pin<&mut Second>,
+    ) -> Self {
+        let first_wake = Arc::new(RoomGateWake::default());
+        let second_wake = Arc::new(RoomGateWake::default());
+        let poll = |future: std::pin::Pin<&mut dyn std::future::Future<Output = ()>>,
+                    wake: &Arc<RoomGateWake>| {
+            let waker = futures_util::task::waker(Arc::clone(wake));
+            let mut context = std::task::Context::from_waker(&waker);
+            let future = tokio::task::unconstrained(future);
+            tokio::pin!(future);
+            assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
+        };
+        let first = async {
+            let _result = first.await;
+        };
+        let second = async {
+            let _result = second.await;
+        };
+        tokio::pin!(first, second);
+        poll(first.as_mut(), &first_wake);
+        poll(second.as_mut(), &second_wake);
+        Self {
+            first: first_wake,
+            second: second_wake,
+        }
+    }
+
+    /// Prove releasing this gate assigns its first permit to the expected operation.
+    fn release(self, gate: RoomEventMutationGuard) {
+        assert!(!self.first.0.load(Ordering::SeqCst));
+        assert!(!self.second.0.load(Ordering::SeqCst));
+        drop(gate);
+        assert!(
+            self.first.0.load(Ordering::SeqCst),
+            "first operation was not waiting on the held room gate"
+        );
+        assert!(
+            !self.second.0.load(Ordering::SeqCst),
+            "the second operation overtook the first gate waiter"
+        );
+    }
+}
+
+/// Reject generic pending work that has not reached the intended room gate.
+#[tokio::test]
+#[should_panic(expected = "first operation was not waiting on the held room gate")]
+async fn room_gate_waiter_probe_rejects_an_unrelated_pending_operation() {
+    let sequencer = Arc::new(RoomEventSequencer::default());
+    let room_id = RoomId::from_u128(1);
+    let gate = sequencer.lock(room_id).await;
+    let stalled = async {
+        std::future::pending::<()>().await;
+        sequencer.lock(room_id).await
+    };
+    let waiting = sequencer.lock(room_id);
+    tokio::pin!(stalled, waiting);
+    let waiters = RoomGateWaiters::poll(stalled.as_mut(), waiting.as_mut());
+    waiters.release(gate);
+}
+
 struct SpectatorLobbyFixture {
     server: Arc<crate::server::EnhancedGameServer>,
     member: PlayerId,
@@ -2327,13 +2405,11 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 }
             };
             tokio::pin!(join, change);
-            if spectator_first {
-                assert!(futures_util::poll!(&mut join).is_pending());
-                assert!(futures_util::poll!(&mut change).is_pending());
+            let waiters = if spectator_first {
+                RoomGateWaiters::poll(join.as_mut(), change.as_mut())
             } else {
-                assert!(futures_util::poll!(&mut change).is_pending());
-                assert!(futures_util::poll!(&mut join).is_pending());
-            }
+                RoomGateWaiters::poll(change.as_mut(), join.as_mut())
+            };
             assert!(server
                 .database
                 .get_room_spectators(&room_id)
@@ -2350,7 +2426,7 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 blocked_member,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
-            drop(gate);
+            waiters.release(gate);
             let (joined, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                 tokio::join!(join, change)
             })
@@ -2512,13 +2588,11 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
                 }
             };
             tokio::pin!(departure, change);
-            if departure_first {
-                assert!(futures_util::poll!(&mut departure).is_pending());
-                assert!(futures_util::poll!(&mut change).is_pending());
+            let waiters = if departure_first {
+                RoomGateWaiters::poll(departure.as_mut(), change.as_mut())
             } else {
-                assert!(futures_util::poll!(&mut change).is_pending());
-                assert!(futures_util::poll!(&mut departure).is_pending());
-            }
+                RoomGateWaiters::poll(change.as_mut(), departure.as_mut())
+            };
             assert_eq!(
                 server
                     .database
@@ -2542,7 +2616,7 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
                 member_read,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
-            drop(gate);
+            waiters.release(gate);
             let (departed, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
                 tokio::join!(departure, change)
             })
