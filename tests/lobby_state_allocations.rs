@@ -246,7 +246,11 @@ async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
             .transition_room_to_lobby(&room.id)
             .await
             .unwrap());
-        assert!(receiver.try_recv().is_err());
+        let trailing = receiver.try_recv();
+        assert!(matches!(
+            trailing,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
         assert_eq!(
             database.get_room_spectators(&room.id).await.unwrap().len(),
             usize::try_from(spectators).unwrap()

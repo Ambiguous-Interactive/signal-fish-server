@@ -2475,12 +2475,14 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
                     None,
                 )
                 .await;
+            let spectator_baseline = observer_messages.try_recv().unwrap();
             assert!(matches!(
-                observer_messages.try_recv().unwrap().as_ref(),
+                spectator_baseline.as_ref(),
                 ServerMessage::SpectatorJoined(_)
             ));
+            let spectator_notification = member_messages.try_recv().unwrap();
             assert!(matches!(
-                member_messages.try_recv().unwrap().as_ref(),
+                spectator_notification.as_ref(),
                 ServerMessage::NewSpectatorJoined { .. }
             ));
             let lifecycle = server
@@ -2529,12 +2531,14 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
                 server.spectator_service.spectator_room(&observer),
                 Some(room_id)
             );
+            let observer_read = observer_messages.try_recv();
             assert!(matches!(
-                observer_messages.try_recv(),
+                observer_read,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
+            let member_read = member_messages.try_recv();
             assert!(matches!(
-                member_messages.try_recv(),
+                member_read,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
             drop(gate);
@@ -2569,7 +2573,15 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
             assert!(room.players.contains_key(&member));
             let mut events = Vec::new();
             let mut session_plans = 0;
-            while let Ok(message) = member_messages.try_recv() {
+            loop {
+                let member_read = member_messages.try_recv();
+                let message = match member_read {
+                    Ok(message) => message,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("member queue disconnected")
+                    }
+                };
                 match message.as_ref() {
                     ServerMessage::SpectatorDisconnected {
                         spectator_id,
@@ -2649,8 +2661,9 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
             assert_eq!(room_code.as_deref(), Some("WATCH8"));
             assert_eq!(*reason, Some(SpectatorStateChangeReason::VoluntaryLeave));
             assert!(current_spectators.is_empty());
+            let observer_read = observer_messages.try_recv();
             assert!(matches!(
-                observer_messages.try_recv(),
+                observer_read,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
         }

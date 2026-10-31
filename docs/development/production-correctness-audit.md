@@ -12151,6 +12151,13 @@ spawned-detach-wrapper qualification. No production defect is inferred.
 Rust, .NET and Godot clients need no changes: runtime behavior and wire format
 stay the same. Keep A08, A10 and #826 open.
 
+The first hosted head `d018da94` fails the test-read policy scanner at seven new
+read sites, including the member-drain loop (CI run `41172572497`, job
+`124453951203`). The fix names each result, checks Empty explicitly and treats
+a disconnected member queue as a failure. The scanner itself is unchanged.
+Nextest `dafd6b25` passes the focused scanner; `176d240c` and `bf348be9` pass the
+same departure history and lobby allocation contract after the read changes.
+
 ### F216 — Coordinator publishes Lobby for a room without members (#1328)
 
 Baseline `92842406`, under #826. The public in-memory coordinator checks Waiting
