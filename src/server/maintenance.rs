@@ -87,6 +87,7 @@ impl EnhancedGameServer {
         cleaned
     }
 
+    /// Remove one unrouted residue and publish a confirmed authority departure.
     async fn cleanup_pending_durable_player_detach(
         &self,
         room_id: RoomId,
@@ -151,6 +152,7 @@ impl EnhancedGameServer {
         cleaned
     }
 
+    /// Order a removed authority's live and replay event behind its departure.
     fn enqueue_removed_member_authority(
         &self,
         room_id: &RoomId,
@@ -326,6 +328,7 @@ impl EnhancedGameServer {
         .await
     }
 
+    /// Process expired seats through transactions that survive caller cancellation.
     pub(super) async fn cleanup_expired_reconnection_candidates(
         self: &Arc<Self>,
         candidates: Vec<(PlayerId, RoomId)>,
@@ -353,6 +356,7 @@ impl EnhancedGameServer {
         count
     }
 
+    /// Remove an eligible expired seat and publish its confirmed authority departure.
     async fn cleanup_expired_reconnection_candidate(
         &self,
         player_id: PlayerId,

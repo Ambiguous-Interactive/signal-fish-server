@@ -14054,16 +14054,19 @@ async fn finalized_readiness_default_preserves_states_missing_rooms_and_storage_
     );
 }
 
+/// Publish a delayed authority release after the disconnect's storage failures.
 #[tokio::test(start_paused = true)]
 async fn durable_detach_repair_publishes_authority_cleared_after_double_storage_failure() {
     authority_residue_repair_publishes_committed_release(false).await;
 }
 
+/// Preserve the same delayed release when expired reconnection cleanup removes the seat.
 #[tokio::test(start_paused = true)]
 async fn expired_membership_repair_publishes_authority_cleared_after_double_storage_failure() {
     authority_residue_repair_publishes_committed_release(true).await;
 }
 
+/// Exercise either maintenance path against the same departure history.
 async fn cleanup_authority_residue(server: &Arc<EnhancedGameServer>, expired: bool) -> usize {
     if expired {
         server.cleanup_expired_reconnections().await
@@ -14072,6 +14075,7 @@ async fn cleanup_authority_residue(server: &Arc<EnhancedGameServer>, expired: bo
     }
 }
 
+/// Check confirmed release, failed repair, exact replay and a subsequent authority claim.
 async fn authority_residue_repair_publishes_committed_release(expired: bool) {
     let mut fixture = setup_joined_pair_with_reconnection_and_config(|config| {
         config.reconnection_window = Duration::from_secs(1);
@@ -14159,6 +14163,7 @@ async fn authority_residue_repair_publishes_committed_release(expired: bool) {
     assert!(successor.iter().any(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(player), you_are_authority: true } if *player == fixture.survivor)));
 }
 
+/// Keep a successor's role and suppress normal authority traffic during shutdown.
 #[tokio::test(start_paused = true)]
 async fn authority_residue_repair_preserves_a_committed_successor_and_shutdown_drain() {
     for expired in [false, true] {
@@ -14225,6 +14230,7 @@ async fn authority_residue_repair_preserves_a_committed_successor_and_shutdown_d
     }
 }
 
+/// Finish committed cleanup after caller cancellation before admitting the next claim.
 #[tokio::test(start_paused = true)]
 async fn canceled_authority_residue_repair_finishes_before_the_next_claim() {
     for expired in [false, true] {
@@ -14299,6 +14305,7 @@ async fn canceled_authority_residue_repair_finishes_before_the_next_claim() {
     }
 }
 
+/// Publish a committed role release once even when application-claim rollback must retry.
 #[tokio::test(start_paused = true)]
 async fn authority_residue_repair_publishes_even_when_application_rollback_fails() {
     let mut fixture = setup_joined_pair_with_reconnection().await;

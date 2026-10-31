@@ -16,8 +16,10 @@ static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::I
 /// Bound successful and rejected starts independently of the spectator roster.
 #[tokio::test]
 async fn start_game_does_not_copy_spectator_metadata() {
+    let outcomes = ["forbidden", "not-ready", "started", "already-started"];
+    let mut profiles = [[(0_usize, 0_usize); 4]; 3];
     let mut bounded = true;
-    for spectators in [0_u128, 16, 255] {
+    for (roster_index, spectators) in [0_u128, 16, 255].into_iter().enumerate() {
         let database = Arc::new(InMemoryDatabase::new());
         let member = Uuid::from_u128(1);
         let room = database
@@ -63,7 +65,7 @@ async fn start_game_does_not_copy_spectator_metadata() {
             .await
             .unwrap();
         let coordinator = InMemoryRoomOperationCoordinator::new(messages, database.clone(), None);
-        for expected in ["forbidden", "not-ready", "started", "already-started"] {
+        for (outcome_index, expected) in outcomes.into_iter().enumerate() {
             if expected == "started" {
                 coordinator
                     .handle_player_ready(&room.id, &member, None)
@@ -93,6 +95,7 @@ async fn start_game_does_not_copy_spectator_metadata() {
                 "START_GAME_PROFILE spectators={spectators} outcome={expected} stats={stats:?}"
             );
             bounded &= stats.bytes_allocated < 20_000;
+            profiles[roster_index][outcome_index] = (stats.allocations, stats.bytes_allocated);
             match (expected, result) {
                 ("forbidden", StartGameOutcome::Forbidden)
                 | ("not-ready", StartGameOutcome::NotReady)
@@ -132,4 +135,14 @@ async fn start_game_does_not_copy_spectator_metadata() {
         );
     }
     assert!(bounded, "start copied unrelated spectator metadata");
+    for (outcome_index, outcome) in outcomes.into_iter().enumerate() {
+        let baseline = profiles[0][outcome_index];
+        for roster_index in [1, 2] {
+            let actual = profiles[roster_index][outcome_index];
+            assert!(
+                actual.1 <= baseline.1 + 512,
+                "{outcome} allocations grew with spectator roster {roster_index}: baseline={baseline:?} actual={actual:?}; profiles={profiles:?}"
+            );
+        }
+    }
 }

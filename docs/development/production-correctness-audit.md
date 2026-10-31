@@ -12717,3 +12717,10 @@ The final 13 cleanup controls pass with the temporary source control removed.
 The 17 scoped game-start controls and the default storage-adapter parity
 control also pass. New in-process cleanup tests remain enabled under Miri;
 no Miri completion is claimed from these ordinary local runs.
+
+Review strengthened the allocation regression to compare each outcome across
+spectator counts, with a 512-byte margin over the zero-spectator baseline and
+the existing absolute ceiling. A temporary projection control copies only
+spectator UUIDs. It adds 4,080 bytes at 255 spectators and fails the relative
+comparison while passing the absolute ceiling. The control is removed before
+publication; production still copies only the four game-start policy fields.
