@@ -12039,6 +12039,13 @@ distinct sender/epoch. Repeated observations reuse the slot. Additional epochs
 and unexpected senders still grow the vector and retain their exact evidence.
 The existing sorted-key insertion and validation rules stay the same.
 
+Final review found that the first helper version evaluated the room fan-out
+argument on every observation. The final helper takes a deferred query and
+calls it only for the second distinct stream's reservation. A counter control
+rejects eager evaluation and requires zero queries for the first stream and its
+repeats, then exactly one across subsequent observations. The isolated storage
+profile does not measure caller lookup work; it cannot establish this property.
+
 The storage regression fails with the original reservation in Nextest
 `1e6b6d14` and passes in `c5ff1e36`. Four 16-player controls combine sparse or
 complete receipts with valid or duplicate gaps. Every raw record and complete

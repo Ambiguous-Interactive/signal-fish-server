@@ -2187,7 +2187,7 @@ pub fn summarize(
             &mut arrivals,
             recipient,
             (sender, epoch),
-            members_of_room[&room_of[recipient]].len().saturating_sub(1),
+            || members_of_room[&room_of[recipient]].len().saturating_sub(1),
             || {
                 let contract = if opaque_senders.contains(sender)
                     || recipient == sender
@@ -2319,7 +2319,7 @@ pub fn summarize(
             &mut gap_streams,
             recipient,
             (sender, gap.epoch),
-            members_of_room[&room_of[recipient]].len().saturating_sub(1),
+            || members_of_room[&room_of[recipient]].len().saturating_sub(1),
             || {
                 // Every observed report must fit the sender's recorded epoch,
                 // including streams whose completeness obligation has ended.
@@ -2337,7 +2337,7 @@ pub fn summarize(
             &mut arrivals,
             recipient,
             (sender, gap.epoch),
-            members_of_room[&room_of[recipient]].len().saturating_sub(1),
+            || members_of_room[&room_of[recipient]].len().saturating_sub(1),
             ArrivalEvidence::default,
         );
         // Receipts are complete before this pass. Insert gaps directly into
@@ -2792,14 +2792,14 @@ fn recipient_stream_entry<'map, 'records, Evidence>(
     recipients: &'map mut RecipientStreams<'records, Evidence>,
     recipient: &'records str,
     key: StreamKey<'records>,
-    planned_streams: usize,
+    planned_streams: impl FnOnce() -> usize,
     create: impl FnOnce() -> Evidence,
 ) -> &'map mut Evidence {
     let streams = recipients
         .entry(recipient)
         .or_insert_with(|| Vec::with_capacity(1));
     if streams.len() == 1 && streams.capacity() == 1 && streams[0].0 != key {
-        streams.reserve_exact(planned_streams.max(2) - 1);
+        streams.reserve_exact(planned_streams().max(2) - 1);
     }
     stream_entry(streams, key, create)
 }
@@ -6962,14 +6962,20 @@ mod coverage_tests {
     fn sparse_recipient_streams_grow_without_losing_order_or_evidence() {
         for planned in [15, 63, 0, 1] {
             let mut recipients = RecipientStreams::new();
-            *recipient_stream_entry(&mut recipients, "recipient", ("sender", 1), planned, || 0) = 7;
+            *recipient_stream_entry(
+                &mut recipients,
+                "recipient",
+                ("sender", 1),
+                || planned,
+                || 0,
+            ) = 7;
             assert_eq!(recipients["recipient"].capacity(), 1, "planned={planned}");
             for epoch in (0..=65).rev() {
                 *recipient_stream_entry(
                     &mut recipients,
                     "recipient",
                     ("sender", epoch),
-                    planned,
+                    || planned,
                     || 0,
                 ) += 1;
                 assert!(recipients["recipient"].is_sorted_by_key(|(key, _)| *key));
@@ -6982,9 +6988,24 @@ mod coverage_tests {
             );
             assert_eq!(recipients["recipient"].len(), 65);
         }
+        let mut query_count = 0;
+        let mut queries = RecipientStreams::new();
+        for (epoch, expected_queries) in [(1, 0), (1, 0), (2, 1), (2, 1), (3, 1), (1, 1)] {
+            recipient_stream_entry(
+                &mut queries,
+                "recipient",
+                ("sender", epoch),
+                || {
+                    query_count += 1;
+                    15
+                },
+                || 0,
+            );
+            assert_eq!(query_count, expected_queries, "epoch={epoch}");
+        }
         let mut dense = RecipientStreams::new();
         for epoch in 0..15 {
-            recipient_stream_entry(&mut dense, "recipient", ("sender", epoch), 15, || 0);
+            recipient_stream_entry(&mut dense, "recipient", ("sender", epoch), || 15, || 0);
         }
         assert_eq!(dense["recipient"].capacity(), 15);
     }
@@ -7048,7 +7069,7 @@ mod coverage_tests {
                                 &mut arrivals,
                                 recipient,
                                 (sender.as_str(), 1),
-                                members.len().saturating_sub(1),
+                                || members.len().saturating_sub(1),
                                 ArrivalEvidence::default,
                             ) = stream;
                         }
