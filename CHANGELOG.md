@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-31
+
 ### Added
 
 - Add native reference-client channel selection that stops new sends on failed links (#1291).
 - Add an experimental native reference-client profile for Godot negotiated channels with exact binary packet events (#1240).
 - Relay live room events and gameplay to read-only spectators (#1137).
+- Add attributed opaque relay probes for v2 and mixed v2/v3 reference-client runs (#678).
+- Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
+- Find a published live room by application, game, and room code beyond the session-list limit (#992).
+- Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
+  and before failed links are removed, including bounded browser state history and SDP, ICE, and DTLS progress
+  plus native and browser receipt admission counts and browser SCTP error details (#853, #889, #1019).
 
 ### Changed
 
@@ -56,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce memory and lookup work in capacity collection, delivery validation, churn schedules, artifact export, and replay
   (#636, #775).
 - Update Tokio to 1.54.1 after 1.54.0 was withdrawn.
+- Update server builds to Tokio 1.54.0 and Unicode normalization 0.1.26.
+- Remove temporary payload allocation when measuring JSON gameplay, signaling, and peer metadata bytes (#636).
+- Reduce dashboard room-query allocations and release room locks before percentile sorting (#636).
+- Reduce the cost of average timing queries in the Rust library (#636).
+- Reduce memory allocation when recording server response and WebSocket round-trip timings (#636).
+- **Breaking:** Require Rust 1.94.0 or newer to build from source with the current dependencies.
+- **Breaking:** Rust library callers using `EncryptionError::Base64Decode` must use base64 0.23.
+- **Breaking:** Opaque reference-client sends now include an application sender header; upgrade both probe clients (#678).
+- **Breaking:** Native MessagePack runs now encode valid payloads and emit decoded receipt values
+  instead of base64 wrappers (#678).
+- Refresh running Direct session plans immediately when the host changes or loses its endpoint (#947).
+  **Breaking:** Rust library callers must use `handle_provide_connection_info` through `Arc<EnhancedGameServer>`.
 
 ### Fixed
 
@@ -145,35 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject queued gameplay after room leave without charging relay bytes (#1119).
 - Preserve native gameplay during peer resets and first sends on negotiated channels (#1121).
 - Keep embedded-server gameplay in its original connection when a player reconnects (#1117).
-
-## [0.12.0] - 2026-10-21
-
-### Added
-
-- Add attributed opaque relay probes for v2 and mixed v2/v3 reference-client runs (#678).
-- Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
-- Find a published live room by application, game, and room code beyond the session-list limit (#992).
-- Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
-  and before failed links are removed, including bounded browser state history and SDP, ICE, and DTLS progress
-  plus native and browser receipt admission counts and browser SCTP error details (#853, #889, #1019).
-
-### Changed
-
-- Update server builds to Tokio 1.54.0 and Unicode normalization 0.1.26.
-- Remove temporary payload allocation when measuring JSON gameplay, signaling, and peer metadata bytes (#636).
-- Reduce dashboard room-query allocations and release room locks before percentile sorting (#636).
-- Reduce the cost of average timing queries in the Rust library (#636).
-- Reduce memory allocation when recording server response and WebSocket round-trip timings (#636).
-- **Breaking:** Require Rust 1.94.0 or newer to build from source with the current dependencies.
-- **Breaking:** Rust library callers using `EncryptionError::Base64Decode` must use base64 0.23.
-- **Breaking:** Opaque reference-client sends now include an application sender header; upgrade both probe clients (#678).
-- **Breaking:** Native MessagePack runs now encode valid payloads and emit decoded receipt values
-  instead of base64 wrappers (#678).
-- Refresh running Direct session plans immediately when the host changes or loses its endpoint (#947).
-  **Breaking:** Rust library callers must use `handle_provide_connection_info` through `Arc<EnhancedGameServer>`.
-
-### Fixed
-
 - Keep v3 peer transport updates off v2 connections after a concurrent reconnect (#1108).
 - Preserve admitted browser gameplay payloads when a peer-link timeout occurs while output waits (#1099).
 - Hold queued native gameplay probes when a returning peer re-arms the exchange release gates (#1097).
