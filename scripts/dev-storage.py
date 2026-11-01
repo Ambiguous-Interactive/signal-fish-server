@@ -456,6 +456,15 @@ def main():
                     size = item.get("allocated_bytes")
                     print(f"{size / GIB:.2f} GiB\t{item['path']}" if size is not None
                           else f"UNKNOWN\t{item['path']}: {item}")
+                for item in result["filesystems"]:
+                    if "error" in item:
+                        print(f"ERROR\t{item['path']}: {item['error']}")
+                for name in ("mounts", "target_breakdown"):
+                    item = result[name]
+                    if "error" in item or item.get("status", 0) != 0:
+                        error = (item.get("error") or item.get("stderr")
+                                 or f"command exited with status {item.get('status')}")
+                        print(f"ERROR\t{name}: {error}")
                 print("Target budget: " + result["target_budget"]["state"])
                 for note in result["notes"]:
                     print(note)

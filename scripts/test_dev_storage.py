@@ -1,7 +1,8 @@
 """Behavior tests for disposable devcontainer storage (no Docker required)."""
 
 import importlib.util
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -441,6 +442,24 @@ class StorageTests(unittest.TestCase):
                       if row["path"] == str(self.repo / "target"))
         self.assertIn("error", target)
         self.assertTrue(any("available_bytes" in row for row in result["filesystems"]))
+
+    def test_text_report_displays_partial_collection_errors(self):
+        result = {
+            "measurements": [{"path": "/fixture/target", "allocated_bytes": 1024**3}],
+            "filesystems": [{"path": "/fixture/target", "error": "path disappeared"}],
+            "mounts": {"error": "fixture timeout"},
+            "target_breakdown": {"status": 1, "stderr": "fixture access denied"},
+            "target_budget": {"state": "ok"}, "notes": [],
+        }
+        output = io.StringIO()
+        with patch.object(storage, "report", return_value=result), \
+                patch.object(sys, "argv", [str(SCRIPT), "report"]), redirect_stdout(output):
+            self.assertEqual(storage.main(), 0)
+        text = output.getvalue()
+        for expected in ["1.00 GiB\t/fixture/target", "ERROR\t/fixture/target: path disappeared",
+                         "ERROR\tmounts: fixture timeout", "ERROR\ttarget_breakdown: fixture access denied",
+                         "Target budget: ok"]:
+            self.assertIn(expected, text)
 
 
 if __name__ == "__main__":
