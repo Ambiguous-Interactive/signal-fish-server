@@ -384,6 +384,11 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
+      - name: Install Node.js for browser installer fixtures
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+
       - name: Record root CPU budget before tests
         if: runner.os == 'Linux'
         shell: bash

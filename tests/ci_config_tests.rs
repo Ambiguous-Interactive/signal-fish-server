@@ -126,6 +126,24 @@ fn browser_interop_retains_failure_diagnostics() {
         .as_mapping_get("steps")
         .and_then(Yaml::as_sequence)
         .expect("interop steps");
+    let install = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Install Chromium headless shell")
+        })
+        .expect("browser install step");
+    assert_eq!(
+        install.as_mapping_get("run").and_then(Yaml::as_str),
+        Some("node scripts/install-playwright-browser.mjs chromium-headless-shell --with-deps")
+    );
+    assert!(install.as_mapping_get("working-directory").is_none());
+    assert_eq!(
+        job.as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(75),
+        "browser qualification retains its full job budget"
+    );
     let upload = steps
         .iter()
         .find(|step| {
@@ -165,6 +183,36 @@ fn browser_interop_retains_failure_diagnostics() {
     assert!(
         !run.contains("|| true"),
         "interop failure must fail the job"
+    );
+}
+
+#[test]
+/// Hosted root tests must provision the runtime so installer fixtures cannot skip.
+fn root_nextest_provisions_node_for_browser_installer_fixtures() {
+    let content = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid CI workflow");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("nextest"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("root nextest steps");
+    let setup = steps.iter().position(|step| {
+        step.as_mapping_get("uses").and_then(Yaml::as_str) == Some("actions/setup-node@v7.1.0")
+            && step
+                .as_mapping_get("with")
+                .and_then(|settings| settings.as_mapping_get("node-version"))
+                .and_then(Yaml::as_str)
+                == Some("22")
+            && step.as_mapping_get("if").is_none()
+            && step.as_mapping_get("continue-on-error").is_none()
+    });
+    let run = steps
+        .iter()
+        .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Run nextest"));
+    assert!(
+        setup.is_some_and(|setup| run.is_some_and(|run| setup < run)),
+        "root CI must install Node 22 before running the browser installer fixtures"
     );
 }
 
@@ -21562,6 +21610,7 @@ fn test_workflow_consumed_configuration_paths_trigger_validation() {
         (
             ".github/workflows/browser-interop.yml",
             vec![
+                "scripts/install-playwright-browser.mjs",
                 "third_party/webrtc/**",
                 "third_party/rtc/**",
                 "third_party/rtc-sctp/**",
@@ -33253,6 +33302,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
             "clients/browser/package.json",
             "clients/browser/package-lock.json",
             "scripts/run-fortress-wasm-interop.sh",
+            "scripts/install-playwright-browser.mjs",
             ".github/workflows/fortress-wasm-interop.yml",
         ],
     );
@@ -33325,7 +33375,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     );
     for required in [
         "browser_name=\"${FORTRESS_WASM_BROWSER:-chromium}\"",
-        "install --with-deps \"${browser_name}\"",
+        "node \"${REPO_ROOT}/scripts/install-playwright-browser.mjs\" \"${browser_name}\" --with-deps",
         "install \"${browser_name}\"",
     ] {
         assert!(

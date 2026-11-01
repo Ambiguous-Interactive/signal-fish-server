@@ -19,6 +19,7 @@ on:
       - "clients/browser/package.json"
       - "clients/browser/package-lock.json"
       - "scripts/run-fortress-wasm-interop.sh"
+      - "scripts/install-playwright-browser.mjs"
       - ".github/workflows/fortress-wasm-interop.yml"
   workflow_dispatch:
   schedule:

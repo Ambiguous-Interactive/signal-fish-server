@@ -291,12 +291,13 @@ async fn expired_membership_cleanup_rejects_ineligible_records_without_storage_w
         } else {
             player
         };
-        assert!(!manager
+        assert!(manager
             .cleanup_expired_membership(&candidate_player, &candidate_room, async {
                 panic!("ineligible cleanup polled the durable removal: {case}");
             })
             .await
-            .unwrap());
+            .unwrap()
+            .is_none());
         assert_eq!(manager.pending_reconnection_room(&player).await, Some(room));
         assert_eq!(
             metrics.reconnection_sessions_active.load(Ordering::Relaxed),
@@ -334,7 +335,7 @@ async fn expired_membership_cleanup_blocks_record_replacement_until_commit() {
         "registration must not replace a record whose durable removal is in flight"
     );
     release.notify_one();
-    assert!(cleanup.await.unwrap());
+    assert!(cleanup.await.unwrap().is_some());
     replacement.await;
     assert_eq!(
         manager.pending_reconnection_room(&player).await,
@@ -374,7 +375,8 @@ async fn expired_membership_cleanup_failure_and_cancellation_retain_retry_state(
         assert!(manager
             .cleanup_expired_membership(&player, &room, async { Ok(None) })
             .await
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(!manager.has_pending_reconnection(&player).await);
     }
 }

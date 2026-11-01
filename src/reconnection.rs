@@ -1425,12 +1425,13 @@ impl ReconnectionManager {
     /// The caller holds the room mutation gate before entering this method.
     /// The write lock prevents a new disconnect from replacing the record
     /// while the storage operation is suspended. Storage errors retain it.
+    /// `None` means ineligible. `Some` carries the removed seat, if one existed.
     pub(crate) async fn cleanup_expired_membership<F>(
         &self,
         player_id: &PlayerId,
         room_id: &RoomId,
         cleanup: F,
-    ) -> anyhow::Result<bool>
+    ) -> anyhow::Result<Option<Option<PlayerInfo>>>
     where
         F: std::future::Future<Output = anyhow::Result<Option<PlayerInfo>>>,
     {
@@ -1445,10 +1446,11 @@ impl ReconnectionManager {
                     && record.window_closed_at(now)
             });
         if !eligible {
-            return Ok(false);
+            return Ok(None);
         }
-        cleanup.await?;
-        Ok(self.remove_expired_reconnection_locked(&mut state, player_id))
+        let removed = cleanup.await?;
+        self.remove_expired_reconnection_locked(&mut state, player_id);
+        Ok(Some(removed))
     }
 
     /// Remove one record only if it is still expired and unclaimed after the

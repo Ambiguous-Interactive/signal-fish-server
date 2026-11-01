@@ -100,7 +100,7 @@ case "${browser_name}" in
         ;;
 esac
 if [[ "${INSTALL_PLAYWRIGHT_DEPS:-0}" == "1" ]]; then
-    node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install --with-deps "${browser_name}"
+    node "${REPO_ROOT}/scripts/install-playwright-browser.mjs" "${browser_name}" --with-deps
 else
     node "${REPO_ROOT}/clients/browser/node_modules/playwright-core/cli.js" install "${browser_name}"
 fi

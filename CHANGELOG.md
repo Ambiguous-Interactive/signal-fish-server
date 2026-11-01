@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce game-start memory use in rooms with spectators (#636).
 - Reduce memory used by lobby promotion and readiness checks before and after game start (#636).
 - Reduce memory used to capture a disconnected player for reconnection (#636).
 
 ### Fixed
 
+- Notify room peers when cleanup removes authority after a failed departure (#1339).
 - Publish committed authority changes even when the request response cannot be sent (#1337).
 - Reject invalid authority transfers and store valid transfers before announcing the new authority (#1334).
 - Commit the Lobby state before sending an early readiness event (#1330).

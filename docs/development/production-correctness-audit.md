@@ -12599,3 +12599,155 @@ coordinator preserves the existing message schema and response-before-event
 order, and the shipped socket backend does not report this direct-send error.
 The readiness projection preserves snapshot values and the capacity change is
 internal. No client tracking issue or migration is needed.
+
+### F222 — Durable departure repair clears authority without an event (#1339)
+
+At main `af29ac08`, a custom storage backend can fail both a disconnected
+member's removal and its fallback authority release. The server removes local
+routing and publishes `PlayerLeft`, but retains the authority-bearing storage
+row for repair. Both pending durable-detach cleanup and expired reconnect
+cleanup discard the later removal result. Storage then has no authority, while
+live peers and replay receive no `AuthorityChanged` for that committed change.
+The shipped in-memory backend does not return these storage errors; no shipped
+socket incident is established.
+
+The pending-detach red control fails in Nextest
+`c33cd150-a593-44d2-8f54-7be856cc14f9`: storage reports no authority, but the
+survivor receives an empty event list. The repair retains the removed player
+record and enqueues the existing cleared-authority event only when that record
+held the role. Both cleanup paths own their transaction before the first
+storage mutation. The room lane orders publication behind the earlier departure
+and ahead of later claims. Shutdown uses the normal drain predicate.
+
+The removal-path sweep also inspected stale-seat moderation and shutdown
+cleanup. Stale-seat moderation requires a distinct acting authority, so the
+target cannot hold the room's single authority slot under the storage contract.
+Shutdown deliberately suppresses normal room traffic. Neither excluded path
+needs an added role event.
+
+#### Game-start policy capture (#636)
+
+Game start previously cloned the complete room, including spectator metadata,
+then loaded the member records again. The new database projection copies only
+`game_name`, `relay_type`, `authority_player` and `lobby_state` under one room
+read lock. Its default adapter projects the existing full snapshot. Membership
+reads, error behavior and the final exact-membership compare-and-set stay the
+same.
+
+The isolated control uses 0, 16 and 255 spectators with unique 32-byte names
+that pass the default production name validator. Setup and assertions are
+outside each allocation interval. With 255 spectators:
+
+| Outcome | Previous allocated bytes | New allocated bytes |
+| --- | --- | --- |
+| Forbidden | 47,825 | 1,099 |
+| Not ready | 48,932 | 2,206 |
+| Started | 55,674 | 8,938 |
+| Already started | 47,733 | 991 |
+
+The new measurements are identical at all three spectator counts. Successful
+start allocations fall from 319 to 56 at the largest roster. The legal-name
+source control fails the allocation ceiling; restored production passes in
+Nextest `f54e5a5b-71e2-4602-bb12-d3cd02ca1932`. Earlier large-name storage stress
+measurements are retained locally but are not the supported-room comparison.
+These are local allocation measurements, not latency or throughput results.
+
+#### Offset-only churn ordering (#775)
+
+The capacity oracle previously retained a raw offset and disconnect count for
+every churn row, plus a temporary per-recipient ordinal map. It now retains
+only raw offsets. Contiguous recipient/timestamp groups use one running
+recipient count; mixed ties temporarily retain disconnect offsets for sorting.
+The compact index falls from eight to four bytes per row, and the wide fallback
+falls from two machine words to one. Tie scratch reuses a buffer bounded by the
+largest mixed group's disconnect count. Index plus scratch therefore does not
+exceed the old index alone. No raw event or receipt is
+removed.
+
+Independent stable ordering controls compare both widths, reversed raw
+histories, pure and mixed ties, Unicode identities, absent epochs and malformed
+extremes. The retained-width regression fails on the previous tuple index in
+Nextest `d62061ff`. Three paired algorithm-fixture observations use the actual
+old compact function and the new function, with 767,232 rows:
+
+| Shape | Peers | Previous median microseconds | New median microseconds |
+| --- | --- | --- | --- |
+| Separate timestamps | 15,984 | 147,493 | 103,791 |
+| Tied timestamps per peer | 15,984 | 148,865 | 99,571 |
+| One mixed timestamp group | 1 | 12,511 | 28,664 |
+
+Every paired digest matches. Retained index bytes fall from 6,137,856 to
+3,068,928. The extreme single-group case trades more sort work for less
+retained memory. The fixture copies the event fields used by sorting and omits
+other raw-event fields, so its process RSS is not a full-generator memory
+result. All attempts and extracted source identities remain in the ignored
+session artifacts. Whole-run peak memory and the planned ten-minute workload
+remain unqualified; #775 stays open.
+
+#### External-client assessment
+
+Rust main `da8f2d16` accepts the existing cleared `AuthorityChanged` identity
+and false recipient flag. .NET main `e467c871` decodes the existing authority
+event in `Polling/FramePipeline.cs`. Godot main `c6fc227c` clears roster flags
+before emitting that event in `signal_fish_client.gd`. All three clients need
+no changes: the repair restores the existing role event after a departed
+member's removal without changing its shape or order. The shipped storage
+backend does not produce the two-error history. The start projection preserves
+all wire values and the capacity change is internal. No client migration or
+tracking issue is needed.
+
+#### Final cleanup qualification
+
+The expiry-only source control suppresses the returned removal evidence at
+its enqueue seam and fails with an empty role-event list in Nextest
+`e02943d3-0a02-4b4d-8fdc-7ed2371cd1f9`. The control is removed before delivery.
+The shared controls cover both cleanup paths, failed and repeated repair,
+a previously committed successor, shutdown suppression and application-claim
+rollback failure. The cancellation history pauses after durable removal but
+before storage returns its result, aborts the caller, and confirms the next
+claim waits for `[cleared role, claim response, claimed role]` in live traffic
+and the corresponding exact role order in replay.
+
+All 46 scoped capacity churn/replay controls pass in Nextest
+`ac671849`, including exact delivery and unchanged replay invalidations. The
+two final compact/wide ordering controls also pass in `8bd1446f`. These results
+do not close the broader correctness or capacity campaigns.
+
+The final 13 cleanup controls pass with the temporary source control removed.
+The 17 scoped game-start controls and the default storage-adapter parity
+control also pass. New in-process cleanup tests remain enabled under Miri;
+no Miri completion is claimed from these ordinary local runs.
+
+Review strengthened the allocation regression to compare each outcome across
+spectator counts, with a 512-byte margin over the zero-spectator baseline and
+the existing absolute ceiling. A temporary projection control copies only
+spectator UUIDs. It adds 4,080 bytes at 255 spectators and fails the relative
+comparison while passing the absolute ceiling. The control is removed before
+publication; production still copies only the four game-start policy fields.
+
+The cancellation replay control now also requires the leaver's `PlayerLeft`
+before the cleared role and successor role. Swapping only the departure and
+clear leaves the old role-only assertion passing but fails the stronger check
+in Nextest `5f88cb10`. Restored source passes both cleanup cells in `5a964d32`.
+
+#### Browser setup follow-up (#1341)
+
+The browser qualification attempt on `55342d9c` restored its Chromium cache,
+then stopped during APT metadata setup before builds or gameplay. The job
+ended canceled near its 75-minute limit. The exact wait cause and cancellation
+actor remain unknown; this does not establish a browser or server defect.
+
+Both opt-in Playwright dependency setup sites now download through the locked
+package and launch the selected executable before installing OS packages.
+A ready browser avoids package setup. Failed startup permits one dependency
+install and requires a successful second launch. Download, setup, persistent
+startup and close failures remain fatal. Full Chromium and the headless shell
+use their respective executables. Fortress's default opt-out and Firefox's
+Mesa/Xvfb setup remain unchanged. Startup does not qualify WebGL or gameplay;
+the full hosted suites and their job limits remain required.
+
+Seven CLI fixture tests pass, including setup-forbidden ready hosts and failure
+propagation. The previous unconditional setup commands fail those controls.
+The locked Chromium shell also starts locally through the new helper. These
+results repair avoidable package setup on ready hosts; they do not determine
+the historical runner's readiness or explain its APT stall. #1341 stays open.

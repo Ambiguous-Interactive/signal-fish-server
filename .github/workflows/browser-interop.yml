@@ -40,6 +40,7 @@ on:
       - "third_party/rtc/**"
       - "third_party/rtc-sctp/**"
       - "scripts/run-browser-interop.sh"
+      - "scripts/install-playwright-browser.mjs"
       - "scripts/read-toml-string.sh"
       - ".github/workflows/browser-interop.yml"
   workflow_dispatch:
@@ -131,11 +132,8 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
 
       - name: Install Chromium headless shell
-        # The lockfile-pinned playwright-core binary (never bare npx);
-        # --with-deps also installs the apt packages Chromium needs on the
-        # runner. A warm cache makes the browser download itself a no-op.
-        working-directory: clients/browser
-        run: node_modules/.bin/playwright-core install --with-deps chromium-headless-shell
+        # Use the locked package. Install OS dependencies only if startup fails.
+        run: node scripts/install-playwright-browser.mjs chromium-headless-shell --with-deps
 
       - name: Show tool versions
         shell: bash
