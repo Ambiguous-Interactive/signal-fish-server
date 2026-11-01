@@ -13302,3 +13302,14 @@ also proves that prepared trackers survive into the workload clock and later
 incarnations. Both relay allocation gates pass with their existing wire digests
 and ceilings. The final all-target/all-feature Clippy gate passes again after
 the terminal-flag assertions.
+
+Review found that the guard was disarmed before sampler construction and task
+arming. The extended readiness-failure control fails in `5afb6083`: a completed
+initial refusal has no persisted deliveries file. The guard now owns the arming
+call and disarms only after the workload epoch is published. Arming failures
+stop and join every producer before the guard writes partial records. Sampler
+construction errors also retain the active guard. No workload timing changes.
+
+The repaired guard passes eleven selected preparation, readiness and unchanged
+replacement controls in `a07ce725`. Exact completed refusals and cancellation
+markers survive both returned readiness failure and readiness timeout.

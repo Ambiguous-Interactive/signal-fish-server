@@ -6859,3 +6859,7 @@ continuity across workload clocks and incarnations. These preparation controls
 do not explain the historical second-replacement wait in #1352. That issue
 remains open. This adds no duration-dependent history or changed memory budget;
 whole-generator memory qualification under #775 remains separate.
+
+The preparation guard stays active through sampler construction and task arming.
+It disarms only after publication of the workload epoch. Readiness failures
+and timeouts stop and join all producers before partial artifacts are written.

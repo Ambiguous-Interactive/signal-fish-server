@@ -179,6 +179,22 @@ struct PreparationEvidence<'a> {
     finished: bool,
 }
 
+impl PreparationEvidence<'_> {
+    /// Keep partial preparation evidence until workload epoch publication.
+    async fn arm(
+        mut self,
+        readiness: Vec<tokio::sync::oneshot::Receiver<()>>,
+        start: &mut tokio::sync::watch::Sender<Option<Instant>>,
+        deadline: Instant,
+        peers: &mut Vec<tokio::task::JoinHandle<()>>,
+        auxiliaries: &mut Vec<tokio::task::JoinHandle<()>>,
+    ) -> Result<Instant, String> {
+        let epoch = arm_tasks(readiness, start, deadline, peers, auxiliaries).await?;
+        self.finished = true;
+        Ok(epoch)
+    }
+}
+
 impl Drop for PreparationEvidence<'_> {
     fn drop(&mut self) {
         if self.finished {
@@ -554,7 +570,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             )
         })
         .collect();
-    let mut preparation = PreparationEvidence {
+    let preparation = PreparationEvidence {
         output_dir: &config.output_dir,
         progress: &peer_progress,
         log: &log,
@@ -640,9 +656,6 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         config.output_dir.join("peer-progress.json"),
         &peer_progress_snapshot(&peer_progress),
     )?;
-    preparation.finished = true;
-    drop(preparation);
-
     let max_intended_us = plans
         .iter()
         .map(SenderPlan::last_intended_us)
@@ -835,14 +848,15 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // Only the owned tasks retain epoch receivers during arming.
     drop(start_rx);
     // Every task has finished initial setup before one immutable clock starts.
-    let epoch = arm_tasks(
-        readiness,
-        &mut start_tx,
-        Instant::now() + STEP_TIMEOUT,
-        &mut handles,
-        &mut auxiliary_handles,
-    )
-    .await?;
+    let epoch = preparation
+        .arm(
+            readiness,
+            &mut start_tx,
+            Instant::now() + STEP_TIMEOUT,
+            &mut handles,
+            &mut auxiliary_handles,
+        )
+        .await?;
     log.set_workload_epoch(epoch.into_std());
     // This covers schedule, declared hooks, lag allowance, and delivery drain.
     let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
@@ -5116,6 +5130,21 @@ mod session_poll_tests {
     #[tokio::test(start_paused = true)]
     async fn readiness_failure_and_timeout_cancel_all_preparation_tasks() {
         for timeout in [false, true] {
+            let output = tempfile::tempdir().unwrap();
+            let context = crate::unit_context();
+            let log = EventLog::for_plans(&context.plans, false).unwrap();
+            log.push_join_failure("r0p0: returned initial refusal".into());
+            let progress: BTreeMap<_, _> = context
+                .plans
+                .iter()
+                .map(|plan| (plan.name.clone(), PeerProgress::new()))
+                .collect();
+            let preparation = PreparationEvidence {
+                output_dir: output.path(),
+                progress: &progress,
+                log: &log,
+                finished: false,
+            };
             let dropped = Arc::new(AtomicUsize::new(0));
             let (mut start, _receiver) = tokio::sync::watch::channel(None);
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -5135,15 +5164,16 @@ mod session_poll_tests {
                 let _guard = guard;
                 std::future::pending::<()>().await;
             })];
-            let error = arm_tasks(
-                vec![ready_rx],
-                &mut start,
-                Instant::now() + Duration::from_secs(1),
-                &mut peers,
-                &mut auxiliaries,
-            )
-            .await
-            .expect_err("incomplete preparation refuses arming");
+            let error = preparation
+                .arm(
+                    vec![ready_rx],
+                    &mut start,
+                    Instant::now() + Duration::from_secs(1),
+                    &mut peers,
+                    &mut auxiliaries,
+                )
+                .await
+                .expect_err("incomplete preparation refuses arming");
             assert!(
                 error.contains(if timeout {
                     "readiness deadline"
@@ -5159,6 +5189,24 @@ mod session_poll_tests {
                 2,
                 "cleanup must complete before returning"
             );
+            let records =
+                artifacts::read_records(output.path()).expect("persisted initial refusal");
+            assert_eq!(
+                records.join_failures,
+                vec!["r0p0: returned initial refusal"]
+            );
+            let rows: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.path().join("peer-progress.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(rows.as_object().unwrap().len(), context.plans.len());
+            let status: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.path().join("preparation.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(status["status"], "cancelled");
+            assert_eq!(status["workload_started"], false);
+            assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
         }
     }
 
