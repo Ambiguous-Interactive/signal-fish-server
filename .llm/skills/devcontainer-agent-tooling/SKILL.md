@@ -57,6 +57,16 @@ description: >-
 5. **Best-effort lifecycle**: every step in post-create/post-start warns and
    continues; a failure must never block the container from opening.
    Bootstrap functions `return`, never `exit`.
+   Post-start also runs `scripts/dev-storage.py clean --apply` with an eight-second
+   timeout before the agent-refresh opt-out. It removes only marker-owned project
+   scratch runs. `SIGNAL_FISH_SKIP_STORAGE_CLEANUP=1` disables this independently.
+   Shared Docker objects, editor caches, and unmarked build trees stay manual.
+   Run disposable build and tool experiments through
+   `python3 scripts/dev-storage.py run-scratch -- <command>`. It sets
+   `CARGO_TARGET_DIR`, `NESTED_CARGO_TARGET_DIR`, and `TMPDIR` in leased scratch.
+   Do not create session-named target trees or leave experiment trees in `/tmp`.
+   Keep durable reports outside scratch; successful runs are removed immediately.
+   See [storage maintenance](../../../docs/development/devcontainer-storage.md).
 6. **GitHub MCP everywhere**: the pinned, checksum-verified
    `github-mcp-server` binary (`ARG GITHUB_MCP_VERSION` in the Dockerfile)
    is wired into every harness below through `.devcontainer/github-mcp.sh`.

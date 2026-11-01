@@ -2,6 +2,9 @@
 
 Guide for building, testing, and contributing to Signal Fish Server.
 
+Use the [devcontainer storage guide](development/devcontainer-storage.md) to
+measure disk use, run disposable experiments, and maintain host storage.
+
 The [production correctness audit](development/production-correctness-audit.md)
 records reviewed contracts, reproducible findings, and the remaining audit work.
 

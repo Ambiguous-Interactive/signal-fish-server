@@ -3,6 +3,12 @@
 See [Core Testing Patterns](skills/testing/SKILL.md) and
 [Testing Tools and Frameworks](skills/testing/references/tools-and-frameworks.md) for full methodology.
 
+Use `python3 scripts/dev-storage.py run-scratch -- <command>` for disposable
+local build, sanitizer, Miri, and tool-download experiments. It sets build and
+temporary paths inside leased scratch. Do not add session-named target trees
+or leave experiment trees in `/tmp`. Save durable evidence outside scratch.
+See [storage maintenance](../docs/development/devcontainer-storage.md).
+
 - Every feature/bugfix requires exhaustive tests (happy, negative, edge, concurrent, recovery)
 - Data-driven/table-driven tests preferred for validation functions
 - **Zero tolerance for flaky tests** -- every failure is a real bug to fix
