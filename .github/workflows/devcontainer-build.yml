@@ -33,6 +33,8 @@ on:
       - '.devcontainer/**'
       - 'scripts/dev-storage.py'
       - 'scripts/test_dev_storage.py'
+      - 'scripts/dev-storage-host.ps1'
+      - 'scripts/test-dev-storage-host.ps1'
       - '.github/workflows/devcontainer-build.yml'
   schedule:
     # Monthly on the 1st at 05:00 UTC — upstream image/feature drift detection.
@@ -66,7 +68,9 @@ jobs:
           imageName: signal-fish-devcontainer-ci
           push: never
           runCmd: |
+            set -euo pipefail
             python3 scripts/test_dev_storage.py
+            pwsh -NoLogo -NoProfile -NonInteractive -File scripts/test-dev-storage-host.ps1
             bash .devcontainer/post-start.sh
             bash .devcontainer/verify-agent-tooling-runtime.sh
 

@@ -1,6 +1,7 @@
 """Behavior tests for disposable devcontainer storage (no Docker required)."""
 
 import importlib.util
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -211,6 +212,56 @@ class StorageTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(len(list(self.manager.base.glob("run-*"))), 1)
 
+    def test_success_status_survives_busy_post_run_cleanup(self):
+        original = storage.lock_file
+        acquisitions = 0
+
+        @contextmanager
+        def busy_after_start(path):
+            nonlocal acquisitions
+            if path.name == ".manager.lock":
+                acquisitions += 1
+                if acquisitions > 1:
+                    raise BlockingIOError("fixture: cleaner holds manager lock")
+            with original(path) as descriptor:
+                yield descriptor
+
+        with patch.object(storage, "lock_file", side_effect=busy_after_start):
+            self.assertEqual(self.manager.run([sys.executable, "-c", "pass"]), 0)
+
+    def test_failure_status_survives_post_run_cleanup_error(self):
+        with patch.object(self.manager, "clean", side_effect=ValueError("fixture: invalid marker")):
+            self.assertEqual(self.manager.run([sys.executable, "-c", "raise SystemExit(7)"]), 7)
+
+    def test_status_survives_completion_metadata_error(self):
+        original = storage.write_json
+
+        def fail_completion(path, metadata):
+            if metadata.get("state") == "complete":
+                raise OSError("fixture: cannot save completed state")
+            original(path, metadata)
+
+        with patch.object(storage, "write_json", side_effect=fail_completion):
+            self.assertEqual(self.manager.run([sys.executable, "-c", "pass"]), 0)
+
+    def test_workflow_stops_on_storage_test_failure(self):
+        workflow = (SCRIPT.parents[1] / ".github/workflows/devcontainer-build.yml").read_text()
+        lines = workflow.split("runCmd: |\n", 1)[1].splitlines()
+        script = []
+        for line in lines:
+            if line and not line.startswith("            "):
+                break
+            script.append(line[12:])
+        script = "\n".join(script)
+        script = script.replace("python3 scripts/test_dev_storage.py", "false")
+        script = script.replace("bash .devcontainer/post-start.sh", "touch continued")
+        script = script.replace("bash .devcontainer/verify-agent-tooling-runtime.sh", "true")
+        script = script.replace("pwsh -NoLogo -NoProfile -NonInteractive -File scripts/test-dev-storage-host.ps1", "true")
+        result = subprocess.run(["bash", "-c", script], cwd=self.repo,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.repo / "continued").exists())
+
     def test_running_command_is_leased_and_termination_retains_failure(self):
         ready = self.repo / "ready"
         child = subprocess.Popen([
@@ -243,8 +294,10 @@ class StorageTests(unittest.TestCase):
         (directory / "lib-agent-tools.sh").write_text('is_truthy() { [ "$1" = 1 ]; }\n')
         (self.repo / "scripts").mkdir()
         shutil.copy(SCRIPT, self.repo / "scripts/dev-storage.py")
+        environment = dict(os.environ, SIGNAL_FISH_SKIP_AGENT_REFRESH="1")
+        environment.pop("SIGNAL_FISH_SKIP_STORAGE_CLEANUP", None)
         return subprocess.run(["bash", str(directory / "post-start.sh")],
-                              env=dict(os.environ, SIGNAL_FISH_SKIP_AGENT_REFRESH="1"),
+                              env=environment,
                               capture_output=True, text=True, timeout=12)
 
     def test_lifecycle_cleans_even_when_agent_refresh_is_disabled(self):

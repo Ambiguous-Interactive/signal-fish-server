@@ -238,19 +238,23 @@ class Manager:
         finally:
             signal.signal(signal.SIGTERM, old_term)
             metadata.update(completed=time.time(), state="complete" if status == 0 else "failed")
-            write_json(path / "run.json", metadata)
-            # Delete only when all processes holding the inherited lease exit.
-            lease.__exit__(None, None, None)
-        if status == 0:
-            with lock_file(self.base / ".manager.lock"):
-                try:
+            try:
+                write_json(path / "run.json", metadata)
+            except (OSError, ValueError, TypeError) as error:
+                print(f"[storage] Could not save completion metadata: {error}", file=sys.stderr)
+            finally:
+                # Delete only when all processes holding the inherited lease exit.
+                lease.__exit__(None, None, None)
+        try:
+            if status == 0:
+                with lock_file(self.base / ".manager.lock"):
                     with lock_file(path / "lease"):
                         if shutil.rmtree.avoids_symlink_attacks:
                             self.inspect_run(path)
                             remove_run(path)
-                except BlockingIOError:
-                    pass
-        self.clean(apply=True)
+            self.clean(apply=True)
+        except (OSError, ValueError, TypeError) as error:
+            print(f"[storage] Post-run cleanup skipped: {error}", file=sys.stderr)
         return status if status >= 0 else 128 - status
 
 

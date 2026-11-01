@@ -48,6 +48,8 @@ durable report before the command exits. Keep raw local evidence in ignored
 `clean --budget-gib <number>` changes the budget for that invocation.
 An unlocked interrupted run becomes eligible after seven days.
 Active leases can exceed the retention budget while work runs.
+Post-command metadata or cleanup failures warn and preserve the command's exit
+status. They do not turn a successful command into a failure.
 
 Cleanup requires matching project and run ownership markers. It preserves
 unknown entries, active leases, Git data, and nested mounts. It never follows
@@ -76,6 +78,9 @@ pwsh -File scripts/dev-storage-host.ps1 > storage-host-before.json
 
 Use `-DockerWslPath <directory>` if Docker Desktop moved its disk. The collector
 records drive free bytes, VHD file length, allocated VHD bytes, and WSL layout.
+It captures raw WSL output and decodes UTF-16LE or UTF-8 before recording names.
+Microsoft documents the UTF-16LE list-output behavior in its
+[WSL output notes](https://github.com/microsoft/WindowsDeveloperConfig/blob/main/wsl-comfort/readme.md).
 An empty VHD list means the disk was not found. Keep these reports local.
 
 1. Inspect the Docker reference snapshot. Preserve running containers and
@@ -176,6 +181,7 @@ or volumes. Keep shared-object removal as explicit, reviewed maintenance.
 
 ```bash
 python3 scripts/test_dev_storage.py
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/test-dev-storage-host.ps1
 shellcheck --severity=warning .devcontainer/post-start.sh
 bash scripts/check-tooling-parity.sh
 cargo nextest run --test agent_tooling_guards -E 'test(scratch_cleanup_is_bounded_and_independent_of_agent_refresh)'
@@ -194,12 +200,16 @@ of no more than 10%. Host reclamation, hosted image validation, and the seven-da
 observation require separate results. Do not mark them complete from local
 fixture tests.
 
-Local validation passed 26 Python tests, all 14 agent-tooling guards, the full
+Local validation passed 30 Python tests, all 14 agent-tooling guards, the full
 Clippy gate with all targets and features, formatting, tooling parity, document
 consistency, shellcheck, actionlint, and PowerShell syntax parsing. Removing the
 lifecycle cleanup invocation made the new guard fail; restoring it made it pass.
-The Windows collector was syntax-checked only. The hosted image workflow was
-updated but was not run or published from this session.
+PowerShell fixtures also verify WSL byte decoding and raw stdout/stderr capture.
+The Windows allocation API still needs a real host measurement. CI runs both
+storage suites with strict shell error handling, so an earlier failure cannot
+be hidden by a later successful command. Initial local validation did not run
+the hosted image workflow. Publication checks are tracked in the
+[storage retention PR](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1346).
 
 Five warm samples per command gave these medians:
 
