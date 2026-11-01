@@ -14,6 +14,35 @@ fn sample(rooms: usize) -> DashboardMetricsSnapshot {
     }
 }
 
+#[tokio::test]
+async fn cache_snapshot_uses_consistent_storage_during_room_deletion() {
+    use crate::database::{GameDatabase, InMemoryDatabase};
+    let database = Arc::new(InMemoryDatabase::new());
+    let room = database
+        .create_room(
+            "cache-sample".into(),
+            Some("CACHE1".into()),
+            4,
+            true,
+            crate::protocol::PlayerId::from_u128(1),
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    database.pause_next_get_room_by_id_for_test();
+    let mut collection = Box::pin(DashboardMetricsCache::fetch_snapshot(database.clone()));
+    assert!(futures_util::poll!(&mut collection).is_pending());
+    database.delete_room(&room.id).await.unwrap();
+    database.release_paused_get_room_by_id_for_test();
+    let snapshot = collection.await.unwrap();
+    assert_eq!(snapshot.active_rooms, 0);
+    assert!(snapshot.rooms_by_game.is_empty());
+    assert!(snapshot.player_percentiles.is_empty());
+    assert!(snapshot.game_percentiles.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn refresh_keeps_selected_history_and_last_success_after_error() {
     for capacity in [0, 1, 4] {
@@ -102,7 +131,7 @@ fn dashboard_history_rollover_profile() {
         for _ in 0..capacity {
             state.push_history(&snapshot, &fields);
         }
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..30_000 {
             state.push_history(std::hint::black_box(&snapshot), &fields);
         }

@@ -13029,7 +13029,9 @@ occupancy and per-game occupancy under one read lock and builds percentile
 maps after releasing it. The dashboard uses this query. Custom backends retain
 the separate-query default and must override it for snapshot consistency.
 Mixed occupancy, empty storage, pending rooms and read failures retain their
-previous values and behavior.
+previous values and behavior. A second negative control reverts only the cache
+query to separate reads and fails at the cache boundary; restoring the combined
+query passes it.
 
 #### Dashboard work and history retention (#636)
 

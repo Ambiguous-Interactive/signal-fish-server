@@ -106,8 +106,8 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
     }
 }
 
-/// Replay-only send, receipt, and gap names. Live tasks clone their peer and registry names
-/// directly, without a pool lookup or duplicate-string cleanup in the log.
+/// Exact names shared by replay rows and retained live churn snapshots.
+/// Live sends and receipts clone peer names directly without a pool lookup.
 #[derive(Default)]
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
 

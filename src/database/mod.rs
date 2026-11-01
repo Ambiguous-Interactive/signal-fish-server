@@ -3386,7 +3386,7 @@ mod tests {
         let expected = database.get_room_metrics_snapshot().await.unwrap();
         for attempt in 0..4 {
             for combined in [attempt % 2 == 0, attempt % 2 != 0] {
-                let started = std::time::Instant::now();
+                let started = tokio::time::Instant::now();
                 for _ in 0..20 {
                     let result = if combined {
                         database.get_room_metrics_snapshot().await.unwrap()
