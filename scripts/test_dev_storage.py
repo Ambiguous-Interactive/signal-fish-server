@@ -419,6 +419,29 @@ class StorageTests(unittest.TestCase):
                             else result["docker"][stage])
                 self.assertIn("error", affected)
 
+    def test_capture_keeps_decoding_failure_local(self):
+        failure = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "fixture invalid output")
+        with patch.object(storage.subprocess, "run", side_effect=failure):
+            result = storage.capture(["docker", "version"])
+        self.assertIn("error", result)
+        self.assertEqual(result["command"], ["docker", "version"])
+
+    def test_disappearing_filesystem_does_not_discard_the_report(self):
+        original = storage.os.statvfs
+
+        def disappear(path):
+            if path == self.repo / "target":
+                raise FileNotFoundError("fixture: target removed during inventory")
+            return original(path)
+
+        with patch.object(storage.os, "statvfs", side_effect=disappear):
+            result = storage.report(self.repo)
+        self.assertTrue(result["measurements"])
+        target = next(row for row in result["filesystems"]
+                      if row["path"] == str(self.repo / "target"))
+        self.assertIn("error", target)
+        self.assertTrue(any("available_bytes" in row for row in result["filesystems"]))
+
 
 if __name__ == "__main__":
     unittest.main()

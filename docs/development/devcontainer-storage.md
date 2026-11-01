@@ -17,6 +17,8 @@ subdirectories, Docker references, builder policy, and collection errors.
 Docker queries have time limits. A timeout means unknown usage, not zero usage.
 Malformed Docker records remain attached to the affected query as collection
 errors. They do not discard the filesystem measurements or valid queries.
+Output decoding errors and disappearing filesystem paths also remain local
+collection errors. Available data from other sections remains in the report.
 For a large Docker store, retry with `report --json --docker --docker-timeout 180`.
 The detailed reference inventory uses batches of 64 containers.
 Do not sum shared filesystem totals, overlapping directories, or image sizes.
@@ -207,7 +209,7 @@ of no more than 10%. Host reclamation, hosted image validation, and the seven-da
 observation require separate results. Do not mark them complete from local
 fixture tests.
 
-Local validation passed 34 Python tests, all 14 agent-tooling guards, the full
+Local validation passed 36 Python tests, all 14 agent-tooling guards, the full
 Clippy gate with all targets and features, formatting, tooling parity, document
 consistency, shellcheck, actionlint, and PowerShell syntax parsing. Removing the
 lifecycle cleanup invocation made the new guard fail; restoring it made it pass.

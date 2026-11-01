@@ -307,7 +307,7 @@ def capture(command, timeout=15):
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         return {"command": command, "status": result.returncode,
                 "stdout": result.stdout, "stderr": result.stderr}
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as error:
         return {"command": command, "error": str(error)}
 
 
@@ -349,10 +349,13 @@ def report(repository, docker=False, docker_timeout=20):
         if measurement.get("status") == 0:
             measurement["allocated_bytes"] = int(measurement["stdout"].split()[0])
         measurements.append(measurement)
-        filesystem = os.statvfs(path)
-        filesystems.append({"path": str(path), "device": path.stat().st_dev,
-                            "total_bytes": filesystem.f_blocks * filesystem.f_frsize,
-                            "available_bytes": filesystem.f_bavail * filesystem.f_frsize})
+        try:
+            filesystem = os.statvfs(path)
+            filesystems.append({"path": str(path), "device": path.stat().st_dev,
+                                "total_bytes": filesystem.f_blocks * filesystem.f_frsize,
+                                "available_bytes": filesystem.f_bavail * filesystem.f_frsize})
+        except OSError as error:
+            filesystems.append({"path": str(path), "error": str(error)})
     result = {"collected_at": time.time(), "repository": str(repository),
               "measurements": measurements, "filesystems": filesystems,
               "mounts": capture(["findmnt", "--json", "-o", "TARGET,SOURCE,FSTYPE"]),
