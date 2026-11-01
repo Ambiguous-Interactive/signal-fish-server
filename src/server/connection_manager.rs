@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 // `tokio::time::Instant` (not `std::time::Instant`) so the activity reaper
 // (`collect_expired_clients`) and the heartbeat-update throttle
-// (`should_update_last_seen`) read the runtime clock. In production this wraps
+// (`reserve_last_seen_update`) read the runtime clock. In production this wraps
 // the same monotonic std clock (identical behavior); under
 // `#[tokio::test(start_paused = true)]` it lets tests drive these windows with
 // `tokio::time::advance(..)` deterministically, at zero wall-clock cost. Every
@@ -64,6 +64,7 @@ pub(crate) struct ClientConnection {
     /// Used to throttle heartbeat updates - we only record if this is older
     /// than the configured threshold (default 30 seconds).
     pub last_heartbeat_update: Option<Instant>,
+    heartbeat_update_revision: u64,
     pub sender: DeliverySender,
     /// Kill switch for this connection's socket tasks (slow-consumer
     /// disconnects, server-side eviction). Paired with `sender`: together they
@@ -144,6 +145,36 @@ pub(crate) struct ClientConnection {
     /// of replying again (see [`ConnectionManager::charge_error_reply`]).
     /// The gate follows the physical socket across a reconnect identity swap.
     pub error_reply_gate: std::sync::Mutex<ErrorReplyGate>,
+}
+
+/// Release an unfinished refresh without changing a newer connection or refresh.
+pub(super) struct HeartbeatUpdateReservation<'a> {
+    manager: &'a ConnectionManager,
+    player_id: PlayerId,
+    lifecycle: Arc<ClientLifecycle>,
+    revision: u64,
+    completed: bool,
+}
+
+impl HeartbeatUpdateReservation<'_> {
+    pub(super) fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for HeartbeatUpdateReservation<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Some(mut client) = self.manager.clients.get_mut(&self.player_id) {
+            if Arc::ptr_eq(&client.lifecycle, &self.lifecycle)
+                && client.heartbeat_update_revision == self.revision
+            {
+                client.last_heartbeat_update = None;
+            }
+        }
+    }
 }
 
 /// Per-physical-connection lifecycle identity and serialization gate.
@@ -587,6 +618,7 @@ impl ConnectionManager {
             room_id: None,
             lifecycle: Arc::clone(&lifecycle),
             last_ping: Instant::now(),
+            heartbeat_update_revision: 0,
             last_heartbeat_update: None,
             sender: sender.clone(),
             close: close.clone(),
@@ -736,6 +768,7 @@ impl ConnectionManager {
             room_id: None,
             lifecycle: Arc::new(ClientLifecycle::new(player_id)),
             last_ping: Instant::now(),
+            heartbeat_update_revision: 0,
             last_heartbeat_update: None,
             sender: sender.clone(),
             close: close.clone(),
@@ -1213,39 +1246,29 @@ impl ConnectionManager {
         }
     }
 
-    /// Checks if we should update `last_seen` for this player.
-    /// Returns true if the threshold has elapsed since the last update, and marks
-    /// the update as performed. Returns false if update should be skipped.
-    ///
-    /// This throttling mechanism reduces database writes while keeping local
-    /// liveness and cleanup timestamps current.
-    pub fn should_update_last_seen(
+    /// Reserve one throttle window until both persistence updates succeed.
+    pub(super) fn reserve_last_seen_update(
         &self,
         player_id: &PlayerId,
         threshold: std::time::Duration,
-    ) -> bool {
-        if let Some(mut client) = self.clients.get_mut(player_id) {
-            let now = Instant::now();
-            let should_update = match client.last_heartbeat_update {
-                None => true, // Never updated, should update
-                Some(last) => now.duration_since(last) >= threshold,
-            };
-
-            if should_update {
-                client.last_heartbeat_update = Some(now);
-            }
-
-            should_update
-        } else {
-            // Unknown player: suppress. A missing entry can never take a
-            // throttle stamp, so allowing the update would fire the heartbeat
-            // metric and the persistence attempt on every in-flight frame that
-            // races its teardown, breaking the once-per-player-per-window
-            // throttle contract. Any live connection (seated player or
-            // spectator) has an entry; a refused lookup here means the socket
-            // is unregistering and no refresh can land anywhere meaningful.
-            false
+    ) -> Option<HeartbeatUpdateReservation<'_>> {
+        let mut client = self.clients.get_mut(player_id)?;
+        let now = Instant::now();
+        if client
+            .last_heartbeat_update
+            .is_some_and(|last| now.duration_since(last) < threshold)
+        {
+            return None;
         }
+        client.heartbeat_update_revision = client.heartbeat_update_revision.wrapping_add(1);
+        client.last_heartbeat_update = Some(now);
+        Some(HeartbeatUpdateReservation {
+            manager: self,
+            player_id: *player_id,
+            lifecycle: Arc::clone(&client.lifecycle),
+            revision: client.heartbeat_update_revision,
+            completed: false,
+        })
     }
 
     pub fn get_client_room(&self, player_id: &PlayerId) -> Option<RoomId> {
@@ -1365,6 +1388,7 @@ impl ConnectionManager {
             room_id: Some(room_id),
             lifecycle: Arc::clone(&old_connection.lifecycle),
             last_ping: Instant::now(),
+            heartbeat_update_revision: old_connection.heartbeat_update_revision,
             last_heartbeat_update: None, // Reset on reconnection, will update immediately
             sender: delivery.sender.clone(),
             close: delivery.close.clone(),
@@ -1439,6 +1463,7 @@ impl ConnectionManager {
             room_id: None,
             lifecycle: Arc::clone(&reassigned_connection.lifecycle),
             last_ping: Instant::now(),
+            heartbeat_update_revision: reassigned_connection.heartbeat_update_revision,
             last_heartbeat_update: None,
             sender: delivery.sender.clone(),
             close: delivery.close.clone(),

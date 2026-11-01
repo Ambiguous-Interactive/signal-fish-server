@@ -81,51 +81,40 @@ impl EnhancedGameServer {
 
     /// Conditionally updates `last_seen` if the throttle threshold has elapsed.
     /// This reduces database writes while keeping local liveness timestamps current.
+    /// A canceled or failed refresh permits the next message to retry.
     pub(super) async fn maybe_update_last_seen(&self, player_id: &PlayerId) {
         let threshold = self.config.heartbeat_throttle;
 
-        // `should_update_last_seen` owns both policies: a disabled throttle
-        // (`Duration::ZERO`) updates every known player (its elapsed check is
-        // trivially true at zero), and unknown players are suppressed on every
-        // path so teardown-racing frames can never fire the persistence
-        // attempt or its metric.
-        let should_update = self
+        let reservation = self
             .connection_manager
-            .should_update_last_seen(player_id, threshold);
+            .reserve_last_seen_update(player_id, threshold);
 
-        if should_update {
+        if let Some(reservation) = reservation {
             self.metrics.increment_heartbeat_updates();
-            if let Err(e) = self.database.update_player_last_seen(player_id).await {
-                tracing::warn!(%player_id, "Failed to update player last_seen: {}", e);
-            }
-            // Keep the player's ROOM alive too. The activity reaper for a room
-            // with players keys off `last_activity`, which is otherwise written
-            // only at creation — so a room whose members are actively pinging,
-            // relaying GameData, or exchanging WebRTC Signals would still be
-            // GC'd `inactive_room_timeout` after creation, mid-game (BUG-1).
-            // This method is the single throttled liveness-refresh, invoked once
-            // per inbound message by `handle_client_message` (text frames) and
-            // `handle_game_data_binary` (binary frames), so it covers every
-            // message type uniformly.
-            //
-            // `update_room_activity` takes the global `rooms` write lock, so this
-            // is deliberately gated behind the per-player heartbeat throttle
-            // (`should_update`, default 30 s cadence): the relay hot path
-            // (potentially every frame) acquires the lock at most once per player
-            // per throttle window, not per message. A room needs only one refresh
-            // per `inactive_room_timeout` (default 1 h) to stay alive, and startup
-            // validation forces `heartbeat_throttle_secs < inactive_room_timeout`,
-            // so the throttled cadence can never starve the reaper. If this ever
-            // shows up in profiling, promote `last_activity` to an atomic so it can
-            // be bumped under the shared read lock.
+            let player_updated = match self.database.update_player_last_seen(player_id).await {
+                Err(e) => {
+                    tracing::warn!(%player_id, "Failed to update player last_seen: {}", e);
+                    false
+                }
+                Ok(()) => true,
+            };
             let occupied_room = self
                 .connection_manager
                 .get_client_room(player_id)
                 .or_else(|| self.spectator_service.spectator_room(player_id));
-            if let Some(room_id) = occupied_room {
-                if let Err(e) = self.database.update_room_activity(&room_id).await {
-                    tracing::warn!(%player_id, %room_id, "Failed to update room activity: {}", e);
+            let room_updated = if let Some(room_id) = occupied_room {
+                match self.database.update_room_activity(&room_id).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(%player_id, %room_id, "Failed to update room activity: {}", e);
+                        false
+                    }
                 }
+            } else {
+                true
+            };
+            if player_updated && room_updated {
+                reservation.complete();
             }
         } else {
             self.metrics.increment_heartbeat_skipped();
@@ -175,6 +164,147 @@ mod tests {
         )
         .await
         .expect("failed to construct test server")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_heartbeat_persistence_retries_before_the_throttle_deadline() {
+        for failed_update in ["player", "room"] {
+            let server = create_test_server().await;
+            let player = uuid::Uuid::new_v4();
+            let (sender, _receiver) = mpsc::channel(16);
+            server.connect_client(player, sender).await;
+            server
+                .handle_join_room(
+                    &player,
+                    "heartbeat-error".into(),
+                    Some("ERROR1".into()),
+                    "Host".into(),
+                    Some(2),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            let room_id = server.get_client_room(&player).await.unwrap();
+            let database = server
+                .database
+                .as_any()
+                .downcast_ref::<InMemoryDatabase>()
+                .unwrap();
+            database
+                .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(2))
+                .await;
+            match failed_update {
+                "player" => database.fail_next_player_heartbeat_for_test(),
+                "room" => database.fail_next_room_heartbeat_for_test(),
+                _ => unreachable!(),
+            }
+            server.maybe_update_last_seen(&player).await;
+            assert_eq!(server.metrics.heartbeat_updates.load(Ordering::Relaxed), 1);
+            server.maybe_update_last_seen(&player).await;
+            assert_eq!(
+                server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+                2,
+                "retry {failed_update} persistence immediately"
+            );
+            server.maybe_update_last_seen(&player).await;
+            assert_eq!(server.metrics.heartbeat_updates.load(Ordering::Relaxed), 2);
+            assert!(server
+                .database
+                .cleanup_expired_rooms(
+                    chrono::Duration::minutes(5),
+                    chrono::Duration::hours(1),
+                    &HashSet::new(),
+                )
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceled_room_refresh_does_not_consume_the_heartbeat_window() {
+        for previously_updated in [false, true] {
+            let server = create_test_server().await;
+            let player = uuid::Uuid::new_v4();
+            let (sender, _receiver) = mpsc::channel(16);
+            server.connect_client(player, sender).await;
+            server
+                .handle_join_room(
+                    &player,
+                    "heartbeat-retry".into(),
+                    Some("RETRY1".into()),
+                    "Host".into(),
+                    Some(2),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            let room_id = server.get_client_room(&player).await.unwrap();
+            if previously_updated {
+                server.maybe_update_last_seen(&player).await;
+                advance(server.config.heartbeat_throttle).await;
+            }
+            let database = server
+                .database
+                .as_any()
+                .downcast_ref::<InMemoryDatabase>()
+                .unwrap();
+            database
+                .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(2))
+                .await;
+            let before = server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_activity;
+            let updates_before = server.metrics.heartbeat_updates.load(Ordering::Relaxed);
+            let held_rooms = database.hold_room_writes_for_test().await;
+            let mut refresh = Box::pin(server.maybe_update_last_seen(&player));
+            assert!(futures_util::poll!(&mut refresh).is_pending());
+            assert_eq!(
+                server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+                updates_before + 1
+            );
+            drop(refresh);
+            drop(held_rooms);
+            server.maybe_update_last_seen(&player).await;
+            let after = server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                after.last_activity > before,
+                "the next frame must retry canceled room activity: previous={previously_updated}"
+            );
+            assert_eq!(
+                server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+                updates_before + 2
+            );
+            server.maybe_update_last_seen(&player).await;
+            assert_eq!(
+                server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+                updates_before + 2,
+                "successful refresh starts the throttle window"
+            );
+            assert!(server
+                .database
+                .cleanup_expired_rooms(
+                    chrono::Duration::minutes(5),
+                    chrono::Duration::hours(1),
+                    &HashSet::new(),
+                )
+                .await
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[tokio::test(start_paused = true)]
