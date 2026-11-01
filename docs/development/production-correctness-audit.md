@@ -13065,10 +13065,23 @@ before its measured regions. Every operation, state, spectator cell and
 allocation assertion remains unchanged. This warm-up candidate is insufficient:
 macOS job `124919556555` on head `85b4ee0a` still records 3 allocations and
 336 bytes for every Waiting sample, versus 2 allocations and 272 bytes for
-Lobby. The source cause of that hosted difference remains unproven. Bounded
-failure-only diagnostics separate the database query, first and repeated
-coordinator reads, an unconstrained read and an immediately preceded yield.
-The original assertions remain binding. All attempts stay visible in #1350.
+Lobby. The scheduler control did not establish that hosted cause.
+
+Rust 1.94's macOS mutex stores its native pthread mutex in a lazy `OnceBox`.
+Tokio 1.54.1's semaphore locks that mutex when a read guard releases its permit.
+The coordinator's readiness lock is new before Waiting and already used before
+Lobby. This per-lock initialization explains the state-shaped difference; a
+scheduler warm-up cannot initialize a newly created lock.
+
+The fixture now reads the coordinator's empty readiness-key list before the
+allocation regions. This initializes the lock without creating readiness
+entries or calling the measured snapshot method. Every original snapshot call,
+state, spectator cell and allocation assertion stays intact. A macOS-only
+assertion separately checks that the first native Tokio read-lock release
+allocates one extra 64-byte block while the second does not. Those controls
+run without cooperative yielding to separate native lock and scheduler costs.
+The failure-only component diagnostics remain available. New-source macOS
+qualification and the retained attempts stay tracked in #1350.
 
 #### External-client assessment
 

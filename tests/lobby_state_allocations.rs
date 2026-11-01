@@ -18,6 +18,7 @@ static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::I
 async fn lobby_state_projection_allocates_only_its_async_result() {
     // Exclude the current-thread scheduler's first deferred-waker allocation.
     tokio::task::yield_now().await;
+    native_readiness_lock_initialization_control().await;
     for spectators in [0_u128, 16, 255] {
         let database = InMemoryDatabase::new();
         let room = database
@@ -366,6 +367,8 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
             database.clone(),
             None,
         );
+        // Initialize the native wait-queue mutex without creating readiness entries.
+        assert!(coordinator.ready_player_room_ids().await.is_empty());
         for state in [LobbyState::Waiting, LobbyState::Lobby] {
             if state == LobbyState::Lobby {
                 database.transition_room_to_lobby(&room.id).await.unwrap();
@@ -500,4 +503,28 @@ async fn diagnose_untouched_snapshot_allocations() {
 #[ignore = "isolated allocation component diagnostics"]
 async fn untouched_snapshot_component_diagnostics() {
     diagnose_untouched_snapshot_allocations().await;
+}
+
+/// Pin native lock initialization separately from readiness snapshot allocations.
+async fn native_readiness_lock_initialization_control() {
+    let lock = tokio::sync::RwLock::new(());
+    let cold = stats_alloc::Region::new(ALLOCATOR);
+    tokio::task::unconstrained(async {
+        drop(lock.read().await);
+    })
+    .await;
+    let cold = cold.change();
+    let warm = stats_alloc::Region::new(ALLOCATOR);
+    tokio::task::unconstrained(async {
+        drop(lock.read().await);
+    })
+    .await;
+    let warm = warm.change();
+    println!("NATIVE_READINESS_LOCK cold={cold:?} warm={warm:?}");
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(cold.allocations, warm.allocations + 1);
+        assert_eq!(cold.bytes_allocated, warm.bytes_allocated + 64);
+        assert_eq!(cold.deallocations, warm.deallocations);
+    }
 }
