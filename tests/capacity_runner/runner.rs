@@ -116,6 +116,7 @@ impl PeerProgress {
         self.enter("active", 1);
     }
 
+    /// Complete the previous lifecycle stage without retaining an event history.
     fn enter(&self, stage: &'static str, incarnation: u32) {
         let at_us = self.epoch.get().map_or(0, |epoch| micros(epoch.elapsed()));
         let mut state = self.state.lock().expect("peer progress");
@@ -2553,6 +2554,7 @@ mod session_poll_tests {
     use super::*;
 
     #[tokio::test]
+    /// Hold each handshake boundary and preserve its pending stage after cancellation.
     async fn peer_lifecycle_retains_the_exact_pending_stage_after_cancellation() {
         for (encoding, upgrade, expected, completed) in [
             (
@@ -2641,6 +2643,7 @@ mod session_poll_tests {
     }
 
     #[tokio::test]
+    /// Exercise repeated incarnations while retaining one fixed-size progress snapshot.
     async fn peer_lifecycle_storage_stays_constant_across_repeated_churn() {
         let progress = PeerProgress::new();
         progress.start(Instant::now());

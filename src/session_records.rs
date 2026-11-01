@@ -717,6 +717,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    /// Check storage reuse and exact cursor/loss accounting across repeated rollovers.
     fn completed_ring_rollover_preserves_storage_and_cursor_accounting() {
         let records = SessionRecords::new();
         for index in 0..SESSION_RECORDS_COMPLETED_CAP {
@@ -765,6 +766,7 @@ mod tests {
     /// Regression for #1353: close and snapshot share one transition boundary.
     #[test]
     #[cfg_attr(miri, ignore)]
+    /// Pause the capture boundary and check concurrent closure with empty and full rings.
     fn snapshot_close_transition_never_lists_one_room_twice() {
         for completed_count in [0, SESSION_RECORDS_COMPLETED_CAP] {
             let records = std::sync::Arc::new(SessionRecords::new());
@@ -1178,6 +1180,7 @@ mod tests {
 
     #[test]
     #[ignore = "isolated session snapshot scan profile with trace timing"]
+    /// Measure capped, uncapped and zero-match scans over 10,000 active records.
     fn session_snapshot_scan_duration_profile() {
         let records = SessionRecords::new();
         for index in 0..10_000 {

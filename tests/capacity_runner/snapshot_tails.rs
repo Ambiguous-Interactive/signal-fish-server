@@ -162,6 +162,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Share live and replayed identities while keeping each sequence tail independent.
     fn retained_snapshot_player_identities_share_storage_and_keep_distinct_tails() {
         use crate::records::{ChurnEvent, ChurnPhase, EventLog};
         let log = EventLog::new();
