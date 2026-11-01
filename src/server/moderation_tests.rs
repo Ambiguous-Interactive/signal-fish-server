@@ -3348,7 +3348,7 @@ async fn canceled_transfer_publishes_committed_authority_before_later_transfer()
     tokio::task::yield_now().await;
     assert!(
         !later.is_finished(),
-        "later transfer must wait for the committed event"
+        "later transfer must not complete before the committed event"
     );
     database.release_authority_request_commit_for_test();
     let transferred = recv_until(&mut successor_rx, |_| true).await;
