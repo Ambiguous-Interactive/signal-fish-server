@@ -13094,3 +13094,104 @@ collect the operator dashboard. All three are unaffected: no WebSocket field,
 ordering, default or error changes. The capacity snapshot change is internal.
 No migration or client tracking issue is required.
 Campaigns #826, #636 and #775 remain open.
+
+### F227 — Session capture can list a closed room twice (#1353)
+
+At `c06a4400`, session capture copies active rooms before locking the completed
+ring. Closing a copied room before that lock lists the same room in both lists.
+The active copy has no end time; the completed copy has end time and `seq=1`.
+Nextest `77fa0158` retains this deterministic failing history. This affects
+operator session telemetry, not room membership or gameplay delivery.
+
+The repair locks the completed ring before a close removes an active record.
+Capture holds that same lock across active traversal, completed copying and
+lifetime drop-counter reads. Both paths take the ring lock before active-map
+locks. Relay counter updates need no new lock. This orders close movement with
+capture; concurrent creation and counter updates are not a globally atomic
+snapshot. The next `since=0` read must receive the completion exactly once.
+Application filters, active caps and sequence ordering retain their contracts.
+
+#### Completed history storage (#636)
+
+The same component inserts before evicting a full 1,024-record ring. Its first
+rollover doubles backing capacity to 2,048 while retaining 1,024 records.
+Nextest `7e34c5ad` fails at that first rollover. Evicting before insertion reuses
+the full ring. The regression also checks retained room IDs, exact completion
+sequences and lifetime drop accounting through more than one full rollover.
+This is a retained-storage improvement, not a gameplay throughput result.
+
+#### Snapshot player identities (#775, #636)
+
+Capacity snapshots already share member keys but keep independent player-ID
+strings in every tail. They now share exact player identities within the run
+and keep sequence tails independent. A pointer-sharing regression fails on the
+old source. Historical JSON, duplicate-key behavior, unusual names, full-width
+sequence values, raw event evidence and replay remain exact.
+
+Fresh-process profiles compare retained source binaries `439586e8` and
+`ca7428f4`. At 255,744 tails, RSS falls from 30,420,992 to 19,628,032 bytes.
+Both artifacts contain 19,188,418 bytes with SHA-256
+`f7bd1e17bfa129ef0af1d62332bd67f1f60bacb67e7bedae466dd38d815f2c97`.
+Construction takes 313,955 versus 588,785 microseconds in this local observation.
+At 1,024,000 tails, RSS falls from 86,167,552 to 38,596,608 bytes. Both artifacts
+contain 76,730,882 bytes with SHA-256
+`ad84504f76d69bf879350792eb50d3a8b757f9d4c802cb23dadd0c0c9e245d33`.
+Construction takes 1,154,027 versus 2,068,390 microseconds.
+
+Sharing has a cost when identities do not repeat. A 64,000-tail, one-member
+control raises RSS from 22,904,832 to 24,932,352 bytes and construction from
+187,491 to 332,084 microseconds, with identical 5,481,782-byte artifacts.
+These are component observations, not whole-generator peak memory or the
+planned ten-minute cell. No workload, memory admission budget, receipt check
+or replay requirement changes. Campaigns #826, #636 and #775 remain open.
+
+#### Room replacement progress (#1352)
+
+Each peer now retains one lifecycle snapshot: current stage and start time,
+last completed stage and time, incarnation and whether the task returned.
+Invalid runs write `peer-progress.json` and include it in existing diagnostics.
+Held upgrade, authentication reply and room-snapshot controls preserve the
+pending stage after cancellation. Repeated transitions retain constant state.
+The unchanged live replacement cell passes in Nextest `6266dd27`. This ordinary
+pass does not explain the historical instrumented timeout. No production cause
+is established. #1352 remains open for matched controls and qualification.
+
+#### External-client assessment
+
+Rust main `da8f2d16` has no server dependency in its manifest. .NET main
+`e467c871` is an independent `netstandard2.1` SDK. Godot main `10bd07ad` uses
+the GDScript WebSocket signaling client. All three are unaffected: session
+telemetry changes no gameplay messages, ordering, defaults or client APIs.
+The capacity changes are internal. No client migration or tracking issue is
+required.
+
+#### Local qualification
+
+Nextest `08d8e1b2` passes 20 selected session-record controls. Expanded empty
+and full-ring histories plus endpoint truncation controls pass in `f526ecf1`
+(22 tests). Full-ring backing storage is 286,720 bytes instead of 573,440.
+Adversarial review replaces a timed negative wait with a direct lock-ownership
+check at the paused capture boundary. Final deterministic qualification passes
+in `11cd8c5b` (22 tests); endpoint integration controls pass in `4e0eca05`
+(2 tests). Snapshot identity controls pass in `34a0f8bd` (12 tests), and
+65 related churn, rejoin and replay controls pass in `173fe1b8`. Held lifecycle
+and unchanged room replacement controls pass in `6266dd27` (3 tests).
+
+#### Session scan cost after review
+
+The close fence includes the full active traversal. A capped response still
+visits every active record. Trace diagnostics report visited and matching
+counts, response limit, scan time and total capture time. Timing starts after
+lock acquisition; logging runs after the completed-ring guard is released.
+Disabled trace logging reads no clocks. Response fields and lock order do not
+change.
+
+Five debug-build samples per 10,000-room cell measure capped all-match scans
+at 2,657–9,985 microseconds and captures at 2,807–10,154 microseconds. Unlimited
+all-match scans take 2,655–9,187 microseconds and captures 6,576–14,479
+microseconds. No-match scans still visit all 10,000 records and take
+1,231–2,285 microseconds. These local component observations exclude lock wait,
+JSON serialization and gameplay throughput. They do not establish a production
+latency bound. The ignored `session_snapshot_scan_duration_profile` retains
+the four cells. Nextest `192e438d` passes 22 focused controls; `ebac8c5b` passes
+the isolated profile. Adversarial review finds no remaining issue.

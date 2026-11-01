@@ -153,10 +153,18 @@ room, active and completed: identity, roster churn, transport outcome,
 traffic, close reason) are served
 at `/metrics/sessions` (and `/v1/metrics/sessions`) as bounded JSON. Active
 records list oldest first; completed records list newest first; both lists
-carry explicit truncation flags when capped. Completed records carry a
+carry explicit truncation flags when capped. A room close cannot put the same
+room in both lists in one response. Concurrent room creation and counter updates
+can still occur during collection. Completed records carry a
 monotonic `seq`; `?since=<seq>` cursor-filters the completed list so a
 scraper misses no completion that stayed inside the retention ring, and
 `?applicationId=<uuid>` restricts both lists to one application's rooms.
+Unset an explicit `logging.level` before using `RUST_LOG`; that setting takes
+precedence over the environment filter. Set
+`RUST_LOG=info,signal_fish_server::session_records=trace` to keep normal logs
+and add scan and capture time, visited records, matching records, and the active
+response limit. These times exclude lock acquisition and response serialization.
+Logging occurs after the capture lock is released.
 Use `/metrics/rooms/lookup?applicationId=<uuid>&gameName=<name>&roomCode=<code>`
 for an exact live-room lookup, including rooms beyond the active list's 512-record
 limit. The binary also serves `/v1/metrics/rooms/lookup`. Library routers serve

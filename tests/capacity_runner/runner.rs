@@ -80,6 +80,67 @@ pub type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 /// `pub(crate)` for the deterministic inbound-classification controls.
 pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<PlayerId, (ReceiptName, u32)>>>;
 
+#[derive(Debug, Clone)]
+struct PeerProgress {
+    epoch: Arc<std::sync::OnceLock<Instant>>,
+    state: Arc<std::sync::Mutex<PeerStageProgress>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PeerStageProgress {
+    stage: &'static str,
+    stage_started_us: u64,
+    last_completed_stage: Option<&'static str>,
+    last_completed_us: Option<u64>,
+    incarnation: u32,
+    task_returned: bool,
+}
+
+impl PeerProgress {
+    fn new() -> Self {
+        Self {
+            epoch: Arc::new(std::sync::OnceLock::new()),
+            state: Arc::new(std::sync::Mutex::new(PeerStageProgress {
+                stage: "ready",
+                stage_started_us: 0,
+                last_completed_stage: None,
+                last_completed_us: None,
+                incarnation: 1,
+                task_returned: false,
+            })),
+        }
+    }
+
+    fn start(&self, epoch: Instant) {
+        self.epoch.set(epoch).expect("one workload epoch");
+        self.enter("active", 1);
+    }
+
+    /// Complete the previous lifecycle stage without retaining an event history.
+    fn enter(&self, stage: &'static str, incarnation: u32) {
+        let at_us = self.epoch.get().map_or(0, |epoch| micros(epoch.elapsed()));
+        let mut state = self.state.lock().expect("peer progress");
+        state.last_completed_stage = Some(state.stage);
+        state.last_completed_us = Some(at_us);
+        state.stage = stage;
+        state.stage_started_us = at_us;
+        state.incarnation = incarnation;
+    }
+
+    fn connection_stage(&self, stage: &'static str) {
+        let incarnation = self.state.lock().expect("peer progress").incarnation;
+        self.enter(stage, incarnation);
+    }
+
+    fn returned(&self) {
+        self.state.lock().expect("peer progress").task_returned = true;
+    }
+
+    fn snapshot(&self) -> PeerStageProgress {
+        self.state.lock().expect("peer progress").clone()
+    }
+}
+
 /// The result of one completed run.
 #[derive(Debug)]
 pub struct RunOutcome {
@@ -399,6 +460,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                     plan,
                     designated,
                     game_data_format,
+                    None,
                 )
                 .await
             }
@@ -584,6 +646,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // bounded kernel handoff and outbound queue fill), then drains.
     let paused_reader = paused_reader_name(&config);
     let mut handles = Vec::new();
+    let mut peer_progress = BTreeMap::new();
     for JoinedPeer {
         name,
         room,
@@ -632,7 +695,10 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         let game_data_format = opaque_sender_format(&config, plan.player);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         readiness.push(ready_rx);
-        handles.push(tokio::spawn(peer_task(
+        let progress = PeerProgress::new();
+        peer_progress.insert(name.clone(), progress.clone());
+        let completion = progress.clone();
+        let task = peer_task(
             name,
             plan,
             PeerFacts {
@@ -650,6 +716,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                     opaque_sender: game_data_format.is_some(),
                 },
                 game_data_format,
+                progress: Some(progress),
             },
             churn_cycles,
             start_rx.clone(),
@@ -660,7 +727,11 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             quiescence_us,
             hold_reads_for,
             is_slow_reader,
-        )));
+        );
+        handles.push(tokio::spawn(async move {
+            task.await;
+            completion.returned();
+        }));
     }
 
     // Only the owned tasks retain epoch receivers during arming.
@@ -715,7 +786,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     );
 
     if !summary.valid {
-        let evidence = invalid_run_diagnostics(
+        let mut evidence = invalid_run_diagnostics(
             &run_id,
             &config,
             &plans,
@@ -725,6 +796,17 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             evidence_finished_us,
             tokio::runtime::Handle::current().metrics().num_workers(),
         );
+        evidence["peer_lifecycle"] = serde_json::to_value(
+            peer_progress
+                .iter()
+                .map(|(peer, progress)| (peer, progress.snapshot()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+        .expect("peer progress serializes");
+        artifacts::write_json(
+            config.output_dir.join("peer-progress.json"),
+            &evidence["peer_lifecycle"],
+        )?;
         eprintln!("capacity invalid run: {evidence}");
     }
 
@@ -1010,6 +1092,7 @@ fn opaque_sender_format(config: &RunConfig, player: u32) -> Option<GameDataEncod
 /// server's epoch is per connection, so a fresh rejoin is a new member
 /// whose relay stream restarts at `(epoch 1, seq 1)` under a new
 /// `PlayerId`.
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_join(
     ws_url: &str,
     encoding: Encoding,
@@ -1018,6 +1101,7 @@ async fn connect_and_join(
     plan: &SenderPlan,
     designated: bool,
     game_data_format: Option<GameDataEncoding>,
+    progress: Option<&PeerProgress>,
 ) -> Result<
     (
         WsSink,
@@ -1028,6 +1112,9 @@ async fn connect_and_join(
     String,
 > {
     let name = RunConfig::peer_name(plan.room, plan.player);
+    if let Some(progress) = progress {
+        progress.connection_stage("socket_connect_and_upgrade");
+    }
     let stream = if designated {
         connect_clamped(ws_url, SLOW_READER_RECV_BUFFER_BYTES).await?
     } else {
@@ -1035,9 +1122,17 @@ async fn connect_and_join(
     };
     let (mut sink, mut rx) = stream.split();
     if encoding == Encoding::V3Json {
-        authenticate_v3(&mut sink, &mut rx, game_data_format).await?;
+        authenticate_v3(&mut sink, &mut rx, game_data_format, progress).await?;
     }
-    let joined = join_room(&mut sink, &mut rx, &room_code, &name, players_per_room).await?;
+    let joined = join_room(
+        &mut sink,
+        &mut rx,
+        &room_code,
+        &name,
+        players_per_room,
+        progress,
+    )
+    .await?;
     // Snapshot tails: per member, the id whose registry entry names its
     // incarnation, and the seq tail its stream already reached ("a
     // recipient owes no GameData at or below this sequence").
@@ -1117,6 +1212,7 @@ async fn authenticate_v3(
     sink: &mut WsSink,
     rx: &mut WsReceiver,
     game_data_format: Option<GameDataEncoding>,
+    progress: Option<&PeerProgress>,
 ) -> Result<(), String> {
     let authenticate = ClientMessage::Authenticate {
         app_id: GAME_NAME.to_string(),
@@ -1129,7 +1225,13 @@ async fn authenticate_v3(
         supported_topologies: Some(vec![Topology::Relay]),
         requested_capabilities: None,
     };
+    if let Some(progress) = progress {
+        progress.connection_stage("authentication_write");
+    }
     send_client(sink, &authenticate).await?;
+    if let Some(progress) = progress {
+        progress.connection_stage("authentication_reply");
+    }
     let mut authenticated = false;
     let mut advertised_formats: Option<Vec<GameDataEncoding>> = None;
     let deadline = tokio::time::Instant::now() + STEP_TIMEOUT;
@@ -1171,6 +1273,7 @@ async fn join_room(
     room_code: &str,
     player_name: &str,
     max_players: u32,
+    progress: Option<&PeerProgress>,
 ) -> Result<signal_fish_server::protocol::RoomJoinedPayload, String> {
     let join = ClientMessage::JoinRoom {
         game_name: GAME_NAME.to_string(),
@@ -1184,7 +1287,13 @@ async fn join_room(
         password: None,
         join_only: None,
     };
+    if let Some(progress) = progress {
+        progress.connection_stage("join_write");
+    }
     send_client(sink, &join).await?;
+    if let Some(progress) = progress {
+        progress.connection_stage("join_snapshot");
+    }
     let deadline = tokio::time::Instant::now() + STEP_TIMEOUT;
     loop {
         let frame = match tokio::time::timeout_at(deadline, rx.next()).await {
@@ -1419,6 +1528,7 @@ struct PeerFacts {
     /// is a cross-format observer.
     experiment: ExperimentContext,
     game_data_format: Option<GameDataEncoding>,
+    progress: Option<PeerProgress>,
 }
 
 /// The unsupported-format experiment context one peer's sends and inbound
@@ -1509,6 +1619,9 @@ async fn peer_task(
             return;
         }
     };
+    if let Some(progress) = &facts.progress {
+        progress.start(epoch);
+    }
     let until = epoch + Duration::from_micros(quiescence_us);
     let hold_reads_until = hold_reads_for.map(|pause| epoch + pause);
 
@@ -1521,6 +1634,9 @@ async fn peer_task(
                 // room code.
                 let cycle = &churn_instants[churn_cursor - 1];
                 tokio::time::sleep_until(epoch + Duration::from_micros(cycle.reconnect_us)).await;
+                if let Some(progress) = &facts.progress {
+                    progress.enter("reconnecting", incarnation + 1);
+                }
                 match connect_and_join(
                     &facts.ws_url,
                     facts.encoding,
@@ -1529,11 +1645,15 @@ async fn peer_task(
                     &plan,
                     false,
                     facts.game_data_format,
+                    facts.progress.as_ref(),
                 )
                 .await
                 {
                     Ok((next_sink, next_rx, player_id, tails)) => {
                         incarnation += 1;
+                        if let Some(progress) = &facts.progress {
+                            progress.enter("active", incarnation);
+                        }
                         registry
                             .lock()
                             .expect("sender registry")
@@ -1770,8 +1890,14 @@ async fn peer_task(
                     churn_cursor += 1;
                     // The pending writer has dropped before either socket half
                     // or the next incarnation can proceed.
+                    if let Some(progress) = &facts.progress {
+                        progress.enter("socket_drop", incarnation);
+                    }
                     drop(sink);
                     drop(rx);
+                    if let Some(progress) = &facts.progress {
+                        progress.enter("offline", incarnation);
+                    }
                     continue 'sessions;
                 }
                 SessionEvent::Frame(_) | SessionEvent::Resume => {}
@@ -2428,6 +2554,117 @@ mod session_poll_tests {
     use super::*;
 
     #[tokio::test]
+    /// Hold each handshake boundary and preserve its pending stage after cancellation.
+    async fn peer_lifecycle_retains_the_exact_pending_stage_after_cancellation() {
+        for (encoding, upgrade, expected, completed) in [
+            (
+                Encoding::V2Json,
+                false,
+                "socket_connect_and_upgrade",
+                "reconnecting",
+            ),
+            (
+                Encoding::V3Json,
+                true,
+                "authentication_reply",
+                "authentication_write",
+            ),
+            (Encoding::V2Json, true, "join_snapshot", "join_write"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let progress = PeerProgress::new();
+            progress.start(Instant::now());
+            progress.enter("reconnecting", 3);
+            let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                if upgrade {
+                    let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    let frame = websocket.next().await.unwrap().unwrap();
+                    let Message::Text(frame) = frame else {
+                        panic!("expected handshake text")
+                    };
+                    let message: ClientMessage = serde_json::from_str(&frame).unwrap();
+                    match encoding {
+                        Encoding::V3Json => {
+                            assert!(matches!(message, ClientMessage::Authenticate { .. }))
+                        }
+                        Encoding::V2Json => {
+                            assert!(matches!(message, ClientMessage::JoinRoom { .. }))
+                        }
+                    }
+                    observed_tx.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                    drop(websocket);
+                } else {
+                    observed_tx.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                    drop(socket);
+                }
+            });
+            let task_progress = progress.clone();
+            let peer = tokio::spawn(async move {
+                let plan = crate::unit_context().plans.remove(0);
+                let _joined = connect_and_join(
+                    &url,
+                    encoding,
+                    "STAGE1".into(),
+                    4,
+                    &plan,
+                    false,
+                    None,
+                    Some(&task_progress),
+                )
+                .await
+                .expect("the held handshake must not finish");
+                task_progress.returned();
+            });
+            tokio::time::timeout(Duration::from_secs(5), observed_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let before = progress.snapshot();
+            assert_eq!(before.stage, expected);
+            assert_eq!(before.last_completed_stage, Some(completed));
+            assert_eq!(before.incarnation, 3);
+            assert!(!before.task_returned);
+            assert!(before
+                .last_completed_us
+                .is_some_and(|at| at == before.stage_started_us));
+            assert!(!await_peers(vec![peer], Instant::now()).await.unwrap());
+            let after = progress.snapshot();
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::to_value(&before).unwrap()
+            );
+            abort_and_join(vec![server]).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    /// Exercise repeated incarnations while retaining one fixed-size progress snapshot.
+    async fn peer_lifecycle_storage_stays_constant_across_repeated_churn() {
+        let progress = PeerProgress::new();
+        progress.start(Instant::now());
+        for incarnation in 2..=10_000 {
+            progress.enter("offline", incarnation - 1);
+            progress.enter("reconnecting", incarnation);
+            progress.connection_stage("socket_connect_and_upgrade");
+            progress.connection_stage("join_write");
+            progress.connection_stage("join_snapshot");
+            progress.enter("active", incarnation);
+        }
+        progress.returned();
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.stage, "active");
+        assert_eq!(snapshot.last_completed_stage, Some("join_snapshot"));
+        assert_eq!(snapshot.incarnation, 10_000);
+        assert!(snapshot.task_returned);
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 300);
+    }
+
+    #[tokio::test]
     async fn record_budget_stop_cancels_and_joins_peers_before_the_deadline() {
         let context = crate::unit_context_with_class(DeliveryClass::Reliable);
         let log = Arc::new(EventLog::for_plans(&context.plans, false).unwrap());
@@ -2823,6 +3060,7 @@ mod session_poll_tests {
                     opaque_sender: false,
                 },
                 game_data_format: None,
+                progress: None,
             },
             Vec::new(),
             receiver,
@@ -3806,6 +4044,7 @@ mod session_poll_tests {
                         opaque_sender: false,
                     },
                     game_data_format: None,
+                    progress: None,
                 },
                 if churn {
                     vec![PeerChurnCycle {
@@ -4064,7 +4303,7 @@ mod session_poll_tests {
                 assert_eq!(records.churn[1].epoch, Some(2));
                 assert_eq!(
                     records.churn[1].tails.get("r0p1"),
-                    Some(&(player.to_string(), 3))
+                    Some(&(player.to_string().into(), 3))
                 );
                 assert!(registry
                     .lock()

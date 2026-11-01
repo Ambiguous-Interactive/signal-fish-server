@@ -170,6 +170,8 @@ pub struct SessionRecords {
     /// completed list is gapless within the ring's retention window. Starts
     /// at 1 so a `since=0` bootstrap cursor keeps every completed record.
     next_completed_seq: AtomicU64,
+    #[cfg(test)]
+    snapshot_pause_for_test: Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
 }
 
 impl Default for SessionRecords {
@@ -180,6 +182,8 @@ impl Default for SessionRecords {
             completed_dropped_total: AtomicU64::default(),
             unpublished_dropped_total: AtomicU64::default(),
             next_completed_seq: AtomicU64::new(1),
+            #[cfg(test)]
+            snapshot_pause_for_test: Mutex::default(),
         }
     }
 }
@@ -341,6 +345,10 @@ impl SessionRecords {
     /// rooms that were never visible are dropped without a record (no
     /// directory ever saw them), with the drop counted.
     pub(crate) fn record_closed(&self, room_id: &RoomId, reason: SessionCloseReason) {
+        let mut completed = self
+            .completed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if let Some((_, mut record)) = self.active.remove(room_id) {
             if !record.published {
                 self.unpublished_dropped_total
@@ -349,15 +357,11 @@ impl SessionRecords {
             }
             record.ended_at_ms = Some(Self::now_ms());
             record.close_reason = Some(reason);
-            self.push_completed(record);
+            self.push_completed(record, &mut completed);
         }
     }
 
-    fn push_completed(&self, mut record: SessionRecord) {
-        let mut completed = self
-            .completed
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+    fn push_completed(&self, mut record: SessionRecord, completed: &mut VecDeque<SessionRecord>) {
         // Stamp only after taking the ring mutex, so sequence order equals
         // ring order by construction: a scrape takes the same mutex and can
         // never observe a stamped-but-unpushed sequence that would let a
@@ -365,11 +369,11 @@ impl SessionRecords {
         // are additionally serialized by the storage layer's rooms write
         // lock; the invariant here must not depend on that.)
         record.seq = Some(self.next_completed_seq.fetch_add(1, Ordering::Relaxed));
-        completed.push_back(record);
-        while completed.len() > SESSION_RECORDS_COMPLETED_CAP {
+        if completed.len() == SESSION_RECORDS_COMPLETED_CAP {
             completed.pop_front();
             self.completed_dropped_total.fetch_add(1, Ordering::Relaxed);
         }
+        completed.push_back(record);
     }
 
     /// Copy the registry for one scrape.
@@ -406,13 +410,21 @@ impl SessionRecords {
         application_id: Option<Uuid>,
         active_limit: usize,
     ) -> SessionsSnapshot {
+        /* A close must not move an active room into this snapshot's completed list. */
+        let completed = self
+            .completed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let scan_started = tracing::enabled!(tracing::Level::TRACE).then(tokio::time::Instant::now);
         let matches_application = |record: &SessionRecord| {
             application_id.is_none_or(|id| record.application_id == Some(id))
         };
         let mut active = Vec::new();
         let mut selected = BinaryHeap::new();
         let mut active_count = 0_usize;
+        let mut active_scanned = 0_usize;
         for entry in self.active.iter() {
+            active_scanned = active_scanned.saturating_add(1);
             let record = entry.value();
             if !matches_application(record) {
                 continue;
@@ -433,43 +445,55 @@ impl SessionRecords {
                 }
             }
         }
+        let scan_duration = scan_started.map(|started| started.elapsed());
         let order = |a: &SessionRecord, b: &SessionRecord| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
                 .then_with(|| a.room_id.cmp(&b.room_id))
         };
         active.sort_unstable_by(order);
-        // Poisoning recovers the guarded data: the ring is a plain queue, so
-        // a panicked writer leaves element-consistent state behind.
-        let completed: Vec<SessionRecord> = {
-            let completed = self
-                .completed
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if since.is_none() && application_id.is_none() {
-                completed.iter().rev().cloned().collect()
-            } else {
-                completed
-                    .iter()
-                    .rev()
-                    .filter(|record| {
-                        matches_application(record)
-                            && since.is_none_or(|cursor| record.seq.is_some_and(|seq| seq > cursor))
-                    })
-                    .cloned()
-                    .collect()
-            }
+        #[cfg(test)]
+        if let Some(pause) = self.snapshot_pause_for_test.lock().unwrap().take() {
+            pause.wait();
+            pause.wait();
+        }
+        let completed_records: Vec<SessionRecord> = if since.is_none() && application_id.is_none() {
+            completed.iter().rev().cloned().collect()
+        } else {
+            completed
+                .iter()
+                .rev()
+                .filter(|record| {
+                    matches_application(record)
+                        && since.is_none_or(|cursor| record.seq.is_some_and(|seq| seq > cursor))
+                })
+                .cloned()
+                .collect()
         };
-        let completed_count = completed.len();
-        SessionsSnapshot {
+        let completed_count = completed_records.len();
+        let snapshot = SessionsSnapshot {
             active,
-            completed,
+            completed: completed_records,
             active_count,
             completed_count,
             completed_cap: SESSION_RECORDS_COMPLETED_CAP,
             completed_dropped_total: self.completed_dropped_total.load(Ordering::Relaxed),
             unpublished_dropped_total: self.unpublished_dropped_total.load(Ordering::Relaxed),
+        };
+        let capture_duration = scan_started.map(|started| started.elapsed());
+        drop(completed);
+        if let (Some(scan_duration), Some(capture_duration)) = (scan_duration, capture_duration) {
+            tracing::trace!(
+                active_scanned,
+                active_count,
+                active_limit,
+                scan_duration_us = u64::try_from(scan_duration.as_micros()).unwrap_or(u64::MAX),
+                capture_duration_us =
+                    u64::try_from(capture_duration.as_micros()).unwrap_or(u64::MAX),
+                "Session snapshot scan completed"
+            );
         }
+        snapshot
     }
 }
 
@@ -689,6 +713,110 @@ mod tests {
         let newest = &snapshot.completed[0];
         let oldest = &snapshot.completed[SESSION_RECORDS_COMPLETED_CAP - 1];
         assert!(newest.ended_at_ms >= oldest.ended_at_ms);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    /// Check storage reuse and exact cursor/loss accounting across repeated rollovers.
+    fn completed_ring_rollover_preserves_storage_and_cursor_accounting() {
+        let records = SessionRecords::new();
+        for index in 0..SESSION_RECORDS_COMPLETED_CAP {
+            let room_id = Uuid::from_u128(index as u128);
+            records.record_created(&room_fixture(room_id, "ROOM"), true);
+            records.record_closed(&room_id, SessionCloseReason::Deleted);
+        }
+        let filled_capacity = records.completed.lock().unwrap().capacity();
+        for index in 0..=SESSION_RECORDS_COMPLETED_CAP {
+            let room_id = Uuid::from_u128((SESSION_RECORDS_COMPLETED_CAP + index) as u128);
+            records.record_created(&room_fixture(room_id, "ROOM"), true);
+            records.record_closed(&room_id, SessionCloseReason::Expired);
+            assert_eq!(
+                records.completed.lock().unwrap().capacity(),
+                filled_capacity,
+                "rollover must reuse the filled ring storage, at index {index}"
+            );
+        }
+        let snapshot = records.snapshot();
+        assert_eq!(snapshot.completed_count, SESSION_RECORDS_COMPLETED_CAP);
+        assert_eq!(
+            snapshot.completed_dropped_total,
+            SESSION_RECORDS_COMPLETED_CAP as u64 + 1
+        );
+        let sequences: Vec<_> = snapshot.completed.iter().map(|record| record.seq).collect();
+        let expected: Vec<_> = (SESSION_RECORDS_COMPLETED_CAP as u64 + 2
+            ..=2 * SESSION_RECORDS_COMPLETED_CAP as u64 + 1)
+            .rev()
+            .map(Some)
+            .collect();
+        assert_eq!(sequences, expected);
+        assert_eq!(
+            snapshot.completed.first().unwrap().room_id,
+            Uuid::from_u128(2 * SESSION_RECORDS_COMPLETED_CAP as u128)
+        );
+        assert_eq!(
+            snapshot.completed.last().unwrap().room_id,
+            Uuid::from_u128(SESSION_RECORDS_COMPLETED_CAP as u128 + 1)
+        );
+        println!(
+            "SESSION_RING_STORAGE capacity={filled_capacity} bytes={}",
+            filled_capacity * std::mem::size_of::<SessionRecord>()
+        );
+    }
+
+    /// Regression for #1353: close and snapshot share one transition boundary.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    /// Pause the capture boundary and check concurrent closure with empty and full rings.
+    fn snapshot_close_transition_never_lists_one_room_twice() {
+        for completed_count in [0, SESSION_RECORDS_COMPLETED_CAP] {
+            let records = std::sync::Arc::new(SessionRecords::new());
+            for _ in 0..completed_count {
+                let completed_id = Uuid::new_v4();
+                records.record_created(&room_fixture(completed_id, "OLD"), true);
+                records.record_closed(&completed_id, SessionCloseReason::Deleted);
+            }
+            let room_id = Uuid::new_v4();
+            records.record_created(&room_fixture(room_id, "ROOM"), true);
+            let pause = std::sync::Arc::new(std::sync::Barrier::new(2));
+            *records.snapshot_pause_for_test.lock().unwrap() = Some(pause.clone());
+            let snapshot_records = records.clone();
+            let snapshot = std::thread::spawn(move || snapshot_records.snapshot());
+            pause.wait();
+            let transition_fenced = matches!(
+                records.completed.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            let close_records = records.clone();
+            let (started_sender, started_receiver) = std::sync::mpsc::channel();
+            let close = std::thread::spawn(move || {
+                started_sender.send(()).unwrap();
+                close_records.record_closed(&room_id, SessionCloseReason::Deleted);
+            });
+            started_receiver.recv().unwrap();
+            pause.wait();
+            let snapshot = snapshot.join().unwrap();
+            close.join().unwrap();
+            assert!(
+                !snapshot.active.iter().any(|active| snapshot
+                    .completed
+                    .iter()
+                    .any(|completed| active.room_id == completed.room_id)),
+                "a room must not be active and completed in one snapshot: {snapshot:?}"
+            );
+            assert!(
+                transition_fenced,
+                "capture must hold the close transition boundary"
+            );
+            assert_eq!(snapshot.active_count, 1);
+            assert_eq!(snapshot.completed_count, completed_count);
+            assert_eq!(snapshot.completed_dropped_total, 0);
+            let next = records.snapshot_view(Some(completed_count as u64), None);
+            assert_eq!(next.active_count, 0);
+            assert_eq!(next.completed_count, 1);
+            assert_eq!(next.completed[0].room_id, room_id);
+            assert_eq!(next.completed[0].seq, Some(completed_count as u64 + 1));
+            assert_eq!(next.completed_dropped_total, u64::from(completed_count > 0));
+        }
     }
 
     /// The structural caps must compose inside the response byte budget: a
@@ -1046,6 +1174,35 @@ mod tests {
                     response.active.len(),
                     full.active.len().min(SESSION_RECORDS_ACTIVE_RESPONSE_CAP)
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated session snapshot scan profile with trace timing"]
+    /// Measure capped, uncapped and zero-match scans over 10,000 active records.
+    fn session_snapshot_scan_duration_profile() {
+        let records = SessionRecords::new();
+        for index in 0..10_000 {
+            records.record_created(&room_fixture(Uuid::from_u128(index), "ROOM"), true);
+        }
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_test_writer()
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        for application_id in [None, Some(Uuid::from_u128(1))] {
+            for active_limit in [SESSION_RECORDS_ACTIVE_RESPONSE_CAP, usize::MAX] {
+                for _ in 0..5 {
+                    let snapshot =
+                        records.snapshot_with_active_limit(None, application_id, active_limit);
+                    let expected_count = if application_id.is_none() { 10_000 } else { 0 };
+                    assert_eq!(snapshot.active_count, expected_count);
+                    assert_eq!(snapshot.active.len(), expected_count.min(active_limit));
+                    std::hint::black_box(snapshot);
+                }
             }
         }
     }
