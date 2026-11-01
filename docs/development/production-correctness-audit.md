@@ -13077,9 +13077,11 @@ The fixture now reads the coordinator's empty readiness-key list before the
 allocation regions. This initializes the lock without creating readiness
 entries or calling the measured snapshot method. Every original snapshot call,
 state, spectator cell and allocation assertion stays intact. A macOS-only
-assertion separately checks that the first native Tokio read-lock release
+ignored qualification separately checks that the first native Tokio read-lock release
 allocates one extra 64-byte block while the second does not. Those controls
 run without cooperative yielding to separate native lock and scheduler costs.
+The exact native allocation cost is diagnostic rather than a normal test
+contract because supported platform or dependency changes may alter it.
 The failure-only component diagnostics remain available. New-source macOS
 qualification and the retained attempts stay tracked in #1350.
 

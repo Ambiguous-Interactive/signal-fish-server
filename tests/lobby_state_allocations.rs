@@ -18,7 +18,6 @@ static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::I
 async fn lobby_state_projection_allocates_only_its_async_result() {
     // Exclude the current-thread scheduler's first deferred-waker allocation.
     tokio::task::yield_now().await;
-    native_readiness_lock_initialization_control().await;
     for spectators in [0_u128, 16, 255] {
         let database = InMemoryDatabase::new();
         let room = database
@@ -506,7 +505,9 @@ async fn untouched_snapshot_component_diagnostics() {
 }
 
 /// Pin native lock initialization separately from readiness snapshot allocations.
-async fn native_readiness_lock_initialization_control() {
+#[tokio::test]
+#[ignore = "isolated native-lock allocation qualification"]
+async fn native_readiness_lock_initialization_qualification() {
     let coordinator = InMemoryRoomOperationCoordinator::new(
         Arc::new(InMemoryMessageCoordinator::new()),
         Arc::new(InMemoryDatabase::new()),
