@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Report session metrics collection time in trace logs.
+- Report session metrics scan and capture times in trace logs.
 
 ### Changed
 
