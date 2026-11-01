@@ -12769,14 +12769,22 @@ adapter boundary; it does not establish a production network incident.
 The shipped in-memory write has no post-commit wait. The pause represents
 a source-compatible asynchronous backend.
 
-The handler now owns its complete transaction. It keeps lifecycle validation,
-the room mutation lane, the storage result and the FIFO publication alive
-when the caller stops waiting. A later transfer cannot publish ahead of the
+The caller validates the request and acquires the lifecycle and room mutation
+guards before it hands the storage write and publication to an owned task.
+This preserves existing room-lane FIFO admission. The owned task keeps both
+guards, the storage result and the FIFO publication alive when the caller
+stops waiting. A later transfer cannot publish ahead of the
 committed event. Existing correlated results, recipient authority flags and
 replay shapes stay the same. The regression checks both role changes in live
 traffic and replay. Refused transfers still preserve storage and emit no role
-change. The scoped 44-test room and transfer control passes in Nextest
-`e2a85bea-ad62-4154-8700-64c484d7a987`.
+change. All 62 scoped room, readiness and transfer controls pass with all features
+after the final ownership boundary change.
+
+The first candidate spawned before acquiring the room lane. Hosted root CI
+caught a changed admission order in the existing concurrent transfer/start
+control. The unchanged control also fails locally in Nextest `402d745c`.
+Moving ownership after validation and lane acquisition, but before the write,
+retains that FIFO contract without weakening the cancellation control.
 
 #### Admission and transfer projections (#636)
 

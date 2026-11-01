@@ -489,32 +489,12 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let server = Arc::clone(self);
-        let authority_id = *authority_id;
-        let transaction = tokio::spawn(async move {
-            server
-                .transfer_authority_owned(authority_id, operation_id, target_id, source_lifecycle)
-                .await;
-        });
-        if let Err(error) = transaction.await {
-            tracing::error!(%authority_id, %error, "Authority transfer transaction failed");
-        }
-    }
-
-    async fn transfer_authority_owned(
-        self: &Arc<Self>,
-        authority_id: PlayerId,
-        operation_id: RoomOperationId,
-        target_id: PlayerId,
-        source_lifecycle: Option<Arc<ClientLifecycle>>,
-    ) {
-        let authority_id = &authority_id;
         let Some(lifecycle) =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
         else {
             return;
         };
-        let _authority_lifecycle_guard = lifecycle.lock().await;
+        let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -625,6 +605,35 @@ impl EnhancedGameServer {
             .await;
             return;
         }
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let transaction = tokio::spawn(async move {
+            server
+                .transfer_authority_owned(
+                    authority_id,
+                    operation_id,
+                    target_id,
+                    room_id,
+                    authority_lifecycle_guard,
+                    transfer_event_guard,
+                )
+                .await;
+        });
+        if let Err(error) = transaction.await {
+            tracing::error!(%authority_id, %error, "Authority transfer transaction failed");
+        }
+    }
+
+    async fn transfer_authority_owned(
+        self: &Arc<Self>,
+        authority_id: PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        room_id: RoomId,
+        _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
+        transfer_event_guard: crate::coordination::RoomEventMutationGuard,
+    ) {
+        let authority_id = &authority_id;
         let granted = match self
             .database
             .update_room_authority(&room_id, Some(target_id))
