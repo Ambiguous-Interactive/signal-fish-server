@@ -12729,3 +12729,25 @@ The cancellation replay control now also requires the leaver's `PlayerLeft`
 before the cleared role and successor role. Swapping only the departure and
 clear leaves the old role-only assertion passing but fails the stronger check
 in Nextest `5f88cb10`. Restored source passes both cleanup cells in `5a964d32`.
+
+#### Browser setup follow-up (#1341)
+
+The browser qualification attempt on `55342d9c` restored its Chromium cache,
+then stopped during APT metadata setup before builds or gameplay. The job
+ended canceled near its 75-minute limit. The exact wait cause and cancellation
+actor remain unknown; this does not establish a browser or server defect.
+
+Both opt-in Playwright dependency setup sites now download through the locked
+package and launch the selected executable before installing OS packages.
+A ready browser avoids package setup. Failed startup permits one dependency
+install and requires a successful second launch. Download, setup, persistent
+startup and close failures remain fatal. Full Chromium and the headless shell
+use their respective executables. Fortress's default opt-out and Firefox's
+Mesa/Xvfb setup remain unchanged. Startup does not qualify WebGL or gameplay;
+the full hosted suites and their job limits remain required.
+
+Seven CLI fixture tests pass, including setup-forbidden ready hosts and failure
+propagation. The previous unconditional setup commands fail those controls.
+The locked Chromium shell also starts locally through the new helper. These
+results repair avoidable package setup on ready hosts; they do not determine
+the historical runner's readiness or explain its APT stall. #1341 stays open.
