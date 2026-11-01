@@ -886,17 +886,21 @@ impl EventLog {
     }
 
     /// Retain exact churn evidence while sharing immutable snapshot member names.
-    pub fn push_churn(&self, mut event: ChurnEvent) {
+    pub fn push_churn(&self, event: ChurnEvent) {
         let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
         let mut state = self.state.lock().expect("event log poisoned");
-        if state
-            .budget
-            .as_ref()
-            .is_none_or(|budget| budget.first_excess_kind.is_none())
-        {
-            event.tails.share_member_names(&mut state.snapshot_names);
+        if self.retain_event(&mut state, "churn", bytes, event, |state| &mut state.churn) {
+            let EventState {
+                churn,
+                snapshot_names,
+                ..
+            } = &mut *state;
+            churn
+                .last_mut()
+                .expect("retained churn event")
+                .tails
+                .share_member_names(snapshot_names);
         }
-        self.retain_event(&mut state, "churn", bytes, event, |state| &mut state.churn);
     }
 
     pub fn push_join_failure(&self, failure: String) {
