@@ -378,6 +378,9 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
             profiles.push((stats.allocations, stats.bytes_allocated));
         }
     }
+    if !profiles.iter().all(|profile| *profile == profiles[0]) {
+        diagnose_untouched_snapshot_allocations().await;
+    }
     assert!(
         profiles.iter().all(|profile| *profile == profiles[0]),
         "untouched ready snapshots copied spectator state: {profiles:?}"
@@ -437,4 +440,64 @@ fn cooperative_runtime_allocation_profile() {
         profiles[0].bytes_allocated,
         profiles[1].bytes_allocated + 64
     );
+}
+
+/// Separate storage, first coordinator reads, repeated reads and scheduling on failure.
+async fn diagnose_untouched_snapshot_allocations() {
+    for state in [LobbyState::Waiting, LobbyState::Lobby] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let room = database
+            .create_room(
+                "allocation-diagnostic".into(),
+                None,
+                4,
+                true,
+                Uuid::from_u128(1),
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        if state == LobbyState::Lobby {
+            database.transition_room_to_lobby(&room.id).await.unwrap();
+        }
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        let ready = database
+            .get_finalized_room_ready_players(&room.id)
+            .await
+            .unwrap();
+        let stats = region.change();
+        assert_eq!(ready, Some(Vec::new()));
+        println!("READY_ALLOCATION_DIAGNOSTIC state={state:?} stage=storage stats={stats:?}");
+        for stage in ["first", "repeated", "unconstrained", "yield_before"] {
+            let coordinator = InMemoryRoomOperationCoordinator::new(
+                Arc::new(InMemoryMessageCoordinator::new()),
+                database.clone(),
+                None,
+            );
+            if stage == "repeated" {
+                assert!(coordinator.current_ready_players(&room.id).await.is_empty());
+            }
+            if stage == "yield_before" {
+                tokio::task::yield_now().await;
+            }
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            let ready = if stage == "unconstrained" {
+                tokio::task::unconstrained(coordinator.current_ready_players(&room.id)).await
+            } else {
+                coordinator.current_ready_players(&room.id).await
+            };
+            let stats = region.change();
+            assert!(ready.is_empty());
+            println!("READY_ALLOCATION_DIAGNOSTIC state={state:?} stage={stage} stats={stats:?}");
+        }
+    }
+}
+
+/// Run the bounded failure diagnostics independently of the allocation assertion.
+#[tokio::test]
+#[ignore = "isolated allocation component diagnostics"]
+async fn untouched_snapshot_component_diagnostics() {
+    diagnose_untouched_snapshot_allocations().await;
 }

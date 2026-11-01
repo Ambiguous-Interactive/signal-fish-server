@@ -13062,8 +13062,13 @@ records the exact 3-allocation, 336-byte shape. Initializing the deferred-waker
 queue before that operation gives 2 allocations and 272 bytes. Nextest
 `f1aa70a9` records both controls. The allocation test now initializes that queue
 before its measured regions. Every operation, state, spectator cell and
-allocation assertion remains unchanged. The original hosted failure remains
-visible; new-source macOS qualification is tracked in #1350.
+allocation assertion remains unchanged. This warm-up candidate is insufficient:
+macOS job `124919556555` on head `85b4ee0a` still records 3 allocations and
+336 bytes for every Waiting sample, versus 2 allocations and 272 bytes for
+Lobby. The source cause of that hosted difference remains unproven. Bounded
+failure-only diagnostics separate the database query, first and repeated
+coordinator reads, an unconstrained read and an immediately preceded yield.
+The original assertions remain binding. All attempts stay visible in #1350.
 
 #### External-client assessment
 
