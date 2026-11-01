@@ -12814,8 +12814,8 @@ capacity in the existing compact or wide representation. Unknown recipients
 still add no index entries. Timestamp order, raw-order ties, viewer-first
 ordering and the raw records stay unchanged. Both widths compare with
 independent stable sorts, including empty input, Unicode and mixed ties.
-The retained-storage ceiling fails on old source in Nextest `e6abd67f`: one
-row retains 16 bytes instead of four.
+The retained-storage ceiling fails on old source: one row retains 16 bytes
+instead of four.
 
 A fresh-process million-row profile retains 4,000,000 index bytes instead of
 4,194,304. Both sources produce checksum `4894385488969092582`. The one
