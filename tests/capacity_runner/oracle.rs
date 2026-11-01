@@ -1899,7 +1899,7 @@ fn snapshot_tail_evidence(
                 Some(room) if rooms.get(member.as_str()) != Some(room) => {
                     Some(SnapshotTailMismatch::ForeignMember)
                 }
-                Some(_) => match records.registry.get(player_id) {
+                Some(_) => match records.registry.get(player_id.as_str()) {
                     None => Some(SnapshotTailMismatch::UnknownPlayerId),
                     Some((registered_member, _)) if registered_member != member => {
                         Some(SnapshotTailMismatch::WrongPlayer {
@@ -1944,7 +1944,7 @@ fn snapshot_tail_evidence(
                 first.get_or_insert_with(|| SnapshotTailViolation {
                     recipient: event.recipient.clone(),
                     member: member.clone(),
-                    player_id: player_id.clone(),
+                    player_id: player_id.to_string(),
                     mismatch,
                 });
             }
@@ -6449,7 +6449,7 @@ mod coverage_tests {
                 first: SnapshotTailViolation {
                     recipient: rejoin.recipient.clone(),
                     member: member.into(),
-                    player_id: rejoin.tails[member].0.clone(),
+                    player_id: rejoin.tails[member].0.to_string(),
                     mismatch,
                 },
             };

@@ -7,17 +7,19 @@ use std::fmt;
 
 type Tail = (String, u64);
 type Entry = (String, Tail);
-type SharedEntry = (crate::records::ReceiptName, Tail);
+type SharedTail = (crate::records::ReceiptName, u64);
+type SharedEntry = (crate::records::ReceiptName, SharedTail);
 
-/// Sorted snapshot members with owned player identities and full sequence tails.
+/// Sorted snapshot members with shared player identities and full sequence tails.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SnapshotTails(Box<[SharedEntry]>);
 
 impl SnapshotTails {
-    /// Share exact member names across retained snapshots without changing their keys.
-    pub(super) fn share_member_names(&mut self, names: &mut crate::records::ReceiptNames) {
-        for (member, _) in &mut self.0 {
+    /// Share exact member names and player identities across retained snapshots.
+    pub(super) fn share_names(&mut self, names: &mut crate::records::ReceiptNames) {
+        for (member, (player_id, _)) in &mut self.0 {
             *member = names.intern(member.as_str());
+            *player_id = names.intern(player_id.as_str());
         }
     }
 
@@ -33,7 +35,7 @@ impl SnapshotTails {
     }
 
     /// Find the exact recorded player identity and tail for one member.
-    pub fn get(&self, member: &str) -> Option<&Tail> {
+    pub fn get(&self, member: &str) -> Option<&SharedTail> {
         self.position(member)
             .ok()
             .map(|position| &self.0[position].1)
@@ -41,7 +43,7 @@ impl SnapshotTails {
 
     #[cfg(test)]
     /// Mutate one fixture tail without changing member ordering.
-    pub fn get_mut(&mut self, member: &str) -> Option<&mut Tail> {
+    pub fn get_mut(&mut self, member: &str) -> Option<&mut SharedTail> {
         self.position(member)
             .ok()
             .map(|position| &mut self.0[position].1)
@@ -49,7 +51,7 @@ impl SnapshotTails {
 
     #[cfg(test)]
     /// Borrow the first fixture member in artifact key order.
-    pub fn first_key_value(&self) -> Option<(&String, &Tail)> {
+    pub fn first_key_value(&self) -> Option<(&String, &SharedTail)> {
         self.0
             .first()
             .map(|(member, tail)| (member.owned_string(), tail))
@@ -58,6 +60,7 @@ impl SnapshotTails {
     #[cfg(test)]
     /// Insert or replace a fixture tail while retaining sorted unique members.
     pub fn insert(&mut self, member: String, tail: Tail) {
+        let tail = (tail.0.into(), tail.1);
         match self.position(&member) {
             Ok(position) => self.0[position].1 = tail,
             Err(position) => {
@@ -93,14 +96,14 @@ impl FromIterator<Entry> for SnapshotTails {
         Self(
             entries
                 .into_iter()
-                .map(|(name, tail)| (name.into(), tail))
+                .map(|(name, (player_id, sequence))| (name.into(), (player_id.into(), sequence)))
                 .collect(),
         )
     }
 }
 
 impl<'a> IntoIterator for &'a SnapshotTails {
-    type Item = (&'a String, &'a Tail);
+    type Item = (&'a String, &'a SharedTail);
     type IntoIter =
         std::iter::Map<std::slice::Iter<'a, SharedEntry>, fn(&'a SharedEntry) -> Self::Item>;
 
@@ -114,7 +117,7 @@ impl<'a> IntoIterator for &'a SnapshotTails {
 
 #[cfg(test)]
 impl std::ops::Index<&str> for SnapshotTails {
-    type Output = Tail;
+    type Output = SharedTail;
 
     /// Select a fixture member and fail when the fixture lacks its required tail.
     fn index(&self, member: &str) -> &Self::Output {
@@ -159,6 +162,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_snapshot_player_identities_share_storage_and_keep_distinct_tails() {
+        use crate::records::{ChurnEvent, ChurnPhase, EventLog};
+        let log = EventLog::new();
+        for sequence in [0, 7, u64::MAX] {
+            log.push_churn(ChurnEvent {
+                recipient: "receiver".into(),
+                phase: ChurnPhase::Rejoined,
+                at_us: sequence,
+                epoch: Some(1),
+                tails: [("member".into(), ("identity-未知\0".into(), sequence))]
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        let records = log.take_records();
+        let output = tempfile::tempdir().unwrap();
+        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+        let replay = crate::artifacts::read_records(output.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&records).unwrap(),
+            serde_json::to_value(&replay).unwrap()
+        );
+        for events in [&records.churn, &replay.churn] {
+            let first = events[0].tails.get("member").unwrap().0.as_str().as_ptr();
+            for (event, sequence) in events.iter().zip([0, 7, u64::MAX]) {
+                let tail = event.tails.get("member").unwrap();
+                assert_eq!(tail.0.as_str(), "identity-未知\0");
+                assert_eq!(tail.1, sequence);
+                assert_eq!(tail.0.as_str().as_ptr(), first);
+            }
+        }
+    }
+
+    #[test]
     /// Compare compact storage with independent map decoding for exact values and errors.
     fn compact_snapshot_tails_preserve_exact_map_json_and_duplicate_keys() {
         for json in [
@@ -174,11 +211,24 @@ mod tests {
             assert_eq!(SnapshotTails::from(reference.clone()), compact);
             assert_eq!(compact.is_empty(), reference.is_empty());
             for member in ["", "a", "z", "\0", "missing"] {
-                assert_eq!(compact.get(member), reference.get(member));
+                assert_eq!(
+                    compact
+                        .get(member)
+                        .map(|(player_id, sequence)| (player_id.as_str(), sequence)),
+                    reference
+                        .get(member)
+                        .map(|(player_id, sequence)| (player_id.as_str(), sequence))
+                );
             }
             assert_eq!(
-                compact.into_iter().collect::<Vec<_>>(),
-                reference.iter().collect::<Vec<_>>()
+                compact
+                    .into_iter()
+                    .map(|(name, (id, sequence))| (name, (id.as_str(), sequence)))
+                    .collect::<Vec<_>>(),
+                reference
+                    .iter()
+                    .map(|(name, (id, sequence))| (name, (id.as_str(), sequence)))
+                    .collect::<Vec<_>>()
             );
             let mut reversed: Vec<_> = reference.into_iter().collect();
             reversed.reverse();
@@ -255,7 +305,8 @@ mod tests {
         for (index, event) in records.churn.iter().enumerate() {
             let (member, tail) = event.tails.first_key_value().unwrap();
             assert!(std::ptr::eq(first, member));
-            assert_eq!(tail, &(format!("identity-{index}"), index as u64));
+            assert_eq!(tail.0.as_str(), format!("identity-{index}"));
+            assert_eq!(tail.1, index as u64);
         }
         let mut edited = records.churn[0].tails.clone();
         edited.insert("another".into(), ("new".into(), 99));
@@ -348,7 +399,7 @@ mod tests {
             std::hint::black_box(tails);
         }
         if std::env::var_os("CAPACITY_SNAPSHOT_COMPACT").is_some() {
-            measure::<SnapshotTails>(snapshots, members, SnapshotTails::share_member_names);
+            measure::<SnapshotTails>(snapshots, members, SnapshotTails::share_names);
         } else {
             measure::<BTreeMap<String, Tail>>(snapshots, members, |_, _| {});
         }

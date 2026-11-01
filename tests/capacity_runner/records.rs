@@ -899,7 +899,7 @@ impl EventLog {
                 .last_mut()
                 .expect("retained churn event")
                 .tails
-                .share_member_names(snapshot_names);
+                .share_names(snapshot_names);
         }
     }
 

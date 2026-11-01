@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory retained by completed-session history (#636).
 - Reduce dashboard collection and history update costs (#636).
 - Reduce memory used by full reconnection replay buffers (#636).
 - Reduce memory used to join rooms as a player or spectator and transfer room authority (#636).
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep active and completed session lists consistent when rooms close during a metrics request (#1353).
 - Keep room counts and occupancy percentiles consistent in each in-memory dashboard sample (#1349).
 - Preserve replay loss when Rust embedders clear buffered room events (#1347).
 - Retry interrupted heartbeat updates so active rooms can renew their expiry window (#1344).

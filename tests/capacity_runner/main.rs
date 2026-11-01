@@ -5532,7 +5532,7 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
         .map(|(id, _)| id.clone())
         .expect("another registered member");
     assert_ne!(player_id, &wrong_id);
-    snapshot.tails.get_mut(&member).unwrap().0 = wrong_id;
+    snapshot.tails.get_mut(&member).unwrap().0 = wrong_id.into();
     artifacts::write_deliveries(output.path(), &records).expect("write malformed snapshot");
     let invalid = artifacts::replay(output.path()).expect("replay malformed snapshot");
     assert!(!invalid.valid);
