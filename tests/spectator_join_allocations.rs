@@ -159,8 +159,8 @@ async fn spectator_admission_reuses_its_owned_room_and_roster() {
     let empty_allocations = profiles[0].1;
     for (spectators, allocations) in profiles {
         assert!(
-            allocations <= empty_allocations + 5 * usize::try_from(spectators).unwrap(),
-            "spectator roster allocation growth exceeded five copies: spectators={spectators} allocations={allocations} empty={empty_allocations}"
+            allocations <= empty_allocations + 3 * usize::try_from(spectators).unwrap(),
+            "spectator roster allocation growth exceeded three copies: spectators={spectators} allocations={allocations} empty={empty_allocations}"
         );
     }
 }

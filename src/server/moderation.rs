@@ -489,6 +489,26 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let transaction = tokio::spawn(async move {
+            server
+                .transfer_authority_owned(authority_id, operation_id, target_id, source_lifecycle)
+                .await;
+        });
+        if let Err(error) = transaction.await {
+            tracing::error!(%authority_id, %error, "Authority transfer transaction failed");
+        }
+    }
+
+    async fn transfer_authority_owned(
+        self: &Arc<Self>,
+        authority_id: PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let authority_id = &authority_id;
         let Some(lifecycle) =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
         else {
@@ -532,7 +552,11 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
-        let room = match self.database.get_room_by_id(&room_id).await {
+        let room = match self
+            .database
+            .get_room_player_snapshot(&room_id, &target_id)
+            .await
+        {
             Ok(Some(room)) => room,
             Ok(None) => {
                 drop(transfer_event_guard);
@@ -569,7 +593,7 @@ impl EnhancedGameServer {
             .await;
             return;
         }
-        if !room.players.contains_key(&target_id) {
+        if room.player.is_none() {
             drop(transfer_event_guard);
             self.metrics.increment_authority_transfer_conflicts();
             self.fail_operation(

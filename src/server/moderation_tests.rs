@@ -3290,3 +3290,105 @@ async fn moderation_refusal_envelopes_exhaust_the_error_reply_budget() {
         "the exhausted budget must close with the 4006 reason"
     );
 }
+
+/// A canceled caller must not hide a durable transfer from live peers or replay.
+#[tokio::test]
+async fn canceled_transfer_publishes_committed_authority_before_later_transfer() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48201".parse().unwrap()).await;
+    let (successor, mut successor_rx) =
+        register_client(&server, "127.0.0.1:48202".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "CANCEL", "host").await;
+    join_seated_player(&server, &successor, &mut successor_rx, "CANCEL", "guest").await;
+    drain_receiver(&mut authority_rx);
+    drain_receiver(&mut successor_rx);
+    let room_id = server.get_client_room(&authority).await.unwrap();
+    let replay = server.reconnection_manager.as_ref().unwrap();
+    replay
+        .register_disconnection(PlayerId::new_v4(), room_id, false, None, 0)
+        .await;
+    let before = replay.get_missed_events(&room_id, 0).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_authority_request_after_commit_for_test();
+    let operation_id = RoomOperationId::new_v4();
+    let transfer_server = Arc::clone(&server);
+    let caller = tokio::spawn(async move {
+        transfer_server
+            .handle_transfer_authority_operation(&authority, operation_id, successor)
+            .await;
+    });
+    timeout(
+        Duration::from_secs(2),
+        database.wait_for_authority_request_commit_for_test(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        Some(successor)
+    );
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let next_server = Arc::clone(&server);
+    let later = tokio::spawn(async move {
+        next_server
+            .handle_transfer_authority_operation(&successor, RoomOperationId::new_v4(), authority)
+            .await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !later.is_finished(),
+        "later transfer must wait for the committed event"
+    );
+    database.release_authority_request_commit_for_test();
+    let transferred = recv_until(&mut successor_rx, |_| true).await;
+    assert!(
+        matches!(transferred.as_ref(), ServerMessage::AuthorityChanged {
+        authority_player: Some(id), you_are_authority: true,
+    } if *id == successor)
+    );
+    let previous_view = recv_until(&mut authority_rx, |_| true).await;
+    assert!(
+        matches!(previous_view.as_ref(), ServerMessage::AuthorityChanged {
+        authority_player: Some(id), you_are_authority: false,
+    } if *id == successor)
+    );
+    let result = recv_until(&mut authority_rx, |_| true).await;
+    assert!(
+        matches!(result.as_ref(), ServerMessage::RoomOperationResult {
+        operation_id: id, result,
+    } if *id == operation_id && matches!(result.as_ref(), RoomOperationResult::AuthorityTransferred { player_id } if *player_id == successor))
+    );
+    timeout(Duration::from_secs(2), later)
+        .await
+        .unwrap()
+        .unwrap();
+    let returned = recv_until(&mut successor_rx, |_| true).await;
+    assert!(
+        matches!(returned.as_ref(), ServerMessage::AuthorityChanged {
+        authority_player: Some(id), you_are_authority: false,
+    } if *id == authority)
+    );
+    let after = replay.get_missed_events(&room_id, 0).await;
+    assert_eq!(after.events.len(), before.events.len() + 2);
+    assert!(
+        matches!(after.events.get(before.events.len()), Some(ServerMessage::AuthorityChanged {
+        authority_player: Some(id), ..
+    }) if *id == successor)
+    );
+    assert!(
+        matches!(after.events.last(), Some(ServerMessage::AuthorityChanged {
+        authority_player: Some(id), ..
+    }) if *id == authority)
+    );
+}

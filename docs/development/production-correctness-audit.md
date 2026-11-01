@@ -12751,3 +12751,94 @@ propagation. The previous unconditional setup commands fail those controls.
 The locked Chromium shell also starts locally through the new helper. These
 results repair avoidable package setup on ready hosts; they do not determine
 the historical runner's readiness or explain its APT stall. #1341 stays open.
+
+### F223 — Caller cancellation hides a committed v3 authority transfer (#1342)
+
+At main `92b1c6bd`, the v3 `TransferAuthority` handler writes storage in the
+caller's task. An asynchronous backend can commit the role and then suspend
+before returning. Cancellation at that point drops the room lane without
+publishing `AuthorityChanged` or recording replay. Stored authority and the
+members' role views disagree. This differs from the public coordinator's
+already-owned transfer path.
+
+The deterministic source control pauses the in-memory adapter after the
+storage write, aborts only the handler caller, and releases storage. The
+successor receives no event within the existing one-second receive bound in
+Nextest `99ea2e7a-13f3-4b0f-a6a8-26dfb4289a64`. This reproduces an asynchronous
+adapter boundary; it does not establish a production network incident.
+The shipped in-memory write has no post-commit wait. The pause represents
+a source-compatible asynchronous backend.
+
+The handler now owns its complete transaction. It keeps lifecycle validation,
+the room mutation lane, the storage result and the FIFO publication alive
+when the caller stops waiting. A later transfer cannot publish ahead of the
+committed event. Existing correlated results, recipient authority flags and
+replay shapes stay the same. The regression checks both role changes in live
+traffic and replay. Refused transfers still preserve storage and emit no role
+change. The scoped 44-test room and transfer control passes in Nextest
+`e2a85bea-ad62-4154-8700-64c484d7a987`.
+
+#### Admission and transfer projections (#636)
+
+Spectator admission previously cloned a whole room to identify its event
+lane, then loaded its required baseline inside that lane. The new
+`GameDatabase::get_room_id` projects only the published ID. The default
+adapter calls the existing lookup; the shipped adapter holds the same
+membership, code and publication locks as a full lookup. Admission still
+loads fresh baseline fields inside the room lane. Pending visibility,
+application scoping, capacity checks and code-rotation ordering stay intact.
+The transfer handler also uses the existing atomic member/authority snapshot
+instead of copying unrelated members and spectators.
+
+The isolated complete spectator-admission profile retains every existing
+baseline and notification assertion. Stored spectators are not live routes,
+so this measures baseline construction rather than spectator fan-out cost.
+
+| Existing spectators | Previous allocations / bytes | New allocations / bytes |
+| --- | --- | --- |
+| 0 | 147 / 23,808 | 139 / 21,565 |
+| 16 | 211 / 32,036 | 187 / 27,631 |
+| 254 | 1,163 / 172,044 | 901 / 130,541 |
+
+The stricter three-copies-per-spectator ceiling fails on the old source in
+Nextest `c50bc235` and passes after the projection. The lookup tests cover
+publication, rotation, deletion, code reuse, stale indexes, game scope, case,
+legacy adapter errors and all three lock boundaries. These are local
+allocation results, not latency or throughput measurements.
+
+#### Exact room churn index capacity (#775)
+
+The capacity oracle previously grew each room's offset vector geometrically.
+The new first pass counts accepted rows per room; the second pass fills exact
+capacity in the existing compact or wide representation. Unknown recipients
+still add no index entries. Timestamp order, raw-order ties, viewer-first
+ordering and the raw records stay unchanged. Both widths compare with
+independent stable sorts, including empty input, Unicode and mixed ties.
+The retained-storage ceiling fails on old source in Nextest `e6abd67f`: one
+row retains 16 bytes instead of four.
+
+A fresh-process million-row profile retains 4,000,000 index bytes instead of
+4,194,304. Both sources produce checksum `4894385488969092582`. The one
+observation takes 1,435,974 microseconds before and 1,483,981 after; this does
+not establish a speed improvement. The extra count pass trades work for an
+exact retained bound. A second paired shape has 767,232 rows: index storage
+falls from 4,194,304 to 3,068,928 bytes with the same checksum
+`6131198148197686732`. The single observations take 1,074,304 microseconds
+before and 1,279,534 after. Set `CAPACITY_ROOM_CHURN_ROWS=767232` when running
+`generator_room_churn_index_memory_profile` to repeat this shape. All 48
+scoped churn and replay controls pass in Nextest `cb7430ea`.
+Peak process memory, full generator storage and the planned ten-minute
+workload remain unqualified; #775 stays open.
+
+#### External-client assessment
+
+Rust main `da8f2d16` validates the existing authority identity and recipient
+flag and applies the role in `src/client_core.rs`. .NET main `e467c871`
+decodes the existing event in `Polling/FramePipeline.cs`. Godot main
+`c58b1631` applies roster flags before emitting `authority_changed` in
+`addons/signal_fish/signal_fish_client.gd`. All three are unaffected: the
+repair completes an existing accepted operation and restores its existing
+ordered event. It adds no message, field, error, default or migration need.
+The projections preserve wire values. The new storage method has a default
+for existing backend implementations. The capacity change is internal.
+No client tracking issue is required.

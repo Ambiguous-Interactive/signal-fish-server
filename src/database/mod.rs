@@ -405,6 +405,15 @@ pub trait GameDatabase: Send + Sync {
     /// Get room by game name and room code
     async fn get_room(&self, game_name: &str, room_code: &str) -> Result<Option<Room>>;
 
+    /// Resolve a published room without requiring an owned room snapshot.
+    /// Visibility and storage errors match [`Self::get_room`].
+    async fn get_room_id(&self, game_name: &str, room_code: &str) -> Result<Option<RoomId>> {
+        Ok(self
+            .get_room(game_name, room_code)
+            .await?
+            .map(|room| room.id))
+    }
+
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
 
@@ -1531,6 +1540,8 @@ impl InMemoryDatabase {
 
     #[cfg(test)]
     pub(crate) fn release_authority_request_commit_for_test(&self) {
+        self.pause_authority_request_after_commit
+            .store(false, std::sync::atomic::Ordering::Release);
         self.release_authority_request_commit.notify_one();
     }
 
@@ -2050,6 +2061,18 @@ impl GameDatabase for InMemoryDatabase {
         Ok(None)
     }
 
+    /// Resolve the code under the same publication and membership locks as a full lookup.
+    async fn get_room_id(&self, game_name: &str, room_code: &str) -> Result<Option<RoomId>> {
+        let rooms = self.rooms.read().await;
+        let room_codes = self.room_codes.read().await;
+        let publication = self.room_publication.read().await;
+        let key = (game_name.to_string(), room_code.to_string());
+        Ok(room_codes
+            .get(&key)
+            .copied()
+            .filter(|room_id| rooms.contains_key(room_id) && !publication.contains_key(room_id)))
+    }
+
     /// Read a complete snapshot, including rooms pending publication.
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>> {
         #[cfg(test)]
@@ -2239,6 +2262,12 @@ impl GameDatabase for InMemoryDatabase {
         let changed = room.set_authority_with_change(authority_player);
         if changed == Some(true) {
             liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        }
+        #[cfg(test)]
+        {
+            drop(liveness);
+            drop(rooms);
+            self.pause_after_authority_request_commit_for_test().await;
         }
         Ok(changed.is_some())
     }
