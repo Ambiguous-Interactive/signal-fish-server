@@ -51,6 +51,14 @@ pub struct RoomCleanupOutcome {
     pub inactive_rooms_cleaned: usize,
 }
 
+/// Room counts and occupancy percentiles for one dashboard sample.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomMetricsSnapshot {
+    pub rooms_by_game: HashMap<String, usize>,
+    pub player_percentiles: HashMap<String, f64>,
+    pub game_percentiles: HashMap<String, HashMap<String, f64>>,
+}
+
 /// One room member and the authority identity from the same storage snapshot.
 #[derive(Debug, Clone)]
 pub struct RoomPlayerSnapshot {
@@ -678,6 +686,17 @@ pub trait GameDatabase: Send + Sync {
     /// Get player count statistics by game for metrics
     async fn get_game_player_percentiles(&self) -> Result<HashMap<String, HashMap<String, f64>>>;
 
+    /// Collect dashboard fields. Backends should override this method to read
+    /// all fields from one storage snapshot; the compatibility default uses
+    /// separate queries and can observe concurrent membership changes.
+    async fn get_room_metrics_snapshot(&self) -> Result<RoomMetricsSnapshot> {
+        Ok(RoomMetricsSnapshot {
+            rooms_by_game: self.get_rooms_by_game().await?,
+            player_percentiles: self.get_player_count_percentiles().await?,
+            game_percentiles: self.get_game_player_percentiles().await?,
+        })
+    }
+
     /// Transition a non-empty waiting room into its lobby state.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()>;
 
@@ -986,6 +1005,10 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    pause_room_metrics: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    release_room_metrics: tokio::sync::Notify,
+    #[cfg(test)]
     get_room_by_id_reached: tokio::sync::Notify,
     #[cfg(test)]
     release_get_room_by_id: tokio::sync::Notify,
@@ -1078,6 +1101,35 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    /// Isolate metrics collection from room-operation pause and observation controls.
+    #[cfg(test)]
+    async fn before_room_metrics_for_test(&self) -> Result<()> {
+        if self
+            .pause_room_metrics
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.release_room_metrics.notified().await;
+        }
+        if self
+            .fail_get_room_by_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room metrics read failure for test");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_room_metrics_for_test(&self) {
+        self.pause_room_metrics
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_room_metrics_for_test(&self) {
+        self.release_room_metrics.notify_one();
+    }
+
     /// Apply the shared room-read failure and pause controls.
     #[cfg(test)]
     async fn before_room_read_for_test(&self) -> Result<()> {
@@ -1167,6 +1219,10 @@ impl InMemoryDatabase {
             get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             pause_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            pause_room_metrics: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            release_room_metrics: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_by_id_reached: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -2812,6 +2868,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(())
     }
 
+    /// Count each stored room once under its game name.
     async fn get_rooms_by_game(&self) -> Result<HashMap<String, usize>> {
         let rooms = self.rooms.read().await;
         let mut game_counts: HashMap<String, usize> = HashMap::new();
@@ -2824,6 +2881,9 @@ impl GameDatabase for InMemoryDatabase {
             }
         }
 
+        drop(rooms);
+        #[cfg(test)]
+        self.before_room_metrics_for_test().await?;
         Ok(game_counts)
     }
 
@@ -2858,6 +2918,39 @@ impl GameDatabase for InMemoryDatabase {
             .into_iter()
             .map(|(game, counts)| (game, counts.percentiles()))
             .collect())
+    }
+
+    /// Collect one internally consistent dashboard sample in one room-table pass.
+    async fn get_room_metrics_snapshot(&self) -> Result<RoomMetricsSnapshot> {
+        #[cfg(test)]
+        self.before_room_metrics_for_test().await?;
+        let (overall, by_game) = {
+            let rooms = self.rooms.read().await;
+            let mut overall = PlayerCountDistribution::default();
+            let mut by_game: HashMap<String, PlayerCountDistribution> = HashMap::new();
+            for room in rooms.values() {
+                overall.record(room.players.len());
+                if let Some(distribution) = by_game.get_mut(room.game_name.as_str()) {
+                    distribution.record(room.players.len());
+                } else {
+                    let mut distribution = PlayerCountDistribution::default();
+                    distribution.record(room.players.len());
+                    by_game.insert(room.game_name.clone(), distribution);
+                }
+            }
+            (overall, by_game)
+        };
+        let mut rooms_by_game = HashMap::with_capacity(by_game.len());
+        let mut game_percentiles = HashMap::with_capacity(by_game.len());
+        for (game, distribution) in by_game {
+            rooms_by_game.insert(game.clone(), distribution.rooms);
+            game_percentiles.insert(game, distribution.percentiles());
+        }
+        Ok(RoomMetricsSnapshot {
+            rooms_by_game,
+            player_percentiles: overall.percentiles(),
+            game_percentiles,
+        })
     }
 
     /// Enter an occupied waiting room into its lobby and renew both clocks once.
@@ -3220,6 +3313,156 @@ mod tests {
     use crate::protocol::ErrorCode;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    /// Background metrics must not consume pauses or observations for room operations.
+    #[tokio::test]
+    async fn metrics_collection_does_not_consume_room_operation_read_controls() {
+        let database = InMemoryDatabase::new();
+        database.reset_get_room_by_id_calls_for_test();
+        database.pause_next_get_room_by_id_for_test();
+        let mut metrics = Box::pin(database.get_room_metrics_snapshot());
+        assert!(futures_util::poll!(&mut metrics).is_ready());
+        assert_eq!(database.get_room_by_id_calls_for_test(), 0);
+        let room = RoomId::from_u128(1);
+        let mut read = Box::pin(database.get_room_lobby_state(&room));
+        assert!(futures_util::poll!(&mut read).is_pending());
+        database.release_paused_get_room_by_id_for_test();
+        assert_eq!(read.await.unwrap(), None);
+        assert_eq!(database.get_room_by_id_calls_for_test(), 1);
+    }
+
+    /// Keep one sample coherent when deletion interrupts its collection.
+    #[tokio::test]
+    async fn dashboard_sample_stays_consistent_when_a_room_disappears_during_collection() {
+        let database = InMemoryDatabase::new();
+        let room = database
+            .create_room(
+                "sample-game".into(),
+                Some("SAMPLE".into()),
+                4,
+                true,
+                PlayerId::from_u128(1),
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        database.pause_next_room_metrics_for_test();
+        let mut collection = Box::pin(database.get_room_metrics_snapshot());
+        assert!(futures_util::poll!(&mut collection).is_pending());
+        database.delete_room(&room.id).await.unwrap();
+        database.release_paused_room_metrics_for_test();
+        let snapshot = collection.await.unwrap();
+        assert_eq!(
+            snapshot.rooms_by_game.is_empty(),
+            snapshot.player_percentiles.is_empty()
+        );
+        assert_eq!(
+            snapshot.rooms_by_game.is_empty(),
+            snapshot.game_percentiles.is_empty()
+        );
+        assert!(snapshot.rooms_by_game.is_empty());
+    }
+
+    /// Preserve historical metrics for empty, pending and mixed-occupancy rooms.
+    #[tokio::test]
+    async fn dashboard_sample_preserves_empty_pending_and_mixed_occupancy_statistics() {
+        let database = InMemoryDatabase::new();
+        let empty = database.get_room_metrics_snapshot().await.unwrap();
+        assert!(empty.rooms_by_game.is_empty());
+        assert!(empty.player_percentiles.is_empty());
+        assert!(empty.game_percentiles.is_empty());
+        for (index, occupancy) in [0, 1, 4, 16].into_iter().enumerate() {
+            let room = database
+                .create_pending_room_classified(
+                    format!("game-{}", index % 2),
+                    None,
+                    32,
+                    true,
+                    PlayerId::from_u128(1),
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let mut rooms = database.rooms.write().await;
+            let stored = rooms.get_mut(&room.id).unwrap();
+            let template = stored.players.values().next().unwrap().clone();
+            stored.players.clear();
+            for player in 0..occupancy {
+                let mut member = template.clone();
+                member.id = PlayerId::from_u128(player + 1);
+                stored.players.insert(member.id, member);
+            }
+        }
+        let sample = database.get_room_metrics_snapshot().await.unwrap();
+        assert_eq!(
+            sample.rooms_by_game,
+            database.get_rooms_by_game().await.unwrap()
+        );
+        assert_eq!(
+            sample.player_percentiles,
+            database.get_player_count_percentiles().await.unwrap()
+        );
+        assert_eq!(
+            sample.game_percentiles,
+            database.get_game_player_percentiles().await.unwrap()
+        );
+        assert_eq!(sample.rooms_by_game.values().sum::<usize>(), 4);
+        assert_eq!(sample.player_percentiles["p50"], 4.0);
+        assert_eq!(sample.game_percentiles["game-0"]["p50"], 4.0);
+        assert_eq!(sample.game_percentiles["game-1"]["p100"], 16.0);
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(database.get_room_metrics_snapshot().await.is_err());
+    }
+
+    /// Compare equal dashboard results through combined and separate storage reads.
+    #[tokio::test]
+    #[ignore = "isolated dashboard storage collection profile"]
+    async fn dashboard_storage_collection_profile() {
+        let database = InMemoryDatabase::new();
+        {
+            let mut rooms = database.rooms.write().await;
+            for index in 0..20_000 {
+                let room = Room::new(
+                    format!("game-{}", index % 16),
+                    format!("{index}"),
+                    16,
+                    true,
+                    "relay".into(),
+                );
+                rooms.insert(room.id, room);
+            }
+        }
+        let expected = database.get_room_metrics_snapshot().await.unwrap();
+        for attempt in 0..4 {
+            for combined in [attempt % 2 == 0, attempt % 2 != 0] {
+                let started = tokio::time::Instant::now();
+                for _ in 0..20 {
+                    let result = if combined {
+                        database.get_room_metrics_snapshot().await.unwrap()
+                    } else {
+                        RoomMetricsSnapshot {
+                            rooms_by_game: database.get_rooms_by_game().await.unwrap(),
+                            player_percentiles: database
+                                .get_player_count_percentiles()
+                                .await
+                                .unwrap(),
+                            game_percentiles: database.get_game_player_percentiles().await.unwrap(),
+                        }
+                    };
+                    assert_eq!(result, expected);
+                    std::hint::black_box(result);
+                }
+                println!("DASHBOARD_COLLECTION attempt={attempt} combined={combined} rooms=20000 samples=20 elapsed_us={}", started.elapsed().as_micros());
+            }
+        }
+    }
 
     /// Project every lifecycle state and retain snapshot failure and pending-row semantics.
     #[tokio::test]

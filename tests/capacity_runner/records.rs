@@ -50,6 +50,11 @@ impl ReceiptName {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    /// Borrow the owned string for historical snapshot key views.
+    pub(super) fn owned_string(&self) -> &String {
+        &self.0
+    }
 }
 
 impl From<String> for ReceiptName {
@@ -102,13 +107,14 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
     }
 }
 
-/// Replay-only send, receipt, and gap names. Live tasks clone their peer and registry names
-/// directly, without a pool lookup or duplicate-string cleanup in the log.
+/// Exact names shared by replay rows and retained live churn snapshots.
+/// Live sends and receipts clone peer names directly without a pool lookup.
 #[derive(Default)]
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
 
 impl ReceiptNames {
-    fn intern(&mut self, name: &str) -> ReceiptName {
+    /// Reuse one owned name for each exact spelling within this pool.
+    pub(super) fn intern(&mut self, name: &str) -> ReceiptName {
         if let Some(shared) = self.0.get(name) {
             return shared.clone();
         }
@@ -479,6 +485,7 @@ pub struct EventLog {
 
 #[derive(Default)]
 struct EventState {
+    snapshot_names: ReceiptNames,
     receipt_timings: Option<ReceiptTimingSnapshot>,
     budget: Option<RecordBudget>,
     sent: Vec<SentEvent>,
@@ -878,10 +885,22 @@ impl EventLog {
         });
     }
 
+    /// Retain exact churn evidence while sharing immutable snapshot member names.
     pub fn push_churn(&self, event: ChurnEvent) {
         let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
         let mut state = self.state.lock().expect("event log poisoned");
-        self.retain_event(&mut state, "churn", bytes, event, |state| &mut state.churn);
+        if self.retain_event(&mut state, "churn", bytes, event, |state| &mut state.churn) {
+            let EventState {
+                churn,
+                snapshot_names,
+                ..
+            } = &mut *state;
+            churn
+                .last_mut()
+                .expect("retained churn event")
+                .tails
+                .share_member_names(snapshot_names);
+        }
     }
 
     pub fn push_join_failure(&self, failure: String) {
@@ -992,6 +1011,7 @@ impl EventLog {
                     });
             }
         }
+        state.snapshot_names = ReceiptNames::default();
         drop(state);
         release_unused_capacity(&mut records.sent);
         release_unused_capacity(&mut records.receipts);

@@ -6804,3 +6804,29 @@ the repaired control refuses before either side effect.
 Whole-generator memory qualification and the largest ten-minute workload remain
 open under #775. This change adds an explicit admission bound for the largest
 planned raw allocations; it does not complete those acceptance items.
+
+### Shared retained snapshot member names (#775, session 602)
+
+Live and replayed churn snapshots now share exact member-name strings within
+the run. Each sorted snapshot entry retains one shared-name pointer instead
+of an owned String. Player identities and full sequence tails remain owned
+per snapshot. Unknown, escaped and Unicode member names remain exact. The
+live pool is released when records move out of the event log. Snapshot edits
+cannot change another snapshot's tail or membership.
+
+A fresh-process profile retains 15,984 snapshots of 16 members each (255,744
+rows). Retained process RSS falls from 39,190,528 to 30,547,968 bytes. Both
+sources write exactly 19,188,418 JSON bytes with SHA-256
+`f7bd1e17bfa129ef0af1d62332bd67f1f60bacb67e7bedae466dd38d815f2c97`.
+The older tree-map control remains available in the same profile. Sharing adds
+construction work: this local sample rises from 83,256 to 343,678 microseconds.
+This trades setup and replay work for retained memory; it does not claim a
+speed improvement. Logs retain each attempt and source identity locally under
+`progress/session-602/`.
+
+Thirty-two selected all-feature capacity controls preserve snapshot identity
+resolution, invalid evidence, churn ordering, budget invalidation and exact
+replay. The new control checks shared-name ownership after event-log transfer
+and artifact replay, plus independent tail mutation. The artifact schema and
+all delivery checks stay unchanged. Whole-generator peak memory and the
+planned ten-minute cell remain unqualified. Issue #775 stays open.

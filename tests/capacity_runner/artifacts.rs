@@ -842,6 +842,7 @@ fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, ser
     direct().or_else(|_: serde_json::Error| serde_json::from_slice(line))
 }
 
+/// Append decoded evidence in file order and share its exact names within the replay.
 fn append_delivery_event(
     records: &mut RunRecords,
     names: &mut crate::records::ReceiptNames,
@@ -853,7 +854,10 @@ fn append_delivery_event(
         DeliveryEvent::Gap(event) => records.gaps.push(names.share_gap(event)),
         DeliveryEvent::UnsupportedNotice(event) => records.unsupported_notices.push(event),
         DeliveryEvent::Disconnect(event) => records.disconnects.push(event),
-        DeliveryEvent::Churn(event) => records.churn.push(event),
+        DeliveryEvent::Churn(mut event) => {
+            event.tails.share_member_names(names);
+            records.churn.push(event);
+        }
         DeliveryEvent::JoinFailure { detail } => records.join_failures.push(detail),
         DeliveryEvent::Fault(event) => records.faults.push(event),
         DeliveryEvent::Registry { senders } => records.registry = senders,
