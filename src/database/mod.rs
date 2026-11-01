@@ -923,6 +923,10 @@ struct CleanupEventEntry {
 /// Simple in-memory database for testing and single-instance deployments
 pub struct InMemoryDatabase {
     rooms: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, Room>>>,
+    #[cfg(test)]
+    fail_update_player_last_seen_once: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_update_room_activity_once: std::sync::atomic::AtomicBool,
     /// Per-session lifecycle records (issues #708, #763): every create,
     /// join, leave, and close path below funnels through this registry.
     session_records: std::sync::Arc<crate::session_records::SessionRecords>,
@@ -1098,9 +1102,32 @@ impl InMemoryDatabase {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_player_heartbeat_for_test(&self) {
+        self.fail_update_player_last_seen_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_room_heartbeat_for_test(&self) {
+        self.fail_update_room_activity_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_room_writes_for_test(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, HashMap<RoomId, Room>> {
+        self.rooms.read().await
+    }
+
     pub fn new() -> Self {
         Self {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            fail_update_player_last_seen_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_update_room_activity_once: std::sync::atomic::AtomicBool::new(false),
             session_records: std::sync::Arc::new(crate::session_records::SessionRecords::new()),
             room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_publication: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -2548,6 +2575,13 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn update_room_activity(&self, room_id: &RoomId) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_update_room_activity_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            anyhow::bail!("injected heartbeat persistence failure for test");
+        }
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
@@ -2767,6 +2801,13 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn update_player_last_seen(&self, _player_id: &PlayerId) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_update_player_last_seen_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            anyhow::bail!("injected heartbeat persistence failure for test");
+        }
         // In-memory DB has no per-player last_seen tracking; no-op
         Ok(())
     }

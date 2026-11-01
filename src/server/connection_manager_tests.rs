@@ -1458,7 +1458,96 @@ async fn default_ip_cap_admits_a_sixteen_player_nat() {
     );
 }
 
-/// The heartbeat-update throttle (`should_update_last_seen`) is deterministic
+#[tokio::test(start_paused = true)]
+async fn heartbeat_reservation_failure_preserves_newer_success_and_connection_identity() {
+    let manager = make_manager(4);
+    let player = Uuid::new_v4();
+    let (sender, _receiver) = channel();
+    manager
+        .connect_test_client(player, sender, "127.0.0.1:7103".parse().unwrap())
+        .await;
+    for threshold in [
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(30),
+    ] {
+        let failed = manager
+            .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+            .unwrap();
+        tokio::time::advance(threshold).await;
+        let newer = manager
+            .reserve_last_seen_update(&player, threshold)
+            .unwrap();
+        newer.complete();
+        drop(failed);
+        assert!(manager
+            .reserve_last_seen_update(&player, std::time::Duration::from_secs(30))
+            .is_none());
+    }
+    let failed = manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap();
+    let (sender, _receiver) = channel();
+    manager
+        .connect_test_client(player, sender, "127.0.0.1:7103".parse().unwrap())
+        .await;
+    manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap()
+        .complete();
+    drop(failed);
+    assert!(manager
+        .reserve_last_seen_update(&player, std::time::Duration::from_secs(30))
+        .is_none());
+    let failed = manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap();
+    drop(failed);
+    assert!(manager
+        .reserve_last_seen_update(&player, std::time::Duration::from_secs(30))
+        .is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn heartbeat_reservation_does_not_reuse_revisions_after_reconnect_rollback() {
+    let manager = make_manager(4);
+    let player = Uuid::new_v4();
+    let (sender, _receiver) = channel();
+    manager
+        .connect_test_client(player, sender, "127.0.0.1:7104".parse().unwrap())
+        .await;
+    let interrupted = manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap();
+    let restored = Uuid::new_v4();
+    assert!(matches!(
+        manager.reassign_connection(&player, &restored, Uuid::new_v4(), 2),
+        ReassignmentOutcome::Reassigned(_)
+    ));
+    assert!(manager
+        .restore_reassigned_connection(&player, &restored)
+        .is_some());
+    manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap()
+        .complete();
+    drop(interrupted);
+    assert!(manager.reserve_last_seen_update(&player, std::time::Duration::from_secs(30)).is_none(),
+        "an old refresh must not clear a completed refresh after the same socket returns to its original identity");
+}
+
+fn complete_last_seen_update(
+    manager: &ConnectionManager,
+    player_id: &PlayerId,
+    threshold: std::time::Duration,
+) -> bool {
+    let Some(reservation) = manager.reserve_last_seen_update(player_id, threshold) else {
+        return false;
+    };
+    reservation.complete();
+    true
+}
+
+/// The heartbeat-update throttle (`reserve_last_seen_update`) is deterministic
 /// under the paused-clock runtime: the first observation always updates, then
 /// updates are suppressed until the threshold has *elapsed* on the runtime
 /// clock. Driven purely by `tokio::time::advance(..)` — no wall-clock sleep,
@@ -1478,19 +1567,19 @@ async fn should_update_last_seen_throttles_until_threshold_elapses() {
 
     // First observation always updates (no prior timestamp recorded).
     assert!(
-        manager.should_update_last_seen(&player_id, threshold),
+        complete_last_seen_update(&manager, &player_id, threshold),
         "first observation must update"
     );
     // Immediately after, the throttle suppresses another update.
     assert!(
-        !manager.should_update_last_seen(&player_id, threshold),
+        !complete_last_seen_update(&manager, &player_id, threshold),
         "an update within the throttle window must be suppressed"
     );
 
     // Just below the threshold: still suppressed (the boundary is `>=`).
     tokio::time::advance(threshold - std::time::Duration::from_millis(1)).await;
     assert!(
-        !manager.should_update_last_seen(&player_id, threshold),
+        !complete_last_seen_update(&manager, &player_id, threshold),
         "an update just under the threshold must stay suppressed"
     );
 
@@ -1498,11 +1587,11 @@ async fn should_update_last_seen_throttles_until_threshold_elapses() {
     // from the new baseline.
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     assert!(
-        manager.should_update_last_seen(&player_id, threshold),
+        complete_last_seen_update(&manager, &player_id, threshold),
         "an update at/after the threshold must fire"
     );
     assert!(
-        !manager.should_update_last_seen(&player_id, threshold),
+        !complete_last_seen_update(&manager, &player_id, threshold),
         "the update after the release is throttled from the new baseline"
     );
 }
@@ -1518,7 +1607,7 @@ async fn should_update_last_seen_suppresses_unknown_player() {
     let manager = make_manager(4);
     let unknown = Uuid::new_v4();
     assert!(
-        !manager.should_update_last_seen(&unknown, std::time::Duration::from_secs(30)),
+        !complete_last_seen_update(&manager, &unknown, std::time::Duration::from_secs(30)),
         "unknown player must be suppressed, not allowed"
     );
 
@@ -1531,7 +1620,7 @@ async fn should_update_last_seen_suppresses_unknown_player() {
         .await
         .expect("registration succeeds");
     assert!(
-        manager.should_update_last_seen(&late_id, std::time::Duration::from_secs(30)),
+        complete_last_seen_update(&manager, &late_id, std::time::Duration::from_secs(30)),
         "freshly registered player keeps the first-update release"
     );
 }

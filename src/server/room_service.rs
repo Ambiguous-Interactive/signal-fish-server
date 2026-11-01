@@ -2094,7 +2094,7 @@ impl EnhancedGameServer {
         let mut room_event_guard = None;
 
         // Try to join existing room or create new one
-        let result = match self.database.get_room(game_name, room_code).await {
+        let result = match self.database.get_room_id(game_name, room_code).await {
             Ok(Some(_)) if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) => {
                 Err(JoinRoomError::RoomCodeCollision)
             }
@@ -2105,7 +2105,7 @@ impl EnhancedGameServer {
                 // room from an invisible one.
                 Err(JoinRoomError::RoomNotFound)
             }
-            Ok(Some(room_lane)) => {
+            Ok(Some(room_id)) => {
                 // Admission, routing publication, the directed RoomJoined
                 // baseline, and PlayerJoined enqueue share one room mutation
                 // transaction. Returning this owned guard to the handler keeps
@@ -2113,13 +2113,13 @@ impl EnhancedGameServer {
                 // member before its route and lifecycle event are published.
                 room_event_guard = Some(
                     self.message_coordinator
-                        .lock_room_event_mutation(&room_lane.id)
+                        .lock_room_event_mutation(&room_id)
                         .await,
                 );
                 // The code lookup identifies only the mutation lane. Refresh
                 // persistence after entering it so ownership, capacity, and
                 // name checks never authorize from a stale pre-lock snapshot.
-                let mut room = match self.database.get_room_by_id(&room_lane.id).await {
+                let mut room = match self.database.get_room_by_id(&room_id).await {
                     Ok(Some(room)) => room,
                     Ok(None) => {
                         self.release_renewed_lock(&mut lock_renewal).await;

@@ -59,7 +59,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123 |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
-| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36 |
+| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36; interrupted heartbeat retry in F224 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
@@ -12850,3 +12850,93 @@ ordered event. It adds no message, field, error, default or migration need.
 The projections preserve wire values. The new storage method has a default
 for existing backend implementations. The capacity change is internal.
 No client tracking issue is required.
+
+### F224 — Interrupted heartbeat refresh consumes its retry window (#1344)
+
+At main `d964d88d`, the heartbeat path records its throttle timestamp before
+awaiting player persistence and room activity. Canceling the refresh while
+it waits for the in-memory room write leaves the old room timestamp intact.
+The next message then skips persistence for the full throttle window. A room
+near its expiry boundary can lose the refresh needed to remain present.
+A storage error has the same throttle effect for asynchronous adapters.
+No production network incident is established.
+
+The deterministic control holds a room read guard, polls the refresh until
+its room write waits, drops that future, releases the guard and tries again.
+The original source fails because the next message leaves room activity
+unchanged in Nextest `1d34abe9`. The repair reserves the throttle window and
+completes it only after both writes succeed. Dropping an unfinished reservation
+permits an immediate retry. A per-connection revision and physical lifecycle
+identity keep an old reservation from clearing a newer refresh or replacement
+connection. Reconnection and rollback carry the revision forward.
+A temporary control that resets that revision fails the same-socket reconnect
+rollback test in Nextest `e5fb2d1d`. Restored source passes the control.
+
+Controls cover initial and previously completed refreshes, both persistence
+errors, exact throttle boundaries, unknown players, the disabled throttle,
+newer successful refreshes and replacement identity. After retry, expired-room
+cleanup retains the room. The reservation adds no heap allocation. It adds one
+`u64` revision field per connection. Existing refresh metrics continue to count
+attempts, including failed and canceled attempts. This repairs retry eligibility;
+it does not complete the broader liveness or production correctness audit.
+
+#### Player admission allocation (#636)
+
+The seated admission code now resolves its room lane with the existing
+`GameDatabase::get_room_id` projection. It still reads fresh room state after
+entering the lane. The default adapter fallback remains available. Creation,
+join-only refusal, room-code locking and admission checks keep their contracts.
+The new complete-admission allocation control checks both player identities,
+the exact spectator baseline and the incumbent's `PlayerJoined` event.
+Stored spectators are not live routes, so this measures baseline construction.
+
+| Stored spectators | Previous allocations / bytes | New allocations / bytes |
+| --- | --- | --- |
+| 0 | 114 / 25,794 | 107 / 24,150 |
+| 16 | 199 / 36,656 | 175 / 32,550 |
+| 255 | 1,394 / 200,535 | 1,131 / 159,322 |
+
+The four-copies-per-spectator bound fails on the original lookup and passes
+with the projection. These are cumulative allocator measurements, not peak
+memory, latency or throughput results. #636 remains open.
+Hosted CI caught an unchecked setup-message drain in the new allocation fixture.
+The fixture now checks the creation baseline, lobby event and empty queue before
+measurement. Its allocated-byte and allocation totals stay unchanged.
+
+#### Rejoin-only room view index (#775)
+
+Room epoch views ignore disconnect rows. Their index now retains only rejoin
+positions. Rooms with disconnects but no rejoins share their unchanged initial
+view. The raw churn ledger, lifecycle ordering and disconnect validation still
+consume every recorded row. Both offset widths match independent stable
+per-viewer sorts, including unknown recipients, Unicode, empty input and ties.
+
+A fresh-process profile at 767,232 raw rows retains 511,488 positions instead
+of 767,232. Index storage falls from 3,068,928 to 2,045,952 bytes. Both sources
+produce rejoin-order checksum `7286540773032410126`. The paired observations
+take 1,142,715 and 976,101 microseconds. One pair does not establish a speed gain.
+
+A separate temporary source comparison keeps 72 complete summary lengths and
+SHA-256 digests identical. It covers reliable, latest and volatile delivery;
+forward and reversed raw order; valid churn; missing and duplicate disconnects
+or rejoins; tied times; unknown recipients and snapshot identities; missing
+and duplicate receipts; wrong receipt epochs; and disconnect-only records.
+The temporary probes are removed before publication. The durable index and
+view controls remain. Whole-generator peak memory and the planned ten-minute
+cell remain unqualified; #775 stays open.
+
+Final local validation passes all 19 scoped all-feature lifecycle controls,
+46 capacity/replay controls, the complete player allocation control and strict
+all-target/all-feature Clippy. Hosted qualification remains required.
+
+#### External-client assessment
+
+Rust main `da8f2d16` queues the existing `ClientOperation::Ping` in
+`src/polling_client.rs`. .NET main `e467c871` uses the existing
+`EnvelopeWriter.WritePing` in `Polling/SignalFishPollingClient.cs`. Godot main
+`c58b1631` sends the existing ping envelope in
+`addons/signal_fish/signal_fish_client.gd`. All three are unaffected: the repair
+changes server persistence retry state only. It preserves heartbeat cadence,
+Ping/Pong payloads, error codes and room events. The admission projection
+preserves baseline values. The oracle change is internal. No client migration
+or tracking issue is required.

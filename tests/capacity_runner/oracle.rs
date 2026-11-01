@@ -1651,20 +1651,23 @@ fn disconnect_positions(events: &[ChurnEvent], compact: bool) -> ChurnPositions 
     positions
 }
 
-fn room_churn_events(
+fn room_rejoin_events(
     events: &[ChurnEvent],
     room_of: &BTreeMap<&str, u32>,
 ) -> BTreeMap<u32, ChurnPositions> {
-    index_room_churn_events(events, room_of, u32::try_from(events.len()).is_ok())
+    index_room_rejoin_events(events, room_of, u32::try_from(events.len()).is_ok())
 }
 
-fn index_room_churn_events(
+fn index_room_rejoin_events(
     events: &[ChurnEvent],
     room_of: &BTreeMap<&str, u32>,
     compact: bool,
 ) -> BTreeMap<u32, ChurnPositions> {
     let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
-    for event in events {
+    for event in events
+        .iter()
+        .filter(|event| event.phase == ChurnPhase::Rejoined)
+    {
         if let Some(room) = room_of.get(event.recipient.as_str()) {
             *counts.entry(*room).or_default() += 1;
         }
@@ -1673,7 +1676,11 @@ fn index_room_churn_events(
         .into_iter()
         .map(|(room, count)| (room, ChurnPositions::with_capacity(compact, count)))
         .collect();
-    for (position, event) in events.iter().enumerate() {
+    for (position, event) in events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.phase == ChurnPhase::Rejoined)
+    {
         if let Some(positions) = room_of
             .get(event.recipient.as_str())
             .and_then(|room| rooms.get_mut(room))
@@ -1761,10 +1768,10 @@ fn churn_views<'a>(
                 })
         };
     let members_by_room = &roster.members_of_room;
-    let events_by_room = room_churn_events(&records.churn, room_of);
+    let events_by_room = room_rejoin_events(&records.churn, room_of);
     // Ordinary rooms have the same immutable initial view at every seat.
     // Keep one per room, rather than one tree of names and epochs per peer.
-    // A room with any recorded churn retains the full viewer-specific path.
+    // A room with a recorded rejoin retains the full viewer-specific path.
     let mut initial_views: BTreeMap<u32, Arc<ChurnView<'a>>> = BTreeMap::new();
     let mut views: BTreeMap<&'a str, Arc<ChurnView<'a>>> = BTreeMap::new();
     let mut unresolved: Vec<String> = Vec::new();
@@ -4382,7 +4389,7 @@ mod coverage_tests {
         let started = std::time::Instant::now();
         let checksum = |events: &mut dyn Iterator<Item = &ChurnEvent>| {
             let mut hash = 0_u64;
-            for event in events {
+            for event in events.filter(|event| event.phase == ChurnPhase::Rejoined) {
                 let position = (std::ptr::from_ref(event).addr() - records.churn.as_ptr().addr())
                     / std::mem::size_of::<ChurnEvent>();
                 hash = hash.wrapping_mul(31).wrapping_add(count_u64(position));
@@ -4421,7 +4428,7 @@ mod coverage_tests {
             std::hint::black_box(&rooms);
             (count, bytes, digest)
         } else {
-            let rooms = room_churn_events(&records.churn, &room_of);
+            let rooms = room_rejoin_events(&records.churn, &room_of);
             let digest = checksum(&mut viewer_churn_events(
                 &records.churn,
                 &rooms[&0],
@@ -4435,8 +4442,20 @@ mod coverage_tests {
             std::hint::black_box(&rooms);
             (count, bytes, digest)
         };
-        assert_eq!(count, records.churn.len());
-        println!("ROOM_CHURN_INDEX stable={stable} rows={count} retained_bytes={bytes} checksum={digest} elapsed_us={}", started.elapsed().as_micros());
+        let rejoined = records
+            .churn
+            .iter()
+            .filter(|event| event.phase == ChurnPhase::Rejoined)
+            .count();
+        assert_eq!(
+            count,
+            if stable {
+                records.churn.len()
+            } else {
+                rejoined
+            }
+        );
+        println!("ROOM_CHURN_INDEX stable={stable} raw_rows={} rows={count} retained_bytes={bytes} checksum={digest} elapsed_us={}", records.churn.len(), started.elapsed().as_micros());
         std::hint::black_box(&records);
     }
 
@@ -4474,9 +4493,9 @@ mod coverage_tests {
                 .collect();
             for compact in [true, false] {
                 let rooms = if compact {
-                    room_churn_events(&events, &room_of)
+                    room_rejoin_events(&events, &room_of)
                 } else {
-                    index_room_churn_events(&events, &room_of, false)
+                    index_room_rejoin_events(&events, &room_of, false)
                 };
                 assert!(rooms
                     .values()
@@ -4485,7 +4504,8 @@ mod coverage_tests {
                     rooms.values().map(ChurnPositions::len).sum::<usize>(),
                     events
                         .iter()
-                        .filter(|event| room_of.contains_key(event.recipient.as_str()))
+                        .filter(|event| event.phase == ChurnPhase::Rejoined
+                            && room_of.contains_key(event.recipient.as_str()))
                         .count()
                 );
                 let width = if compact {
@@ -4503,7 +4523,10 @@ mod coverage_tests {
                 for (viewer, room) in &room_of {
                     let mut expected: Vec<_> = events
                         .iter()
-                        .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
+                        .filter(|event| {
+                            event.phase == ChurnPhase::Rejoined
+                                && room_of.get(event.recipient.as_str()) == Some(room)
+                        })
                         .collect();
                     expected.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
                     let empty = ChurnPositions::with_capacity(true, 0);
@@ -4540,8 +4563,7 @@ mod coverage_tests {
         assert!(Arc::ptr_eq(&initial["other"], &initial["last"]));
         assert!(!Arc::ptr_eq(&initial["alice"], &initial["other"]));
 
-        // Disconnects change no epoch or snapshot state. Force each room
-        // through the existing viewer-specific event path as an exact control.
+        // Disconnects leave epoch views unchanged and shared.
         for recipient in ["alice", "other"] {
             records.churn.push(crate::records::ChurnEvent {
                 recipient: recipient.to_string(),
@@ -4554,8 +4576,8 @@ mod coverage_tests {
         let (unshared, unresolved) = churn_views(&records, &RosterIndex::new(&roster), &blocks);
         assert!(unresolved.is_empty());
         assert_eq!(initial, unshared);
-        assert!(!Arc::ptr_eq(&unshared["alice"], &unshared["βob"]));
-        assert!(!Arc::ptr_eq(&unshared["other"], &unshared["last"]));
+        assert!(Arc::ptr_eq(&unshared["alice"], &unshared["βob"]));
+        assert!(Arc::ptr_eq(&unshared["other"], &unshared["last"]));
 
         records.churn.truncate(1);
         records
