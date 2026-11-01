@@ -31,4 +31,16 @@ $lines = @(Invoke-WslText -Executable $python -ArgumentList @('-c', $code))
 if ($lines.Count -ne 2 -or $lines[0] -cne 'Ubuntu-魚🐟' -or $lines[1] -cne 'fixture error') {
     throw 'WSL raw stream capture changed stdout or stderr'
 }
+$failureHex = [Convert]::ToHexString([Text.Encoding]::Unicode.GetBytes('fixture failure: 魚'))
+$failureCode = "import sys; sys.stderr.buffer.write(bytes.fromhex('$failureHex')); sys.exit(7)"
+$rejected = $false
+try {
+    Invoke-WslText -Executable $python -ArgumentList @('-c', $failureCode) | Out-Null
+} catch {
+    if ($_.Exception.Message -notmatch 'exit code 7' -or $_.Exception.Message -notmatch 'fixture failure: 魚') {
+        throw
+    }
+    $rejected = $true
+}
+if (-not $rejected) { throw 'A failed WSL query must fail the collector' }
 Write-Output 'WSL byte decoding and raw stream capture passed.'

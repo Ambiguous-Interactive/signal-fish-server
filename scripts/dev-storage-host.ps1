@@ -40,6 +40,10 @@ function Invoke-WslText {
         [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($outTask, $errTask)).GetAwaiter().GetResult()
         $outputText = ConvertFrom-WslBytes -Bytes $stdout.ToArray()
         $errorText = ConvertFrom-WslBytes -Bytes $stderr.ToArray()
+        if ($process.ExitCode -ne 0) {
+            $diagnostic = ($errorText + "`n" + $outputText).Trim()
+            throw "WSL query failed with exit code $($process.ExitCode): $diagnostic"
+        }
         ($outputText + "`n" + $errorText) -split '\r?\n' | Where-Object { $_.Length -gt 0 }
     } finally {
         $process.Dispose()
