@@ -507,16 +507,20 @@ async fn untouched_snapshot_component_diagnostics() {
 
 /// Pin native lock initialization separately from readiness snapshot allocations.
 async fn native_readiness_lock_initialization_control() {
-    let lock = tokio::sync::RwLock::new(());
+    let coordinator = InMemoryRoomOperationCoordinator::new(
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDatabase::new()),
+        None,
+    );
     let cold = stats_alloc::Region::new(ALLOCATOR);
     tokio::task::unconstrained(async {
-        drop(lock.read().await);
+        assert!(coordinator.ready_player_room_ids().await.is_empty());
     })
     .await;
     let cold = cold.change();
     let warm = stats_alloc::Region::new(ALLOCATOR);
     tokio::task::unconstrained(async {
-        drop(lock.read().await);
+        assert!(coordinator.ready_player_room_ids().await.is_empty());
     })
     .await;
     let warm = warm.change();
