@@ -15,6 +15,8 @@ python3 scripts/dev-storage.py report --json --docker > /path/outside-scratch/st
 The report records allocated bytes, available filesystem bytes, mounts, target
 subdirectories, Docker references, builder policy, and collection errors.
 Docker queries have time limits. A timeout means unknown usage, not zero usage.
+Malformed Docker records remain attached to the affected query as collection
+errors. They do not discard the filesystem measurements or valid queries.
 For a large Docker store, retry with `report --json --docker --docker-timeout 180`.
 The detailed reference inventory uses batches of 64 containers.
 Do not sum shared filesystem totals, overlapping directories, or image sizes.
@@ -55,6 +57,9 @@ Cleanup requires matching project and run ownership markers. It preserves
 unknown entries, active leases, Git data, and nested mounts. It never follows
 symlinks to delete their targets. It removes only managed scratch; it does not
 clean legacy target trees, npm caches, agent history, or shared editor data.
+Removal opens each directory component without following links, validates the
+leased run through its open handle, and removes files relative to that handle.
+A replaced run entry cannot redirect deletion to another directory.
 
 Post-start runs cleanup with an eight-second timeout, before the agent-refresh
 opt-out. It warns and continues on failure. Set
@@ -200,7 +205,7 @@ of no more than 10%. Host reclamation, hosted image validation, and the seven-da
 observation require separate results. Do not mark them complete from local
 fixture tests.
 
-Local validation passed 30 Python tests, all 14 agent-tooling guards, the full
+Local validation passed 33 Python tests, all 14 agent-tooling guards, the full
 Clippy gate with all targets and features, formatting, tooling parity, document
 consistency, shellcheck, actionlint, and PowerShell syntax parsing. Removing the
 lifecycle cleanup invocation made the new guard fail; restoring it made it pass.

@@ -73,21 +73,54 @@ def regular_json(path):
         return json.load(stream)
 
 
-def remove_run(path):
+def remove_run(path, lease_fd, repository, validate):
     """Keep ownership and lease metadata until the large tree is gone.
 
     A lifecycle timeout during removal leaves a recognizable run to retry.
     """
     if not shutil.rmtree.avoids_symlink_attacks:
         raise ValueError("This platform cannot safely remove scratch trees")
-    work = path / "work"
-    if work.is_symlink():
-        work.unlink()
-    elif work.exists():
-        shutil.rmtree(work)
-    (path / "run.json").unlink()
-    (path / "lease").unlink()
-    path.rmdir()
+    # Open each component without following links. Keep the validated run
+    # anchored even if its directory entry changes during removal.
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors = []
+    try:
+        descriptors.append(os.open(repository, flags))
+        parts = path.relative_to(repository).parts
+        for component in parts[:-1]:
+            descriptors.append(os.open(component, flags, dir_fd=descriptors[-1]))
+        parent_fd = descriptors[-1]
+        run_fd = os.open(parts[-1], flags, dir_fd=parent_fd)
+        descriptors.append(run_fd)
+        identity = os.fstat(run_fd)
+        actual_lease = os.stat("lease", dir_fd=run_fd, follow_symlinks=False)
+        if not os.path.samestat(os.fstat(lease_fd), actual_lease):
+            raise ValueError("Run lease changed during removal")
+        validate(path, directory_fd=run_fd)
+
+        def verify_entry():
+            current = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            if not os.path.samestat(identity, current):
+                raise ValueError("Run directory changed during removal")
+
+        verify_entry()
+        try:
+            work = os.stat("work", dir_fd=run_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            work = None
+        if work is not None:
+            if stat.S_ISLNK(work.st_mode):
+                os.unlink("work", dir_fd=run_fd)
+            else:
+                shutil.rmtree("work", dir_fd=run_fd)
+        verify_entry()
+        os.unlink("run.json", dir_fd=run_fd)
+        os.unlink("lease", dir_fd=run_fd)
+        verify_entry()
+        os.rmdir(parts[-1], dir_fd=parent_fd)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def mounted_below(path):
@@ -128,17 +161,19 @@ class Manager:
         if marker != {"owner": OWNER, "repository": str(self.repository)}:
             raise ValueError(f"Scratch ownership mismatch: {self.base}")
 
-    def inspect_run(self, path):
-        if path.is_symlink() or not path.is_dir():
+    def inspect_run(self, path, directory_fd=None):
+        if directory_fd is None and (path.is_symlink() or not path.is_dir()):
             raise ValueError("Not a managed directory")
-        metadata = regular_json(path / "run.json")
+        root = path if directory_fd is None else Path(f"/proc/self/fd/{directory_fd}")
+        metadata = regular_json(root / "run.json")
         if (not isinstance(metadata, dict) or metadata.get("owner") != OWNER
                 or metadata.get("repository") != str(self.repository)
                 or metadata.get("state") not in {"running", "failed", "complete"}):
             raise ValueError("Run ownership or state mismatch")
-        if {entry.name for entry in path.iterdir()} - {"work", "run.json", "lease"}:
+        if {entry.name for entry in root.iterdir()} - {"work", "run.json", "lease"}:
             raise ValueError("Contains unclassified files")
-        if mounted_below(path):
+        actual_path = path if directory_fd is None else Path(os.readlink(root))
+        if mounted_below(actual_path):
             raise ValueError("Contains a mount")
         timestamp = metadata.get("completed")
         if timestamp is None:
@@ -147,14 +182,14 @@ class Manager:
                 or timestamp <= 0 or timestamp > time.time() + 60):
             raise ValueError("Invalid run timestamp")
         # Refuse source trees and nested mounts, even if someone moved one here.
-        for parent, directories, files in os.walk(path, followlinks=False):
+        for parent, directories, files in os.walk(root, followlinks=False):
             if ".git" in directories or ".git" in files:
                 raise ValueError("Contains Git data")
             for directory in directories:
                 child = Path(parent) / directory
                 if not child.is_symlink() and os.path.ismount(child):
                     raise ValueError("Contains a nested mount")
-        return timestamp, allocated_bytes(path)
+        return timestamp, allocated_bytes(root)
 
     def clean(self, apply=False, budget=DEFAULT_BUDGET):
         result = {"candidates": [], "preserved": [], "removed_bytes": 0,
@@ -181,12 +216,12 @@ class Manager:
                     if reason == "budget" and retained <= budget:
                         continue
                     # Recheck while holding the lease throughout deletion.
-                    with lock_file(path / "lease"):
+                    with lock_file(path / "lease") as lease_fd:
                         self.inspect_run(path)
                         result["candidates"].append({"path": str(path), "allocated_bytes": size,
                                                      "reason": reason})
                         if apply:
-                            remove_run(path)
+                            remove_run(path, lease_fd, self.repository, self.inspect_run)
                             result["removed_bytes"] += size
                     retained -= size
                 result["retained_bytes"] = retained
@@ -248,10 +283,10 @@ class Manager:
         try:
             if status == 0:
                 with lock_file(self.base / ".manager.lock"):
-                    with lock_file(path / "lease"):
+                    with lock_file(path / "lease") as lease_fd:
                         if shutil.rmtree.avoids_symlink_attacks:
                             self.inspect_run(path)
-                            remove_run(path)
+                            remove_run(path, lease_fd, self.repository, self.inspect_run)
             self.clean(apply=True)
         except (OSError, ValueError, TypeError) as error:
             print(f"[storage] Post-run cleanup skipped: {error}", file=sys.stderr)
@@ -265,6 +300,30 @@ def capture(command, timeout=15):
                 "stdout": result.stdout, "stderr": result.stderr}
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"command": command, "error": str(error)}
+
+
+def docker_records(result, fields):
+    """Keep malformed optional inventory local to its collection result."""
+    if result.get("status") != 0:
+        return None
+    try:
+        rows = [json.loads(line) for line in result["stdout"].splitlines()]
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Docker record is not an object")
+            for name, kind in fields.items():
+                if not isinstance(row.get(name), kind):
+                    raise ValueError(f"Docker record has invalid {name}")
+            if "mounts" in fields:
+                for mount in row["mounts"]:
+                    if (not isinstance(mount, dict) or not isinstance(mount.get("Type"), str)
+                            or (mount["Type"] == "volume"
+                                and not isinstance(mount.get("Name"), str))):
+                        raise ValueError("Docker record has an invalid mount")
+        return rows
+    except (ValueError, KeyError, TypeError) as error:
+        result["error"] = f"Invalid Docker output: {error}"
+        return None
 
 
 def report(repository, docker=False, docker_timeout=20):
@@ -314,8 +373,9 @@ def report(repository, docker=False, docker_timeout=20):
                             for name, command in commands.items()}
         # Inspect only selected fields. Never record container environments.
         containers = result["docker"]["containers"]
-        if containers.get("status") == 0:
-            ids = [json.loads(line)["ID"] for line in containers["stdout"].splitlines()]
+        listed = docker_records(containers, {"ID": str})
+        if listed is not None:
+            ids = [row["ID"] for row in listed]
             result["docker"]["references"] = []
             for offset in range(0, len(ids), 64):
                 result["docker"]["references"].append(capture([
@@ -323,12 +383,15 @@ def report(repository, docker=False, docker_timeout=20):
                     '{"id":{{json .Id}},"image":{{json .Image}},"state":{{json .State.Status}},'
                     '"project":{{json (index .Config.Labels "devcontainer.local_folder")}},'
                     '"mounts":{{json .Mounts}}}', *ids[offset:offset + 64]], timeout=10))
-            references = [json.loads(line)
-                          for batch in result["docker"]["references"]
-                          if batch.get("status") == 0 for line in batch["stdout"].splitlines()]
+            references = []
+            for batch in result["docker"]["references"]:
+                rows = docker_records(batch, {"mounts": list})
+                if rows is not None:
+                    references.extend(rows)
             volumes = result["docker"]["volumes"]
-            if volumes.get("status") == 0:
-                names = {json.loads(line)["Name"] for line in volumes["stdout"].splitlines()}
+            listed_volumes = docker_records(volumes, {"Name": str})
+            if listed_volumes is not None:
+                names = {row["Name"] for row in listed_volumes}
                 used = {mount["Name"] for row in references for mount in row["mounts"]
                         if mount["Type"] == "volume"}
                 result["docker"]["reference_summary"] = {

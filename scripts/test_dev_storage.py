@@ -172,6 +172,48 @@ class StorageTests(unittest.TestCase):
         self.clean(apply=True)
         self.assertEqual(outside.read_text(), "keep")
 
+    def test_replaced_run_path_cannot_delete_outside_work(self):
+        run = self.run_fixture()
+        outside = self.repo / "outside"
+        (outside / "work").mkdir(parents=True)
+        keep = outside / "work" / "source.rs"
+        keep.write_text("keep")
+        original = storage.remove_run
+
+        def replace_before_removal(path, *args, **kwargs):
+            path.rename(self.manager.base / ".moved-run")
+            path.symlink_to(outside, target_is_directory=True)
+            return original(path, *args, **kwargs)
+
+        with patch.object(storage, "remove_run", side_effect=replace_before_removal):
+            with self.assertRaises((OSError, ValueError)):
+                self.clean(apply=True)
+        self.assertEqual(keep.read_text(), "keep")
+
+    def test_replacement_after_open_cannot_redirect_deletion(self):
+        run = self.run_fixture()
+        outside = self.repo / "outside"
+        (outside / "work").mkdir(parents=True)
+        keep = outside / "work" / "source.rs"
+        keep.write_text("keep")
+        original = storage.shutil.rmtree
+        swapped = False
+
+        def replace_during_removal(path, *args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                run.rename(self.manager.base / ".moved-run")
+                run.symlink_to(outside, target_is_directory=True)
+            return original(path, *args, **kwargs)
+
+        # Keep the platform capability attribute while wrapping the real remover.
+        replace_during_removal.avoids_symlink_attacks = True
+        with patch.object(storage.shutil, "rmtree", replace_during_removal):
+            with self.assertRaises((OSError, ValueError)):
+                self.clean(apply=True)
+        self.assertEqual(keep.read_text(), "keep")
+
     def test_symlinked_target_is_rejected(self):
         other = self.repo / "other"
         other.mkdir()
@@ -321,6 +363,35 @@ class StorageTests(unittest.TestCase):
             self.assertIn("filesystems", report)
             self.assertIn("measurements", report)
             self.assertEqual(list(Path(root).iterdir()), [])
+
+    def test_malformed_docker_data_preserves_the_rest_of_the_report(self):
+        for stage, malformed in [
+            ("containers", "not JSON"),
+            ("containers", '["not an object"]'),
+            ("volumes", '{"Name": []}'),
+            ("references", '{"mounts": [null]}'),
+        ]:
+            with self.subTest(stage=stage, malformed=malformed):
+                def fake_capture(command, timeout=15):
+                    output = ""
+                    kind = None
+                    if command[:3] == ["docker", "ps", "-a"]:
+                        kind, output = "containers", '{"ID": "example"}'
+                    elif command[:3] == ["docker", "volume", "ls"]:
+                        kind, output = "volumes", '{"Name": "data"}'
+                    elif command[:2] == ["docker", "inspect"]:
+                        kind, output = "references", '{"mounts": []}'
+                    elif command[0] == "du":
+                        output = "4096\tfixture\n"
+                    return {"status": 0, "stdout": malformed if kind == stage else output,
+                            "stderr": "", "command": command}
+
+                with patch.object(storage, "capture", side_effect=fake_capture):
+                    result = storage.report(self.repo, docker=True)
+                self.assertTrue(result["measurements"])
+                affected = (result["docker"]["references"][0] if stage == "references"
+                            else result["docker"][stage])
+                self.assertIn("error", affected)
 
 
 if __name__ == "__main__":
