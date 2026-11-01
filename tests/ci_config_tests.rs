@@ -187,6 +187,36 @@ fn browser_interop_retains_failure_diagnostics() {
 }
 
 #[test]
+/// Hosted root tests must provision the runtime so installer fixtures cannot skip.
+fn root_nextest_provisions_node_for_browser_installer_fixtures() {
+    let content = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid CI workflow");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("nextest"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("root nextest steps");
+    let setup = steps.iter().position(|step| {
+        step.as_mapping_get("uses").and_then(Yaml::as_str) == Some("actions/setup-node@v7.1.0")
+            && step
+                .as_mapping_get("with")
+                .and_then(|settings| settings.as_mapping_get("node-version"))
+                .and_then(Yaml::as_str)
+                == Some("22")
+            && step.as_mapping_get("if").is_none()
+            && step.as_mapping_get("continue-on-error").is_none()
+    });
+    let run = steps
+        .iter()
+        .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Run nextest"));
+    assert!(
+        setup.is_some_and(|setup| run.is_some_and(|run| setup < run)),
+        "root CI must install Node 22 before running the browser installer fixtures"
+    );
+}
+
+#[test]
 fn token_binding_canonicalization_preserves_default_serde_json_features() {
     let manifest = read_file(&repo_root().join("Cargo.toml"));
     assert!(

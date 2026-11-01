@@ -10,6 +10,10 @@ records reviewed contracts, reproducible findings, and the remaining audit work.
 - Rust 1.94.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
+Node.js 22 runs the browser installer fixture tests. These tests return with a
+skip message when Node.js is absent from a local Rust-only setup. CI installs
+Node.js and treats its absence as a failure.
+
 ### CI Tooling Parity
 
 The devcontainer is expected to include the same core CLI tooling used by CI,

@@ -6,6 +6,30 @@ use std::process::{Command, Output};
 
 use serde_json::{json, Value};
 
+/// Keep Node optional for local Rust-only builds, but require it in every CI run.
+fn node_available() -> bool {
+    match Command::new("node").arg("--version").output() {
+        Ok(output) => {
+            assert!(
+                output.status.success(),
+                "Node version probe failed: {output:?}"
+            );
+            true
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::env::var_os("CI").is_none()
+                && std::env::var_os("GITHUB_ACTIONS").is_none() =>
+        {
+            eprintln!("SKIP browser installer fixture: Node.js is not installed for this local Rust-only build");
+            false
+        }
+        Err(error) => panic!(
+            "Cannot run Node.js for browser installer fixtures; CI requires Node.js: {error}"
+        ),
+    }
+}
+
 struct BrowserFixture {
     root: tempfile::TempDir,
     script: PathBuf,
@@ -183,6 +207,9 @@ fn assert_history(events: &[Value], expected: &[&str]) {
 #[test]
 /// A runnable browser must skip host package installation even when it is permitted.
 fn runnable_browsers_download_and_launch_without_host_package_setup() {
+    if !node_available() {
+        return;
+    }
     for target in ["chromium-headless-shell", "chromium", "firefox"] {
         for permitted in [false, true] {
             let fixture = BrowserFixture::new();
@@ -206,6 +233,9 @@ fn runnable_browsers_download_and_launch_without_host_package_setup() {
 #[test]
 /// A failed launch may install dependencies once, then must launch and close successfully.
 fn missing_host_dependencies_require_a_successful_public_browser_retry() {
+    if !node_available() {
+        return;
+    }
     for target in ["chromium-headless-shell", "chromium", "firefox"] {
         let fixture = BrowserFixture::new();
         let output = fixture.run(
@@ -228,6 +258,9 @@ fn missing_host_dependencies_require_a_successful_public_browser_retry() {
 #[test]
 /// Download and host setup failures keep their original exit status and stop immediately.
 fn browser_installer_preserves_download_and_dependency_setup_exit_codes() {
+    if !node_available() {
+        return;
+    }
     for (name, overrides, code, history) in [
         (
             "download",
@@ -255,6 +288,9 @@ fn browser_installer_preserves_download_and_dependency_setup_exit_codes() {
 #[test]
 /// Successful package setup cannot turn a second browser launch failure into a pass.
 fn browser_installer_rejects_a_persistent_launch_failure_after_one_setup_attempt() {
+    if !node_available() {
+        return;
+    }
     let fixture = BrowserFixture::new();
     let output = fixture.run(
         &["chromium", "--with-deps"],
@@ -270,6 +306,9 @@ fn browser_installer_rejects_a_persistent_launch_failure_after_one_setup_attempt
 #[test]
 /// Close failures remain fatal and never trigger dependency installation or another launch.
 fn browser_installer_does_not_treat_close_failures_as_missing_dependencies() {
+    if !node_available() {
+        return;
+    }
     for recovered in [false, true] {
         let fixture = BrowserFixture::new();
         let mut overrides = vec![("FIXTURE_CLOSE_FAIL", "1")];
@@ -295,6 +334,9 @@ fn browser_installer_does_not_treat_close_failures_as_missing_dependencies() {
 #[test]
 /// Callers that omit permission for host setup must stop after the initial failed launch.
 fn browser_installer_without_dependency_setup_permission_stops_on_launch_failure() {
+    if !node_available() {
+        return;
+    }
     let fixture = BrowserFixture::new();
     let output = fixture.run(
         &["chromium-headless-shell"],
@@ -307,6 +349,9 @@ fn browser_installer_without_dependency_setup_permission_stops_on_launch_failure
 #[test]
 /// Invalid targets, duplicate flags and extra arguments must fail before any side effects.
 fn browser_installer_rejects_invalid_arguments_before_commands_or_launches() {
+    if !node_available() {
+        return;
+    }
     for arguments in [
         vec![],
         vec!["webkit"],
