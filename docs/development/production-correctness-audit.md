@@ -13052,9 +13052,9 @@ and recovery without changing the retained sample count.
 #### Scheduled readiness allocation measurement (#1350)
 
 Main `1d9def4c` fails macOS Nextest job `124843195926` in run `41304770223`.
-Its first untouched Waiting snapshot records 3 allocations and 336 bytes;
-all later Waiting/Lobby snapshots record 2 allocations and 272 bytes regardless
-of spectator count. An ordinary local control passes and is not a repair.
+Each untouched Waiting snapshot records 3 allocations and 336 bytes;
+each Lobby snapshot records 2 allocations and 272 bytes regardless of
+spectator count. An ordinary local control passes and is not a repair.
 
 A focused control leaves one cooperative poll credit in a fresh current-thread
 runtime before the same readiness operation. Its second lock read yields and
