@@ -1005,6 +1005,10 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
     #[cfg(test)]
+    pause_room_metrics: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    release_room_metrics: tokio::sync::Notify,
+    #[cfg(test)]
     get_room_by_id_reached: tokio::sync::Notify,
     #[cfg(test)]
     release_get_room_by_id: tokio::sync::Notify,
@@ -1097,6 +1101,35 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    /// Isolate metrics collection from room-operation pause and observation controls.
+    #[cfg(test)]
+    async fn before_room_metrics_for_test(&self) -> Result<()> {
+        if self
+            .pause_room_metrics
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.release_room_metrics.notified().await;
+        }
+        if self
+            .fail_get_room_by_id
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room metrics read failure for test");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_room_metrics_for_test(&self) {
+        self.pause_room_metrics
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_room_metrics_for_test(&self) {
+        self.release_room_metrics.notify_one();
+    }
+
     /// Apply the shared room-read failure and pause controls.
     #[cfg(test)]
     async fn before_room_read_for_test(&self) -> Result<()> {
@@ -1186,6 +1219,10 @@ impl InMemoryDatabase {
             get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             pause_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            pause_room_metrics: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            release_room_metrics: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_by_id_reached: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -2846,7 +2883,7 @@ impl GameDatabase for InMemoryDatabase {
 
         drop(rooms);
         #[cfg(test)]
-        self.before_room_read_for_test().await?;
+        self.before_room_metrics_for_test().await?;
         Ok(game_counts)
     }
 
@@ -2886,7 +2923,7 @@ impl GameDatabase for InMemoryDatabase {
     /// Collect one internally consistent dashboard sample in one room-table pass.
     async fn get_room_metrics_snapshot(&self) -> Result<RoomMetricsSnapshot> {
         #[cfg(test)]
-        self.before_room_read_for_test().await?;
+        self.before_room_metrics_for_test().await?;
         let (overall, by_game) = {
             let rooms = self.rooms.read().await;
             let mut overall = PlayerCountDistribution::default();
@@ -3277,6 +3314,23 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    /// Background metrics must not consume pauses or observations for room operations.
+    #[tokio::test]
+    async fn metrics_collection_does_not_consume_room_operation_read_controls() {
+        let database = InMemoryDatabase::new();
+        database.reset_get_room_by_id_calls_for_test();
+        database.pause_next_get_room_by_id_for_test();
+        let mut metrics = Box::pin(database.get_room_metrics_snapshot());
+        assert!(futures_util::poll!(&mut metrics).is_ready());
+        assert_eq!(database.get_room_by_id_calls_for_test(), 0);
+        let room = RoomId::from_u128(1);
+        let mut read = Box::pin(database.get_room_lobby_state(&room));
+        assert!(futures_util::poll!(&mut read).is_pending());
+        database.release_paused_get_room_by_id_for_test();
+        assert_eq!(read.await.unwrap(), None);
+        assert_eq!(database.get_room_by_id_calls_for_test(), 1);
+    }
+
     /// Keep one sample coherent when deletion interrupts its collection.
     #[tokio::test]
     async fn dashboard_sample_stays_consistent_when_a_room_disappears_during_collection() {
@@ -3294,13 +3348,11 @@ mod tests {
             )
             .await
             .unwrap();
-        database
-            .pause_get_room_by_id
-            .store(true, std::sync::atomic::Ordering::Release);
+        database.pause_next_room_metrics_for_test();
         let mut collection = Box::pin(database.get_room_metrics_snapshot());
         assert!(futures_util::poll!(&mut collection).is_pending());
         database.delete_room(&room.id).await.unwrap();
-        database.release_get_room_by_id.notify_one();
+        database.release_paused_room_metrics_for_test();
         let snapshot = collection.await.unwrap();
         assert_eq!(
             snapshot.rooms_by_game.is_empty(),

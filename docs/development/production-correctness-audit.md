@@ -13031,7 +13031,9 @@ the separate-query default and must override it for snapshot consistency.
 Mixed occupancy, empty storage, pending rooms and read failures retain their
 previous values and behavior. A second negative control reverts only the cache
 query to separate reads and fails at the cache boundary; restoring the combined
-query passes it.
+query passes it. Metrics tests use separate pause controls so a background
+refresh cannot consume a room-operation test pause. A focused negative control
+reproduces the original shared-control interference before this isolation.
 
 #### Dashboard work and history retention (#636)
 

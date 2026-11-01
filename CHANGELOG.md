@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep in-memory dashboard room counts and occupancy percentiles consistent when rooms change (#1349).
+- Keep room counts and occupancy percentiles consistent in each in-memory dashboard sample (#1349).
 - Preserve replay loss when Rust embedders clear buffered room events (#1347).
 - Retry interrupted heartbeat updates so active rooms can renew their expiry window (#1344).
 - Finish committed authority transfers in room order after caller cancellation (#1342).

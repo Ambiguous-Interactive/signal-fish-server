@@ -32,11 +32,11 @@ async fn cache_snapshot_uses_consistent_storage_during_room_deletion() {
         )
         .await
         .unwrap();
-    database.pause_next_get_room_by_id_for_test();
+    database.pause_next_room_metrics_for_test();
     let mut collection = Box::pin(DashboardMetricsCache::fetch_snapshot(database.clone()));
     assert!(futures_util::poll!(&mut collection).is_pending());
     database.delete_room(&room.id).await.unwrap();
-    database.release_paused_get_room_by_id_for_test();
+    database.release_paused_room_metrics_for_test();
     let snapshot = collection.await.unwrap();
     assert_eq!(snapshot.active_rooms, 0);
     assert!(snapshot.rooms_by_game.is_empty());
