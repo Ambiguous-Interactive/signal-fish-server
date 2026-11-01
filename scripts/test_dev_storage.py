@@ -58,7 +58,7 @@ class StorageTests(unittest.TestCase):
 
     def test_failed_metadata_write_preserves_original_and_cleans_own_temp(self):
         target = self.repo / "state.json"
-        other_writer = target.with_suffix(".tmp")
+        other_writer = target.with_suffix(f".{storage.uuid.uuid4().hex}.tmp")
         other_writer.write_text("other writer")
         original = {"saved": True}
 
@@ -80,7 +80,7 @@ class StorageTests(unittest.TestCase):
                             storage.write_json(target, {"new": True})
                 self.assertEqual(json.loads(target.read_text()), original)
                 self.assertEqual(other_writer.read_text(), "other writer")
-                self.assertEqual(list(self.repo.glob("state.*.tmp")), [])
+                self.assertEqual(list(self.repo.glob("state.*.tmp")), [other_writer])
 
     def test_expired_run_removed_and_repeat_is_empty(self):
         run = self.run_fixture()
