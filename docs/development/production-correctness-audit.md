@@ -12869,6 +12869,8 @@ completes it only after both writes succeed. Dropping an unfinished reservation
 permits an immediate retry. A per-connection revision and physical lifecycle
 identity keep an old reservation from clearing a newer refresh or replacement
 connection. Reconnection and rollback carry the revision forward.
+A temporary control that resets that revision fails the same-socket reconnect
+rollback test in Nextest `e5fb2d1d`. Restored source passes the control.
 
 Controls cover initial and previously completed refreshes, both persistence
 errors, exact throttle boundaries, unknown players, the disabled throttle,
@@ -12920,7 +12922,7 @@ The temporary probes are removed before publication. The durable index and
 view controls remain. Whole-generator peak memory and the planned ten-minute
 cell remain unqualified; #775 stays open.
 
-Final local validation passes all 18 scoped all-feature lifecycle controls,
+Final local validation passes all 19 scoped all-feature lifecycle controls,
 46 capacity/replay controls, the complete player allocation control and strict
 all-target/all-feature Clippy. Hosted qualification remains required.
 

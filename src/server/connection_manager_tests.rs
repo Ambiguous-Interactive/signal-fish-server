@@ -1507,6 +1507,34 @@ async fn heartbeat_reservation_failure_preserves_newer_success_and_connection_id
         .is_some());
 }
 
+#[tokio::test(start_paused = true)]
+async fn heartbeat_reservation_does_not_reuse_revisions_after_reconnect_rollback() {
+    let manager = make_manager(4);
+    let player = Uuid::new_v4();
+    let (sender, _receiver) = channel();
+    manager
+        .connect_test_client(player, sender, "127.0.0.1:7104".parse().unwrap())
+        .await;
+    let interrupted = manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap();
+    let restored = Uuid::new_v4();
+    assert!(matches!(
+        manager.reassign_connection(&player, &restored, Uuid::new_v4(), 2),
+        ReassignmentOutcome::Reassigned(_)
+    ));
+    assert!(manager
+        .restore_reassigned_connection(&player, &restored)
+        .is_some());
+    manager
+        .reserve_last_seen_update(&player, std::time::Duration::ZERO)
+        .unwrap()
+        .complete();
+    drop(interrupted);
+    assert!(manager.reserve_last_seen_update(&player, std::time::Duration::from_secs(30)).is_none(),
+        "an old refresh must not clear a completed refresh after the same socket returns to its original identity");
+}
+
 fn complete_last_seen_update(
     manager: &ConnectionManager,
     player_id: &PlayerId,
