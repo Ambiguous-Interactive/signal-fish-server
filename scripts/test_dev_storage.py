@@ -298,6 +298,24 @@ class StorageTests(unittest.TestCase):
         with patch.object(storage, "lock_file", side_effect=busy_after_start):
             self.assertEqual(self.manager.run([sys.executable, "-c", "pass"]), 0)
 
+    def test_initial_metadata_failure_removes_empty_run_without_starting_command(self):
+        with patch.object(storage, "write_json", side_effect=OSError("fixture: initial write failed")):
+            with self.assertRaises(OSError):
+                self.manager.run([sys.executable, "-c", "open('started', 'w').close()"])
+        self.assertEqual(list(self.manager.base.glob("run-*")), [])
+        self.assertFalse((self.repo / "started").exists())
+
+    def test_initial_metadata_failure_preserves_unexpected_files(self):
+        def unexpected_file(path, _metadata):
+            (path.parent / "work" / "source.rs").write_text("keep")
+            raise OSError("fixture: initial write failed")
+
+        with patch.object(storage, "write_json", side_effect=unexpected_file):
+            with self.assertRaises(OSError):
+                self.manager.run([sys.executable, "-c", "pass"])
+        run = next(self.manager.base.glob("run-*"))
+        self.assertEqual((run / "work" / "source.rs").read_text(), "keep")
+
     def test_failure_status_survives_post_run_cleanup_error(self):
         with patch.object(self.manager, "clean", side_effect=ValueError("fixture: invalid marker")):
             self.assertEqual(self.manager.run([sys.executable, "-c", "raise SystemExit(7)"]), 7)

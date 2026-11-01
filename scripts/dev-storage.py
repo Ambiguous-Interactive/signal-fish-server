@@ -248,7 +248,27 @@ class Manager:
             (path / "lease").touch()
             metadata = {"owner": OWNER, "repository": str(self.repository),
                         "created": time.time(), "completed": None, "state": "running"}
-            write_json(path / "run.json", metadata)
+            initial_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                write_json(path / "run.json", metadata)
+            except (OSError, ValueError, TypeError):
+                try:
+                    # No command has started. Remove only empty scaffolding;
+                    # preserve any unexpected files instead of deleting a tree.
+                    os.rmdir("work", dir_fd=initial_fd)
+                    os.unlink("lease", dir_fd=initial_fd)
+                    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                        if os.path.samestat(os.fstat(initial_fd), current):
+                            os.rmdir(path.name, dir_fd=parent_fd)
+                    finally:
+                        os.close(parent_fd)
+                except OSError as error:
+                    print(f"[storage] Initial run cleanup skipped: {error}", file=sys.stderr)
+                raise
+            finally:
+                os.close(initial_fd)
             # Acquire before publishing an unlocked, runnable directory.
             lease = lock_file(path / "lease")
             descriptor = lease.__enter__()

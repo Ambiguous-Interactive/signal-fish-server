@@ -57,6 +57,8 @@ Post-command metadata or cleanup failures warn and preserve the command's exit
 status. They do not turn a successful command into a failure.
 Failed metadata writes remove their own temporary file and preserve the prior
 saved record. Each write uses a distinct temporary name.
+If the first run record cannot be saved, the wrapper removes empty scaffolding
+before starting a command. It preserves unexpected files for manual inspection.
 
 Cleanup requires matching project and run ownership markers. It preserves
 unknown entries, active leases, Git data, and nested mounts. It never follows
@@ -210,7 +212,7 @@ of no more than 10%. Host reclamation, hosted image validation, and the seven-da
 observation require separate results. Do not mark them complete from local
 fixture tests.
 
-Local validation passed 37 Python tests, all 14 agent-tooling guards, the full
+Local validation passed 39 Python tests, all 14 agent-tooling guards, the full
 Clippy gate with all targets and features, formatting, tooling parity, document
 consistency, shellcheck, actionlint, and PowerShell syntax parsing. Removing the
 lifecycle cleanup invocation made the new guard fail; restoring it made it pass.
