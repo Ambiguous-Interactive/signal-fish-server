@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Report session metrics collection time in trace logs.
+
 ### Changed
 
 - Reduce memory retained by completed-session history (#636).

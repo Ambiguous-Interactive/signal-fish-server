@@ -13176,3 +13176,22 @@ in `11cd8c5b` (22 tests); endpoint integration controls pass in `4e0eca05`
 (2 tests). Snapshot identity controls pass in `34a0f8bd` (12 tests), and
 65 related churn, rejoin and replay controls pass in `173fe1b8`. Held lifecycle
 and unchanged room replacement controls pass in `6266dd27` (3 tests).
+
+#### Session scan cost after review
+
+The close fence includes the full active traversal. A capped response still
+visits every active record. Trace diagnostics report visited and matching
+counts, response limit, scan time and total capture time. Timing starts after
+lock acquisition; logging runs after the completed-ring guard is released.
+Disabled trace logging reads no clocks. Response fields and lock order do not
+change.
+
+Five debug-build samples per 10,000-room cell measure capped all-match scans
+at 2,657–9,985 microseconds and captures at 2,807–10,154 microseconds. Unlimited
+all-match scans take 2,655–9,187 microseconds and captures 6,576–14,479
+microseconds. No-match scans still visit all 10,000 records and take
+1,231–2,285 microseconds. These local component observations exclude lock wait,
+JSON serialization and gameplay throughput. They do not establish a production
+latency bound. The ignored `session_snapshot_scan_duration_profile` retains
+the four cells. Nextest `192e438d` passes 22 focused controls; `ebac8c5b` passes
+the isolated profile. Adversarial review finds no remaining issue.

@@ -159,6 +159,10 @@ can still occur during collection. Completed records carry a
 monotonic `seq`; `?since=<seq>` cursor-filters the completed list so a
 scraper misses no completion that stayed inside the retention ring, and
 `?applicationId=<uuid>` restricts both lists to one application's rooms.
+Set `RUST_LOG=signal_fish_server::session_records=trace` to log scan and capture
+time, visited records, matching records, and the active response limit. These
+times exclude lock acquisition and response serialization. Logging occurs after
+the capture lock is released.
 Use `/metrics/rooms/lookup?applicationId=<uuid>&gameName=<name>&roomCode=<code>`
 for an exact live-room lookup, including rooms beyond the active list's 512-record
 limit. The binary also serves `/v1/metrics/rooms/lookup`. Library routers serve

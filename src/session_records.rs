@@ -415,13 +415,16 @@ impl SessionRecords {
             .completed
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let scan_started = tracing::enabled!(tracing::Level::TRACE).then(tokio::time::Instant::now);
         let matches_application = |record: &SessionRecord| {
             application_id.is_none_or(|id| record.application_id == Some(id))
         };
         let mut active = Vec::new();
         let mut selected = BinaryHeap::new();
         let mut active_count = 0_usize;
+        let mut active_scanned = 0_usize;
         for entry in self.active.iter() {
+            active_scanned = active_scanned.saturating_add(1);
             let record = entry.value();
             if !matches_application(record) {
                 continue;
@@ -442,6 +445,7 @@ impl SessionRecords {
                 }
             }
         }
+        let scan_duration = scan_started.map(|started| started.elapsed());
         let order = |a: &SessionRecord, b: &SessionRecord| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
@@ -467,7 +471,7 @@ impl SessionRecords {
                 .collect()
         };
         let completed_count = completed_records.len();
-        SessionsSnapshot {
+        let snapshot = SessionsSnapshot {
             active,
             completed: completed_records,
             active_count,
@@ -475,7 +479,21 @@ impl SessionRecords {
             completed_cap: SESSION_RECORDS_COMPLETED_CAP,
             completed_dropped_total: self.completed_dropped_total.load(Ordering::Relaxed),
             unpublished_dropped_total: self.unpublished_dropped_total.load(Ordering::Relaxed),
+        };
+        let capture_duration = scan_started.map(|started| started.elapsed());
+        drop(completed);
+        if let (Some(scan_duration), Some(capture_duration)) = (scan_duration, capture_duration) {
+            tracing::trace!(
+                active_scanned,
+                active_count,
+                active_limit,
+                scan_duration_us = u64::try_from(scan_duration.as_micros()).unwrap_or(u64::MAX),
+                capture_duration_us =
+                    u64::try_from(capture_duration.as_micros()).unwrap_or(u64::MAX),
+                "Session snapshot scan completed"
+            );
         }
+        snapshot
     }
 }
 
@@ -1154,6 +1172,34 @@ mod tests {
                     response.active.len(),
                     full.active.len().min(SESSION_RECORDS_ACTIVE_RESPONSE_CAP)
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated session snapshot scan profile with trace timing"]
+    fn session_snapshot_scan_duration_profile() {
+        let records = SessionRecords::new();
+        for index in 0..10_000 {
+            records.record_created(&room_fixture(Uuid::from_u128(index), "ROOM"), true);
+        }
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_ansi(false)
+            .with_test_writer()
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        for application_id in [None, Some(Uuid::from_u128(1))] {
+            for active_limit in [SESSION_RECORDS_ACTIVE_RESPONSE_CAP, usize::MAX] {
+                for _ in 0..5 {
+                    let snapshot =
+                        records.snapshot_with_active_limit(None, application_id, active_limit);
+                    let expected_count = if application_id.is_none() { 10_000 } else { 0 };
+                    assert_eq!(snapshot.active_count, expected_count);
+                    assert_eq!(snapshot.active.len(), expected_count.min(active_limit));
+                    std::hint::black_box(snapshot);
+                }
             }
         }
     }
