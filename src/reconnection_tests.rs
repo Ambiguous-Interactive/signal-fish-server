@@ -179,6 +179,111 @@ fn extreme_event_buffer_size_does_not_panic_during_construction() {
 }
 
 #[test]
+fn cleared_events_preserve_replay_loss_evidence() {
+    for prior_watermark in [None, Some(3), Some(100)] {
+        let mut buffer = EventBuffer::new(Uuid::new_v4(), 4);
+        buffer.evicted_watermark = prior_watermark;
+        for sequence in [8, 20, 13] {
+            buffer.push(ServerMessage::Pong, sequence);
+        }
+        buffer.clear();
+        let expected = Some(prior_watermark.unwrap_or(0).max(20));
+        assert!(buffer.events.is_empty());
+        assert_eq!(
+            buffer.evicted_watermark, expected,
+            "#1347: clear loses replay"
+        );
+        buffer.clear();
+        assert_eq!(buffer.evicted_watermark, expected);
+        buffer.push(ServerMessage::Pong, 101);
+        assert_eq!(buffer.get_events_after(20).len(), 1);
+        assert_eq!(buffer.evicted_watermark, expected);
+    }
+    let mut empty = EventBuffer::new(Uuid::new_v4(), 0);
+    empty.clear();
+    assert_eq!(empty.evicted_watermark, None);
+}
+
+#[tokio::test]
+async fn replay_cursor_reports_events_discarded_by_a_ring_clear() {
+    let manager = ReconnectionManager::new(300, 4, Arc::new(ServerMetrics::new()));
+    let room = Uuid::new_v4();
+    for _ in 0..3 {
+        manager.buffer_event(&room, ServerMessage::Pong).await;
+    }
+    manager
+        .replay_state
+        .write()
+        .await
+        .event_buffers
+        .get_mut(&room)
+        .unwrap()
+        .clear();
+    manager.buffer_event(&room, ServerMessage::Pong).await;
+    for (cursor, truncated, events) in [(0, true, 1), (2, true, 1), (3, false, 1), (4, false, 0)] {
+        let replay = manager.get_missed_events(&room, cursor).await;
+        assert_eq!(replay.truncated, truncated, "#1347: cursor {cursor}");
+        assert_eq!(replay.events.len(), events);
+    }
+}
+
+#[test]
+fn full_replay_ring_reuses_storage_and_preserves_exact_tail() {
+    for limit in [0, 1, 4, 16, 64] {
+        let mut buffer = EventBuffer::new(Uuid::new_v4(), limit);
+        for sequence in 1..=limit as u64 {
+            assert_eq!(buffer.push(ServerMessage::Pong, sequence), 0);
+        }
+        let capacity = buffer.events.capacity();
+        for sequence in limit as u64 + 1..=limit as u64 + 128 {
+            assert_eq!(buffer.push(ServerMessage::Pong, sequence), 1);
+            assert_eq!(buffer.events.len(), limit);
+            assert_eq!(
+                buffer.events.capacity(),
+                capacity,
+                "#636: full ring grew at limit={limit}"
+            );
+            assert_eq!(buffer.evicted_watermark, Some(sequence - limit as u64));
+            assert_eq!(
+                buffer
+                    .events
+                    .iter()
+                    .map(|event| event.sequence)
+                    .collect::<Vec<_>>(),
+                (sequence - limit as u64 + 1..=sequence).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn replay_capacity_changes_keep_exact_evictions_and_watermarks() {
+    let mut buffer = EventBuffer::new(Uuid::new_v4(), 8);
+    for sequence in [10, 30, 20, 40] {
+        assert_eq!(buffer.push(ServerMessage::Pong, sequence), 0);
+    }
+    buffer.max_size = 2;
+    assert_eq!(buffer.push(ServerMessage::Pong, 50), 3);
+    assert_eq!(buffer.evicted_watermark, Some(30));
+    assert_eq!(
+        buffer
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![40, 50]
+    );
+    buffer.max_size = 0;
+    assert_eq!(buffer.push(ServerMessage::Pong, 5), 3);
+    assert!(buffer.events.is_empty());
+    assert_eq!(buffer.evicted_watermark, Some(50));
+    buffer.max_size = 1;
+    assert_eq!(buffer.push(ServerMessage::Pong, 60), 0);
+    assert_eq!(buffer.events[0].sequence, 60);
+    assert_eq!(buffer.evicted_watermark, Some(50));
+}
+
+#[test]
 fn test_event_buffer_get_events_after() {
     let room_id = Uuid::new_v4();
     let mut buffer = EventBuffer::new(room_id, 10);

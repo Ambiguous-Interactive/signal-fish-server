@@ -242,6 +242,18 @@ impl EventBuffer {
     /// replay can report truncation honestly. Returns the number of events
     /// evicted by this push.
     pub fn push(&mut self, message: ServerMessage, sequence: u64) -> usize {
+        let mut evicted = 0usize;
+        while self.events.len() >= self.max_size {
+            let Some(oldest) = self.events.pop_front() else {
+                break;
+            };
+            self.record_evicted_sequence(oldest.sequence);
+            evicted = evicted.saturating_add(1);
+        }
+        if self.max_size == 0 {
+            self.record_evicted_sequence(sequence);
+            return evicted.saturating_add(1);
+        }
         let event = BufferedEvent {
             message,
             // Wall clock (durable record): replay/diagnostic stamp on the
@@ -251,19 +263,14 @@ impl EventBuffer {
         };
 
         self.events.push_back(event);
-
-        // Remove oldest events if buffer is full
-        let mut evicted = 0usize;
-        while self.events.len() > self.max_size {
-            if let Some(oldest) = self.events.pop_front() {
-                self.evicted_watermark = Some(
-                    self.evicted_watermark
-                        .map_or(oldest.sequence, |watermark| watermark.max(oldest.sequence)),
-                );
-                evicted = evicted.saturating_add(1);
-            }
-        }
         evicted
+    }
+
+    fn record_evicted_sequence(&mut self, sequence: u64) {
+        self.evicted_watermark = Some(
+            self.evicted_watermark
+                .map_or(sequence, |watermark| watermark.max(sequence)),
+        );
     }
 
     /// Get events that occurred after a specific sequence number
@@ -280,8 +287,11 @@ impl EventBuffer {
         self.events.iter().map(|e| e.message.clone()).collect()
     }
 
-    /// Clear all events
+    /// Clear all events while preserving evidence of replay loss.
     pub fn clear(&mut self) {
+        if let Some(sequence) = self.events.iter().map(|event| event.sequence).max() {
+            self.record_evicted_sequence(sequence);
+        }
         self.events.clear();
     }
 }
