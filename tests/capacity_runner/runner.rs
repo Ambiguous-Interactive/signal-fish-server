@@ -202,18 +202,18 @@ impl Drop for PreparationEvidence<'_> {
             return;
         }
         let progress = peer_progress_snapshot(self.progress);
-        let result = (|| {
-            artifacts::write_json(self.output_dir.join("peer-progress.json"), &progress)?;
+        let results = [
+            artifacts::write_json(self.output_dir.join("peer-progress.json"), &progress),
             artifacts::write_json(
                 self.output_dir.join("preparation.json"),
-                &json!({
-                    "status": "cancelled", "workload_started": false,
-                }),
-            )?;
-            artifacts::write_deliveries(self.output_dir, &self.log.take_records())
-        })();
-        if let Err(error) = result {
-            eprintln!("capacity preparation artifacts: {error}");
+                &json!({"status": "cancelled", "workload_started": false}),
+            ),
+            artifacts::write_deliveries(self.output_dir, &self.log.take_records()),
+        ];
+        for result in results {
+            if let Err(error) = result {
+                eprintln!("capacity preparation artifacts: {error}");
+            }
         }
     }
 }
@@ -2664,6 +2664,70 @@ async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(),
 #[cfg(test)]
 mod session_poll_tests {
     use super::*;
+
+    #[test]
+    /// A failed artifact path must not discard other writable cancellation evidence.
+    fn cancellation_artifact_failures_do_not_skip_other_outputs() {
+        for blocked in [
+            "peer-progress.json",
+            "preparation.json",
+            artifacts::DELIVERIES_FILE,
+        ] {
+            let output = tempfile::tempdir().unwrap();
+            std::fs::create_dir(output.path().join(blocked)).unwrap();
+            let context = crate::unit_context();
+            let log = EventLog::for_plans(&context.plans, false).unwrap();
+            log.push_join_failure("r0p0: retained initial failure".into());
+            let progress: BTreeMap<_, _> = context
+                .plans
+                .iter()
+                .map(|plan| (plan.name.clone(), PeerProgress::new()))
+                .collect();
+            drop(PreparationEvidence {
+                output_dir: output.path(),
+                progress: &progress,
+                log: &log,
+                finished: false,
+            });
+            assert!(output.path().join(blocked).is_dir());
+            for file in [
+                "peer-progress.json",
+                "preparation.json",
+                artifacts::DELIVERIES_FILE,
+            ] {
+                if file != blocked {
+                    assert!(
+                        output.path().join(file).is_file(),
+                        "blocked={blocked}, missing={file}"
+                    );
+                }
+            }
+            if blocked != artifacts::DELIVERIES_FILE {
+                assert_eq!(
+                    artifacts::read_records(output.path())
+                        .unwrap()
+                        .join_failures,
+                    vec!["r0p0: retained initial failure"]
+                );
+            }
+            if blocked != "peer-progress.json" {
+                let rows: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(output.path().join("peer-progress.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(rows.as_object().unwrap().len(), context.plans.len());
+            }
+            if blocked != "preparation.json" {
+                let marker: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(output.path().join("preparation.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(marker["status"], "cancelled");
+                assert_eq!(marker["workload_started"], false);
+            }
+            assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
+        }
+    }
 
     #[tokio::test]
     /// Issue #1355: cancellation retains identity and every planned initial peer.

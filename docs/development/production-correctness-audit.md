@@ -13333,3 +13333,15 @@ JSON sizing and text-lane controls pass in `ddae9193` (four tests). Strict
 all-target/all-feature Clippy, Markdown and doc consistency pass. Production
 sizing and benchmark bodies remain identical to the measured source; later
 changes to those paths add Rustdoc only.
+
+A further review control blocks each cancellation artifact path with a directory.
+The old short-circuit fails in `55244216`: a progress-file error prevents the
+cancellation marker and exact failures from reaching their writable paths. The
+guard now attempts all three writes independently before reporting errors.
+Blocked progress, marker and delivery paths each preserve the other writable
+outputs. No successful summary is written for partial preparation.
+
+All twelve artifact, preparation and replacement controls pass in
+`f9066f14-5e60-4d66-804c-601bd749d190`. Strict all-target/all-feature Clippy, spelling,
+Markdown and doc consistency checks pass. Review reports 100% documentation
+coverage for touched complex functions and accepts the explicit #636 scope.
