@@ -91,3 +91,26 @@ async fn refresh_keeps_selected_history_and_last_success_after_error() {
         }
     }
 }
+
+#[test]
+#[ignore = "isolated dashboard history rollover profile"]
+fn dashboard_history_rollover_profile() {
+    let fields = HistoryFields::from_fields(&[DashboardHistoryField::ActiveRooms]);
+    let snapshot = sample(1);
+    for capacity in [1, 100, 10_000] {
+        let mut state = DashboardMetricsCacheState::new(capacity);
+        for _ in 0..capacity {
+            state.push_history(&snapshot, &fields);
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..30_000 {
+            state.push_history(std::hint::black_box(&snapshot), &fields);
+        }
+        assert_eq!(state.history.len(), capacity);
+        println!(
+            "HISTORY_ROLLOVER capacity={capacity} pushes=30000 elapsed_us={}",
+            started.elapsed().as_micros()
+        );
+        std::hint::black_box(state);
+    }
+}

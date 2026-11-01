@@ -50,6 +50,10 @@ impl ReceiptName {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    pub(super) fn owned_string(&self) -> &String {
+        &self.0
+    }
 }
 
 impl From<String> for ReceiptName {
@@ -108,7 +112,7 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
 
 impl ReceiptNames {
-    fn intern(&mut self, name: &str) -> ReceiptName {
+    pub(super) fn intern(&mut self, name: &str) -> ReceiptName {
         if let Some(shared) = self.0.get(name) {
             return shared.clone();
         }
@@ -479,6 +483,7 @@ pub struct EventLog {
 
 #[derive(Default)]
 struct EventState {
+    snapshot_names: ReceiptNames,
     receipt_timings: Option<ReceiptTimingSnapshot>,
     budget: Option<RecordBudget>,
     sent: Vec<SentEvent>,
@@ -878,9 +883,16 @@ impl EventLog {
         });
     }
 
-    pub fn push_churn(&self, event: ChurnEvent) {
+    pub fn push_churn(&self, mut event: ChurnEvent) {
         let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
         let mut state = self.state.lock().expect("event log poisoned");
+        if state
+            .budget
+            .as_ref()
+            .is_none_or(|budget| budget.first_excess_kind.is_none())
+        {
+            event.tails.share_member_names(&mut state.snapshot_names);
+        }
         self.retain_event(&mut state, "churn", bytes, event, |state| &mut state.churn);
     }
 
@@ -992,6 +1004,7 @@ impl EventLog {
                     });
             }
         }
+        state.snapshot_names = ReceiptNames::default();
         drop(state);
         release_unused_capacity(&mut records.sent);
         release_unused_capacity(&mut records.receipts);

@@ -13010,3 +13010,63 @@ the Rust server's public replay-ring method. All three are unaffected: the
 clear repair has no production caller, ring storage preserves event values
 and order, and the capacity change is internal. No wire field, error code,
 default, client migration or client tracking issue is required.
+
+### F226 — Dashboard collection mixes room snapshots (#1349)
+
+At `0365dc5d`, the dashboard collects counts and occupancy percentiles through
+three independent room-table reads. Deleting the only room after the count
+read leaves a successful sample with one active room and empty percentiles.
+This affects monitoring. It does not change gameplay membership.
+
+A deterministic control pauses after the old count read, deletes the room,
+and resumes collection. It fails in Nextest `12ed53d5`: counts are nonempty while percentiles are
+empty. The repaired control passes in Nextest `9ac6e1f4`. An earlier test build failed because its
+room-creation call lacked an argument; that attempt is retained separately.
+
+`GameDatabase::get_room_metrics_snapshot` provides a combined query with a
+source-compatible default. The in-memory override collects counts, overall
+occupancy and per-game occupancy under one read lock and builds percentile
+maps after releasing it. The dashboard uses this query. Custom backends retain
+the separate-query default and must override it for snapshot consistency.
+Mixed occupancy, empty storage, pending rooms and read failures retain their
+previous values and behavior.
+
+#### Dashboard work and history retention (#636)
+
+An alternating local profile collects 20 samples over 20,000 empty rooms in
+16 games. Four combined-query measurements take 249,078–280,870 microseconds;
+four separate-query controls take 480,132–573,861 microseconds. Every sample
+compares equal. This is a local component profile, not gameplay throughput.
+
+History uses a bounded deque. It removes the oldest sample before adding the
+next sample and still returns oldest-to-newest JSON arrays. At 10,000 retained
+samples, 30,000 rollover pushes take 1,860 microseconds instead of 1,089,100.
+These debug-build samples exclude view serialization and map cloning. The
+existing history controls cover wraparound, capacity, selected fields, failures
+and recovery without changing the retained sample count.
+
+#### Scheduled readiness allocation measurement (#1350)
+
+Main `1d9def4c` fails macOS Nextest job `124843195926` in run `41304770223`.
+Its first untouched Waiting snapshot records 3 allocations and 336 bytes;
+all later Waiting/Lobby snapshots record 2 allocations and 272 bytes regardless
+of spectator count. An ordinary local control passes and is not a repair.
+
+A focused control leaves one cooperative poll credit in a fresh current-thread
+runtime before the same readiness operation. Its second lock read yields and
+records the exact 3-allocation, 336-byte shape. Initializing the deferred-waker
+queue before that operation gives 2 allocations and 272 bytes. Nextest
+`f1aa70a9` records both controls. The allocation test now initializes that queue
+before its measured regions. Every operation, state, spectator cell and
+allocation assertion remains unchanged. The original hosted failure remains
+visible; new-source macOS qualification is tracked in #1350.
+
+#### External-client assessment
+
+Rust main `da8f2d16` has no server-crate dependency in its manifest. .NET main
+`e467c871` targets an independent signaling SDK. Godot main `f0ae2e81` uses the
+GDScript WebSocket client. These clients do not call the Rust storage trait or
+collect the operator dashboard. All three are unaffected: no WebSocket field,
+ordering, default or error changes. The capacity snapshot change is internal.
+No migration or client tracking issue is required.
+Campaigns #826, #636 and #775 remain open.

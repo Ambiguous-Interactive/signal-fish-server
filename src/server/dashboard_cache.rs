@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -61,7 +61,7 @@ impl RefreshGate {
 struct DashboardMetricsCacheState {
     snapshot: Option<DashboardMetricsSnapshot>,
     last_error: Option<String>,
-    history: Vec<DashboardHistoryEntry>,
+    history: VecDeque<DashboardHistoryEntry>,
     history_capacity: usize,
 }
 
@@ -71,7 +71,7 @@ impl DashboardMetricsCacheState {
         Self {
             snapshot: None,
             last_error: None,
-            history: Vec::with_capacity(history_capacity),
+            history: VecDeque::with_capacity(history_capacity),
             history_capacity,
         }
     }
@@ -79,9 +79,9 @@ impl DashboardMetricsCacheState {
     fn push_history(&mut self, snapshot: &DashboardMetricsSnapshot, fields: &HistoryFields) {
         let entry = DashboardHistoryEntry::from_snapshot(snapshot, fields);
         if self.history.len() == self.history_capacity {
-            self.history.remove(0);
+            self.history.pop_front();
         }
-        self.history.push(entry);
+        self.history.push_back(entry);
     }
 }
 
@@ -252,19 +252,13 @@ impl DashboardMetricsCache {
         }
     }
 
-    /// Fetch one dashboard sample from storage.
-    ///
-    /// Consistency note: each query below takes its own `rooms.read()`
-    /// acquisition, so a room created or deleted between them can produce a
-    /// sample whose `active_rooms` disagrees with its percentile entries by
-    /// the rooms moved in that window. This is a bounded, self-healing skew in
-    /// a monitoring-only surface (the next refresh re-samples); unify the
-    /// three reads under one acquisition only if a consumer ever joins those
-    /// fields inside a single history entry.
+    /// Fetch one dashboard sample through the backend's snapshot query.
     async fn fetch_snapshot(database: Arc<dyn GameDatabase>) -> Result<DashboardMetricsSnapshot> {
-        let rooms_by_game = database.get_rooms_by_game().await?;
-        let player_percentiles = database.get_player_count_percentiles().await?;
-        let game_percentiles = database.get_game_player_percentiles().await?;
+        let crate::database::RoomMetricsSnapshot {
+            rooms_by_game,
+            player_percentiles,
+            game_percentiles,
+        } = database.get_room_metrics_snapshot().await?;
         let active_rooms = rooms_by_game.values().sum();
 
         Ok(DashboardMetricsSnapshot {
@@ -294,7 +288,7 @@ impl DashboardMetricsCache {
                 (HashMap::new(), HashMap::new(), HashMap::new(), 0, None)
             };
 
-        let history = guard.history.clone();
+        let history = guard.history.iter().cloned().collect();
 
         // Staleness is a monotonic elapsed decision (see the snapshot's
         // `fetched_at_instant`); the wall stamp is surfaced but never decides.

@@ -16,6 +16,8 @@ static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::I
 /// A ready-state read must not copy spectator names or the room's member map.
 #[tokio::test]
 async fn lobby_state_projection_allocates_only_its_async_result() {
+    // Exclude the current-thread scheduler's first deferred-waker allocation.
+    tokio::task::yield_now().await;
     for spectators in [0_u128, 16, 255] {
         let database = InMemoryDatabase::new();
         let room = database
@@ -379,5 +381,59 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
     assert!(
         profiles.iter().all(|profile| *profile == profiles[0]),
         "untouched ready snapshots copied spectator state: {profiles:?}"
+    );
+}
+
+#[test]
+#[ignore = "isolated runtime allocation attribution control"]
+fn cooperative_runtime_allocation_profile() {
+    let mut profiles = Vec::new();
+    for warm_scheduler in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (coordinator, room) = tokio::task::unconstrained(async {
+                let database = Arc::new(InMemoryDatabase::new());
+                let room = database
+                    .create_room(
+                        "scheduler".into(),
+                        None,
+                        4,
+                        true,
+                        Uuid::from_u128(1),
+                        "relay".into(),
+                        "test".into(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                (
+                    InMemoryRoomOperationCoordinator::new(
+                        Arc::new(InMemoryMessageCoordinator::new()),
+                        database,
+                        None,
+                    ),
+                    room,
+                )
+            })
+            .await;
+            if warm_scheduler {
+                tokio::task::yield_now().await;
+            }
+            for _ in 0..127 {
+                tokio::task::consume_budget().await;
+            }
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            assert!(coordinator.current_ready_players(&room.id).await.is_empty());
+            let stats = region.change();
+            profiles.push(stats);
+            println!("RUNTIME_READY_SNAPSHOT warm_scheduler={warm_scheduler} stats={stats:?}");
+        });
+    }
+    assert_eq!(profiles[0].allocations, profiles[1].allocations + 1);
+    assert_eq!(
+        profiles[0].bytes_allocated,
+        profiles[1].bytes_allocated + 64
     );
 }

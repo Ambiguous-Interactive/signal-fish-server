@@ -7,12 +7,20 @@ use std::fmt;
 
 type Tail = (String, u64);
 type Entry = (String, Tail);
+type SharedEntry = (crate::records::ReceiptName, Tail);
 
 /// Sorted snapshot members with owned player identities and full sequence tails.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SnapshotTails(Box<[Entry]>);
+pub struct SnapshotTails(Box<[SharedEntry]>);
 
 impl SnapshotTails {
+    /// Share exact member names across retained snapshots without changing their keys.
+    pub(super) fn share_member_names(&mut self, names: &mut crate::records::ReceiptNames) {
+        for (member, _) in &mut self.0 {
+            *member = names.intern(member.as_str());
+        }
+    }
+
     /// Return whether the snapshot contains no members.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -42,7 +50,9 @@ impl SnapshotTails {
     #[cfg(test)]
     /// Borrow the first fixture member in artifact key order.
     pub fn first_key_value(&self) -> Option<(&String, &Tail)> {
-        self.0.first().map(|(member, tail)| (member, tail))
+        self.0
+            .first()
+            .map(|(member, tail)| (member.owned_string(), tail))
     }
 
     #[cfg(test)]
@@ -52,7 +62,7 @@ impl SnapshotTails {
             Ok(position) => self.0[position].1 = tail,
             Err(position) => {
                 let mut entries = std::mem::take(&mut self.0).into_vec();
-                entries.insert(position, (member, tail));
+                entries.insert(position, (member.into(), tail));
                 self.0 = entries.into_boxed_slice();
             }
         }
@@ -62,7 +72,7 @@ impl SnapshotTails {
 impl From<BTreeMap<String, Tail>> for SnapshotTails {
     /// Consume a sorted snapshot map without copying its owned strings.
     fn from(tails: BTreeMap<String, Tail>) -> Self {
-        Self(tails.into_iter().collect())
+        tails.into_iter().collect()
     }
 }
 
@@ -80,17 +90,25 @@ impl FromIterator<Entry> for SnapshotTails {
             earlier.1 = std::mem::take(&mut later.1);
             true
         });
-        Self(entries.into_boxed_slice())
+        Self(
+            entries
+                .into_iter()
+                .map(|(name, tail)| (name.into(), tail))
+                .collect(),
+        )
     }
 }
 
 impl<'a> IntoIterator for &'a SnapshotTails {
     type Item = (&'a String, &'a Tail);
-    type IntoIter = std::iter::Map<std::slice::Iter<'a, Entry>, fn(&'a Entry) -> Self::Item>;
+    type IntoIter =
+        std::iter::Map<std::slice::Iter<'a, SharedEntry>, fn(&'a SharedEntry) -> Self::Item>;
 
     /// Borrow snapshot entries in the same member order as artifact serialization.
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().map(|(member, tail)| (member, tail))
+        self.0
+            .iter()
+            .map(|(member, tail)| (member.owned_string(), tail))
     }
 }
 
@@ -217,6 +235,51 @@ mod tests {
     }
 
     #[test]
+    fn retained_and_replayed_snapshots_share_exact_member_names_and_keep_owned_tails() {
+        use crate::records::{ChurnEvent, ChurnPhase, EventLog};
+        let log = EventLog::new();
+        for index in 0..3 {
+            log.push_churn(ChurnEvent {
+                recipient: "receiver".into(),
+                phase: ChurnPhase::Rejoined,
+                at_us: index,
+                epoch: Some(1),
+                tails: [("未知\0".to_owned(), (format!("identity-{index}"), index))]
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        let records = log.take_records();
+        let first = records.churn[0].tails.first_key_value().unwrap().0;
+        for (index, event) in records.churn.iter().enumerate() {
+            let (member, tail) = event.tails.first_key_value().unwrap();
+            assert!(std::ptr::eq(first, member));
+            assert_eq!(tail, &(format!("identity-{index}"), index as u64));
+        }
+        let mut edited = records.churn[0].tails.clone();
+        edited.insert("another".into(), ("new".into(), 99));
+        edited.get_mut("未知\0").unwrap().0 = "changed".into();
+        assert_eq!(
+            records.churn[0].tails.get("未知\0").unwrap().0,
+            "identity-0"
+        );
+        let output = tempfile::tempdir().unwrap();
+        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+        let replay = crate::artifacts::read_records(output.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&replay).unwrap(),
+            serde_json::to_value(&records).unwrap()
+        );
+        let first = replay.churn[0].tails.first_key_value().unwrap().0;
+        for event in &replay.churn {
+            assert!(std::ptr::eq(
+                first,
+                event.tails.first_key_value().unwrap().0
+            ));
+        }
+    }
+
+    #[test]
     #[ignore = "isolated retained snapshot-tail memory profile; run in a fresh process"]
     /// Measure retained snapshot storage and artifact hashes in isolated comparison processes.
     fn generator_snapshot_tail_storage_profile() {
@@ -231,11 +294,16 @@ mod tests {
         assert!((1..=1_000_000).contains(&snapshots));
         assert!((1..=64).contains(&members));
         /// Retain the selected snapshot shape and report its storage sample and exact artifact hash.
-        fn measure<T: FromIterator<Entry> + Serialize>(snapshots: usize, members: usize) {
+        fn measure<T: FromIterator<Entry> + Serialize>(
+            snapshots: usize,
+            members: usize,
+            share: fn(&mut T, &mut crate::records::ReceiptNames),
+        ) {
             let started = std::time::Instant::now();
+            let mut names = crate::records::ReceiptNames::default();
             let tails: Vec<T> = (0..snapshots)
                 .map(|snapshot| {
-                    (0..members)
+                    let mut tails = (0..members)
                         .map(|member| {
                             (
                                 format!("r{}p{member}", snapshot / members),
@@ -245,7 +313,9 @@ mod tests {
                                 ),
                             )
                         })
-                        .collect()
+                        .collect();
+                    share(&mut tails, &mut names);
+                    tails
                 })
                 .collect();
             let build_us = started.elapsed().as_micros();
@@ -277,9 +347,9 @@ mod tests {
             std::hint::black_box(tails);
         }
         if std::env::var_os("CAPACITY_SNAPSHOT_COMPACT").is_some() {
-            measure::<SnapshotTails>(snapshots, members);
+            measure::<SnapshotTails>(snapshots, members, SnapshotTails::share_member_names);
         } else {
-            measure::<BTreeMap<String, Tail>>(snapshots, members);
+            measure::<BTreeMap<String, Tail>>(snapshots, members, |_, _| {});
         }
     }
 }
