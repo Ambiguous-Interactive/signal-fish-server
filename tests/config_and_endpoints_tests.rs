@@ -1338,12 +1338,7 @@ fn test_configuration_reference_table_is_complete_and_current() {
     );
 }
 
-#[test]
-fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = vec![root.join("README.md")];
-    collect_markdown_files(&root.join("docs"), &mut files);
-    let env_var_regex = Regex::new(r"\bSIGNAL_FISH_[A-Z0-9_]*\b").expect("valid env regex");
+fn is_documented_env_var_allowed(env_var: &str) -> bool {
     let allowed_single_underscore_vars = [
         "SIGNAL_FISH_CONFIG_JSON",
         "SIGNAL_FISH_CONFIG_STDIN",
@@ -1357,7 +1352,35 @@ fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
         // Devcontainer lifecycle opt-out consumed by post-start.sh, not a
         // server configuration field override.
         "SIGNAL_FISH_SKIP_AGENT_REFRESH",
+        // Managed scratch output and cleanup opt-out are development tooling,
+        // not server configuration field overrides.
+        "SIGNAL_FISH_SCRATCH_DIR",
+        "SIGNAL_FISH_SKIP_STORAGE_CLEANUP",
     ];
+    env_var.starts_with("SIGNAL_FISH__") || allowed_single_underscore_vars.contains(&env_var)
+}
+
+#[test]
+fn test_documented_storage_env_vars_do_not_allow_stale_server_names() {
+    for (env_var, allowed) in [
+        ("SIGNAL_FISH_SCRATCH_DIR", true),
+        ("SIGNAL_FISH_SKIP_STORAGE_CLEANUP", true),
+        ("SIGNAL_FISH__PORT", true),
+        ("SIGNAL_FISH_PORT", false),
+        ("SIGNAL_FISH_SERVER_PING_TIMEOUT", false),
+        ("SIGNAL_FISH_SCRATCH_DIR_EXTRA", false),
+        ("SIGNAL_FISH_SKIP_STORAGE_CLEANUP_EXTRA", false),
+    ] {
+        assert_eq!(is_documented_env_var_allowed(env_var), allowed, "{env_var}");
+    }
+}
+
+#[test]
+fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = vec![root.join("README.md")];
+    collect_markdown_files(&root.join("docs"), &mut files);
+    let env_var_regex = Regex::new(r"\bSIGNAL_FISH_[A-Z0-9_]*\b").expect("valid env regex");
 
     let mut violations = Vec::new();
     for file in files {
@@ -1365,9 +1388,7 @@ fn test_docs_use_canonical_config_tokens_and_env_prefixes() {
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", file.display()));
         for found in env_var_regex.find_iter(&content) {
             let env_var = found.as_str();
-            if env_var.starts_with("SIGNAL_FISH__")
-                || allowed_single_underscore_vars.contains(&env_var)
-            {
+            if is_documented_env_var_allowed(env_var) {
                 continue;
             }
             violations.push(format!(
