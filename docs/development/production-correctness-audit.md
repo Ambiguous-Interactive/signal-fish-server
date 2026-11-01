@@ -13314,7 +13314,7 @@ The repaired guard passes eleven selected preparation, readiness and unchanged
 replacement controls in `a07ce725`. Exact completed refusals and cancellation
 markers survive both returned readiness failure and readiness timeout.
 
-The earlier full run `41358544147` passes macOS and coverage at `cc87ede3`.
+The earlier full run `41358544147` passes macOS and coverage at `cc87ede39a62e9d746196af0fcc6dcd46d10c1e5`.
 Its Windows job `125004398596` fails the held-socket write control: the 16 MiB
 send completes successfully, so no pending write exists to time out. That
 fixture inferred backpressure from payload size and was not portable. The
