@@ -869,8 +869,48 @@ fn assert_host_election_borrows_candidates() {
     assert!(bounded, "host election must borrow its candidates");
 }
 
+fn assert_full_replay_rings_reuse_storage() {
+    use signal_fish_server::reconnection::{BufferedEvent, EventBuffer};
+
+    let mut bounded = true;
+    for limit in [0, 1, 4, 16, 64, 256] {
+        let mut buffer = EventBuffer::new(RoomId::nil(), limit);
+        for sequence in 1..=limit as u64 {
+            assert_eq!(buffer.push(ServerMessage::Pong, sequence), 0);
+        }
+        let before_bytes = buffer.events.capacity() * std::mem::size_of::<BufferedEvent>();
+        let region = Region::new(GLOBAL);
+        for sequence in limit as u64 + 1..=limit as u64 + 128 {
+            assert_eq!(buffer.push(ServerMessage::Pong, sequence), 1);
+        }
+        let stats = region.change();
+        let after_bytes = buffer.events.capacity() * std::mem::size_of::<BufferedEvent>();
+        eprintln!("full_replay_ring limit={limit} before_bytes={before_bytes} after_bytes={after_bytes} allocations={} reallocations={} allocated_bytes={}",
+            stats.allocations, stats.reallocations, stats.bytes_allocated);
+        bounded &= stats.allocations == 0
+            && stats.reallocations == 0
+            && stats.bytes_allocated == 0
+            && after_bytes == before_bytes;
+        assert_eq!(buffer.events.len(), limit);
+        assert_eq!(buffer.evicted_watermark, Some(128));
+        assert_eq!(
+            buffer
+                .events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            (129..=limit as u64 + 128).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        bounded,
+        "full replay rings must evict before growing their storage"
+    );
+}
+
 /// Enforce component allocation ceilings and report repeated relay measurements.
 fn main() {
+    assert_full_replay_rings_reuse_storage();
     assert_readiness_snapshots_reuse_their_id_storage();
     assert_session_peer_lists_do_not_grow();
     assert_host_election_borrows_candidates();

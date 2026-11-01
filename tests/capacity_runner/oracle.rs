@@ -829,20 +829,27 @@ impl<'a> RoomMembers<'a> {
     }
 }
 
-/// Validate every observed churn action against the planned lifecycle and roster.
+#[derive(Default)]
+struct PlannedChurn {
+    cycles: Vec<(u64, u64)>,
+    next_action: usize,
+}
+
+/// Validate every observed churn action with progress bounded by planned peers.
 fn churn_evidence(
     churn: &ChurnPlan,
     roster: &BTreeMap<&str, u32>,
     records: &RunRecords,
     reasons: &mut Vec<InvalidReason>,
 ) {
-    let mut planned: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    let mut planned: BTreeMap<&str, PlannedChurn> = BTreeMap::new();
     for cycle in &churn.cycles {
         for peer in &cycle.peers {
             if let Some(reconnect) = cycle.reconnects_us.get(peer) {
                 planned
                     .entry(peer)
                     .or_default()
+                    .cycles
                     .push((cycle.disconnect_us, *reconnect));
             }
         }
@@ -855,20 +862,21 @@ fn churn_evidence(
             .collect::<BTreeSet<_>>()
     });
     let events = ordered_churn_events(records);
-    let mut positions: BTreeMap<&str, usize> = BTreeMap::new();
     let mut count = 0_u64;
     let mut first = None;
     for raw_position in events {
         let event = &records.churn[raw_position];
-        let position = positions.entry(event.recipient.as_str()).or_default();
+        let mut unplanned = PlannedChurn::default();
+        let progress = planned
+            .get_mut(event.recipient.as_str())
+            .unwrap_or(&mut unplanned);
+        let position = &mut progress.next_action;
         let expected_phase = if position.is_multiple_of(2) {
             ChurnPhase::Disconnect
         } else {
             ChurnPhase::Rejoined
         };
-        let cycle = planned
-            .get(event.recipient.as_str())
-            .and_then(|cycles| cycles.get(*position / 2));
+        let cycle = progress.cycles.get(*position / 2);
         let mismatch = if !roster.contains_key(event.recipient.as_str()) {
             Some(ChurnMismatch::UnknownRecipient)
         } else if let Some(&(disconnect, reconnect)) = cycle {
@@ -5859,6 +5867,106 @@ mod coverage_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unplanned_churn_identities_preserve_exact_evidence_and_replay() {
+        let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
+        let mut records = crate::churned_records(&context, &churn);
+        for index in 0..4096 {
+            records.churn.push(ChurnEvent {
+                recipient: format!("unknown-{index:05}"),
+                phase: ChurnPhase::Disconnect,
+                at_us: index,
+                epoch: None,
+                tails: BTreeMap::new().into(),
+            });
+        }
+        records.churn.push(ChurnEvent {
+            recipient: "r0p0".into(),
+            phase: ChurnPhase::Rejoined,
+            at_us: 0,
+            epoch: Some(2),
+            tails: BTreeMap::new().into(),
+        });
+        let expected = InvalidReason::InvalidChurnEvents {
+            count: 4097,
+            first: ChurnViolation {
+                recipient: "r0p0".into(),
+                phase: ChurnPhase::Rejoined,
+                mismatch: ChurnMismatch::UnplannedAction,
+            },
+        };
+        let mut original = None;
+        for reverse in [false, true] {
+            if reverse {
+                records.churn.reverse();
+            }
+            let output = tempfile::tempdir().unwrap();
+            crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+            let replayed = crate::artifacts::read_records(output.path()).unwrap();
+            for evidence in [&records, &replayed] {
+                let summary = summarize(
+                    &context.plans,
+                    &context.roster,
+                    evidence,
+                    1_000,
+                    96,
+                    DeliveryClass::Reliable,
+                    &churn,
+                    None,
+                );
+                assert!(!summary.valid);
+                assert!(summary.reasons.contains(&expected), "{:?}", summary.reasons);
+                let summary = serde_json::to_value(summary).unwrap();
+                assert_eq!(original.get_or_insert_with(|| summary.clone()), &summary);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated churn validation memory profile; run in a fresh process"]
+    fn generator_unplanned_churn_memory_profile() {
+        let rows: usize = std::env::var("CAPACITY_UNPLANNED_CHURN_ROWS")
+            .map(|value| value.parse().expect("unplanned churn row count"))
+            .unwrap_or(500_000);
+        let records = RunRecords {
+            churn: (0..rows)
+                .map(|index| ChurnEvent {
+                    recipient: format!("unknown-{index:08}"),
+                    phase: ChurnPhase::Disconnect,
+                    at_us: count_u64(index),
+                    epoch: None,
+                    tails: BTreeMap::new().into(),
+                })
+                .collect(),
+            ..RunRecords::default()
+        };
+        let started = std::time::Instant::now();
+        let mut reasons = Vec::new();
+        churn_evidence(
+            &ChurnPlan::default(),
+            &BTreeMap::new(),
+            &records,
+            &mut reasons,
+        );
+        assert_eq!(
+            reasons,
+            vec![InvalidReason::InvalidChurnEvents {
+                count: count_u64(rows),
+                first: ChurnViolation {
+                    recipient: "unknown-00000000".into(),
+                    phase: ChurnPhase::Disconnect,
+                    mismatch: ChurnMismatch::UnknownRecipient,
+                },
+            }]
+        );
+        println!(
+            "UNPLANNED_CHURN rows={rows} elapsed_us={} reasons={}",
+            started.elapsed().as_micros(),
+            serde_json::to_string(&reasons).unwrap()
+        );
+        std::hint::black_box(records);
     }
 
     /// #775: keep exact disconnect identities with four-byte offsets when they fit.

@@ -12940,3 +12940,73 @@ changes server persistence retry state only. It preserves heartbeat cadence,
 Ping/Pong payloads, error codes and room events. The admission projection
 preserves baseline values. The oracle change is internal. No client migration
 or tracking issue is required.
+
+### F225 — Clearing a public replay ring hides discarded events (#1347)
+
+At main `2d068b42`, `EventBuffer::clear()` removes retained events without
+advancing `evicted_watermark`. An embedder can discard events needed by an
+older cursor and still read no truncation evidence. The production manager
+removes whole room buffers and does not call this public method. No live
+WebSocket incident is established.
+
+The new clear regression fails on the original source in Nextest `0cf10ad4`:
+a ring containing sequences 8, 20 and 13 retains no watermark after clear.
+The repair records the highest discarded sequence before clearing. Empty and
+repeated clears preserve prior evidence, including an already higher
+watermark. A cursor control checks replay after a later push on both sides of
+the discarded tail.
+
+#### Full replay ring storage (#636)
+
+The previous push path appends before evicting. When a ring fills its backing
+allocation, the next event grows that allocation even though its oldest event
+is immediately removed. A zero-capacity ring also allocates before discarding
+every event. The repair evicts before appending and records zero-capacity
+loss without storing the event. Mutable-capacity controls retain the exact
+removed count and maximum loss sequence after shrinking or disabling a ring.
+The original storage regression also fails in Nextest `0cf10ad4`.
+All 28 selected all-feature replay controls pass in Nextest `775741be`.
+
+The original allocation benchmark fails its no-growth ceiling. At capacities
+4, 16, 64 and 256 it retains twice the filled ring storage after the next
+push. The 256-event ring grows from 53,248 to 106,496 bytes; a disabled ring
+allocates 832 bytes. Capacity 1 already has spare backing slots and does not
+grow. The repaired benchmark keeps the 256-event ring at 53,248 bytes and
+the disabled ring at zero bytes. All six capacities add no allocations or
+reallocations during 128 further pushes. The complete allocation benchmark
+passes its existing relay ceilings too. These are deterministic ring-allocation
+results, not process peak memory or throughput measurements.
+
+#### Planned churn progress storage (#775)
+
+The capacity oracle previously retained one progress-map entry for every
+observed churn identity, including unknown and unplanned identities. It also
+kept a separate cycle-plan map. Progress now lives with each planned peer;
+unplanned events retain no counter. The raw ledger, event ordering, exact
+invalid count, first violation and phase/epoch checks remain unchanged.
+
+A fresh-process 500,000-row unknown-identity profile reduces peak process RSS
+from 81,764 to 56,924 KiB. Both sources return exactly 500,000 invalid events
+with the same first identity, phase and reason. The original and repaired
+binary SHA-256 prefixes are `809becdb` and `1572f4bd`. The retained fixture is
+`generator_unplanned_churn_memory_profile`; run it alone with `--ignored`.
+Linux `wait4` attributes the final RSS measurement to that exact test child.
+An earlier repaired-source control records 57,052 KiB with the same verdict.
+The new complete-summary control includes 4,096 unknown peers, an unplanned
+roster peer and a valid planned lifecycle. It compares forward and reversed
+histories and artifact replay exactly. Fifteen scoped churn controls pass in
+Nextest `082dc301`.
+
+This is one oracle-phase memory measurement. It does not establish server
+throughput, whole-generator peak memory or the planned ten-minute cell.
+Campaigns #826, #636 and #775 remain open.
+
+#### External-client assessment
+
+Rust main `da8f2d16` has no server-crate dependency in `Cargo.toml`. .NET main
+`e467c871` is an independent `netstandard2.1` SDK. Godot main `c2184135` uses
+the GDScript client in `addons/signal_fish/signal_fish_client.gd`. None calls
+the Rust server's public replay-ring method. All three are unaffected: the
+clear repair has no production caller, ring storage preserves event values
+and order, and the capacity change is internal. No wire field, error code,
+default, client migration or client tracking issue is required.
