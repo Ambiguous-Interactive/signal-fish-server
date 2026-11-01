@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce CPU work when sizing JSON gameplay payloads (#636).
 - Reduce memory retained by completed-session history (#636).
 - Reduce dashboard collection and history update costs (#636).
 - Reduce memory used by full reconnection replay buffers (#636).

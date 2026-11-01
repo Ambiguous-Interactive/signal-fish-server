@@ -585,7 +585,12 @@ pub mod allocation_benchmark {
         }
     }
 
-    /// Measure the production payload-sizing path without starting a server.
+    /// Measure the production JSON game-data sizing path.
+    pub fn game_data_json_len(value: &serde_json::Value) -> usize {
+        super::game_data::game_data_json_len(value)
+    }
+
+    /// Measure generic canonical JSON sizing without starting a server.
     pub fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
         super::signaling::canonical_json_len(value)
     }

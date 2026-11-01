@@ -82,6 +82,7 @@ pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<PlayerId, (Receip
 
 #[derive(Debug, Clone)]
 struct PeerProgress {
+    preparation_started: Instant,
     epoch: Arc<std::sync::OnceLock<Instant>>,
     state: Arc<std::sync::Mutex<PeerStageProgress>>,
 }
@@ -89,6 +90,8 @@ struct PeerProgress {
 #[derive(Debug, Clone, serde::Serialize)]
 struct PeerStageProgress {
     stage: &'static str,
+    clock: &'static str,
+    last_completed_clock: Option<&'static str>,
     stage_started_us: u64,
     last_completed_stage: Option<&'static str>,
     last_completed_us: Option<u64>,
@@ -97,11 +100,19 @@ struct PeerStageProgress {
 }
 
 impl PeerProgress {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::planned(Instant::now())
+    }
+
+    fn planned(preparation_started: Instant) -> Self {
         Self {
+            preparation_started,
             epoch: Arc::new(std::sync::OnceLock::new()),
             state: Arc::new(std::sync::Mutex::new(PeerStageProgress {
-                stage: "ready",
+                stage: "planned",
+                clock: "preparation",
+                last_completed_clock: None,
                 stage_started_us: 0,
                 last_completed_stage: None,
                 last_completed_us: None,
@@ -118,10 +129,19 @@ impl PeerProgress {
 
     /// Complete the previous lifecycle stage without retaining an event history.
     fn enter(&self, stage: &'static str, incarnation: u32) {
-        let at_us = self.epoch.get().map_or(0, |epoch| micros(epoch.elapsed()));
+        let (clock, at_us) = self.epoch.get().map_or_else(
+            || ("preparation", micros(self.preparation_started.elapsed())),
+            |epoch| ("workload", micros(epoch.elapsed())),
+        );
         let mut state = self.state.lock().expect("peer progress");
         state.last_completed_stage = Some(state.stage);
-        state.last_completed_us = Some(at_us);
+        state.last_completed_clock = Some(state.clock);
+        state.last_completed_us = Some(if state.clock == clock {
+            at_us
+        } else {
+            micros(self.preparation_started.elapsed())
+        });
+        state.clock = clock;
         state.stage = stage;
         state.stage_started_us = at_us;
         state.incarnation = incarnation;
@@ -138,6 +158,46 @@ impl PeerProgress {
 
     fn snapshot(&self) -> PeerStageProgress {
         self.state.lock().expect("peer progress").clone()
+    }
+}
+
+/// Capture one bounded row for each planned peer.
+fn peer_progress_snapshot(
+    progress: &BTreeMap<String, PeerProgress>,
+) -> BTreeMap<&str, PeerStageProgress> {
+    progress
+        .iter()
+        .map(|(name, progress)| (name.as_str(), progress.snapshot()))
+        .collect()
+}
+
+/// Keep initial setup evidence when the owning run future is dropped.
+struct PreparationEvidence<'a> {
+    output_dir: &'a std::path::Path,
+    progress: &'a BTreeMap<String, PeerProgress>,
+    log: &'a EventLog,
+    finished: bool,
+}
+
+impl Drop for PreparationEvidence<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let progress = peer_progress_snapshot(self.progress);
+        let result = (|| {
+            artifacts::write_json(self.output_dir.join("peer-progress.json"), &progress)?;
+            artifacts::write_json(
+                self.output_dir.join("preparation.json"),
+                &json!({
+                    "status": "cancelled", "workload_started": false,
+                }),
+            )?;
+            artifacts::write_deliveries(self.output_dir, &self.log.take_records())
+        })();
+        if let Err(error) = result {
+            eprintln!("capacity preparation artifacts: {error}");
+        }
     }
 }
 
@@ -422,68 +482,6 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     };
     let ws_url = format!("{}{}", endpoint_base, config.encoding.ws_path());
 
-    // Join phase: every peer of a room joins before the next room starts
-    // (the first join creates the room; intra-room joins are concurrent).
-    // Each join records the room's member roster (`PlayerId` -> peer name)
-    // so `DeliveryReport` gap ranges attribute their omissions to a sender.
-    let registry: SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
-    // One joined peer: its plan identity, the session halves, its PlayerId
-    // (the registry key), and the join snapshot's `(id, seq tail)` stamps.
-    struct JoinedPeer {
-        name: String,
-        room: u32,
-        sink: WsSink,
-        rx: WsReceiver,
-        player_id: PlayerId,
-        tails: BTreeMap<String, (String, u64)>,
-    }
-    let mut peers: Vec<JoinedPeer> = Vec::new();
-    for room in 0..config.rooms {
-        let room_plans: Vec<&SenderPlan> = plans.iter().filter(|plan| plan.room == room).collect();
-        let joins = room_plans.into_iter().map(|plan| {
-            let config = &config;
-            let ws_url = &ws_url;
-            let designated = slow_reader_name(config).as_deref()
-                == Some(RunConfig::peer_name(plan.room, plan.player).as_str())
-                || paused_reader_name(config).as_deref()
-                    == Some(RunConfig::peer_name(plan.room, plan.player).as_str());
-            // The experiment's opaque sender: peer 0 negotiates rkyv (the
-            // overlay enables it; the negotiation verifies the server
-            // advertised it).
-            let game_data_format = opaque_sender_format(config, plan.player);
-            async move {
-                connect_and_join(
-                    ws_url,
-                    config.encoding,
-                    config.room_code(plan.room),
-                    config.players_per_room,
-                    plan,
-                    designated,
-                    game_data_format,
-                    None,
-                )
-                .await
-            }
-        });
-        let results = futures_util::future::join_all(joins).await;
-        for (plan, result) in plans.iter().filter(|p| p.room == room).zip(results) {
-            match result {
-                Ok((sink, rx, player_id, tails)) => peers.push(JoinedPeer {
-                    name: plan.name.clone(),
-                    room: plan.room,
-                    sink,
-                    rx,
-                    player_id,
-                    tails,
-                }),
-                Err(failure) => log.push_join_failure(format!(
-                    "{}: {failure}",
-                    RunConfig::peer_name(plan.room, plan.player)
-                )),
-            }
-        }
-    }
-
     // Manifest first (BEFORE the measurement epoch: hashing the server
     // binary and writing the manifest are setup work that must not eat into
     // any scheduled send's budget): a crashed run still leaves its identity
@@ -545,6 +543,105 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         identity,
         BuildIdentity::current(),
     )?;
+
+    let preparation_started = Instant::now();
+    let peer_progress: BTreeMap<_, _> = plans
+        .iter()
+        .map(|plan| {
+            (
+                plan.name.clone(),
+                PeerProgress::planned(preparation_started),
+            )
+        })
+        .collect();
+    let mut preparation = PreparationEvidence {
+        output_dir: &config.output_dir,
+        progress: &peer_progress,
+        log: &log,
+        finished: false,
+    };
+    // Join phase: every peer of a room joins before the next room starts
+    // (the first join creates the room; intra-room joins are concurrent).
+    // Each join records the room's member roster (`PlayerId` -> peer name)
+    // so `DeliveryReport` gap ranges attribute their omissions to a sender.
+    let registry: SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+    // One joined peer: its plan identity, the session halves, its PlayerId
+    // (the registry key), and the join snapshot's `(id, seq tail)` stamps.
+    struct JoinedPeer {
+        name: String,
+        room: u32,
+        sink: WsSink,
+        rx: WsReceiver,
+        player_id: PlayerId,
+        tails: BTreeMap<String, (String, u64)>,
+    }
+    let mut peers: Vec<JoinedPeer> = Vec::new();
+    for room in 0..config.rooms {
+        let preparation_deadline = Instant::now() + STEP_TIMEOUT * 6;
+        let room_plans: Vec<&SenderPlan> = plans.iter().filter(|plan| plan.room == room).collect();
+        let joins = room_plans.into_iter().map(|plan| {
+            let config = &config;
+            let ws_url = &ws_url;
+            let log = &log;
+            let progress = peer_progress
+                .get(&plan.name)
+                .expect("planned peer progress");
+            let designated = slow_reader_name(config).as_deref()
+                == Some(RunConfig::peer_name(plan.room, plan.player).as_str())
+                || paused_reader_name(config).as_deref()
+                    == Some(RunConfig::peer_name(plan.room, plan.player).as_str());
+            // The experiment's opaque sender: peer 0 negotiates rkyv (the
+            // overlay enables it; the negotiation verifies the server
+            // advertised it).
+            let game_data_format = opaque_sender_format(config, plan.player);
+            async move {
+                let result = tokio::time::timeout_at(
+                    preparation_deadline,
+                    connect_and_join(
+                        ws_url,
+                        config.encoding,
+                        config.room_code(plan.room),
+                        config.players_per_room,
+                        plan,
+                        designated,
+                        game_data_format,
+                        Some(progress),
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| Err("initial preparation deadline exceeded".into()));
+                if result.is_ok() {
+                    progress.connection_stage("prepared");
+                } else {
+                    progress.returned();
+                    if let Err(failure) = &result {
+                        log.push_join_failure(format!("{}: {failure}", plan.name));
+                    }
+                }
+                result
+            }
+        });
+        let results = futures_util::future::join_all(joins).await;
+        for (plan, result) in plans.iter().filter(|p| p.room == room).zip(results) {
+            if let Ok((sink, rx, player_id, tails)) = result {
+                peers.push(JoinedPeer {
+                    name: plan.name.clone(),
+                    room: plan.room,
+                    sink,
+                    rx,
+                    player_id,
+                    tails,
+                });
+            }
+        }
+    }
+
+    artifacts::write_json(
+        config.output_dir.join("peer-progress.json"),
+        &peer_progress_snapshot(&peer_progress),
+    )?;
+    preparation.finished = true;
+    drop(preparation);
 
     let max_intended_us = plans
         .iter()
@@ -646,7 +743,6 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // bounded kernel handoff and outbound queue fill), then drains.
     let paused_reader = paused_reader_name(&config);
     let mut handles = Vec::new();
-    let mut peer_progress = BTreeMap::new();
     for JoinedPeer {
         name,
         room,
@@ -695,8 +791,10 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         let game_data_format = opaque_sender_format(&config, plan.player);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         readiness.push(ready_rx);
-        let progress = PeerProgress::new();
-        peer_progress.insert(name.clone(), progress.clone());
+        let progress = peer_progress
+            .get(&name)
+            .expect("planned peer progress")
+            .clone();
         let completion = progress.clone();
         let task = peer_task(
             name,
@@ -785,6 +883,8 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         config.experiment,
     );
 
+    let lifecycle = peer_progress_snapshot(&peer_progress);
+    artifacts::write_json(config.output_dir.join("peer-progress.json"), &lifecycle)?;
     if !summary.valid {
         let mut evidence = invalid_run_diagnostics(
             &run_id,
@@ -796,17 +896,8 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             evidence_finished_us,
             tokio::runtime::Handle::current().metrics().num_workers(),
         );
-        evidence["peer_lifecycle"] = serde_json::to_value(
-            peer_progress
-                .iter()
-                .map(|(peer, progress)| (peer, progress.snapshot()))
-                .collect::<BTreeMap<_, _>>(),
-        )
-        .expect("peer progress serializes");
-        artifacts::write_json(
-            config.output_dir.join("peer-progress.json"),
-            &evidence["peer_lifecycle"],
-        )?;
+        evidence["peer_lifecycle"] =
+            serde_json::to_value(&lifecycle).expect("peer progress serializes");
         eprintln!("capacity invalid run: {evidence}");
     }
 
@@ -1313,8 +1404,9 @@ async fn join_room(
 
 async fn send_client(sink: &mut WsSink, message: &ClientMessage) -> Result<(), String> {
     let frame = serde_json::to_string(message).map_err(|error| format!("serialize: {error}"))?;
-    sink.send(Message::Text(frame.into()))
+    tokio::time::timeout(STEP_TIMEOUT, sink.send(Message::Text(frame.into())))
         .await
+        .map_err(|_| format!("handshake write timed out after {STEP_TIMEOUT:?}"))?
         .map_err(|error| format!("send: {error}"))
 }
 
@@ -2554,6 +2646,224 @@ mod session_poll_tests {
     use super::*;
 
     #[tokio::test]
+    /// Issue #1355: cancellation retains identity and every planned initial peer.
+    async fn preparation_cancellation_preserves_all_planned_peers() {
+        for (encoding, upgrade, expected, refuse_first) in [
+            (Encoding::V2Json, false, "socket_connect_and_upgrade", false),
+            (Encoding::V2Json, true, "join_snapshot", false),
+            (Encoding::V3Json, true, "authentication_reply", false),
+            (Encoding::V3Json, true, "authentication_reply", true),
+        ] {
+            let output = tempfile::tempdir().unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = crate::scenario_config(encoding);
+            config.rooms = 2;
+            config.players_per_room = 2;
+            config.endpoint = Some(format!("ws://{}", listener.local_addr().unwrap()));
+            config.output_dir = output.path().to_path_buf();
+            let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let first = listener.accept().await.unwrap().0;
+                let second = listener.accept().await.unwrap().0;
+                let mut upgraded = Vec::new();
+                let mut raw = Vec::new();
+                for (index, socket) in [first, second].into_iter().enumerate() {
+                    if upgrade {
+                        let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                        websocket.next().await.unwrap().unwrap();
+                        if refuse_first && index == 0 {
+                            websocket
+                                .send(Message::Text(
+                                    serde_json::to_string(&ServerMessage::AuthenticationError {
+                                        error: "returned before cancellation".into(),
+                                        error_code:
+                                            signal_fish_server::protocol::ErrorCode::InvalidAppId,
+                                    })
+                                    .unwrap()
+                                    .into(),
+                                ))
+                                .await
+                                .unwrap();
+                            let _closed = websocket.next().await;
+                        }
+                        upgraded.push(websocket);
+                    } else {
+                        raw.push(socket);
+                    }
+                }
+                observed_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+                drop((raw, upgraded));
+            });
+            let run = tokio::spawn(run(config));
+            tokio::time::timeout(Duration::from_secs(5), observed_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            run.abort();
+            assert!(run.await.unwrap_err().is_cancelled());
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.path().join(artifacts::MANIFEST_FILE))
+                    .expect("initial manifest"),
+            )
+            .unwrap();
+            assert_eq!(manifest["config"]["rooms"], 2);
+            let progress: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.path().join("peer-progress.json"))
+                    .expect("canceled preparation progress"),
+            )
+            .unwrap();
+            assert_eq!(progress.as_object().unwrap().len(), 4);
+            for name in ["r0p0", "r0p1"] {
+                assert_eq!(progress[name]["stage"], expected);
+                assert_eq!(progress[name]["clock"], "preparation");
+                if !refuse_first {
+                    assert_eq!(progress[name]["task_returned"], false);
+                }
+            }
+            for name in ["r1p0", "r1p1"] {
+                assert_eq!(progress[name]["stage"], "planned");
+                assert_eq!(progress[name]["clock"], "preparation");
+                assert_eq!(progress[name]["task_returned"], false);
+            }
+            let records = artifacts::read_records(output.path()).unwrap();
+            assert_eq!(records.join_failures.len(), usize::from(refuse_first));
+            if refuse_first {
+                let failed = records.join_failures[0]
+                    .strip_suffix(": v3 authentication refused: returned before cancellation")
+                    .expect("exact retained failure");
+                assert!(["r0p0", "r0p1"].contains(&failed));
+                for name in ["r0p0", "r0p1"] {
+                    assert_eq!(progress[name]["task_returned"], name == failed);
+                }
+            }
+            assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
+            let status: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.path().join("preparation.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(status["status"], "cancelled");
+            assert_eq!(status["workload_started"], false);
+            abort_and_join(vec![server]).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    /// Keep exact returned join errors and failed peers through verdict and replay.
+    async fn preparation_refusals_keep_exact_failures_and_replay() {
+        let output = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        config.rooms = 2;
+        config.players_per_room = 2;
+        config.endpoint = Some(format!("ws://{}", listener.local_addr().unwrap()));
+        config.output_dir = output.path().to_path_buf();
+        config.warmup = Duration::ZERO;
+        config.duration = Duration::from_millis(1);
+        config.drain_grace = Duration::ZERO;
+        config.generator_lag_bound = Duration::from_millis(1);
+        config.sample_interval = Duration::from_millis(1);
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                websocket.next().await.unwrap().unwrap();
+                websocket
+                    .send(Message::Text(
+                        serde_json::to_string(&ServerMessage::AuthenticationError {
+                            error: "initial refusal marker".into(),
+                            error_code: signal_fish_server::protocol::ErrorCode::InvalidAppId,
+                        })
+                        .unwrap()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), run(config))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!outcome.summary.valid);
+        let records = artifacts::read_records(output.path()).unwrap();
+        assert_eq!(records.join_failures.len(), 4);
+        for name in ["r0p0", "r0p1", "r1p0", "r1p1"] {
+            assert!(records.join_failures.contains(&format!(
+                "{name}: v3 authentication refused: initial refusal marker"
+            )));
+        }
+        assert_eq!(
+            serde_json::to_value(artifacts::replay(output.path()).unwrap()).unwrap(),
+            serde_json::to_value(&outcome.summary).unwrap()
+        );
+        let progress: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.path().join("peer-progress.json")).unwrap(),
+        )
+        .unwrap();
+        for row in progress.as_object().unwrap().values() {
+            assert_eq!(row["stage"], "authentication_reply");
+            assert_eq!(row["clock"], "preparation");
+            assert_eq!(row["task_returned"], true);
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    /// Initial handshake writes stop when a connected peer stops reading.
+    async fn preparation_write_deadline_stops_a_held_socket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            held_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(websocket);
+        });
+        let stream = connect_plain(&url).await.unwrap();
+        held_rx.await.unwrap();
+        let (mut sink, _rx) = stream.split();
+        let message = ClientMessage::GameData {
+            data: json!("x".repeat(16 * 1024 * 1024)),
+            class: None,
+            key: None,
+        };
+        tokio::time::pause();
+        let result = send_client(&mut sink, &message).await;
+        assert_eq!(
+            result.unwrap_err(),
+            format!("handshake write timed out after {STEP_TIMEOUT:?}")
+        );
+        abort_and_join(vec![server]).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    /// Preparation time never becomes workload send time.
+    async fn preparation_and_workload_clocks_remain_distinct() {
+        let progress = PeerProgress::new();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        progress.connection_stage("join_snapshot");
+        assert_eq!(progress.snapshot().stage_started_us, 10_000_000);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        progress.connection_stage("prepared");
+        progress.start(Instant::now());
+        let started = progress.snapshot();
+        assert_eq!(started.stage, "active");
+        assert_eq!(started.clock, "workload");
+        assert_eq!(started.stage_started_us, 0);
+        assert_eq!(started.last_completed_stage, Some("prepared"));
+        assert_eq!(started.last_completed_clock, Some("preparation"));
+        assert_eq!(started.last_completed_us, Some(12_000_000));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        progress.enter("offline", 1);
+        let offline = progress.snapshot();
+        assert_eq!(offline.last_completed_clock, Some("workload"));
+        assert_eq!(offline.last_completed_us, Some(1_000_000));
+    }
+
+    #[tokio::test]
     /// Hold each handshake boundary and preserve its pending stage after cancellation.
     async fn peer_lifecycle_retains_the_exact_pending_stage_after_cancellation() {
         for (encoding, upgrade, expected, completed) in [
@@ -2661,7 +2971,7 @@ mod session_poll_tests {
         assert_eq!(snapshot.last_completed_stage, Some("join_snapshot"));
         assert_eq!(snapshot.incarnation, 10_000);
         assert!(snapshot.task_returned);
-        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 300);
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 400);
     }
 
     #[tokio::test]
