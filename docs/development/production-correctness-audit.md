@@ -12899,6 +12899,9 @@ Stored spectators are not live routes, so this measures baseline construction.
 The four-copies-per-spectator bound fails on the original lookup and passes
 with the projection. These are cumulative allocator measurements, not peak
 memory, latency or throughput results. #636 remains open.
+Hosted CI caught an unchecked setup-message drain in the new allocation fixture.
+The fixture now checks the creation baseline, lobby event and empty queue before
+measurement. Its allocated-byte and allocation totals stay unchanged.
 
 #### Rejoin-only room view index (#775)
 

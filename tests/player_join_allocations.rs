@@ -33,7 +33,22 @@ async fn player_admission_does_not_copy_the_room_to_find_its_lane() {
                 None,
             )
             .await;
-        while host_receiver.try_recv().is_ok() {}
+        {
+            let created = host_receiver.try_recv().unwrap();
+            assert!(
+                matches!(created.as_ref(), ServerMessage::RoomJoined(payload) if payload.player_id == host && payload.room_code == "PPROF1")
+            );
+            let lobby = host_receiver.try_recv().unwrap();
+            assert!(matches!(
+                lobby.as_ref(),
+                ServerMessage::LobbyStateChanged { .. }
+            ));
+            let remaining = host_receiver.try_recv();
+            assert!(matches!(
+                remaining,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
         let room_id = server.get_client_room(&host).await.unwrap();
         server
             .database()
