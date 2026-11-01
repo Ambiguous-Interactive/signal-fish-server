@@ -494,7 +494,7 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let _authority_lifecycle_guard = lifecycle.lock().await;
+        let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -532,7 +532,11 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
-        let room = match self.database.get_room_by_id(&room_id).await {
+        let room = match self
+            .database
+            .get_room_player_snapshot(&room_id, &target_id)
+            .await
+        {
             Ok(Some(room)) => room,
             Ok(None) => {
                 drop(transfer_event_guard);
@@ -569,7 +573,7 @@ impl EnhancedGameServer {
             .await;
             return;
         }
-        if !room.players.contains_key(&target_id) {
+        if room.player.is_none() {
             drop(transfer_event_guard);
             self.metrics.increment_authority_transfer_conflicts();
             self.fail_operation(
@@ -601,6 +605,35 @@ impl EnhancedGameServer {
             .await;
             return;
         }
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let transaction = tokio::spawn(async move {
+            server
+                .transfer_authority_owned(
+                    authority_id,
+                    operation_id,
+                    target_id,
+                    room_id,
+                    authority_lifecycle_guard,
+                    transfer_event_guard,
+                )
+                .await;
+        });
+        if let Err(error) = transaction.await {
+            tracing::error!(%authority_id, %error, "Authority transfer transaction failed");
+        }
+    }
+
+    async fn transfer_authority_owned(
+        self: &Arc<Self>,
+        authority_id: PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        room_id: RoomId,
+        _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
+        transfer_event_guard: crate::coordination::RoomEventMutationGuard,
+    ) {
+        let authority_id = &authority_id;
         let granted = match self
             .database
             .update_room_authority(&room_id, Some(target_id))

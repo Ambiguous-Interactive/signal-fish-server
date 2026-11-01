@@ -320,3 +320,89 @@ async fn room_existence_tracks_pending_published_and_deleted_rows() {
     assert!(!db.room_exists(&room.id).await.unwrap());
     assert!(!db.room_exists(&Uuid::nil()).await.unwrap());
 }
+
+/// ID-only lookup retains code scope, publication visibility and stale-index handling.
+#[tokio::test]
+async fn room_id_lookup_matches_full_snapshots_through_publication_rotation_and_deletion() {
+    let db = InMemoryDatabase::new();
+    let room = db
+        .create_pending_room_classified(
+            "lookup".into(),
+            Some("BEFORE".into()),
+            4,
+            true,
+            Uuid::new_v4(),
+            "relay".into(),
+            "test".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    for stage in ["pending", "published", "rotated", "deleted", "reused"] {
+        match stage {
+            "published" => db.publish_room(&room.id).await.unwrap(),
+            "rotated" => {
+                db.update_room_code(&room.id, "AFTER1".into())
+                    .await
+                    .unwrap();
+            }
+            "deleted" => {
+                assert!(db.delete_room(&room.id).await.unwrap());
+            }
+            "reused" => {
+                create_test_room(&db, "lookup", "BEFORE").await.unwrap();
+            }
+            _ => {}
+        }
+        for (game, code) in [
+            ("lookup", "BEFORE"),
+            ("lookup", "AFTER1"),
+            ("other", "BEFORE"),
+            ("lookup", "before"),
+        ] {
+            assert_eq!(
+                db.get_room_id(game, code).await.unwrap(),
+                db.get_room(game, code).await.unwrap().map(|room| room.id),
+                "stage={stage}, game={game}, code={code}"
+            );
+        }
+    }
+    let stale = Uuid::new_v4();
+    db.room_codes
+        .write()
+        .await
+        .insert(("lookup".into(), "STALE1".into()), stale);
+    assert_eq!(db.get_room_id("lookup", "STALE1").await.unwrap(), None);
+}
+
+/// The projection must wait for every lock that protects a full code lookup.
+#[tokio::test]
+async fn room_id_lookup_serializes_with_membership_codes_and_publication() {
+    let db = InMemoryDatabase::new();
+    let room = create_test_room(&db, "lookup", "LOCKED").await.unwrap();
+    {
+        let guard = db.rooms.write().await;
+        let lookup = db.get_room_id("lookup", "LOCKED");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(guard);
+        assert_eq!(lookup.await.unwrap(), Some(room.id));
+    }
+    {
+        let guard = db.room_codes.write().await;
+        let lookup = db.get_room_id("lookup", "LOCKED");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(guard);
+        assert_eq!(lookup.await.unwrap(), Some(room.id));
+    }
+    {
+        let guard = db.room_publication.write().await;
+        let lookup = db.get_room_id("lookup", "LOCKED");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(guard);
+        assert_eq!(lookup.await.unwrap(), Some(room.id));
+    }
+}

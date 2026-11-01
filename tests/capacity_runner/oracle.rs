@@ -1573,11 +1573,11 @@ enum ChurnPositions {
 }
 
 impl ChurnPositions {
-    fn new(compact: bool) -> Self {
+    fn with_capacity(compact: bool, count: usize) -> Self {
         if compact {
-            Self::Compact(Vec::new())
+            Self::Compact(Vec::with_capacity(count))
         } else {
-            Self::Wide(Vec::new())
+            Self::Wide(Vec::with_capacity(count))
         }
     }
 
@@ -1663,13 +1663,22 @@ fn index_room_churn_events(
     room_of: &BTreeMap<&str, u32>,
     compact: bool,
 ) -> BTreeMap<u32, ChurnPositions> {
-    let mut rooms: BTreeMap<u32, ChurnPositions> = BTreeMap::new();
-    for (position, event) in events.iter().enumerate() {
+    let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+    for event in events {
         if let Some(room) = room_of.get(event.recipient.as_str()) {
-            rooms
-                .entry(*room)
-                .or_insert_with(|| ChurnPositions::new(compact))
-                .push(position);
+            *counts.entry(*room).or_default() += 1;
+        }
+    }
+    let mut rooms: BTreeMap<u32, ChurnPositions> = counts
+        .into_iter()
+        .map(|(room, count)| (room, ChurnPositions::with_capacity(compact, count)))
+        .collect();
+    for (position, event) in events.iter().enumerate() {
+        if let Some(positions) = room_of
+            .get(event.recipient.as_str())
+            .and_then(|room| rooms.get_mut(room))
+        {
+            positions.push(position);
         }
     }
     for positions in rooms.values_mut() {
@@ -4360,7 +4369,10 @@ mod coverage_tests {
     #[test]
     #[ignore = "isolated room churn index memory profile; run in a fresh process"]
     fn generator_room_churn_index_memory_profile() {
-        let records = churn_sort_fixture(1_000_000);
+        let rows = std::env::var("CAPACITY_ROOM_CHURN_ROWS")
+            .map(|value| value.parse().expect("room churn row count"))
+            .unwrap_or(1_000_000);
+        let records = churn_sort_fixture(rows);
         let room_of: BTreeMap<_, _> = records
             .churn
             .iter()
@@ -4476,13 +4488,25 @@ mod coverage_tests {
                         .filter(|event| room_of.contains_key(event.recipient.as_str()))
                         .count()
                 );
+                let width = if compact {
+                    std::mem::size_of::<u32>()
+                } else {
+                    std::mem::size_of::<usize>()
+                };
+                for positions in rooms.values() {
+                    assert_eq!(
+                        positions.retained_bytes(),
+                        positions.len() * width,
+                        "room churn index must not retain spare event offsets: count={count}"
+                    );
+                }
                 for (viewer, room) in &room_of {
                     let mut expected: Vec<_> = events
                         .iter()
                         .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
                         .collect();
                     expected.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
-                    let empty = ChurnPositions::new(true);
+                    let empty = ChurnPositions::with_capacity(true, 0);
                     let actual: Vec<_> =
                         viewer_churn_events(&events, rooms.get(room).unwrap_or(&empty), viewer)
                             .map(std::ptr::from_ref)

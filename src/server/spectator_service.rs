@@ -450,8 +450,8 @@ impl SpectatorService {
             Arc::clone(&self.metrics),
         );
         let room_and_guard = async {
-            let room = match self.database.get_room(&game_name, &room_code).await {
-                Ok(Some(room)) => room,
+            let room_id = match self.database.get_room_id(&game_name, &room_code).await {
+                Ok(Some(room_id)) => room_id,
                 Ok(None) => {
                     return Err(SpectatorError::new(
                         "Room not found",
@@ -468,9 +468,9 @@ impl SpectatorService {
             };
             let guard = self
                 .message_coordinator
-                .lock_room_event_mutation(&room.id)
+                .lock_room_event_mutation(&room_id)
                 .await;
-            Ok((room, guard))
+            Ok((room_id, guard))
         }
         .await;
         lock_renewal.stop_renewal();
@@ -485,11 +485,11 @@ impl SpectatorService {
                 self.metrics.increment_distributed_lock_release_failures();
             }
         }
-        let (room, room_event_guard) = room_and_guard?;
+        let (room_id, room_event_guard) = room_and_guard?;
         // The lookup by code only identifies the room lane. Capacity and every
         // baseline field come from a fresh read inside that lane so an admission
         // never publishes a stale pre-lock room snapshot.
-        let room = match self.database.get_room_by_id(&room.id).await {
+        let room = match self.database.get_room_by_id(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 return Err(SpectatorError::new(
@@ -498,7 +498,7 @@ impl SpectatorService {
                 ))
             }
             Err(err) => {
-                warn!(room_id = %room.id, error = %err, "Failed to refresh room for spectator");
+                warn!(%room_id, error = %err, "Failed to refresh room for spectator");
                 return Err(SpectatorError::new(
                     "Storage error",
                     Some(ErrorCode::StorageError),

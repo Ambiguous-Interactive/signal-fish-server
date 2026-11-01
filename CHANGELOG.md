@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory used to join rooms as a spectator and transfer room authority (#636).
 - Reduce game-start memory use in rooms with spectators (#636).
 - Reduce memory used by lobby promotion and readiness checks before and after game start (#636).
 - Reduce memory used to capture a disconnected player for reconnection (#636).
 
 ### Fixed
 
+- Finish committed authority transfers in room order after caller cancellation (#1342).
 - Notify room peers when cleanup removes authority after a failed departure (#1339).
 - Publish committed authority changes even when the request response cannot be sent (#1337).
 - Reject invalid authority transfers and store valid transfers before announcing the new authority (#1334).

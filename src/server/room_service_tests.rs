@@ -14369,3 +14369,46 @@ async fn authority_residue_repair_publishes_even_when_application_rollback_fails
         "application rollback retry cannot repeat the authority event",
     );
 }
+
+/// Legacy adapters retain their code-lookup visibility and error semantics.
+#[tokio::test]
+async fn room_id_default_preserves_code_lookup_and_storage_errors() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let room = inner
+        .create_room(
+            "id-adapter".into(),
+            Some("LOOKID".into()),
+            4,
+            false,
+            PlayerId::new_v4(),
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut adapter = DrainAfterCreateDatabase::new(inner.clone());
+    for (game, code, expected) in [
+        ("id-adapter", "LOOKID", Some(room.id)),
+        ("other", "LOOKID", None),
+        ("id-adapter", "absent", None),
+    ] {
+        assert_eq!(adapter.get_room_id(game, code).await.unwrap(), expected);
+        assert_eq!(inner.get_room_id(game, code).await.unwrap(), expected);
+    }
+    adapter.fail_room_lookup = true;
+    assert_eq!(
+        adapter
+            .get_room_id("id-adapter", "LOOKID")
+            .await
+            .unwrap_err()
+            .to_string(),
+        "injected room lookup failure"
+    );
+    adapter.fail_room_lookup = false;
+    inner.delete_room(&room.id).await.unwrap();
+    assert_eq!(
+        adapter.get_room_id("id-adapter", "LOOKID").await.unwrap(),
+        None
+    );
+}
