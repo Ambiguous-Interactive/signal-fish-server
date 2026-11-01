@@ -1,6 +1,6 @@
 //! Run artifacts and artifact replay.
 //!
-//! A run writes five machine-readable artifacts into its output directory:
+//! A completed run writes these machine-readable artifacts into its output directory:
 //!
 //! - `manifest.json` — schema version, run ID, the full [`RunConfig`],
 //!   workload shape, server identity (endpoint, PID, binary hash, config
@@ -11,9 +11,15 @@
 //! - `intervals.jsonl` — periodic server resource samples (delivery
 //!   counters, RSS, CPU time, cgroup memory) with unavailable counters
 //!   recorded as null, never omitted.
+//! - `peer-progress.json` — one row per planned peer, including the stage,
+//!   its clock, the last completed stage, incarnation, and task-return state.
 //! - `summary.json` — the oracle outcome (the run's verdict).
 //! - `latency-histogram-v2.hdr` — HdrHistogram V2 encoding of the measured
 //!   one-way latency samples.
+//!
+//! Initial preparation writes the manifest before connecting and progress before
+//! arming. Dropping preparation writes partial progress and deliveries plus a
+//! `preparation.json` cancellation marker; it does not write a success summary.
 //!
 //! Replay is the same purity as the oracle: `replay` reads the manifest and
 //! `deliveries.jsonl`, rebuilds the plans from the recorded config, and

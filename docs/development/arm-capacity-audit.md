@@ -6830,3 +6830,32 @@ replay. The new control checks shared-name ownership after event-log transfer
 and artifact replay, plus independent tail mutation. The artifact schema and
 all delivery checks stay unchanged. Whole-generator peak memory and the
 planned ten-minute cell remain unqualified. Issue #775 stays open.
+
+### Initial preparation evidence (#1355, session 604)
+
+The runner writes `manifest.json` before any peer connects. Each planned peer
+has one bounded lifecycle row, including peers that have not started or that
+returned an initial error. `peer-progress.json` records all rows before arming
+and after completion. Successful peers reuse their trackers during churn.
+
+Each row names the clock for its stage and last completion. Preparation uses
+a shared setup clock; workload stages use the immutable send/receipt epoch.
+Initial connection/upgrade, negotiation writes and replies, and room-baseline
+waits retain distinct stages. Each write has a 30-second deadline. Each room's
+concurrent initial joins also share a six-step outer deadline; later rooms
+receive their own setup budget. Setup does not consume the workload lag budget.
+
+Dropping the owning preparation future writes partial `peer-progress.json`,
+completed failures in `deliveries.jsonl`, and a `preparation.json` cancellation
+marker with `workload_started=false`. It writes no successful `summary.json`.
+A refusal is recorded when it returns, even if another peer remains pending.
+Forced process termination cannot guarantee destructor-based file writes.
+
+Held upgrade, negotiation and baseline controls retain every planned peer.
+A mixed refused/held history preserves the exact completed error on cancellation.
+Returned-error runs keep their invalid verdict and reproduce it on replay.
+The unchanged room-replacement workload checks exact deliveries and tracker
+continuity across workload clocks and incarnations. These preparation controls
+do not explain the historical second-replacement wait in #1352. That issue
+remains open. This adds no duration-dependent history or changed memory budget;
+whole-generator memory qualification under #775 remains separate.
