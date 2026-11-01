@@ -66,6 +66,7 @@ struct DashboardMetricsCacheState {
 }
 
 impl DashboardMetricsCacheState {
+    /// Reserve a bounded history with at least one retained sample.
     fn new(history_capacity: usize) -> Self {
         let history_capacity = history_capacity.max(1);
         Self {
@@ -76,6 +77,7 @@ impl DashboardMetricsCacheState {
         }
     }
 
+    /// Retain selected fields in oldest-to-newest order without shifting prior samples.
     fn push_history(&mut self, snapshot: &DashboardMetricsSnapshot, fields: &HistoryFields) {
         let entry = DashboardHistoryEntry::from_snapshot(snapshot, fields);
         if self.history.len() == self.history_capacity {
@@ -273,6 +275,7 @@ impl DashboardMetricsCache {
         })
     }
 
+    /// Copy the last sample and ordered history with monotonic staleness.
     pub(super) async fn view(&self) -> DashboardMetricsView {
         let guard = self.inner.read().await;
         let (rooms_by_game, player_percentiles, game_percentiles, active_rooms, fetched_at) =

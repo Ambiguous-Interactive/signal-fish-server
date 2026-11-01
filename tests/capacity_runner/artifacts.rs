@@ -842,6 +842,7 @@ fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, ser
     direct().or_else(|_: serde_json::Error| serde_json::from_slice(line))
 }
 
+/// Append decoded evidence in file order and share its exact names within the replay.
 fn append_delivery_event(
     records: &mut RunRecords,
     names: &mut crate::records::ReceiptNames,

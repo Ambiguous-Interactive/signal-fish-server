@@ -234,6 +234,7 @@ mod tests {
         }
     }
 
+    /// Preserve shared keys and independent mutable tails through transfer and replay.
     #[test]
     fn retained_and_replayed_snapshots_share_exact_member_names_and_keep_owned_tails() {
         use crate::records::{ChurnEvent, ChurnPhase, EventLog};

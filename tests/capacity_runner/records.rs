@@ -51,6 +51,7 @@ impl ReceiptName {
         self.0.as_str()
     }
 
+    /// Borrow the owned string for historical snapshot key views.
     pub(super) fn owned_string(&self) -> &String {
         &self.0
     }
@@ -112,6 +113,7 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
 
 impl ReceiptNames {
+    /// Reuse one owned name for each exact spelling within this pool.
     pub(super) fn intern(&mut self, name: &str) -> ReceiptName {
         if let Some(shared) = self.0.get(name) {
             return shared.clone();
@@ -883,6 +885,7 @@ impl EventLog {
         });
     }
 
+    /// Retain exact churn evidence while sharing immutable snapshot member names.
     pub fn push_churn(&self, mut event: ChurnEvent) {
         let bytes = crate::runner::json_byte_count(&event).unwrap_or(usize::MAX);
         let mut state = self.state.lock().expect("event log poisoned");

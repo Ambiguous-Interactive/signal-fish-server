@@ -384,6 +384,7 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
     );
 }
 
+/// Attribute the first yielding readiness read to scheduler initialization.
 #[test]
 #[ignore = "isolated runtime allocation attribution control"]
 fn cooperative_runtime_allocation_profile() {

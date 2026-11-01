@@ -14,6 +14,7 @@ fn sample(rooms: usize) -> DashboardMetricsSnapshot {
     }
 }
 
+/// Reject separate-query cache routing through a deterministic room deletion.
 #[tokio::test]
 async fn cache_snapshot_uses_consistent_storage_during_room_deletion() {
     use crate::database::{GameDatabase, InMemoryDatabase};
@@ -43,6 +44,7 @@ async fn cache_snapshot_uses_consistent_storage_during_room_deletion() {
     assert!(snapshot.game_percentiles.is_empty());
 }
 
+/// Preserve selected fields, FIFO history and the last successful sample across errors.
 #[tokio::test(start_paused = true)]
 async fn refresh_keeps_selected_history_and_last_success_after_error() {
     for capacity in [0, 1, 4] {
@@ -121,6 +123,7 @@ async fn refresh_keeps_selected_history_and_last_success_after_error() {
     }
 }
 
+/// Measure full-history rollover without copying returned dashboard views.
 #[test]
 #[ignore = "isolated dashboard history rollover profile"]
 fn dashboard_history_rollover_profile() {

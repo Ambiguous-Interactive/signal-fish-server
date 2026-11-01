@@ -2831,6 +2831,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(())
     }
 
+    /// Count each stored room once under its game name.
     async fn get_rooms_by_game(&self) -> Result<HashMap<String, usize>> {
         let rooms = self.rooms.read().await;
         let mut game_counts: HashMap<String, usize> = HashMap::new();
@@ -3276,6 +3277,7 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    /// Keep one sample coherent when deletion interrupts its collection.
     #[tokio::test]
     async fn dashboard_sample_stays_consistent_when_a_room_disappears_during_collection() {
         let database = InMemoryDatabase::new();
@@ -3311,6 +3313,7 @@ mod tests {
         assert!(snapshot.rooms_by_game.is_empty());
     }
 
+    /// Preserve historical metrics for empty, pending and mixed-occupancy rooms.
     #[tokio::test]
     async fn dashboard_sample_preserves_empty_pending_and_mixed_occupancy_statistics() {
         let database = InMemoryDatabase::new();
@@ -3366,6 +3369,7 @@ mod tests {
         assert!(database.get_room_metrics_snapshot().await.is_err());
     }
 
+    /// Compare equal dashboard results through combined and separate storage reads.
     #[tokio::test]
     #[ignore = "isolated dashboard storage collection profile"]
     async fn dashboard_storage_collection_profile() {
