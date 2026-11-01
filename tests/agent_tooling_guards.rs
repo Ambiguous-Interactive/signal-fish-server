@@ -263,6 +263,25 @@ fn agent_clis_refresh_to_latest_on_every_launch() {
 }
 
 #[test]
+fn scratch_cleanup_is_bounded_and_independent_of_agent_refresh() {
+    let live = read_live(".devcontainer/post-start.sh");
+    require_fragments(
+        &live,
+        &[
+            "SIGNAL_FISH_SKIP_STORAGE_CLEANUP",
+            "timeout 8s python3 \"$SCRIPT_DIR/../scripts/dev-storage.py\" clean --apply",
+        ],
+        "Post-start must bound cleanup to owned scratch data and keep attach best-effort.",
+    );
+    let cleanup = live.find("SIGNAL_FISH_SKIP_STORAGE_CLEANUP").unwrap();
+    let refresh = live.find("SIGNAL_FISH_SKIP_AGENT_REFRESH").unwrap();
+    assert!(
+        cleanup < refresh,
+        "Skipping agent refresh must not skip scratch cleanup"
+    );
+}
+
+#[test]
 fn zai_mcp_suite_is_wired_to_every_harness() {
     let contract = "Every supported agent harness must receive the official Z.AI \
                     Vision, Web Search, Web Reader, and Zread MCP servers. The \

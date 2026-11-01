@@ -323,6 +323,8 @@ assert_contains_literal "$DEVCONTAINER_JSON" '"GITHUB_PERSONAL_ACCESS_TOKEN"' "D
 assert_contains_literal "$DEVCONTAINER_JSON" '"Z_AI_API_KEY"' "Devcontainer passes the Z.AI API key into the container environment"
 assert_contains_literal "$DEVCONTAINER_JSON" '"Z_AI_MODE": "ZAI"' "Devcontainer selects the Z.AI service mode"
 assert_contains_literal "$DEVCONTAINER_POST_START" "refresh_agent_npm_tools" "Post-start refreshes all npm-delivered agent tools"
+assert_contains_literal "$DEVCONTAINER_POST_START" 'timeout 8s python3 "$SCRIPT_DIR/../scripts/dev-storage.py" clean --apply' "Post-start bounds owned scratch cleanup"
+assert_contains_literal "$DEVCONTAINER_POST_START" 'SIGNAL_FISH_SKIP_STORAGE_CLEANUP' "Scratch cleanup has an independent opt-out"
 assert_contains_literal "$DEVCONTAINER_POST_START" "configure_codex_mcp_servers" "Post-start re-applies the Codex GitHub and Z.AI MCP wiring"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_opencode_cli" "Agent tooling library installs OpenCode"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "@opencode/cli@latest" "Agent tooling library installs OpenCode V2 from @opencode/cli"

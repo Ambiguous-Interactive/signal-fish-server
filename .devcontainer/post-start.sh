@@ -13,6 +13,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-agent-tools.sh
 . "$SCRIPT_DIR/lib-agent-tools.sh"
 
+# Bound only marker-owned project scratch data. Keep this independent of CLI
+# refresh and cap work so storage maintenance cannot delay editor use.
+if ! is_truthy "${SIGNAL_FISH_SKIP_STORAGE_CLEANUP:-0}"; then
+    if ! timeout 8s python3 "$SCRIPT_DIR/../scripts/dev-storage.py" clean --apply; then
+        echo "[post-start] Warning: scratch cleanup did not finish; continuing."
+    fi
+fi
+
 if is_truthy "${SIGNAL_FISH_SKIP_AGENT_REFRESH:-0}"; then
     echo "[post-start] SIGNAL_FISH_SKIP_AGENT_REFRESH is set; skipping agent CLI refresh."
     exit 0

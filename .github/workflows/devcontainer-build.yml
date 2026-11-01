@@ -31,6 +31,8 @@ on:
     branches: [main]
     paths:
       - '.devcontainer/**'
+      - 'scripts/dev-storage.py'
+      - 'scripts/test_dev_storage.py'
       - '.github/workflows/devcontainer-build.yml'
   schedule:
     # Monthly on the 1st at 05:00 UTC — upstream image/feature drift detection.
@@ -64,6 +66,7 @@ jobs:
           imageName: signal-fish-devcontainer-ci
           push: never
           runCmd: |
+            python3 scripts/test_dev_storage.py
             bash .devcontainer/post-start.sh
             bash .devcontainer/verify-agent-tooling-runtime.sh
 
