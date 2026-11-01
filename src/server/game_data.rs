@@ -284,6 +284,7 @@ impl EnhancedGameServer {
             .await;
     }
 
+    /// Count payload bytes once before the coordinated JSON relay handoff.
     pub(crate) async fn handle_game_data_from_lifecycle(
         &self,
         player_id: &PlayerId,

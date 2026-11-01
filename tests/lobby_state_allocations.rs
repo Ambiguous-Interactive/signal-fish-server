@@ -332,6 +332,7 @@ async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
     );
 }
 
+/// Compare allocation profiles across rosters within the same lobby-state history.
 async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 255] {

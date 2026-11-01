@@ -13313,3 +13313,23 @@ construction errors also retain the active guard. No workload timing changes.
 The repaired guard passes eleven selected preparation, readiness and unchanged
 replacement controls in `a07ce725`. Exact completed refusals and cancellation
 markers survive both returned readiness failure and readiness timeout.
+
+The earlier full run `41358544147` passes macOS and coverage at `cc87ede3`.
+Its Windows job `125004398596` fails the held-socket write control: the 16 MiB
+send completes successfully, so no pending write exists to time out. That
+fixture inferred backpressure from payload size and was not portable. The
+replacement uses a controlled pending sink through the same protocol-write
+helper. It checks readiness before the exact deadline, expiry at the deadline,
+immediate success and the unchanged transport error. Removing the timeout
+fails in `2ced1737`; the bounded control passes in `3e2a2c81`. Live held
+upgrade, negotiation and room-baseline controls remain unchanged.
+
+Function documentation now covers all touched sizing, benchmark, preparation,
+readiness and allocation functions. The PR explicitly states the #636 sizing
+requirements; that broader campaign remains open.
+
+Portable preparation and replacement controls pass in `74c0737f` (eleven tests);
+JSON sizing and text-lane controls pass in `ddae9193` (four tests). Strict
+all-target/all-feature Clippy, Markdown and doc consistency pass. Production
+sizing and benchmark bodies remain identical to the measured source; later
+changes to those paths add Rustdoc only.

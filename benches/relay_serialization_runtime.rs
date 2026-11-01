@@ -49,6 +49,7 @@ fn relay_serialization_runtime(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Compare production JSON sizing CPU time with the serializer reference.
 fn payload_sizing_runtime(criterion: &mut Criterion) {
     use signal_fish_server::server::allocation_benchmark::{
         canonical_json_len, game_data_json_len,

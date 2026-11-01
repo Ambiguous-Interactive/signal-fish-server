@@ -761,6 +761,7 @@ fn assert_database_metrics_reuse_game_names() {
     });
 }
 
+/// Keep canonical and production JSON sizing free of heap allocations.
 fn assert_payload_sizing_does_not_allocate() {
     use signal_fish_server::server::allocation_benchmark::{
         canonical_json_len, game_data_json_len,

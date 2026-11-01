@@ -1433,6 +1433,7 @@ mod json_size_tests {
     use super::super::game_data::game_data_json_len;
     use proptest::prelude::*;
 
+    /// Generate bounded nested values for the independent serializer oracle.
     fn json_values() -> impl Strategy<Value = serde_json::Value> {
         prop_oneof![
             Just(serde_json::Value::Null),
@@ -1454,12 +1455,14 @@ mod json_size_tests {
     proptest! {
         #[test]
         #[cfg_attr(miri, ignore)]
+        /// Compare nested JSON size counts with independent serializer output.
         fn game_data_json_size_matches_canonical_serialization(value in json_values()) {
             prop_assert_eq!(game_data_json_len(&value), serde_json::to_vec(&value).unwrap().len());
         }
     }
 
     #[test]
+    /// Pin escape counts, byte offsets and numeric boundaries against serialization.
     fn game_data_json_size_preserves_escapes_numbers_and_chunk_boundaries() {
         for byte in 0_u8..=127 {
             for offset in 0..8 {

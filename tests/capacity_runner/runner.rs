@@ -196,6 +196,7 @@ impl PreparationEvidence<'_> {
 }
 
 impl Drop for PreparationEvidence<'_> {
+    /// Persist partial evidence when preparation exits before successful arming.
     fn drop(&mut self) {
         if self.finished {
             return;
@@ -1416,7 +1417,12 @@ async fn join_room(
     }
 }
 
-async fn send_client(sink: &mut WsSink, message: &ClientMessage) -> Result<(), String> {
+/// Bound one protocol write and preserve serialization and transport errors.
+async fn send_client<S>(sink: &mut S, message: &ClientMessage) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
     let frame = serde_json::to_string(message).map_err(|error| format!("serialize: {error}"))?;
     tokio::time::timeout(STEP_TIMEOUT, sink.send(Message::Text(frame.into())))
         .await
@@ -2823,34 +2829,44 @@ mod session_poll_tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    /// Initial handshake writes stop when a connected peer stops reading.
-    async fn preparation_write_deadline_stops_a_held_socket() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
-        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
-            held_tx.send(()).unwrap();
-            std::future::pending::<()>().await;
-            drop(websocket);
-        });
-        let stream = connect_plain(&url).await.unwrap();
-        held_rx.await.unwrap();
-        let (mut sink, _rx) = stream.split();
+    #[tokio::test(start_paused = true)]
+    /// A pending protocol write expires exactly at its deadline on every platform.
+    async fn preparation_write_deadline_stops_a_pending_sink() {
         let message = ClientMessage::GameData {
-            data: json!("x".repeat(16 * 1024 * 1024)),
+            data: json!({"held": true}),
             class: None,
             key: None,
         };
-        tokio::time::pause();
-        let result = send_client(&mut sink, &message).await;
-        assert_eq!(
-            result.unwrap_err(),
-            format!("handshake write timed out after {STEP_TIMEOUT:?}")
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&entered);
+        let mut sink = Box::pin(futures_util::sink::unfold(
+            (),
+            move |(), _frame: Message| {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending::<Result<(), std::convert::Infallible>>()
+            },
+        ));
+        let mut write = Box::pin(send_client(&mut sink, &message));
+        assert!(futures_util::poll!(write.as_mut()).is_pending());
+        assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
+        tokio::time::advance(STEP_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(futures_util::poll!(write.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            matches!(futures_util::poll!(write.as_mut()), std::task::Poll::Ready(Err(detail))
+            if detail == format!("handshake write timed out after {STEP_TIMEOUT:?}"))
         );
-        abort_and_join(vec![server]).await.unwrap();
+        drop(write);
+
+        let mut ready = futures_util::sink::drain::<Message>();
+        assert!(send_client(&mut ready, &message).await.is_ok());
+        let mut refused = Box::pin(futures_util::sink::unfold((), |(), _frame: Message| {
+            std::future::ready(Err::<(), _>("write refused"))
+        }));
+        assert_eq!(
+            send_client(&mut refused, &message).await.unwrap_err(),
+            "send: write refused"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -5128,6 +5144,7 @@ mod session_poll_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    /// Preserve exact initial failures after readiness-error and timeout cleanup.
     async fn readiness_failure_and_timeout_cancel_all_preparation_tasks() {
         for timeout in [false, true] {
             let output = tempfile::tempdir().unwrap();

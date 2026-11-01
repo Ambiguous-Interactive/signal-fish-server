@@ -5559,6 +5559,7 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
 /// and the artifacts must replay to the same summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
+/// Require exact delivery, tracker continuity and replay through room replacement.
 async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
