@@ -27,10 +27,19 @@ RETENTION = 7 * 86400
 
 def write_json(path, data):
     """Replace metadata atomically; a failed write cannot create a valid run."""
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("x", encoding="utf-8") as stream:
-        json.dump(data, stream, sort_keys=True)
-    temporary.replace(path)
+    temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    created = False
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            created = True
+            json.dump(data, stream, sort_keys=True)
+        temporary.replace(path)
+    finally:
+        if created:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as error:
+                print(f"[storage] Could not remove metadata temporary file: {error}", file=sys.stderr)
 
 
 @contextmanager

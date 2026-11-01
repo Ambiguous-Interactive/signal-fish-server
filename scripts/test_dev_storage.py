@@ -56,6 +56,32 @@ class StorageTests(unittest.TestCase):
                  for p in self.repo.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
 
+    def test_failed_metadata_write_preserves_original_and_cleans_own_temp(self):
+        target = self.repo / "state.json"
+        other_writer = target.with_suffix(".tmp")
+        other_writer.write_text("other writer")
+        original = {"saved": True}
+
+        def disk_full(_data, stream, **_kwargs):
+            stream.write("{")
+            raise OSError(28, "fixture: disk full")
+
+        for failure in ["serialization", "disk full", "replacement"]:
+            with self.subTest(failure=failure):
+                storage.write_json(target, original)
+                with self.assertRaises((TypeError, OSError)):
+                    if failure == "serialization":
+                        storage.write_json(target, {"cannot_serialize": object()})
+                    elif failure == "disk full":
+                        with patch.object(storage.json, "dump", side_effect=disk_full):
+                            storage.write_json(target, {"new": True})
+                    else:
+                        with patch.object(Path, "replace", side_effect=PermissionError("fixture")):
+                            storage.write_json(target, {"new": True})
+                self.assertEqual(json.loads(target.read_text()), original)
+                self.assertEqual(other_writer.read_text(), "other writer")
+                self.assertEqual(list(self.repo.glob("state.*.tmp")), [])
+
     def test_expired_run_removed_and_repeat_is_empty(self):
         run = self.run_fixture()
         self.assertGreater(self.clean(apply=True)["removed_bytes"], 0)
