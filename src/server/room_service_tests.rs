@@ -14302,6 +14302,23 @@ async fn canceled_authority_residue_repair_finishes_before_the_next_claim() {
             })
             .collect();
         assert_eq!(roles, vec![None, Some(fixture.survivor)]);
+        let lifecycle: Vec<_> = replayed
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ServerMessage::PlayerLeft { .. } | ServerMessage::AuthorityChanged { .. }
+                )
+            })
+            .collect();
+        assert!(
+            matches!(lifecycle.as_slice(), [
+                ServerMessage::PlayerLeft { player_id, .. },
+                ServerMessage::AuthorityChanged { authority_player: None, you_are_authority: false },
+                ServerMessage::AuthorityChanged { authority_player: Some(successor), you_are_authority: false },
+            ] if *player_id == fixture.leaver && *successor == fixture.survivor),
+            "replay must retain departure before the repaired release and next claim (expired={expired}): {lifecycle:?}"
+        );
     }
 }
 

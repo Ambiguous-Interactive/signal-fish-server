@@ -12724,3 +12724,8 @@ the existing absolute ceiling. A temporary projection control copies only
 spectator UUIDs. It adds 4,080 bytes at 255 spectators and fails the relative
 comparison while passing the absolute ceiling. The control is removed before
 publication; production still copies only the four game-start policy fields.
+
+The cancellation replay control now also requires the leaver's `PlayerLeft`
+before the cleared role and successor role. Swapping only the departure and
+clear leaves the old role-only assertion passing but fails the stronger check
+in Nextest `5f88cb10`. Restored source passes both cleanup cells in `5a964d32`.
