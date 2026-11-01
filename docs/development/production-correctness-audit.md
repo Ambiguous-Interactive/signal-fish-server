@@ -13345,3 +13345,19 @@ All twelve artifact, preparation and replacement controls pass in
 `f9066f14-5e60-4d66-804c-601bd749d190`. Strict all-target/all-feature Clippy, spelling,
 Markdown and doc consistency checks pass. Review reports 100% documentation
 coverage for touched complex functions and accepts the explicit #636 scope.
+
+Full macOS verification later fails a separate spectator-admission allocation
+profile in run `41362145836`, job `125015008082`. Counts are 144, 193 and
+906 for 0, 16 and 254 stored spectators. The middle cell exceeds the same
+three-copy ceiling by one allocation; its cross-platform difference includes
+an additional 64 bytes. The historical allocation site is untraced; #1359
+retains that investigation. No gameplay fault or fourth roster copy is proved.
+
+The profile now owns a fresh runtime per cohort and warms deferred scheduler
+storage before setup. Every admission/message assertion and the exact
+three-copy ceiling remains unchanged. The existing controlled scheduler probe
+passes in `2638d125`, with cold 3 allocations / 336 bytes versus warmed
+2 / 272. Local isolated spectator counts remain 139, 187 and 901. Adding one
+extra complete roster copy inside measurement fails the same ceiling in
+`bde58a8f-fe62-4187-9074-1c4bc70e1c44`. This removes an uncontrolled measurement factor;
+it does not identify the historical allocation producer or close #1359.
