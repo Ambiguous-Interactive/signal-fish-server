@@ -387,7 +387,7 @@ async fn finalized_join_spectator_gets_public_lifecycle_without_session_plan() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -571,7 +571,7 @@ async fn finalized_join_uses_delivered_baseline_when_refresh_fails() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -630,7 +630,7 @@ async fn finalized_join_counts_its_mixed_membership_once_per_publication() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -700,7 +700,7 @@ async fn finalized_join_counts_its_mixed_membership_once_across_routing_retries(
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -764,7 +764,7 @@ async fn finalized_join_rejects_a_refresh_that_lost_the_joiner() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -835,7 +835,7 @@ async fn finalized_join_uses_a_valid_newer_membership_refresh() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -891,7 +891,7 @@ async fn finalized_join_counts_every_committed_turn_plan_once() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -947,7 +947,7 @@ async fn finalized_v2_join_refreshes_v3_incumbents_without_counting_actor_plan()
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -1013,7 +1013,7 @@ async fn finalized_join_counts_incumbent_credentials_without_an_actor_plan() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -1075,7 +1075,7 @@ async fn finalized_join_transaction_failure_emits_terminal_boundary() {
     assert!(
         server
             .publish_finalized_join_membership(
-                &fixture.room,
+                Arc::new(fixture.room.clone()),
                 fixture.joiner,
                 fixture.joined_player.clone(),
                 guard,
@@ -1164,7 +1164,7 @@ async fn finalized_join_exhausts_a_zero_budget_routing_retry() {
     let published = timeout(
         Duration::from_secs(1),
         server.publish_finalized_join_membership(
-            &zero_budget_baseline,
+            Arc::new(zero_budget_baseline.clone()),
             fixture.joiner,
             fixture.joined_player,
             guard,
@@ -1283,7 +1283,7 @@ async fn coordinator_pruned_join_actor_is_automatically_terminalized() {
         .await;
     assert!(
         server
-            .publish_finalized_join_membership(&room, joiner, joined_player, guard)
+            .publish_finalized_join_membership(Arc::new(room.clone()), joiner, joined_player, guard)
             .await
     );
 
@@ -7493,7 +7493,12 @@ async fn refreshed_finalized_plans_carry_no_phantom_authority_after_departure() 
         .await;
     assert!(
         server
-            .publish_finalized_join_membership(&room, joiner, joined_player.clone(), guard,)
+            .publish_finalized_join_membership(
+                Arc::new(room.clone()),
+                joiner,
+                joined_player.clone(),
+                guard,
+            )
             .await
     );
 

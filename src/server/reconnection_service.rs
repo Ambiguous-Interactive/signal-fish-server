@@ -1600,14 +1600,18 @@ impl EnhancedGameServer {
                     Box::pin(async move {
                         let routed_player_ids: HashSet<PlayerId> =
                             routed_player_ids.into_iter().collect();
-                        let current_room = server
-                            .database
-                            .get_room_by_id(&response_room_id)
-                            .await
-                            .map_err(|error| {
-                                anyhow::anyhow!("failed to fetch reconnect room baseline: {error}")
-                            })?
-                            .ok_or_else(|| anyhow::anyhow!("reconnect room disappeared"))?;
+                        let current_room = Arc::new(
+                            server
+                                .database
+                                .get_room_by_id(&response_room_id)
+                                .await
+                                .map_err(|error| {
+                                    anyhow::anyhow!(
+                                        "failed to fetch reconnect room baseline: {error}"
+                                    )
+                                })?
+                                .ok_or_else(|| anyhow::anyhow!("reconnect room disappeared"))?,
+                        );
                         let mut response_players = server
                             .database
                             .get_room_players(&response_room_id)
@@ -1641,7 +1645,7 @@ impl EnhancedGameServer {
                             *baseline_publication_in_builder
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                Some((current_room.clone(), response_players.clone()));
+                                Some((Arc::clone(&current_room), response_players.clone()));
                         }
 
                         // Get missed events inside the coordinator registration

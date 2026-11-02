@@ -707,7 +707,7 @@ pub fn read_intervals(output_dir: &Path) -> Result<Vec<IntervalSample>, String> 
 
 fn read_delivery_event(line: &[u8], path: &Path) -> Result<DeliveryEvent<String>, String> {
     /* Preserve historical last-key-wins decoding and error messages. */
-    let value: Value = serde_json::from_slice(line)
+    let mut value: Value = serde_json::from_slice(line)
         .map_err(|error| format!("parse a {} line: {error}", path.display()))?;
     let kind = value
         .get("event_kind")
@@ -748,10 +748,11 @@ fn read_delivery_event(line: &[u8], path: &Path) -> Result<DeliveryEvent<String>
         )),
         "registry" => {
             let senders = value
-                .get("senders")
-                .ok_or_else(|| "registry line missing senders".to_string())?;
+                .get_mut("senders")
+                .ok_or_else(|| "registry line missing senders".to_string())?
+                .take();
             Ok(DeliveryEvent::Registry {
-                senders: serde_json::from_value(senders.clone())
+                senders: serde_json::from_value(senders)
                     .map_err(|error| format!("parse registry senders: {error}"))?,
             })
         }
@@ -1421,6 +1422,102 @@ mod tests {
         for (file, result) in results {
             assert!(result.expect_err("write failure").contains(file));
         }
+    }
+
+    #[test]
+    fn registry_replay_preserves_historical_values_and_errors() {
+        let path = Path::new("deliveries.jsonl");
+        for line in [
+            r#"{"event_kind":"registry","senders":{}}"#,
+            r#"{"event_kind":"registry","senders":{"z":["old",1],"a":["未知\n\u0000",4294967295],"z":["new",2]}}"#,
+            r#"{"event_kind":"sent","event_kind":"registry","senders":{"old":["old",1]},"senders":{"new":["new",2]},"extra":true}"#,
+            r#"{"event_kind":"registry"}"#,
+            r#"{"event_kind":"registry","senders":null}"#,
+            r#"{"event_kind":"registry","senders":[]}"#,
+            r#"{"event_kind":"registry","senders":{"a":["name",-1]}}"#,
+            r#"{"event_kind":"registry","senders":{"a":["name",4294967296]}}"#,
+            r#"{"event_kind":"registry","senders":{"a":["name"]}}"#,
+            r#"{"event_kind":"registry","senders":{"a":[null,1]}}"#,
+        ] {
+            let value: Value = serde_json::from_str(line).unwrap();
+            let historical = value
+                .get("senders")
+                .ok_or_else(|| "registry line missing senders".to_string())
+                .and_then(|senders| {
+                    serde_json::from_value::<BTreeMap<String, (String, u32)>>(senders.clone())
+                        .map_err(|error| format!("parse registry senders: {error}"))
+                });
+            let actual = read_delivery_event(line.as_bytes(), path).map(|event| {
+                let DeliveryEvent::Registry { senders } = event else {
+                    panic!("{event:?}");
+                };
+                senders
+            });
+            assert_eq!(actual, historical, "{line}");
+            if let Ok(expected) = actual {
+                let output = tempfile::tempdir().unwrap();
+                fs::write(output.path().join(DELIVERIES_FILE), format!("{line}\n")).unwrap();
+                assert_eq!(read_records(output.path()).unwrap().registry, expected);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated registry replay memory profile; run in a fresh process"]
+    fn registry_replay_memory_profile() {
+        let generations: usize = std::env::var("CAPACITY_REGISTRY_PROBE_GENERATIONS")
+            .unwrap_or_else(|_| "8".into())
+            .parse()
+            .expect("probe generations");
+        assert!((1..=8).contains(&generations));
+        let clone_reference = std::env::var_os("CAPACITY_REGISTRY_PROBE_CLONE_REFERENCE").is_some();
+        let count = 15_984 * generations;
+        let mut line = Vec::new();
+        write!(&mut line, "{{\"event_kind\":\"registry\",\"senders\":{{").unwrap();
+        for index in 0..count {
+            if index != 0 {
+                line.push(b',');
+            }
+            write!(
+                &mut line,
+                "\"{index:032x}\":[\"r{}p{}\",{}]",
+                index % 999,
+                index % 16,
+                index / 15_984 + 1
+            )
+            .unwrap();
+        }
+        line.extend_from_slice(b"}}");
+        let before = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        let event = if clone_reference {
+            let value: Value = serde_json::from_slice(&line).unwrap();
+            let senders = serde_json::from_value(value["senders"].clone()).unwrap();
+            std::hint::black_box(&value);
+            DeliveryEvent::Registry { senders }
+        } else {
+            read_delivery_event(&line, Path::new("deliveries.jsonl")).unwrap()
+        };
+        let elapsed_us = started.elapsed().as_micros();
+        let DeliveryEvent::Registry { senders } = event else {
+            panic!("{event:?}");
+        };
+        assert_eq!(senders.len(), count);
+        let mut checksum = 0_u64;
+        for (index, (identity, (name, epoch))) in senders.iter().enumerate() {
+            assert_eq!(identity, &format!("{index:032x}"));
+            assert_eq!(name, &format!("r{}p{}", index % 999, index % 16));
+            assert_eq!(*epoch as usize, index / 15_984 + 1);
+            checksum += identity.len() as u64 + name.len() as u64 + u64::from(*epoch);
+        }
+        println!(
+            "REGISTRY_REPLAY_PROFILE {}",
+            serde_json::json!({"entries":count, "clone_reference":clone_reference,
+            "input_bytes":line.len(), "before_rss_bytes":before,
+            "after_rss_bytes":crate::diagnostics::resident_memory_bytes(std::process::id()),
+            "elapsed_us":elapsed_us, "checksum":checksum})
+        );
+        std::hint::black_box((senders, line));
     }
 
     #[test]

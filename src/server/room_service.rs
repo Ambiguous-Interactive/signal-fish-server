@@ -814,16 +814,20 @@ impl EnhancedGameServer {
                             Box::pin(async move {
                                 let routed_player_ids: HashSet<PlayerId> =
                                     routed_player_ids.into_iter().collect();
-                                let current_room = server
-                                    .database
-                                    .get_room_by_id(&response_room_id)
-                                    .await
-                                    .map_err(|error| {
-                                        anyhow::anyhow!(
-                                            "failed to fetch joined room baseline: {error}"
-                                        )
-                                    })?
-                                    .ok_or_else(|| anyhow::anyhow!("joined room disappeared"))?;
+                                let current_room = Arc::new(
+                                    server
+                                        .database
+                                        .get_room_by_id(&response_room_id)
+                                        .await
+                                        .map_err(|error| {
+                                            anyhow::anyhow!(
+                                                "failed to fetch joined room baseline: {error}"
+                                            )
+                                        })?
+                                        .ok_or_else(|| {
+                                            anyhow::anyhow!("joined room disappeared")
+                                        })?,
+                                );
                                 let mut current_players = server
                                     .database
                                     .get_room_players(&response_room_id)
@@ -878,7 +882,7 @@ impl EnhancedGameServer {
                                     *baseline_room_in_builder
                                         .lock()
                                         .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                        Some(current_room.clone());
+                                        Some(Arc::clone(&current_room));
                                 }
 
                                 if created_room {
@@ -1055,7 +1059,7 @@ impl EnhancedGameServer {
                 {
                     (
                         self.publish_finalized_join_membership(
-                            &current_room,
+                            Arc::clone(&current_room),
                             *player_id,
                             player_info,
                             room_event_guard,

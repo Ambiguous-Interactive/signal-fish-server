@@ -98,10 +98,240 @@ fn session_plans_do_not_copy_custom_connection_metadata() {
     });
 }
 
-/// Run the measurement on the same thread as harness bookkeeping.
+fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
+    let mut profiles = Vec::new();
+    for bytes in [0, 1024, 64 * 1024] {
+        allocation_harness::block_on(async {
+            tokio::task::yield_now().await;
+            let server = EnhancedGameServer::new(
+                ServerConfig {
+                    enable_reconnection: true,
+                    ..Default::default()
+                },
+                ProtocolConfig::default(),
+                RelayTypeConfig::default(),
+                SessionConfig {
+                    default_topology: Topology::Mesh,
+                    enable_webrtc: true,
+                    ..Default::default()
+                },
+                TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                TransportSecurityConfig::default(),
+                vec![],
+            )
+            .await
+            .unwrap();
+            let host = Uuid::from_u128(1);
+            let guest = Uuid::from_u128(2);
+            let actor = if reconnect { guest } else { Uuid::from_u128(3) };
+            let (host_tx, mut host_rx) = tokio::sync::mpsc::channel(64);
+            let (guest_tx, mut guest_rx) = tokio::sync::mpsc::channel(64);
+            server.connect_client(host, host_tx).await;
+            server.connect_client(guest, guest_tx).await;
+            for (player, name) in [(host, "Host"), (guest, "Guest")] {
+                negotiate_webrtc_for_measurement(&server, &player);
+                server
+                    .handle_join_room(
+                        &player,
+                        "membership-profile".into(),
+                        Some("MEMB01".into()),
+                        name.into(),
+                        Some(4),
+                        Some(true),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                server.handle_player_ready(&player).await;
+            }
+            let mut token = None;
+            while let Ok(message) = guest_rx.try_recv() {
+                if let ServerMessage::RoomJoined(payload) = message.as_ref() {
+                    token = payload.reconnection_token.clone();
+                }
+            }
+            server.handle_start_game(&host).await;
+            let room_id = server.get_client_room(&host).await.unwrap();
+            let metadata = serde_json::json!({"nested": ["x".repeat(bytes)]});
+            // Only the incumbent carries the varied payload, so each byte slope is one copy.
+            assert!(server
+                .database()
+                .update_player_connection_info(
+                    &room_id,
+                    &host,
+                    ConnectionInfo::Custom {
+                        data: metadata.clone()
+                    }
+                )
+                .await
+                .unwrap());
+            if reconnect {
+                server.unregister_client(&guest).await;
+            }
+            while host_rx.try_recv().is_ok() {}
+            while guest_rx.try_recv().is_ok() {}
+            let temporary = Uuid::from_u128(4);
+            let connection = if reconnect { temporary } else { actor };
+            let (actor_tx, mut actor_rx) = tokio::sync::mpsc::channel(64);
+            server.connect_client(connection, actor_tx).await;
+            negotiate_webrtc_for_measurement(&server, &connection);
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            if reconnect {
+                assert!(
+                    server
+                        .handle_reconnect(&temporary, &guest, &room_id, token.as_deref().unwrap())
+                        .await
+                );
+            } else {
+                server
+                    .handle_join_room(
+                        &actor,
+                        "membership-profile".into(),
+                        Some("MEMB01".into()),
+                        "Joiner".into(),
+                        Some(4),
+                        Some(true),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+            }
+            let stats = region.change();
+            println!("MEMBERSHIP_PROFILE reconnect={reconnect} bytes={bytes} stats={stats:?}");
+            profiles.push(stats);
+            let baseline = actor_rx.try_recv().unwrap();
+            let players = match baseline.as_ref() {
+                ServerMessage::RoomJoined(payload) if !reconnect => &payload.current_players,
+                ServerMessage::Reconnected(payload) if reconnect => {
+                    assert_eq!(payload.player_id, guest);
+                    assert!(payload.reconnection_token.is_some());
+                    &payload.current_players
+                }
+                _ => panic!("unexpected baseline: {baseline:?}"),
+            };
+            assert_eq!(players.len(), if reconnect { 2 } else { 3 });
+            let connection_info = &players
+                .iter()
+                .find(|player| player.id == host)
+                .unwrap()
+                .connection_info;
+            if reconnect {
+                assert!(connection_info.is_none());
+            } else {
+                assert!(
+                    matches!(connection_info, Some(ConnectionInfo::Custom { data }) if *data == metadata)
+                );
+            }
+            let actor_plan = actor_rx.try_recv().unwrap();
+            let ServerMessage::SessionPlan(actor_plan) = actor_plan.as_ref() else {
+                panic!("{actor_plan:?}");
+            };
+            assert_eq!(actor_plan.topology, Topology::Mesh);
+            assert_eq!(actor_plan.transport, Transport::WebRtc);
+            assert_eq!(actor_plan.peers.len(), if reconnect { 1 } else { 2 });
+            assert!(actor_plan
+                .peers
+                .iter()
+                .all(|peer| peer.player_id != actor && peer.initiate == (actor < peer.player_id)));
+            let lifecycle = host_rx.try_recv().unwrap();
+            assert!(
+                match lifecycle.as_ref() {
+                    ServerMessage::PlayerJoined { player } => !reconnect && player.id == actor,
+                    ServerMessage::PlayerReconnected {
+                        player_id, epoch, ..
+                    } => reconnect && *player_id == actor && epoch.is_some(),
+                    _ => false,
+                },
+                "unexpected lifecycle: {lifecycle:?}"
+            );
+            let host_plan = host_rx.try_recv().unwrap();
+            let ServerMessage::SessionPlan(host_plan) = host_plan.as_ref() else {
+                panic!("{host_plan:?}");
+            };
+            assert_eq!(host_plan.generation, actor_plan.generation);
+            assert_eq!(host_plan.peers.len(), actor_plan.peers.len());
+            let members = if reconnect {
+                vec![host, guest]
+            } else {
+                vec![host, guest, actor]
+            };
+            for (recipient, plan) in [(actor, actor_plan), (host, host_plan)] {
+                let actual: std::collections::BTreeSet<_> =
+                    plan.peers.iter().map(|peer| peer.player_id).collect();
+                let expected: std::collections::BTreeSet<_> = members
+                    .iter()
+                    .copied()
+                    .filter(|peer| *peer != recipient)
+                    .collect();
+                assert_eq!(actual, expected);
+                assert_eq!(plan.host, None);
+                assert_eq!(plan.direct_endpoint, None);
+                assert_eq!(plan.fallback, Transport::Relay);
+                assert!(plan
+                    .peers
+                    .iter()
+                    .all(|peer| peer.initiate == (recipient < peer.player_id)));
+            }
+            if !reconnect {
+                let lifecycle = guest_rx.try_recv().unwrap();
+                assert!(
+                    matches!(lifecycle.as_ref(), ServerMessage::PlayerJoined { player } if player.id == actor)
+                );
+                let plan = guest_rx.try_recv().unwrap();
+                let ServerMessage::SessionPlan(plan) = plan.as_ref() else {
+                    panic!("{plan:?}");
+                };
+                assert_eq!(plan.generation, actor_plan.generation);
+                let peers: std::collections::BTreeSet<_> =
+                    plan.peers.iter().map(|peer| peer.player_id).collect();
+                assert_eq!(peers, [host, actor].into_iter().collect());
+                assert!(matches!(
+                    guest_rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
+            }
+            assert!(matches!(
+                actor_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                host_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            let stored = server
+                .database()
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(&stored.players[&host].connection_info,
+                    Some(ConnectionInfo::Custom { data }) if *data == metadata));
+        });
+    }
+    let baseline = profiles[0].bytes_allocated;
+    for (bytes, stats) in [0, 1024, 64 * 1024].into_iter().zip(profiles) {
+        assert!(stats.bytes_allocated <= baseline + (if reconnect { 5 } else { 4 }) * bytes + 1024,
+                "redundant membership snapshot: reconnect={reconnect} bytes={bytes} baseline={baseline} stats={stats:?}");
+    }
+}
+
+/// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
-    allocation_harness::run(
-        "session_plans_do_not_copy_custom_connection_metadata",
-        session_plans_do_not_copy_custom_connection_metadata,
-    );
+    allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "session_plans_do_not_copy_custom_connection_metadata",
+            session_plans_do_not_copy_custom_connection_metadata,
+        ),
+        allocation_harness::trial("finalized_join_reuses_owned_room_snapshots", || {
+            finalized_membership_reuses_owned_room_snapshots(false)
+        }),
+        allocation_harness::trial("finalized_reconnect_reuses_owned_room_snapshot", || {
+            finalized_membership_reuses_owned_room_snapshots(true)
+        }),
+    ]);
 }

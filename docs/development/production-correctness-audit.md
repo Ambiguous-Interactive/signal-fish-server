@@ -13721,3 +13721,95 @@ reversed-order and other host-election mutations remain. All 46 shards, the
 five-minute target, the ten-minute job deadline and every test remain. The
 inventory and feasibility controls qualify the new count; final hosted
 qualification still applies to the current head.
+
+### F236 — Finalized P2P joins copy their owned baseline twice
+
+Scope: #1376, #636 and #826, session 609, baseline `d7adedcc`.
+
+The registration builder cloned its owned `Room` into the retained baseline.
+Finalized membership publication cloned that baseline into its owned job. Failed,
+missing or incompatible refreshes cloned it again on each reservation attempt.
+The builder now shares one immutable `Arc<Room>` with the publication record and
+job. Refresh failure borrows that retained snapshot. Snapshot capture, publication
+ordering, cancellation ownership and the original fallback selection stay exact.
+
+The complete embedded three-player mesh join varies only one incumbent's nested
+Custom metadata over 0 / 1,024 / 65,536 bytes. Original allocations are
+230 / 236 / 236 and allocated bytes are 44,064 / 50,208 / 437,280. The four-copy
+payload bound fails on the original source in Nextest `e879f219-fcb8-464b-a07c-4fed95fe4dbb`. The revised operation allocates
+201 / 205 / 205 times and 39,286 / 43,382 / 301,430 bytes. This removes two payload
+copies without removing the baseline or later membership refresh.
+
+The regression checks baseline membership and metadata, the actor's plan,
+incumbent lifecycle-before-plan order, all three peer sets, shared generation,
+mesh transport, offerer roles, no extra messages and unchanged stored metadata.
+Existing refresh-failure, lost-actor, retry and terminal-boundary histories remain
+unchanged apart from passing an explicitly owned baseline to the private method.
+These are isolated allocation measurements, not socket latency or throughput.
+
+### F237 — Reconnect retention copies the full room before publication
+
+Scope: #1377, #636 and #826, session 609, baseline `d7adedcc`.
+
+The reconnect builder cloned its current `Room` when retaining the publication
+snapshot, while continuing to use the original through baseline construction.
+It now shares that exact immutable snapshot at the same capture point. The
+separate player roster remains owned because the baseline projection mutates
+its epochs and sequences; this change does not alias mutable player snapshots.
+
+The complete embedded two-player mesh reconnect uses a pre-issued token,
+disconnects the guest, negotiates a fresh socket and restores its identity. With
+0 / 1,024 / 65,536 bytes of incumbent Custom metadata, original allocations are
+188 / 194 / 194 and allocated bytes are 41,133 / 47,277 / 434,349. The five-copy
+bound fails on the original source in Nextest
+`1f56bedd-23fb-4912-9ee1-43de670b1c82`. The revised operation allocates
+176 / 181 / 181 times and 38,765 / 43,885 / 366,445 bytes. The v3 baseline still
+omits connection metadata as required, rotates the token, precedes the plan and
+retains both players. The incumbent receives the reconnect lifecycle before its
+matching-generation mesh plan. Stored incumbent metadata remains exact.
+
+Nextest `b35b68e7-b5af-43c3-914a-d2032855fa0f` passes 25 scoped publication,
+reconnect baseline-failure, token-retry and panic-recovery histories for F236 and
+F237. The v3 projection and all existing assertions remain unchanged.
+
+External clients are unaffected by F236 and F237. Rust `src/mesh.rs` at
+`da8f2d16`, .NET `src/SignalFish.Client/Protocol/MessagesMesh.cs` at `e467c871`, and
+Godot `addons/signal_fish/protocol/sf_session_types.gd` at `3cfc3e20` consume the
+same baseline and plan contracts. Wire fields, errors, defaults, capabilities,
+generation rules, event order, reconnect semantics and encoding do not change.
+The new shared snapshot is private to the server. No client migration is needed.
+
+### F238 — Registry replay duplicates the complete parsed identity table
+
+Scope: #1378, #775, #636 and #826, session 609, baseline `d7adedcc`.
+
+The artifact decoder parsed the registry row into `serde_json::Value`, cloned
+its full `senders` subtree, then consumed the clone into the typed registry.
+The original tree remained live during conversion. The decoder now takes the
+owned subtree from the parsed object. It preserves the historical parser and
+consumes the same final duplicate-key value without an intermediate deep copy.
+
+Focused controls compare exact values and errors with the historical decoder.
+They cover empty registries, Unicode and escaped names, maximum epochs, repeated
+identity keys, repeated outer fields, unknown fields, missing fields, invalid
+container types and invalid tuple values. Valid rows also pass through the full
+artifact reader. Replay admission limits and delivery validation stay unchanged.
+
+The isolated 127,872-entry profile retains 15,984 peer identities over eight
+incarnations. Its input is 6,171,765 bytes. Both implementations check every
+identity, peer name and epoch, with checksum 5,468,432. Original process RSS is
+12,152,832 bytes before decoding and 93,450,240 after decoding; revised RSS is
+12,156,928 before and 59,064,320 after. Decode elapsed times are 553,616 and
+509,867 microseconds respectively. These observations include allocator-retained
+pages and do not identify peak live bytes, production capacity or remote latency.
+The planned ten-minute cell and broader #775 campaign remain unqualified.
+
+Matched fresh-process controls at 15,984 / 63,936 / 127,872 identities compare the
+old clone path with the consuming decoder. Every identity, name and epoch stays
+exact. Linux `wait4` reports peak process RSS of 20,873,216 / 52,068,352 /
+93,618,176 bytes for cloning and 16,711,680 / 35,160,064 / 59,539,456 bytes for
+consumption. These increasing cohorts isolate removable decoder overhead;
+allocator retention and process overhead remain part of the observations.
+
+F236–F238 require current-head hosted qualification before closure. The broad
+campaigns #636 and #826 remain open. No spectator workload is added this session.
