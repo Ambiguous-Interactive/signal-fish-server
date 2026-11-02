@@ -13834,3 +13834,48 @@ passes in `82ecea70-b31c-462b-90cc-666c4b5a7499`; allocation bounds stay unchang
 
 F236–F238 require current-head hosted qualification before closure. The broad
 campaigns #636 and #826 remain open. No spectator workload is added this session.
+
+### F239 — Held-callback timeout lacks a transport progress timeline
+
+Scope: open #1319 and #826, session 609, PR #1379 head `7f7c4372`.
+
+Native Client Interop run `41508262950`, job `125493045520`, fails
+`godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair` during
+receiver-offerer, second-generation held setup. All 2,048 distinct 4 KiB sends are
+admitted. The 15-second refusal wait performs 1,340 polls. The job has 326 passes
+and this one failure. It does not reach callback resume in the failed cell.
+
+The last receiver snapshot has physical generation 2, 3,112 accepted SCTP chunks,
+zero refused or redundant chunks, 68 acknowledgement timeouts and 526 reliable
+transport messages / 2,154,496 bytes. Engine receipts and pending application
+counts are zero. The sender has 5,202,536 outstanding reliable bytes,
+3,451 emitted chunks, 323 retransmissions, 137 fast retransmissions and one
+retransmission timeout. Both transports remain connected, with no closure or
+receive rejection. The retained decoded log has SHA-256
+`efc35a86022762958d122a3cfe6d2186ce74243aa2d096d4d0bdb1b3186677ff`.
+
+This excludes incomplete send admission for this attempt. The last snapshot does
+not show when progress stopped or distinguish a progressing path, credit
+backpressure, retransmission timing and observation contention. No historical
+cause or production repair is established. No rerun of this failed head was
+requested.
+
+Both held-refusal fixtures now retain eight fixed scalar checkpoints after the
+wait begins, plus the latest observation. They record actual elapsed time,
+accepted/refused chunks, acknowledgement timeouts and reliable transport counts
+and bytes. Missing fields stay absent values, distinct from zero. A delayed
+sample can satisfy several checkpoint times; each row retains its actual sample
+time rather than inventing earlier observations. State stays bounded after any
+number of polls. The normal ten-millisecond observation interval, caller-owned
+deadlines, positive refusal precondition, receive limits, offered burst and exact
+receipt checks remain unchanged. Full snapshots remain in timeout evidence.
+
+The deterministic control checks 16,000 observations, incomplete snapshots,
+checkpoint times, reliable-label selection, fixed storage and delayed first
+samples. Existing observer-progress and ten malformed/incomplete-refusal cases
+retain their assertions. The focused live control passes all four role/generation
+cells, each with 2,048 exact receipts and zero sender debt after resume. These
+four controls pass in Nextest `d8de70cb-f610-4a30-85f3-4639eff99101`. The local pass
+does not explain the hosted failure. Keep #1319 open for measured cause and
+qualification. This is test-fixture evidence only; server and external-client
+contracts do not change, and no release-note entry is required.
