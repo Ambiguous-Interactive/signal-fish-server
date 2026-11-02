@@ -184,7 +184,8 @@ fn host_departure_replans_without_copying_spectator_rosters() {
                 }
             }
             assert!(saw_plan);
-            assert!(matches!(host_receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+            let host_trailing = host_receiver.try_recv();
+            assert!(matches!(host_trailing, Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
             assert_eq!(server.get_client_room(&host).await, None);
             assert_eq!(server.get_client_room(&guest).await, Some(room_id));
             let remaining = server.database().get_room_by_id(&room_id).await.unwrap().unwrap();
