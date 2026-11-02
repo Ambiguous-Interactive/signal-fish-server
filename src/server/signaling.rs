@@ -495,7 +495,7 @@ impl EnhancedGameServer {
                 .map(|stamp| stamp.epoch)
         });
         let player_joined = Arc::new(ServerMessage::PlayerJoined {
-            player: joiner_snapshot.clone(),
+            player: joiner_snapshot,
         });
         let joiner_was_authority = baseline_room.authority_player == Some(joiner);
         let server = Arc::clone(self);
@@ -504,6 +504,9 @@ impl EnhancedGameServer {
             room_event_guard,
             Box::new(move || {
                 Box::pin(async move {
+                    let ServerMessage::PlayerJoined { player: joiner_snapshot } = player_joined.as_ref() else {
+                        return Err(anyhow::anyhow!("join publication requires a player snapshot"));
+                    };
                     let mut attempts_remaining = baseline_room.players.len().saturating_add(1);
                     // Mixed-path membership is a fact about the room snapshot
                     // this publication resolved, not about its delivery
@@ -511,10 +514,10 @@ impl EnhancedGameServer {
                     // reservation retry.
                     let mut mixed_path_observed = false;
                     loop {
-                        let refreshed_room = match server.database.get_room_by_id(&room_id).await {
+                        let refreshed_room = match server.database.get_room_session_selection_snapshot(&room_id).await {
                             Ok(Some(room))
                                 if room.lobby_state == LobbyState::Finalized
-                                    && room.players.contains_key(&joiner) =>
+                                    && room.players.iter().any(|player| player.id == joiner) =>
                             {
                                 Some(room)
                             }
@@ -531,7 +534,6 @@ impl EnhancedGameServer {
                                 None
                             }
                         };
-                        let publication_room = refreshed_room.as_ref().unwrap_or(&baseline_room);
                         let routed = match server
                             .message_coordinator
                             .routed_player_ids(&room_id)
@@ -545,20 +547,20 @@ impl EnhancedGameServer {
                                 None
                             }
                         };
-                        let members = server.session_members_from(publication_room
-                            .players
-                            .values()
-                            .filter(|player| {
-                                routed.as_ref().map_or_else(
-                                    || {
-                                        server
-                                            .connection_manager
-                                            .current_relay_stamp_in_room(&player.id, &room_id)
-                                            .is_some()
-                                    },
-                                    |routed| routed.contains(&player.id),
-                                )
-                            }));
+                        let is_routed = |player_id: &PlayerId| {
+                            routed.as_ref().map_or_else(
+                                || server.connection_manager.current_relay_stamp_in_room(player_id, &room_id).is_some(),
+                                |routed| routed.contains(player_id),
+                            )
+                        };
+                        let (authority_player, members) = match refreshed_room {
+                            Some(room) => (room.authority_player, server.session_members_from_selection(
+                                room.players.into_iter().filter(|player| is_routed(&player.id)),
+                            )),
+                            None => (baseline_room.authority_player, server.session_members_from(
+                                baseline_room.players.values().filter(|player| is_routed(&player.id)),
+                            )),
+                        };
 
                         if !members.iter().any(|member| member.player_id == joiner) {
                             if let Some(expected_epoch) = expected_join_epoch {
@@ -584,7 +586,7 @@ impl EnhancedGameServer {
 
                         let resolved = membership_session_decision(
                             server.active_session_plan(&room_id),
-                            publication_room.authority_player,
+                            authority_player,
                             members,
                         );
                         if !mixed_path_observed {
