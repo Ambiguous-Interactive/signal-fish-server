@@ -1,5 +1,7 @@
 //! Allocation contract for the room-code read used after player departure.
 
+mod allocation_harness;
+
 use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::protocol::SpectatorInfo;
 use uuid::Uuid;
@@ -8,8 +10,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// Room-code reads must not copy unrelated spectator metadata.
-#[test]
-#[serial_test::serial]
 fn room_code_read_cost_does_not_grow_with_spectator_rosters() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -78,8 +78,6 @@ fn room_code_read_cost_does_not_grow_with_spectator_rosters() {
 mod test_helpers;
 
 /// The complete departure keeps its confirmation and peer event without name copies.
-#[test]
-#[serial_test::serial]
 fn player_leave_does_not_copy_stored_spectator_names() {
     use signal_fish_server::protocol::ServerMessage;
 
@@ -156,4 +154,18 @@ fn player_leave_does_not_copy_stored_spectator_names() {
             "spectators={spectators}: allocations={allocations}, baseline={baseline}"
         );
     }
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "room_code_read_cost_does_not_grow_with_spectator_rosters",
+            room_code_read_cost_does_not_grow_with_spectator_rosters,
+        ),
+        allocation_harness::trial(
+            "player_leave_does_not_copy_stored_spectator_names",
+            player_leave_does_not_copy_stored_spectator_names,
+        ),
+    ]);
 }

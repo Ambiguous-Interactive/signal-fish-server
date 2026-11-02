@@ -13595,3 +13595,129 @@ admission bound. Both mutations are removed. Exact-head hosted coverage and
 OS qualification remain required. The other allocation binaries keep their
 existing harnesses; a separate sweep remains follow-up work. This repair does
 not identify the historical #1359 allocation site.
+
+### F232 — P2P selection copies legacy metadata; allocation histories use worker runners
+
+Scope: #1371, #636, #826 and #1367, session 608, starting at `9cfe76dc`.
+
+Session selection copied each full `ConnectionInfo` although its only use was
+validation of a Direct host endpoint. Finalized join also cloned the routed
+player roster before projecting its session members. The projection now retains
+only valid Direct endpoints and moves negotiated capability vectors into each
+member. Initial game start and later membership changes share one constructor.
+Join and departure project borrowed routed players without an intermediate
+owned roster. Stored metadata and legacy messages retain their full values.
+
+The complete two-player mesh-start regression fails on the original source in
+Nextest `77dfe76d`. For 0 / 1,024 / 65,536 bytes of nested Custom metadata per
+player it records 108 / 114 / 114 allocations and 18,128 / 24,272 / 411,344
+allocated bytes. The two-copy payload bound rejects the extra selection copy
+after exact legacy metadata, shared generation, mesh peers and offerer checks.
+The endpoint projection passes in `2afe80aa-ecea-4e2f-880f-e9325d8e12c3`: 102 / 106 / 106 allocations and
+16,692 / 20,788 / 278,836 bytes. These are isolated operation measurements,
+not throughput, remote-network latency or peak-memory qualification.
+
+Raw endpoint controls preserve player identity, name, authority, join time,
+negotiated capabilities and input metadata. Missing, Custom, unspecified-address
+and zero-port inputs do not supply a Direct endpoint; IPv4, IPv6 and absolute
+DNS endpoints keep their exact host and port. Existing selection, failover,
+Direct refresh, finalized join and reconnect controls retain their assertions.
+The first session-policy/signaling cohort passes all 184 histories in `f7b8105d`.
+
+For #1367, all seven remaining allocation binaries now register their original
+histories with the shared main-thread runner. The readiness binary retains all
+three ignored diagnostics. The room-code binary retains both named histories.
+Current-thread Tokio runtimes still enable their original drivers. No original
+message, persistence, allocation or byte assertion is relaxed. Nextest `a4fd6612`
+passes nine histories across the seven migrated binaries and the new P2P binary.
+Plain Cargo with sixteen requested threads passes both room-code histories and
+the readiness history; its separate ignored run passes all three diagnostics.
+The runner forces one thread before dispatch, and each trial checks the thread
+which constructed it. A negative control dispatches a guarded trial to a worker
+and requires failure. Exact filtering and ignored-only selection have separate
+controls. Both pass in `a5d8e79d`. The P2P allocation bound retains an extra-copy
+negative control through the original-source failure above.
+
+The main scheduled MSRV job `125267122195`, run `41441979827` at `3cc427c6`,
+failed the old worker-based room-code and session-snapshot controls. Room-code
+recorded 129 allocations / 8,672 bytes at zero spectators and 128 / 8,064 in
+both larger cohorts. Session-snapshot recorded 7 / 1,047, then 4 / 867 twice.
+Current main already migrates session-snapshot; this session migrates room-code.
+This removes concurrent harness bookkeeping from those measured regions. It
+does not identify the exact historical allocation sites or close #1359.
+
+External clients are unaffected: Rust `src/mesh.rs`, .NET
+`src/SignalFish.Client/Protocol/MessagesMesh.cs`, and Godot
+`addons/signal_fish/protocol/sf_session_types.gd` consume the same plan fields.
+Their current Direct endpoint contracts remain unchanged. No wire type, default,
+capability, generation, ordering, reconnect rule or error code changes. The
+selection input is crate-private, so these clients need no migration or issue.
+The broader #636 and #826 campaigns remain open. Exact-head hosted qualification
+is still required for the focused fixes.
+
+### F233 — Six socket-failure histories share one ten-second baseline limit
+
+Scope: #1372 and #826, session 608.
+
+Scheduled mutation baseline job `125129184063` in run `41399865912` times out
+`socket_task_failures_close_registration_and_retain_tracking` at 10.002 seconds.
+It reports two expected supervisor-panic injections and passes its other 1,561
+tests. The same focused trace-validation/mutants command reproduces the timeout
+locally in Nextest `63f18712` at 10.009 seconds.
+
+The test aggregates six complete socket histories. The isolated candidate keeps
+the exact helper body and registers one test per failure kind. No production
+code, per-stage wait, close budget or mutation-profile limit changes. Nextest
+`70b7996c` passes reader abort in 0.025 seconds and the other five cases in
+4.023–4.026 seconds each. Their normal cumulative close waits exceed twenty
+seconds, establishing the aggregate deadline error. Every case still checks
+registration removal and complete task settlement; the reconnect case keeps
+physical lifecycle identity, and supervisor panic keeps held-reader tracking.
+This repairs test isolation. It does not establish a production transport stall.
+
+The initial session repair inventory has 452 mutation sites. With 46 shards and the
+unchanged 29-second measured budget, the worst planned shard remains 290 seconds.
+Both inventory and shard-budget controls pass. Strict all-target, all-feature
+Clippy passes; source-policy, documentation and markdown checks also pass.
+
+### F234 — Cache restore disables the mutation profile's incremental builds
+
+Scope: #1374, found during exact-head qualification of #1373 at `a224fbb3`.
+
+Mutation run `41493002428` passes all 1,570 baseline tests, then completes 32
+shards and cancels 14 at the ten-minute job limit. Shard 27 artifact `13165638210`
+retains eight caught mutations, one unviable mutation and an incomplete final
+test. Successful builds take 52.374–58.003 seconds; test phases take
+5.419–5.667 seconds. No completed survivor is recorded in that shard. The
+incomplete matrix is not qualified.
+
+The runner inherits `CARGO_INCREMENTAL=0`. Pinned `rust-cache` v2.9.3 explicitly
+exports that value in `src/restore.ts`, overriding the intended profile setting.
+The shared mutation script now sets `CARGO_INCREMENTAL=1` before either warm or
+shard execution and reports that setting. Inventory, features, assertions,
+sharding, per-test termination and job deadlines remain unchanged. A command
+fixture supplies the cache action's zero and checks Cargo's actual environment.
+The original warm command fails that control; the repair passes both modes and
+all eight script controls. Hosted timing and complete mutation qualification
+remain required. This is a verification build repair, with no runtime change.
+
+### F235 — Host-election tie mutation preserves the returned identity
+
+Scope: #1375 and #826. Mutation run `41496401214` completes all 46 shards at
+`f5fae245`. Shard 32 job `125453903957` catches nine mutations and reports one
+survivor: replacing `<` with `<=` in `elect_host`.
+
+The comparison key is `(joined_at, player_id)`, and the function returns only
+`Option<PlayerId>`. The two operators differ only on equal keys. Choosing the
+other tied reference preserves both key fields. Every later comparison therefore
+receives the same key, and the authority shortcut depends only on the current
+member's identity. Induction over the input establishes the same returned ID,
+including duplicate member records. No reference or other member field escapes.
+This is an equivalent mutation, not a missing host-selection assertion.
+
+One source- and function-anchored exclusion records that proof. Comparing complete
+inventories removes exactly that one mutation: 452 becomes 451. Constant-return,
+reversed-order and other host-election mutations remain. All 46 shards, the
+five-minute target, the ten-minute job deadline and every test remain. The
+inventory and feasibility controls qualify the new count; final hosted
+qualification still applies to the current head.

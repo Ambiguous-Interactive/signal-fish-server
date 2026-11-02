@@ -1,5 +1,7 @@
 //! Isolated allocation contract for player-name comparisons in rooms.
 
+mod allocation_harness;
+
 use signal_fish_server::protocol::validation::validate_player_name_uniqueness;
 use signal_fish_server::protocol::PlayerInfo;
 use std::collections::HashMap;
@@ -9,7 +11,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// ASCII joins must preserve case-insensitive identity without normalization storage.
-#[test]
 fn ascii_player_name_checks_allocate_only_the_collision_error() {
     for count in [0_u128, 1, 16, 64, 255] {
         let players: HashMap<_, _> = (0..count)
@@ -48,4 +49,12 @@ fn ascii_player_name_checks_allocate_only_the_collision_error() {
             );
         }
     }
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![allocation_harness::trial(
+        "ascii_player_name_checks_allocate_only_the_collision_error",
+        ascii_player_name_checks_allocate_only_the_collision_error,
+    )]);
 }

@@ -48,6 +48,9 @@ set -euo pipefail
 MUTANTS_PROFILE="mutants"
 MUTANTS_TIMEOUT="120"
 
+# rust-cache exports 0; mutation shards require incremental rebuilds.
+export CARGO_INCREMENTAL=1
+
 # Configure the mold linker the way the Dockerfile / .devcontainer do: pick the
 # linker via the per-TARGET `CARGO_TARGET_<triple>_LINKER` env and pass the mold
 # link-arg via RUSTFLAGS. This is deliberately NOT a bare `-C linker=clang` in
@@ -159,11 +162,13 @@ else
 fi
 
 if [ "$PRINT_CMD" = "1" ]; then
+    echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL}"
     echo "RUSTFLAGS=${RUSTFLAGS}"
     echo "${CMD[*]}"
     exit 0
 fi
 
+echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL}" >&2
 echo "RUSTFLAGS=${RUSTFLAGS}" >&2
 echo "+ ${CMD[*]}" >&2
 exec "${CMD[@]}"

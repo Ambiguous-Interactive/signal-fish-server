@@ -544,7 +544,7 @@ impl EnhancedGameServer {
                                 None
                             }
                         };
-                        let live_players: Vec<PlayerInfo> = publication_room
+                        let members = server.session_members_from(publication_room
                             .players
                             .values()
                             .filter(|player| {
@@ -557,11 +557,9 @@ impl EnhancedGameServer {
                                     },
                                     |routed| routed.contains(&player.id),
                                 )
-                            })
-                            .cloned()
-                            .collect();
+                            }));
 
-                        if !live_players.iter().any(|player| player.id == joiner) {
+                        if !members.iter().any(|member| member.player_id == joiner) {
                             if let Some(expected_epoch) = expected_join_epoch {
                                 server
                                     .terminate_room_generation_after_publication_failure(
@@ -586,7 +584,7 @@ impl EnhancedGameServer {
                         let resolved = membership_session_decision(
                             server.active_session_plan(&room_id),
                             publication_room.authority_player,
-                            server.session_members_from(&live_players),
+                            members,
                         );
                         if !mixed_path_observed {
                             server.observe_mixed_path_members(&room_id, &resolved.decision);

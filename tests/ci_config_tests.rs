@@ -34242,7 +34242,6 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 45 shards, ceil(448/45) * 29s remains 290s.
 // 450 (was 448): first close-request timestamps add two mutable sites (#1295).
 // With 45 shards, ceil(450/45) * 29s remains 290s.
-// 451 (was 450): the ASCII player-name comparison adds one site (#636).
 // With 46 shards, ceil(451/46) * 29s remains 290s.
 const MUTATION_TOTAL_MUTANTS: u32 = 451;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took

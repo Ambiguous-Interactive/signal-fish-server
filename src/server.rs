@@ -546,7 +546,7 @@ pub mod allocation_benchmark {
     impl HostElectionFixture {
         /// Build candidates with owned names, endpoints, and capabilities.
         pub fn new(member_count: u32, direct: bool) -> Self {
-            use crate::protocol::{ConnectionInfo, PlayerId, Topology, Transport};
+            use crate::protocol::{DirectEndpoint, PlayerId, Topology, Transport};
             Self {
                 members: (1..=member_count)
                     .map(|index| super::session_policy::SessionMember {
@@ -554,7 +554,7 @@ pub mod allocation_benchmark {
                         player_name: format!("host-election-player-{index}"),
                         is_authority: false,
                         joined_at: chrono::DateTime::UNIX_EPOCH,
-                        connection_info: Some(ConnectionInfo::Direct {
+                        direct_endpoint: Some(DirectEndpoint {
                             host: "127.0.0.1".to_string(),
                             port: 7777,
                         }),

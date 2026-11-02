@@ -1,5 +1,7 @@
 //! Game start must not copy unrelated spectator records.
 
+mod allocation_harness;
+
 use signal_fish_server::coordination::{
     ClientDeliveryHandle, ConnectionCloseSignal, InMemoryRoomOperationCoordinator,
     MessageCoordinator, RoomOperationCoordinatorTrait, StartGameOutcome,
@@ -14,7 +16,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// Bound successful and rejected starts independently of the spectator roster.
-#[tokio::test]
 async fn start_game_does_not_copy_spectator_metadata() {
     let outcomes = ["forbidden", "not-ready", "started", "already-started"];
     let mut profiles = [[(0_usize, 0_usize); 4]; 3];
@@ -145,4 +146,12 @@ async fn start_game_does_not_copy_spectator_metadata() {
             );
         }
     }
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![allocation_harness::trial(
+        "start_game_does_not_copy_spectator_metadata",
+        || allocation_harness::block_on(start_game_does_not_copy_spectator_metadata()),
+    )]);
 }

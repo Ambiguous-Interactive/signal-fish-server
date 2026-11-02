@@ -1,5 +1,7 @@
 //! Reconnect capture must copy only the departing member's metadata.
 
+mod allocation_harness;
+
 use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::protocol::{ConnectionInfo, PlayerInfo, SpectatorInfo};
 use uuid::Uuid;
@@ -8,7 +10,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// Bound reconnect capture allocations independently of unrelated room metadata.
-#[tokio::test]
 async fn room_player_projection_preserves_metadata_without_copying_other_members() {
     let mut profiles = Vec::new();
     for (members, spectators) in [(1_u128, 0_u128), (4, 16), (8, 255)] {
@@ -180,4 +181,16 @@ async fn room_player_projection_preserves_metadata_without_copying_other_members
         .unwrap();
     assert_eq!(snapshot.player.unwrap().id, creator);
     assert_eq!(snapshot.authority_player, pending.authority_player);
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![allocation_harness::trial(
+        "room_player_projection_preserves_metadata_without_copying_other_members",
+        || {
+            allocation_harness::block_on(
+                room_player_projection_preserves_metadata_without_copying_other_members(),
+            )
+        },
+    )]);
 }

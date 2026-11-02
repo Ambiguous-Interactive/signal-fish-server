@@ -259,6 +259,47 @@ name = "spectator_join_allocations"
 path = "tests/spectator_join_allocations.rs"
 harness = false
 
+[[test]]
+name = "session_plan_allocations"
+path = "tests/session_plan_allocations.rs"
+harness = false
+required-features = ["allocation-tracking"]
+
+[[test]]
+name = "finalized_readiness_allocations"
+path = "tests/finalized_readiness_allocations.rs"
+harness = false
+
+[[test]]
+name = "reconnection_snapshot_allocations"
+path = "tests/reconnection_snapshot_allocations.rs"
+harness = false
+
+[[test]]
+name = "player_join_allocations"
+path = "tests/player_join_allocations.rs"
+harness = false
+
+[[test]]
+name = "name_uniqueness_allocations"
+path = "tests/name_uniqueness_allocations.rs"
+harness = false
+
+[[test]]
+name = "start_game_allocations"
+path = "tests/start_game_allocations.rs"
+harness = false
+
+[[test]]
+name = "room_code_allocations"
+path = "tests/room_code_allocations.rs"
+harness = false
+
+[[test]]
+name = "lobby_state_allocations"
+path = "tests/lobby_state_allocations.rs"
+harness = false
+
 [[bench]]
 name = "response_time_tracker"
 harness = false
