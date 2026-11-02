@@ -97,6 +97,24 @@ struct PeerStageProgress {
     last_completed_us: Option<u64>,
     incarnation: u32,
     task_returned: bool,
+    send: Option<PeerSendProgress>,
+    last_completed_send: Option<CompletedSendProgress>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct PeerSendProgress {
+    seq: u64,
+    incarnation: u32,
+    intended_us: u64,
+    stage: &'static str,
+    stage_started_us: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CompletedSendProgress {
+    seq: u64,
+    incarnation: u32,
+    at_us: u64,
 }
 
 impl PeerProgress {
@@ -118,6 +136,8 @@ impl PeerProgress {
                 last_completed_us: None,
                 incarnation: 1,
                 task_returned: false,
+                send: None,
+                last_completed_send: None,
             })),
         }
     }
@@ -150,6 +170,28 @@ impl PeerProgress {
     fn connection_stage(&self, stage: &'static str) {
         let incarnation = self.state.lock().expect("peer progress").incarnation;
         self.enter(stage, incarnation);
+    }
+
+    fn send_stage(&self, stage: &'static str, seq: u64, incarnation: u32, intended_us: u64) {
+        let at_us = micros(self.epoch.get().expect("workload epoch").elapsed());
+        self.state.lock().expect("peer progress").send = Some(PeerSendProgress {
+            seq,
+            incarnation,
+            intended_us,
+            stage,
+            stage_started_us: at_us,
+        });
+    }
+
+    fn send_completed(&self, seq: u64, incarnation: u32) {
+        let at_us = micros(self.epoch.get().expect("workload epoch").elapsed());
+        let mut state = self.state.lock().expect("peer progress");
+        state.last_completed_send = Some(CompletedSendProgress {
+            seq,
+            incarnation,
+            at_us,
+        });
+        state.send = None;
     }
 
     fn returned(&self) {
@@ -1814,6 +1856,12 @@ async fn peer_task(
                     let Some(send) = next_send else {
                         return std::future::pending::<SendOutcome>().await;
                     };
+                    let mark_send_stage = |stage| {
+                        if let Some(progress) = &facts.progress {
+                            progress.send_stage(stage, send.seq, incarnation, send.intended_us);
+                        }
+                    };
+                    mark_send_stage("scheduled_wait");
                     tokio::time::sleep_until(epoch + Duration::from_micros(send.intended_us)).await;
                     // Fault hooks: a pause shifts this and every later send
                     // (the pause must show up as scheduled-send lag, never as
@@ -1825,6 +1873,7 @@ async fn peer_task(
                     }) = facts.pause_sends
                     {
                         if send.seq == after_seq {
+                            mark_send_stage("declared_pause");
                             tokio::time::sleep_until(
                                 epoch + Duration::from_micros(send.intended_us) + duration,
                             )
@@ -1833,6 +1882,7 @@ async fn peer_task(
                     }
                     if let (Some(stall), Some(first)) = (facts.stall_senders, first_measured) {
                         if send.seq == first {
+                            mark_send_stage("declared_stall");
                             tokio::time::sleep(stall).await;
                         }
                     }
@@ -1854,8 +1904,10 @@ async fn peer_task(
                             max_lag_us: lag,
                             bound_us: facts.generator_lag_bound_us,
                         });
+                        mark_send_stage("lag_rejected");
                         return SendOutcome::Stopped;
                     }
+                    mark_send_stage("frame_preparation");
                     let (class, key) = if facts.experiment.opaque_sender {
                         (None, None)
                     } else {
@@ -1893,6 +1945,7 @@ async fn peer_task(
                     let (frame, application_bytes) = match encoded {
                         Ok(encoded) => encoded,
                         Err(detail) => {
+                            mark_send_stage("preparation_failed");
                             log.push_fault(InvalidReason::SendFailed {
                                 sender: plan.name.clone(),
                                 detail,
@@ -1902,7 +1955,16 @@ async fn peer_task(
                     };
                     let encoded_frame_body_bytes = count_u64(frame.len());
                     let write_start_us = micros(epoch.elapsed());
-                    if let Err(error) = sink.send(frame).await {
+                    if let Err(error) = send_gameplay_frame(
+                        &mut sink,
+                        frame,
+                        facts.progress.as_ref(),
+                        send.seq,
+                        incarnation,
+                        send.intended_us,
+                    )
+                    .await
+                    {
                         // After a declared termination, socket errors are the
                         // expected consequence — the peer stops, and its
                         // remainder is unsent work, not an independent fault.
@@ -1922,6 +1984,7 @@ async fn peer_task(
                             ),
                         );
                     }
+                    mark_send_stage("send_record");
                     log.push_sent(SentEvent {
                         sender: receipt_recipient.clone(),
                         room: plan.room,
@@ -1933,6 +1996,9 @@ async fn peer_task(
                         application_bytes,
                         encoded_frame_body_bytes,
                     });
+                    if let Some(progress) = &facts.progress {
+                        progress.send_completed(send.seq, incarnation);
+                    }
                     SendOutcome::Sent
                 });
                 loop {
@@ -2021,6 +2087,29 @@ async fn peer_task(
             }
         }
     }
+}
+
+async fn send_gameplay_frame<S>(
+    sink: &mut S,
+    frame: Message,
+    progress: Option<&PeerProgress>,
+    seq: u64,
+    incarnation: u32,
+    intended_us: u64,
+) -> Result<(), S::Error>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    if let Some(progress) = progress {
+        progress.send_stage("socket_write", seq, incarnation, intended_us);
+    }
+    let result = sink.send(frame).await;
+    if result.is_err() {
+        if let Some(progress) = progress {
+            progress.send_stage("socket_write_failed", seq, incarnation, intended_us);
+        }
+    }
+    result
 }
 
 fn failed_transport_write(log: &EventLog, sender: &str, detail: String) -> SendOutcome {
@@ -3083,6 +3172,59 @@ mod session_poll_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    /// #1352: cancellation retains the exact in-flight send and prior completion.
+    async fn interrupted_gameplay_write_retains_sequence_incarnation_and_stage() {
+        let progress = PeerProgress::new();
+        let epoch = Instant::now();
+        progress.start(epoch);
+        progress.send_completed(14, 2);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let mut sink = Box::pin(futures_util::sink::unfold((), |(), _frame: Message| {
+            std::future::pending::<Result<(), std::convert::Infallible>>()
+        }));
+        let mut write = Box::pin(send_gameplay_frame(
+            &mut sink,
+            Message::Text("held".into()),
+            Some(&progress),
+            15,
+            3,
+            5_000,
+        ));
+        assert!(futures_util::poll!(&mut write).is_pending());
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let before = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(before["send"]["stage"], "socket_write");
+        assert_eq!(before["send"]["seq"], 15);
+        assert_eq!(before["send"]["incarnation"], 3);
+        assert_eq!(before["send"]["intended_us"], 5_000);
+        assert_eq!(before["send"]["stage_started_us"], 10_000);
+        assert_eq!(
+            before["last_completed_send"],
+            json!({"seq": 14, "incarnation": 2, "at_us": 0})
+        );
+        drop(write);
+        assert_eq!(serde_json::to_value(progress.snapshot()).unwrap(), before);
+        let mut ready = futures_util::sink::drain::<Message>();
+        send_gameplay_frame(
+            &mut ready,
+            Message::Text("next".into()),
+            Some(&progress),
+            16,
+            4,
+            10_000,
+        )
+        .await
+        .unwrap();
+        progress.send_completed(16, 4);
+        let completed = serde_json::to_value(progress.snapshot()).unwrap();
+        assert!(completed["send"].is_null());
+        assert_eq!(
+            completed["last_completed_send"],
+            json!({"seq": 16, "incarnation": 4, "at_us": 20_010_000})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     /// Preparation time never becomes workload send time.
     async fn preparation_and_workload_clocks_remain_distinct() {
         let progress = PeerProgress::new();
@@ -3207,14 +3349,20 @@ mod session_poll_tests {
             progress.connection_stage("join_write");
             progress.connection_stage("join_snapshot");
             progress.enter("active", incarnation);
+            progress.send_stage("scheduled_wait", u64::from(incarnation), incarnation, 0);
+            progress.send_stage("socket_write", u64::from(incarnation), incarnation, 0);
+            progress.send_completed(u64::from(incarnation), incarnation);
         }
+        progress.send_stage("socket_write", u64::MAX, 10_000, u64::MAX);
         progress.returned();
         let snapshot = progress.snapshot();
         assert_eq!(snapshot.stage, "active");
         assert_eq!(snapshot.last_completed_stage, Some("join_snapshot"));
         assert_eq!(snapshot.incarnation, 10_000);
         assert!(snapshot.task_returned);
-        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 400);
+        assert_eq!(snapshot.last_completed_send.as_ref().unwrap().seq, 10_000);
+        assert_eq!(snapshot.send.as_ref().unwrap().seq, u64::MAX);
+        assert!(serde_json::to_vec(&snapshot).unwrap().len() < 700);
     }
 
     #[tokio::test]
@@ -4577,6 +4725,7 @@ mod session_poll_tests {
             let first_send_us = plan.sends.get(0).expect("scheduled send").intended_us;
             tokio::time::pause();
             let epoch = Instant::now();
+            let progress = PeerProgress::new();
             let (start, receiver) = tokio::sync::watch::channel(Some(epoch));
             let (ready, readiness) = tokio::sync::oneshot::channel();
             let peer = tokio::spawn(peer_task(
@@ -4597,7 +4746,7 @@ mod session_poll_tests {
                         opaque_sender: false,
                     },
                     game_data_format: None,
-                    progress: None,
+                    progress: Some(progress.clone()),
                 },
                 if churn {
                     vec![PeerChurnCycle {
@@ -4792,6 +4941,19 @@ mod session_poll_tests {
             poll_without_clock_advance(peer)
                 .await
                 .expect("peer task completes");
+            let snapshot = progress.snapshot();
+            let send = snapshot.send.expect("the failed attempt stays visible");
+            assert_eq!(
+                send.stage,
+                if saturated {
+                    "lag_rejected"
+                } else {
+                    "preparation_failed"
+                }
+            );
+            assert_eq!(send.seq, 0);
+            assert_eq!(send.incarnation, 1);
+            assert!(snapshot.last_completed_send.is_none());
             let records = log.take_records();
             assert_eq!(
                 records

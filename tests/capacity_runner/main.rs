@@ -5655,6 +5655,16 @@ async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
         assert_eq!(row["incarnation"], incarnation);
         assert_eq!(row["clock"], "workload");
         assert_eq!(row["task_returned"], true);
+        let last_send = records
+            .sent
+            .iter()
+            .filter(|event| event.sender.as_str() == name)
+            .max_by_key(|event| event.seq)
+            .expect("every peer sends");
+        assert_eq!(row["last_completed_send"]["seq"], last_send.seq);
+        assert_eq!(row["last_completed_send"]["incarnation"], last_send.epoch);
+        assert!(row["last_completed_send"]["at_us"].as_u64().unwrap() >= last_send.sent_us);
+
         if incarnation == 1 {
             assert_eq!(row["last_completed_stage"], "prepared");
             assert_eq!(row["last_completed_clock"], "preparation");

@@ -172,6 +172,17 @@ pub struct RoomStartSnapshot {
     pub lobby_state: crate::protocol::LobbyState,
 }
 
+/// Members and session policy read atomically for departure replanning.
+#[derive(Debug, Clone)]
+pub struct RoomSessionSnapshot {
+    /// Stored players, including members whose routes are not yet published.
+    pub players: Vec<PlayerInfo>,
+    /// Authority preference used when selecting a replacement host.
+    pub authority_player: Option<PlayerId>,
+    /// Lifecycle state that determines whether a live session can be replanned.
+    pub lobby_state: crate::protocol::LobbyState,
+}
+
 /// Exact room state from which a game-start publication was prepared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeRoomGameExpectation {
@@ -441,6 +452,22 @@ pub trait GameDatabase: Send + Sync {
             .map(|room| RoomStartSnapshot {
                 game_name: room.game_name,
                 relay_type: room.relay_type,
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state,
+            }))
+    }
+
+    /// Read session members and policy from one storage snapshot.
+    /// Pending visibility and storage errors match [`Self::get_room_by_id`].
+    async fn get_room_session_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSessionSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|room| RoomSessionSnapshot {
+                players: room.players.into_values().collect(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state,
             }))
@@ -2196,6 +2223,25 @@ impl GameDatabase for InMemoryDatabase {
             .map(|room| RoomStartSnapshot {
                 game_name: room.game_name.clone(),
                 relay_type: room.relay_type.clone(),
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
+    /// Copy session members and policy together without spectator metadata.
+    async fn get_room_session_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSessionSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSessionSnapshot {
+                players: room.players.values().cloned().collect(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state.clone(),
             }))

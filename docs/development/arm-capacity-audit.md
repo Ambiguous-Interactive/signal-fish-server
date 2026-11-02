@@ -6886,3 +6886,28 @@ This is the chosen cancellation-instant contract, with sequential partial reads;
 fully quiesced capture is not required. Returned readiness errors and timeouts
 still abort and join producers before returning. These controls do not identify
 a server gameplay fault or explain the post-epoch replacement wait in #1352.
+
+### Active-send evidence (#1352, session 606)
+
+Each `peer-progress.json` row now includes `send` and `last_completed_send`.
+`send` holds the most recent unfinished or failed attempt: sequence, incarnation,
+intended time, stage and stage-start time. Stages distinguish scheduled waiting,
+declared pause or stall, frame preparation, socket write and event recording.
+Explicit lag, preparation and write failures keep their terminal stage. The last
+completed send has a sequence, incarnation and completion time. Completion clears
+`send` only after the exact sent event enters the ledger.
+
+Send times use the workload clock. Lifecycle stages remain independent, so an
+interrupted old-incarnation attempt can remain visible while the peer is offline
+or reconnecting. These are task progress observations, not proof of remote receipt
+or a packet capture. A canceled task retains its last phase and keeps
+`task_returned=false`; the row does not claim the canceled future is still live.
+Storage stays fixed per peer across workload duration and repeated churn.
+
+Held-write cancellation retains the exact attempt and previous completion. The
+stopped-generator histories retain lag and preparation failure stages through
+continued inbound evidence and rejoin. The unchanged replacement workload checks
+the final completion identity against its exact event ledger and preserves replay.
+The original coverage workload, drain margin, lag limit and delivery assertions
+stay unchanged. A passing control does not establish the historical cause of
+issue #1352, which remains open.
