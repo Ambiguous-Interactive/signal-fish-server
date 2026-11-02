@@ -626,6 +626,8 @@ fn visit_jsonl(
     visit_jsonl_with_limits(reader, path, ReplayLimits::from_env()?, visit)
 }
 
+/// Borrow complete buffered rows and assemble fragmented rows within all replay limits.
+/// Consume the current row before returning a decoder or record-budget error.
 fn visit_jsonl_with_limits(
     mut reader: impl BufRead,
     path: &Path,
@@ -1894,6 +1896,7 @@ mod tests {
         );
     }
 
+    /// Bound copied bytes for ordinary file buffers while retaining every decoded receipt.
     #[test]
     fn buffered_replay_borrows_receipt_rows_without_changing_decoded_evidence() {
         struct ObservedBuffer<R> {
@@ -1955,6 +1958,7 @@ mod tests {
         assert!(borrowed_bytes > (borrowed_bytes + copied_bytes) * 9 / 10);
     }
 
+    /// Borrow large complete rows and preserve exact UTF-8, CRLF and fragmented-row decoding.
     #[test]
     fn jsonl_visitor_borrows_complete_buffered_rows_and_preserves_fragmented_rows() {
         let values = [

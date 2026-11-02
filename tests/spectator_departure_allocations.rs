@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
+/// Bound complete departure growth to two roster copies and verify both terminal messages.
 #[test]
 #[serial_test::serial]
 fn spectator_departure_copies_only_the_two_published_rosters() {
