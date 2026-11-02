@@ -13530,3 +13530,20 @@ External clients remain unaffected. The Rust client's `src/protocol.rs`, the
 consume the same spectator messages. The additive database method has a default
 implementation and belongs to the server library. These clients do not implement
 that backend interface. All three campaigns remain open.
+
+Hosted follow-up: macOS job `125090091747` in full CI `41386859043` passes
+both new departure controls, then reproduces #1359 in the unchanged admission
+control. Its profiles are exactly 144 / 193 / 906 allocations and 22,021 /
+28,151 / 130,997 bytes. The job records 3,014 passes and one failure; fail-fast
+leaves 532 tests unrun. Linux with all features passes the original admission
+control in `33ff47e7`. This is not attributed to the departure projection.
+
+The admission fixture now performs a real timer wait before measurement, in
+addition to warming deferred scheduling. Paired native-lock and cold/warm timer
+controls print their exact costs and require the warmed operations to allocate
+nothing. Both controls and the unchanged admission ceiling pass on Linux in
+`7d0af9cb`. Rust's macOS mutex backend initializes a boxed native mutex lazily;
+a yield alone does not force a driver wait. This is a candidate isolation fix,
+not proof of the historical allocation site. Keep #1359 open until the paired
+macOS evidence establishes or rejects this explanation. No limit or roster
+assertion was relaxed.
