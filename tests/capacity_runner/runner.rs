@@ -2858,6 +2858,8 @@ mod session_poll_tests {
         let (peer_entered, observe_peer) = tokio::sync::oneshot::channel();
         let (auxiliary_entered, observe_auxiliary) = tokio::sync::oneshot::channel();
         let (release_auxiliary, hold_auxiliary) = tokio::sync::oneshot::channel();
+        let (peer_completed, observe_peer_completion) = tokio::sync::oneshot::channel();
+        let (auxiliary_completed, observe_auxiliary_completion) = tokio::sync::oneshot::channel();
         let mut peers = vec![tokio::spawn({
             let mut receiver = receiver.clone();
             let log = Arc::clone(&log);
@@ -2872,6 +2874,7 @@ mod session_poll_tests {
                 log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail });
                 peer_progress.returned();
                 order.lock().unwrap().push("peer_returned");
+                peer_completed.send(()).unwrap();
             }
         })];
         let mut auxiliaries = vec![tokio::spawn({
@@ -2888,6 +2891,7 @@ mod session_poll_tests {
                 assert_eq!(detail, "run readiness receiver closed before arming");
                 log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail });
                 order.lock().unwrap().push("auxiliary_returned");
+                auxiliary_completed.send(()).unwrap();
             }
         })];
         observe_peer.await.unwrap();
@@ -2898,16 +2902,16 @@ mod session_poll_tests {
             log: &log,
             finished: false,
         };
-        let peer_handles = &mut peers;
-        let auxiliary_handles = &mut auxiliaries;
+        let peer_completion = peers[0].abort_handle();
+        let auxiliary_completion = auxiliaries[0].abort_handle();
         let mut owner = Box::pin(async move {
             preparation
                 .arm(
                     vec![peer_readiness, auxiliary_readiness],
                     &mut start,
                     Instant::now() + Duration::from_secs(30),
-                    peer_handles,
-                    auxiliary_handles,
+                    &mut peers,
+                    &mut auxiliaries,
                 )
                 .await
         });
@@ -2931,9 +2935,14 @@ mod session_poll_tests {
         assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
         order.lock().unwrap().push("artifacts_captured");
         release_auxiliary.send(()).unwrap();
-        for handle in peers.into_iter().chain(auxiliaries) {
-            handle.await.unwrap();
-        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            observe_peer_completion.await.unwrap();
+            observe_auxiliary_completion.await.unwrap();
+        })
+        .await
+        .expect("detached producers return after cancellation");
+        assert!(peer_completion.is_finished());
+        assert!(auxiliary_completion.is_finished());
         assert!(progress["r0p0"].snapshot().task_returned);
         let late = log.take_records();
         assert_eq!(

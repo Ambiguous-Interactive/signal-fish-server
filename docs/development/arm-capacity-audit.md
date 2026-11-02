@@ -6876,7 +6876,8 @@ The held-readiness control starts a peer waiting for the epoch and an auxiliary
 whose readiness is held. It polls the owning arming future pending, drops that
 future, and reads the artifacts before either producer returns. The exact
 initial refusal and all planned peer rows survive. No workload epoch or success
-summary exists. The control then lets both producers return and joins them.
+summary exists. The owner drops both worker handles. Separate completion signals and task-state
+handles prove both detached producers return after the capture.
 Their two later records are derivative epoch-channel/readiness-channel closure
 notices. The peer's later return flag is also absent from the earlier capture.
 The control retains producer entry, owner cancellation, capture and return order.

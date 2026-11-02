@@ -13396,8 +13396,9 @@ The held-readiness cancellation control qualifies the distinct #1358 boundary.
 An owner-exit artifact precedes producer return and can omit later derivative
 channel-closure notices and task-return flags. The marker now declares that
 partial contract. Exact initial refusals and all planned rows survive, no
-workload epoch is published, and no success summary is written. Each producer
-is joined in the control after its late evidence is observed. Returned arming
+workload epoch is published, and no success summary is written. The owner drops
+both worker handles; separate signals and task-state handles confirm both
+detached producers finish after capture. Returned arming
 errors retain their existing abort-and-join path. See the owner-exit section in
 `arm-capacity-audit.md` for the capture contract. The broader audit remains open.
 
