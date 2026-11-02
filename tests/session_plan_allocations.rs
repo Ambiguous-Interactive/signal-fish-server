@@ -1,6 +1,7 @@
 //! Exact P2P start publications retain legacy metadata without copying it into selection.
 
 mod allocation_harness;
+mod live_p2p_allocations;
 
 use signal_fish_server::config::*;
 use signal_fish_server::database::DatabaseConfig;
@@ -140,7 +141,7 @@ fn assert_membership_queue_empty(
     );
 }
 
-fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
+fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name: bool) {
     let mut profiles = Vec::new();
     for bytes in [0, 1024, 64 * 1024] {
         allocation_harness::block_on(async {
@@ -150,7 +151,10 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
                     enable_reconnection: true,
                     ..Default::default()
                 },
-                ProtocolConfig::default(),
+                ProtocolConfig {
+                    max_player_name_length: if actor_name { 64 * 1024 + 5 } else { 32 },
+                    ..Default::default()
+                },
                 RelayTypeConfig::default(),
                 SessionConfig {
                     default_topology: Topology::Mesh,
@@ -180,7 +184,11 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
                         &player,
                         "membership-profile".into(),
                         Some("MEMB01".into()),
-                        name.into(),
+                        if actor_name && player == guest {
+                            "G".repeat(bytes + 5)
+                        } else {
+                            name.into()
+                        },
                         Some(4),
                         Some(true),
                         None,
@@ -193,8 +201,9 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
             let token = drain_membership_setup(&mut guest_rx, false);
             server.handle_start_game(&host).await;
             let room_id = server.get_client_room(&host).await.unwrap();
-            let metadata = serde_json::json!({"nested": ["x".repeat(bytes)]});
-            // Only the incumbent carries the varied payload, so each byte slope is one copy.
+            let metadata =
+                serde_json::json!({"nested": ["x".repeat(if actor_name { 0 } else { bytes })]});
+            // Vary one owned field so each byte slope counts its copies.
             assert!(server
                 .database()
                 .update_player_connection_info(
@@ -337,13 +346,22 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
                 .await
                 .unwrap()
                 .unwrap();
+            assert!(stored.players[&guest].connection_info.is_none());
+            assert_eq!(
+                stored.players[&guest].name,
+                if actor_name {
+                    "G".repeat(bytes + 5)
+                } else {
+                    "Guest".into()
+                }
+            );
             assert!(matches!(&stored.players[&host].connection_info,
-                    Some(ConnectionInfo::Custom { data }) if *data == metadata));
+                Some(ConnectionInfo::Custom { data }) if *data == metadata));
         });
     }
     let baseline = profiles[0].bytes_allocated;
     for (bytes, stats) in [0, 1024, 64 * 1024].into_iter().zip(profiles) {
-        assert!(stats.bytes_allocated <= baseline + (if reconnect { 5 } else { 4 }) * bytes + 1024,
+        assert!(stats.bytes_allocated <= baseline + (if actor_name { 10 } else if reconnect { 5 } else { 4 }) * bytes + 1024,
                 "redundant membership snapshot: reconnect={reconnect} bytes={bytes} baseline={baseline} stats={stats:?}");
     }
 }
@@ -351,15 +369,24 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial("reconnect_claim_shares_retained_player_name", || {
+            finalized_membership_reuses_owned_room_snapshots(true, true)
+        }),
+        allocation_harness::trial("host_departure_skips_legacy_player_metadata", || {
+            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false)
+        }),
+        allocation_harness::trial("direct_refresh_skips_legacy_player_metadata", || {
+            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(true)
+        }),
         allocation_harness::trial(
             "session_plans_do_not_copy_custom_connection_metadata",
             session_plans_do_not_copy_custom_connection_metadata,
         ),
         allocation_harness::trial("finalized_join_reuses_owned_room_snapshots", || {
-            finalized_membership_reuses_owned_room_snapshots(false)
+            finalized_membership_reuses_owned_room_snapshots(false, false)
         }),
         allocation_harness::trial("finalized_reconnect_reuses_owned_room_snapshot", || {
-            finalized_membership_reuses_owned_room_snapshots(true)
+            finalized_membership_reuses_owned_room_snapshots(true, false)
         }),
     ]);
 }

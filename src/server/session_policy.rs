@@ -134,15 +134,19 @@ pub(crate) struct SessionMember {
 
 impl SessionMember {
     fn from_player(player: &PlayerInfo, protocol: NegotiatedProtocol) -> Self {
+        Self::from_session_player(crate::database::SessionPlayer::from(player), protocol)
+    }
+
+    fn from_session_player(
+        player: crate::database::SessionPlayer,
+        protocol: NegotiatedProtocol,
+    ) -> Self {
         Self {
             player_id: player.id,
-            player_name: player.name.clone(),
+            player_name: player.name,
             is_authority: player.is_authority,
             joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
-            direct_endpoint: player
-                .connection_info
-                .as_ref()
-                .and_then(DirectEndpoint::from_connection_info),
+            direct_endpoint: player.direct_endpoint,
             version: protocol.version,
             transports: protocol.transports,
             topologies: protocol.topologies,
@@ -745,6 +749,19 @@ impl EnhancedGameServer {
             .collect()
     }
 
+    fn session_members_from_selection(
+        &self,
+        players: impl IntoIterator<Item = crate::database::SessionPlayer>,
+    ) -> Vec<SessionMember> {
+        players
+            .into_iter()
+            .map(|player| {
+                let protocol = self.client_protocol(&player.id);
+                SessionMember::from_session_player(player, protocol)
+            })
+            .collect()
+    }
+
     /// Build the complete, one-shot publication for an explicit game start.
     ///
     /// The room coordinator invokes this only after capturing its exact routed
@@ -1021,7 +1038,11 @@ impl EnhancedGameServer {
             return;
         };
 
-        let room = match self.database.get_room_session_snapshot(room_id).await {
+        let room = match self
+            .database
+            .get_room_session_selection_snapshot(room_id)
+            .await
+        {
             Ok(Some(room)) => room,
             Ok(None) => {
                 // The room itself is gone; drop the stale decision.
@@ -1058,11 +1079,12 @@ impl EnhancedGameServer {
             }
         };
         let stored_players_empty = room.players.is_empty();
-        let members = self.session_members_from(room.players.iter().filter(|member| {
-            routed_player_ids
-                .as_ref()
-                .is_none_or(|routed| routed.contains(&member.id))
-        }));
+        let members =
+            self.session_members_from_selection(room.players.into_iter().filter(|member| {
+                routed_player_ids
+                    .as_ref()
+                    .is_none_or(|routed| routed.contains(&member.id))
+            }));
 
         // Last published member left. Storage may still hold an admitted
         // member whose route has not committed yet — a failed finalized
@@ -1162,7 +1184,11 @@ impl EnhancedGameServer {
         stored: ActiveSessionPlan,
         room_event_guard: RoomEventMutationGuard,
     ) -> bool {
-        let mut room = match self.database.get_room_by_id(room_id).await {
+        let mut room = match self
+            .database
+            .get_room_session_selection_snapshot(room_id)
+            .await
+        {
             Ok(Some(room)) => room,
             _ => return false,
         };
@@ -1173,15 +1199,15 @@ impl EnhancedGameServer {
                 .await
                 .unwrap_or(false);
         }
-        let Some(host) = room.players.get_mut(player_id) else {
+        let Some(host) = room
+            .players
+            .iter_mut()
+            .find(|player| player.id == *player_id)
+        else {
             return false;
         };
-        let previous = host
-            .connection_info
-            .as_ref()
-            .and_then(DirectEndpoint::from_connection_info);
+        let previous = host.direct_endpoint.take();
         let replacement = DirectEndpoint::from_connection_info(&connection_info);
-        host.connection_info = Some(connection_info.clone());
         if previous == replacement && replacement.is_some() {
             return self
                 .database
@@ -1189,6 +1215,7 @@ impl EnhancedGameServer {
                 .await
                 .unwrap_or(false);
         }
+        host.direct_endpoint = replacement;
         let routed = match self.message_coordinator.routed_player_ids(room_id).await {
             Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
             Err(_) => return false,
@@ -1196,12 +1223,11 @@ impl EnhancedGameServer {
         if routed.as_ref().is_some_and(|ids| !ids.contains(player_id)) {
             return false;
         }
-        let players: Vec<_> = room
-            .players
-            .into_values()
-            .filter(|member| routed.as_ref().is_none_or(|ids| ids.contains(&member.id)))
-            .collect();
-        let members = self.session_members_from(&players);
+        let members = self.session_members_from_selection(
+            room.players
+                .into_iter()
+                .filter(|member| routed.as_ref().is_none_or(|ids| ids.contains(&member.id))),
+        );
         self.publish_host_session(
             room_id,
             stored,

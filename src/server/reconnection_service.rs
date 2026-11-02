@@ -90,7 +90,7 @@ fn bound_reconnect_baseline(
 
 struct ReconnectionClaimGuard {
     manager: Arc<ReconnectionManager>,
-    claim: Option<ClaimedReconnection>,
+    claim: Option<Arc<ClaimedReconnection>>,
 }
 
 /// Durable state a reconnect attempt has already changed but has not yet
@@ -115,22 +115,22 @@ struct ReconnectRestoreState {
 
 #[derive(Clone, Default)]
 struct ReconnectPanicRecovery {
-    claim: Option<ClaimedReconnection>,
+    claim: Option<Arc<ClaimedReconnection>>,
     restore: ReconnectRestoreState,
     reassigned: bool,
     room_event_guard: Option<RoomEventMutationGuard>,
 }
 
 impl ReconnectionClaimGuard {
-    fn new(manager: Arc<ReconnectionManager>, claim: ClaimedReconnection) -> Self {
+    fn new(manager: Arc<ReconnectionManager>, claim: Arc<ClaimedReconnection>) -> Self {
         Self {
             manager,
             claim: Some(claim),
         }
     }
 
-    fn disconnected(&self) -> Option<DisconnectedPlayer> {
-        self.claim.as_ref().map(|claim| claim.disconnected.clone())
+    fn retained_claim(&self) -> Option<Arc<ClaimedReconnection>> {
+        self.claim.as_ref().map(Arc::clone)
     }
 
     async fn release(mut self) -> bool {
@@ -529,10 +529,11 @@ impl EnhancedGameServer {
         restore: &ReconnectRestoreState,
         reason: &str,
     ) {
-        let Some(disconnected) = claim_guard.disconnected() else {
+        let Some(retained_claim) = claim_guard.retained_claim() else {
             tracing::warn!(%reason, "Reconnection rejection had no active claim to release");
             return;
         };
+        let disconnected = &retained_claim.disconnected;
         // A detach this attempt took over is owed back to maintenance unless
         // the rejection itself made the durable state clean. `None` here means
         // "nothing left to repair"; `Some(rollback)` re-queues the retry with
@@ -1047,12 +1048,13 @@ impl EnhancedGameServer {
                 return false;
             }
         };
+        let claim = Arc::new(claim);
         panic_recovery
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .claim = Some(claim.clone());
+            .claim = Some(Arc::clone(&claim));
         let claim_guard = ReconnectionClaimGuard::new(Arc::clone(reconnection_manager), claim);
-        let Some(disconnected) = claim_guard.disconnected() else {
+        let Some(retained_claim) = claim_guard.retained_claim() else {
             tracing::warn!(
                 %reconnect_player_id,
                 %room_id,
@@ -1060,6 +1062,7 @@ impl EnhancedGameServer {
             );
             return false;
         };
+        let disconnected = &retained_claim.disconnected;
         let last_sequence = disconnected.last_sequence;
         let mut restore = ReconnectRestoreState::default();
 
@@ -2384,7 +2387,7 @@ impl EnhancedGameServer {
                     self.repair_panicked_reconnect_publication_locked(
                         *reconnect_player_id,
                         *room_id,
-                        &disconnected,
+                        disconnected,
                         repair_guard,
                     )
                     .await;

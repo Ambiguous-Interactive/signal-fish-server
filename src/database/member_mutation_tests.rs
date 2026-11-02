@@ -578,3 +578,143 @@ async fn spectator_snapshot_preserves_atomic_code_roster_and_read_failures() {
         .unwrap()
         .is_none());
 }
+
+/// #826: session members, authority and state share one atomic room read.
+#[tokio::test]
+async fn session_selection_preserves_pending_members_policy_and_read_failures() {
+    let database = InMemoryDatabase::new();
+    let room = database
+        .create_pending_room_classified(
+            "session-snapshot".into(),
+            Some("SNAP01".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!database.is_room_published(&room.id).await.unwrap());
+    for state in [
+        crate::protocol::LobbyState::Waiting,
+        crate::protocol::LobbyState::Lobby,
+        crate::protocol::LobbyState::Finalized,
+    ] {
+        {
+            let mut rooms = database.rooms.write().await;
+            let stored = rooms.get_mut(&room.id).unwrap();
+            stored.lobby_state = state.clone();
+            let player = stored.players.values_mut().next().unwrap();
+            player.name = "名称\0with metadata".into();
+            player.connection_info = Some(ConnectionInfo::Custom {
+                data: serde_json::json!({"nested": ["exact", 17]}),
+            });
+            player.epoch = Some(7);
+            player.seq = Some(19);
+        }
+        let expected = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        let snapshot = database
+            .get_room_session_selection_snapshot(&room.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.lobby_state, state);
+        assert_eq!(snapshot.authority_player, expected.authority_player);
+        assert_eq!(snapshot.players.len(), expected.players.len());
+        for player in snapshot.players {
+            assert_eq!(player, SessionPlayer::from(&expected.players[&player.id]));
+        }
+    }
+    let held = database.rooms.write().await;
+    let mut read = Box::pin(database.get_room_session_selection_snapshot(&room.id));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    drop(read);
+    drop(held);
+    database.publish_room(&room.id).await.unwrap();
+    database
+        .update_room_authority(&room.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        database
+            .get_room_session_selection_snapshot(&room.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        None
+    );
+    database
+        .fail_get_room_by_id
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(database
+        .get_room_session_selection_snapshot(&room.id)
+        .await
+        .is_err());
+    database
+        .fail_get_room_by_id
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(database.delete_room(&room.id).await.unwrap());
+    assert!(database
+        .get_room_session_selection_snapshot(&room.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// #1380/#1381: selection retains only valid Direct endpoints and exact identity fields.
+#[tokio::test]
+async fn session_player_projection_preserves_fields_and_validated_endpoints() {
+    let database = InMemoryDatabase::new();
+    let mut room = create_test_room(&database, "selection", "SELECT")
+        .await
+        .unwrap();
+    let player = room.players.values_mut().next().unwrap();
+    player.name = "名称".into();
+    for (info, endpoint) in [
+        (None, None),
+        (
+            Some(ConnectionInfo::Custom {
+                data: serde_json::json!({"nested": ["large metadata"]}),
+            }),
+            None,
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "192.0.2.1".into(),
+                port: 7777,
+            }),
+            Some(crate::protocol::DirectEndpoint {
+                host: "192.0.2.1".into(),
+                port: 7777,
+            }),
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "".into(),
+                port: 7777,
+            }),
+            None,
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "192.0.2.1".into(),
+                port: 0,
+            }),
+            None,
+        ),
+    ] {
+        player.connection_info = info;
+        let before = serde_json::to_value(&player).unwrap();
+        let selected = SessionPlayer::from(&*player);
+        assert_eq!(selected.id, player.id);
+        assert_eq!(selected.name, player.name);
+        assert_eq!(selected.is_authority, player.is_authority);
+        assert_eq!(selected.connected_at, player.connected_at);
+        assert_eq!(selected.direct_endpoint, endpoint);
+        assert_eq!(serde_json::to_value(&player).unwrap(), before);
+    }
+}
