@@ -2,6 +2,8 @@
 
 mod test_helpers;
 
+mod allocation_harness;
+
 use signal_fish_server::protocol::{ServerMessage, SpectatorInfo};
 use uuid::Uuid;
 
@@ -9,8 +11,12 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// Bound roster-copy growth in isolated runtimes with warmed scheduler storage.
-#[test]
 fn spectator_admission_reuses_its_owned_room_and_roster() {
+    #[cfg(feature = "allocation-tracking")]
+    signal_fish_server::server::allocation_benchmark::install_spectator_allocation_observer(
+        record_stage,
+    )
+    .unwrap();
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 254] {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -98,10 +104,22 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
             let room_code = "SPROF1".into();
             let spectator_name = "Viewer".into();
             let region = stats_alloc::Region::new(ALLOCATOR);
+            #[cfg(feature = "allocation-tracking")]
+            {
+                RECORDING.store(true, std::sync::atomic::Ordering::Relaxed);
+                record_stage("before_call");
+            }
             server
                 .handle_join_as_spectator(&spectator, game_name, room_code, spectator_name, None)
                 .await;
+            #[cfg(feature = "allocation-tracking")]
+            {
+                record_stage("returned");
+                RECORDING.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
             let stats = region.change();
+            #[cfg(feature = "allocation-tracking")]
+            print_stages(spectators);
             println!("SPECTATOR_JOIN_PROFILE spectators={spectators} stats={stats:?}");
             profiles.push((spectators, stats.allocations));
 
@@ -170,4 +188,71 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
             "spectator roster allocation growth exceeded three copies: spectators={spectators} allocations={allocations} empty={empty_allocations}"
         );
     }
+}
+
+#[cfg(feature = "allocation-tracking")]
+const STAGES: [&str; 20] = [
+    "before_call",
+    "before_spawn",
+    "task_prepared",
+    "task_started",
+    "lifecycle_found",
+    "lifecycle_locked",
+    "owned_start",
+    "code_lock",
+    "room_read",
+    "policy_checks",
+    "insert",
+    "generation",
+    "baseline_read",
+    "readiness",
+    "roster",
+    "registration",
+    "registered",
+    "notification",
+    "completed",
+    "returned",
+];
+#[cfg(feature = "allocation-tracking")]
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "allocation-tracking")]
+static ALLOCATIONS: [std::sync::atomic::AtomicUsize; 20] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 20];
+#[cfg(feature = "allocation-tracking")]
+static BYTES: [std::sync::atomic::AtomicUsize; 20] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 20];
+
+/// Record cumulative allocator counters without heap storage or native locks.
+#[cfg(feature = "allocation-tracking")]
+fn record_stage(stage: &'static str) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !RECORDING.load(Relaxed) {
+        return;
+    }
+    let index = STAGES
+        .iter()
+        .position(|candidate| *candidate == stage)
+        .unwrap();
+    let stats = ALLOCATOR.stats();
+    ALLOCATIONS[index].store(stats.allocations, Relaxed);
+    BYTES[index].store(stats.bytes_allocated, Relaxed);
+}
+
+/// Print stage deltas only after the complete admission measurement ends.
+#[cfg(feature = "allocation-tracking")]
+fn print_stages(spectators: u128) {
+    use std::sync::atomic::Ordering::Relaxed;
+    for index in 1..STAGES.len() {
+        let allocations = ALLOCATIONS[index].load(Relaxed) - ALLOCATIONS[index - 1].load(Relaxed);
+        let bytes = BYTES[index].load(Relaxed) - BYTES[index - 1].load(Relaxed);
+        println!("ADMISSION_STAGE spectators={spectators} stage={} allocations={allocations} bytes={bytes}", STAGES[index]);
+    }
+}
+
+/// Run allocation histories without a concurrent test-runner thread.
+fn main() {
+    allocation_harness::run(
+        "spectator_admission_reuses_its_owned_room_and_roster",
+        spectator_admission_reuses_its_owned_room_and_roster,
+    );
 }

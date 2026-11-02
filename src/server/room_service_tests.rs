@@ -14458,3 +14458,65 @@ async fn default_session_snapshot_retains_custom_backend_read_semantics() {
         .unwrap()
         .is_none());
 }
+
+/// #826: custom backends retain one complete read and the same missing/error results.
+#[tokio::test]
+async fn default_spectator_snapshot_retains_custom_backend_read_semantics() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let room = inner
+        .create_pending_room_classified(
+            "spectator-adapter".into(),
+            Some("ADAPT1".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let adapter = DrainAfterCreateDatabase::new(inner.clone());
+    for name in [None, Some("名称\0")] {
+        if let Some(name) = name {
+            inner
+                .add_spectator_to_room(
+                    &room.id,
+                    crate::protocol::SpectatorInfo {
+                        id: PlayerId::from_u128(2),
+                        name: name.into(),
+                        connected_at: chrono::DateTime::from_timestamp(1234, 0),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        inner.reset_get_room_by_id_calls_for_test();
+        let actual = adapter
+            .get_room_spectator_snapshot(&room.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inner.get_room_by_id_calls_for_test(), 1);
+        let expected = inner
+            .get_room_spectator_snapshot(&room.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual.room_code, expected.room_code);
+        assert_eq!(
+            serde_json::to_value(actual.spectators).unwrap(),
+            serde_json::to_value(expected.spectators).unwrap()
+        );
+    }
+    inner.fail_get_room_by_id_for_test(true);
+    assert!(adapter.get_room_spectator_snapshot(&room.id).await.is_err());
+    inner.fail_get_room_by_id_for_test(false);
+    assert!(inner.delete_room(&room.id).await.unwrap());
+    assert!(adapter
+        .get_room_spectator_snapshot(&room.id)
+        .await
+        .unwrap()
+        .is_none());
+}

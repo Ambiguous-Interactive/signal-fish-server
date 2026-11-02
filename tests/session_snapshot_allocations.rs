@@ -1,5 +1,7 @@
 //! Session replanning reads must not copy spectator metadata.
 
+mod allocation_harness;
+
 use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::protocol::SpectatorInfo;
 use uuid::Uuid;
@@ -7,9 +9,7 @@ use uuid::Uuid;
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
-/// #636: retain exact members while keeping read cost independent of spectators.
-#[test]
-#[serial_test::serial]
+/// Keep both allocation histories in one test so libtest cannot allocate for a second test concurrently.
 fn session_snapshot_cost_does_not_grow_with_spectator_rosters() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 254] {
@@ -77,12 +77,12 @@ fn session_snapshot_cost_does_not_grow_with_spectator_rosters() {
         assert_eq!(profile.allocations, baseline.allocations);
         assert_eq!(profile.bytes_allocated, baseline.bytes_allocated);
     }
+    #[cfg(feature = "allocation-tracking")]
+    host_departure_replans_without_copying_spectator_rosters();
 }
 
 /// #636/#826: a complete host departure retains failover without spectator copies.
 #[cfg(feature = "allocation-tracking")]
-#[test]
-#[serial_test::serial]
 fn host_departure_replans_without_copying_spectator_rosters() {
     use signal_fish_server::config::*;
     use signal_fish_server::database::DatabaseConfig;
@@ -208,4 +208,12 @@ fn host_departure_replans_without_copying_spectator_rosters() {
             "{profiles:?}"
         );
     }
+}
+
+/// Run allocation histories without a concurrent test-runner thread.
+fn main() {
+    allocation_harness::run(
+        "session_snapshot_cost_does_not_grow_with_spectator_rosters",
+        session_snapshot_cost_does_not_grow_with_spectator_rosters,
+    );
 }

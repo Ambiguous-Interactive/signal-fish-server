@@ -493,3 +493,88 @@ async fn session_snapshot_preserves_pending_members_policy_and_read_failures() {
         .unwrap()
         .is_none());
 }
+
+/// #826: code and roster stay paired across pending visibility, cancellation and errors.
+#[tokio::test]
+async fn spectator_snapshot_preserves_atomic_code_roster_and_read_failures() {
+    let database = InMemoryDatabase::new();
+    let room = database
+        .create_pending_room_classified(
+            "spectator-snapshot".into(),
+            Some("SPEC01".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!database.is_room_published(&room.id).await.unwrap());
+    for count in [0_u128, 1, 255] {
+        {
+            let mut rooms = database.rooms.write().await;
+            let stored = rooms.get_mut(&room.id).unwrap();
+            stored.code = format!("SPEC{count:03}");
+            stored.spectators.clear();
+            for index in 0..count {
+                let id = PlayerId::from_u128(index + 2);
+                stored.spectators.insert(
+                    id,
+                    SpectatorInfo {
+                        id,
+                        name: format!("名称\0-{index}"),
+                        connected_at: chrono::DateTime::from_timestamp(1234, 0),
+                    },
+                );
+            }
+        }
+        let expected = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        let actual = database
+            .get_room_spectator_snapshot(&room.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual.room_code, expected.code);
+        assert_eq!(actual.spectators.len(), expected.spectators.len());
+        for spectator in actual.spectators {
+            assert_eq!(
+                serde_json::to_value(&spectator).unwrap(),
+                serde_json::to_value(&expected.spectators[&spectator.id]).unwrap()
+            );
+        }
+    }
+    let mut held = database.rooms.write().await;
+    let mut read = Box::pin(database.get_room_spectator_snapshot(&room.id));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    drop(read);
+    let stored = held.get_mut(&room.id).unwrap();
+    stored.code = "PAIRED".into();
+    stored.spectators.clear();
+    drop(held);
+    let actual = database
+        .get_room_spectator_snapshot(&room.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual.room_code, "PAIRED");
+    assert!(actual.spectators.is_empty());
+    database
+        .fail_get_room_by_id
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(database
+        .get_room_spectator_snapshot(&room.id)
+        .await
+        .is_err());
+    database
+        .fail_get_room_by_id
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(database.delete_room(&room.id).await.unwrap());
+    assert!(database
+        .get_room_spectator_snapshot(&room.id)
+        .await
+        .unwrap()
+        .is_none());
+}

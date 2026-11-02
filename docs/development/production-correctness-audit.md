@@ -13469,3 +13469,129 @@ Final restored controls pass in `1c76a15b` (both allocation contracts),
 (fifteen snapshot and session-departure histories). Strict all-target/all-feature
 Clippy passes. The mutation inventory remains 451; no mutation campaign ran
 locally. Both deliberate negative attempts remain recorded as failures.
+
+### F231 — Spectator departure copies unrelated room state and repeats roster copies
+
+Scope: #636, #826 and #775, session 607, starting at `9ea7aac1`.
+
+Spectator departure read a complete room, copied its spectator roster, and
+copied that roster into its acknowledgement. The peer notification consumed
+the other copy. The first read also copied all seated-player metadata, which
+neither terminal message uses. Ghost-repair notification repeated the complete
+room read and roster copy.
+
+`GameDatabase::get_room_spectator_snapshot` now pairs the current room code and
+spectator roster in one read. The in-memory implementation holds one room read
+lock and copies no player metadata. The default method consumes one complete
+snapshot so custom backends retain pending-room visibility, missing-room results
+and storage errors. Departure filters the owned vector in place before the
+existing durable removal. Both terminal messages retain the exact captured
+roster. Ghost repair consumes the same projected roster.
+
+The complete departure control first fails against the original source in
+Nextest `2e5a2f2c`: 74 / 123 / 837 allocations and 13,510 / 18,618 / 101,734
+bytes for 0 / 16 / 254 remaining spectators. The two-copy allocation bound
+rejects the old three-copy growth after every message and persistence assertion.
+The final candidate passes in `544d1a3c`: 64 / 97 / 573 allocations and
+11,589 / 14,173 / 55,109 bytes. These are isolated operation measurements,
+not server-throughput or historical macOS allocation attribution claims.
+
+The read-only allocation control in that run compares one seated player with
+sixteen. Fifteen extra players carry 64 KiB of nested metadata each. The
+projected read uses identical allocations and bytes in both cohorts: 2 / 19 /
+257 allocations and 126 / 1,502 / 21,970 bytes for the same spectator counts.
+Exact names, timestamps, code and stored member counts remain intact.
+
+The atomic-read control covers empty and full rosters, pending rooms, Unicode
+and NUL names, timestamps, a canceled read blocked by a writer, a paired code
+and roster update, storage errors and deletion. The custom-backend control
+pins one complete fallback read. Thirty-three focused histories pass in
+`0dec92d8`, including durable-remove failures, missing rooms, both detach panic
+boundaries, caller cancellation, FIFO publication, ghost-repair retries and
+reconnection replay. No wire schema, error code, admission rule or lifecycle
+order changes.
+
+For #775, replay previously copied every JSONL row into scratch storage even
+when the buffered reader already held a complete row. The visitor now borrows
+complete buffered rows and assembles fragmented or unterminated rows as before.
+Byte, line and row admission checks still run before decoding. A callback error
+still consumes its current row and never reads its tail. The original borrowing
+control fails in `bbbf768b`; the corrected reader passes in `78c53e5d`.
+With the normal 8 KiB reader buffer and 10,000 receipt rows, 1,637,268 bytes
+borrow the input buffer and 32,732 bytes need assembly, versus 1,670,000 copied
+bytes before the change. Decoded receipt evidence is identical. The focused
+controls retain fragmented UTF-8, CRLF, final rows without newlines, blank-line
+budget costs, malformed rows, late read errors, all event types, duplicate-key
+semantics and exact live-run replay. The large ten-minute campaign remains
+unqualified; this reduction does not close #775.
+
+External clients remain unaffected. The Rust client's `src/protocol.rs`, the
+.NET client's `MessagesSpectators.cs` and the Godot client's `sf_events.gd`
+consume the same spectator messages. The additive database method has a default
+implementation and belongs to the server library. These clients do not implement
+that backend interface. All three campaigns remain open.
+
+Hosted follow-up: macOS job `125090091747` in full CI `41386859043` passes
+both new departure controls, then reproduces #1359 in the unchanged admission
+control. Its profiles are exactly 144 / 193 / 906 allocations and 22,021 /
+28,151 / 130,997 bytes. The job records 3,014 passes and one failure; fail-fast
+leaves 532 tests unrun. Linux with all features passes the original admission
+control in `33ff47e7`. This is not attributed to the departure projection.
+
+A timer-wait warmup experiment in head `28771688` does not change the macOS
+profiles. Job `125097722865` in full CI `41389439954` rejects the same ceiling.
+The experiment is removed. The additional zero-allocation timer assertion also
+had a parallel-libtest interference risk identified in review; that additional
+test is removed with the rejected experiment.
+
+The next diagnostic retains cumulative allocation counts and bytes at twenty
+admission boundaries. It uses fixed atomic storage and a nonallocating observer
+behind the existing dev-only `allocation-tracking` feature. The original single
+allocation test emits the stage deltas after measurement; it adds no independent
+concurrent allocation test. The Linux all-feature profile remains 139 / 187 /
+901 allocations, including the observer. All original admission, notification
+and three-copy assertions remain unchanged. This can locate the extra macOS
+allocation within a smaller operation but does not yet identify its allocation
+site. Keep #1359 open.
+
+Coverage follow-up #1366: head `e0bd5d38` fails job `125107697359` in full
+CI `41392638859`. The pre-existing session snapshot binary records 5 allocations
+and 1,475 bytes for zero spectators, then 4 and 867 for both larger cohorts.
+Its exact equality check fails; the host-departure history passes. The binary
+has two global-allocation tests. Serial body locks do not serialize libtest
+thread setup and result collection, so those allocations can overlap a region.
+The candidate gives both this binary and the new spectator departure binary
+one test entry each. Each entry executes both original histories sequentially.
+Every message, metadata, persistence, count and byte assertion remains. Scoped
+Nextest and plain libtest with eight test threads retain all four histories.
+This removes overlap between fixture histories, but does not exclude all runner
+allocations: Rust 1.94 libtest can allocate on its main thread after it spawns
+even a sole test worker. This candidate alone cannot close #1366. Exact-head hosted qualification remains
+required; no allocation site or gameplay copy defect is inferred from the
+historical extra 608 bytes.
+
+Head `85854a17` reproduces #1359 in macOS job `125119068983`, full CI
+`41396407054`. The 16-spectator cohort has 62 allocations / 7,218 bytes
+between `before_spawn` and `owned_start`; the zero and 254 cohorts both have
+61 / 7,154 in that interval. Later stages retain expected roster growth.
+This places the extra 64 bytes before the owned admission body, but does not
+identify a call site or exclude runner interference. Four finer checkpoints
+separate task preparation, first task poll, lifecycle lookup and lock acquisition.
+All original message assertions and allocation bounds remain.
+
+The next repair replaces the built-in harness for the session snapshot, spectator
+departure and spectator admission binaries with `libtest-mimic` 0.8.2. A shared
+runner forces its single-thread mode, which calls each history on the process
+main thread. It prints results before or after each history and creates no
+concurrent test-runner thread. Each trial asserts that it runs on the captured
+main thread. The three fixtures retain all original operations, bounds and
+message assertions. The dependency is development-only; it adds one new
+transitive crate and requires Rust 1.65, below this repository's MSRV.
+
+All three entries pass scoped Nextest and plain Cargo with eight requested test
+threads. A worker-mode negative control fails the thread identity assertion.
+A deliberately added spectator roster read fails the unchanged three-copy
+admission bound. Both mutations are removed. Exact-head hosted coverage and
+OS qualification remain required. The other allocation binaries keep their
+existing harnesses; a separate sweep remains follow-up work. This repair does
+not identify the historical #1359 allocation site.

@@ -626,6 +626,8 @@ fn visit_jsonl(
     visit_jsonl_with_limits(reader, path, ReplayLimits::from_env()?, visit)
 }
 
+/// Borrow complete buffered rows and assemble fragmented rows within all replay limits.
+/// Consume the current row before returning a decoder or record-budget error.
 fn visit_jsonl_with_limits(
     mut reader: impl BufRead,
     path: &Path,
@@ -635,6 +637,15 @@ fn visit_jsonl_with_limits(
     let mut line = Vec::new();
     let mut input_bytes = 0_u64;
     let mut records = 0_u64;
+    let mut visit_line = |line: &[u8]| -> Result<(), String> {
+        if !line.is_empty() {
+            records = records.checked_add(1)
+                .filter(|&count| count <= limits.records)
+                .ok_or_else(|| format!("replay record budget {} exceeded: {}; set CAPACITY_RUNNER_REPLAY_MAX_RECORDS for a provisioned host", limits.records, path.display()))?;
+            visit(line)?;
+        }
+        Ok(())
+    };
     loop {
         let available = reader
             .fill_buf()
@@ -649,6 +660,12 @@ fn visit_jsonl_with_limits(
         let line_len = line.len().checked_add(content)
             .filter(|&length| length <= limits.line_bytes)
             .ok_or_else(|| format!("replay line budget {} exceeded: {}; set CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES for a provisioned host", limits.line_bytes, path.display()))?;
+        if line.is_empty() && newline.is_some() {
+            let result = visit_line(&available[..content]);
+            reader.consume(consumed);
+            result?;
+            continue;
+        }
         if line_len > line.capacity() {
             let capacity = line
                 .capacity()
@@ -662,10 +679,7 @@ fn visit_jsonl_with_limits(
         reader.consume(consumed);
         if newline.is_some() || at_end {
             if !line.is_empty() {
-                records = records.checked_add(1)
-                    .filter(|&count| count <= limits.records)
-                    .ok_or_else(|| format!("replay record budget {} exceeded: {}; set CAPACITY_RUNNER_REPLAY_MAX_RECORDS for a provisioned host", limits.records, path.display()))?;
-                visit(&line)?;
+                visit_line(&line)?;
                 line.clear();
             }
             if at_end {
@@ -1880,6 +1894,123 @@ mod tests {
             1,
             "never read the trailing input"
         );
+    }
+
+    /// Bound copied bytes for ordinary file buffers while retaining every decoded receipt.
+    #[test]
+    fn buffered_replay_borrows_receipt_rows_without_changing_decoded_evidence() {
+        struct ObservedBuffer<R> {
+            inner: R,
+            range: std::rc::Rc<std::cell::Cell<(usize, usize)>>,
+        }
+        impl<R: Read> Read for ObservedBuffer<R> {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                self.inner.read(out)
+            }
+        }
+        impl<R: BufRead> BufRead for ObservedBuffer<R> {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                let bytes = self.inner.fill_buf()?;
+                self.range.set((bytes.as_ptr() as usize, bytes.len()));
+                Ok(bytes)
+            }
+            fn consume(&mut self, amount: usize) {
+                self.inner.consume(amount);
+            }
+        }
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        let line =
+            serde_json::to_string(&DeliveryEvent::Receipt(records.receipts[0].clone())).unwrap();
+        let rows = 10_000;
+        let raw = format!("{line}\n").repeat(rows);
+        let range = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+        let reader = ObservedBuffer {
+            inner: BufReader::with_capacity(8192, Cursor::new(raw.as_bytes())),
+            range: range.clone(),
+        };
+        let mut visited = 0;
+        let mut borrowed_bytes = 0;
+        let mut copied_bytes = 0;
+        visit_jsonl(reader, Path::new("receipts.jsonl"), |bytes| {
+            let (start, length) = range.get();
+            let address = bytes.as_ptr() as usize;
+            if address >= start && address + bytes.len() <= start + length {
+                borrowed_bytes += bytes.len();
+            } else {
+                copied_bytes += bytes.len();
+            }
+            let actual: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(
+                actual,
+                serde_json::to_value(crate::records::DeliveryEventRef::Receipt(
+                    &records.receipts[0]
+                ))
+                .unwrap()
+            );
+            visited += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visited, rows);
+        assert_eq!(borrowed_bytes + copied_bytes, rows * line.len());
+        println!("REPLAY_LINE_COPY_PROFILE rows={rows} borrowed_bytes={borrowed_bytes} copied_bytes={copied_bytes}");
+        assert!(borrowed_bytes > (borrowed_bytes + copied_bytes) * 9 / 10);
+    }
+
+    /// Borrow large complete rows and preserve exact UTF-8, CRLF and fragmented-row decoding.
+    #[test]
+    fn jsonl_visitor_borrows_complete_buffered_rows_and_preserves_fragmented_rows() {
+        let values = [
+            serde_json::json!({"text": "é".repeat(100_000)}),
+            serde_json::json!({"name": "鱼\0"}),
+            serde_json::json!({}),
+        ];
+        let mut raw = String::from("\n");
+        for value in &values {
+            raw.push_str(&serde_json::to_string(value).unwrap());
+            raw.push_str("\r\n");
+        }
+        raw.push_str("{}");
+        let start = raw.as_ptr() as usize;
+        let end = start + raw.len();
+        let mut borrowed_bytes = 0;
+        let mut decoded = Vec::new();
+        visit_jsonl(
+            Cursor::new(raw.as_bytes()),
+            Path::new("borrowed.jsonl"),
+            |line| {
+                let address = line.as_ptr() as usize;
+                if decoded.len() < values.len() {
+                    assert!(
+                        (start..end).contains(&address),
+                        "complete rows must borrow reader storage"
+                    );
+                    assert!(address + line.len() <= end);
+                    borrowed_bytes += line.len();
+                }
+                decoded.push(serde_json::from_slice::<Value>(line).unwrap());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(borrowed_bytes > 200_000);
+        let mut expected = values.to_vec();
+        expected.push(serde_json::json!({}));
+        assert_eq!(decoded, expected);
+        for capacity in [1, 2, 7, 8192] {
+            let mut fragmented = Vec::new();
+            visit_jsonl(
+                BufReader::with_capacity(capacity, Cursor::new(raw.as_bytes())),
+                Path::new("fragmented.jsonl"),
+                |line| {
+                    fragmented.push(serde_json::from_slice::<Value>(line).unwrap());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(fragmented, expected);
+        }
     }
 
     #[test]
