@@ -13721,3 +13721,167 @@ reversed-order and other host-election mutations remain. All 46 shards, the
 five-minute target, the ten-minute job deadline and every test remain. The
 inventory and feasibility controls qualify the new count; final hosted
 qualification still applies to the current head.
+
+### F236 — Finalized P2P joins copy their owned baseline twice
+
+Scope: #1376, #636 and #826, session 609, baseline `d7adedcc`.
+
+The registration builder cloned its owned `Room` into the retained baseline.
+Finalized membership publication cloned that baseline into its owned job. Failed,
+missing or incompatible refreshes cloned it again on each reservation attempt.
+The builder now shares one immutable `Arc<Room>` with the publication record and
+job. Refresh failure borrows that retained snapshot. Snapshot capture, publication
+ordering, cancellation ownership and the original fallback selection stay exact.
+
+The complete embedded three-player mesh join varies only one incumbent's nested
+Custom metadata over 0 / 1,024 / 65,536 bytes. Original allocations are
+230 / 236 / 236 and allocated bytes are 44,064 / 50,208 / 437,280. The four-copy
+payload bound fails on the original source in Nextest `e879f219-fcb8-464b-a07c-4fed95fe4dbb`. The revised operation allocates
+201 / 205 / 205 times and 39,286 / 43,382 / 301,430 bytes. This removes two payload
+copies without removing the baseline or later membership refresh.
+
+The regression checks baseline membership and metadata, the actor's plan,
+incumbent lifecycle-before-plan order, all three peer sets, shared generation,
+mesh transport, offerer roles, no extra messages and unchanged stored metadata.
+Existing refresh-failure, lost-actor, retry and terminal-boundary histories remain
+unchanged apart from passing an explicitly owned baseline to the private method.
+These are isolated allocation measurements, not socket latency or throughput.
+
+### F237 — Reconnect retention copies the full room before publication
+
+Scope: #1377, #636 and #826, session 609, baseline `d7adedcc`.
+
+The reconnect builder cloned its current `Room` when retaining the publication
+snapshot, while continuing to use the original through baseline construction.
+It now shares that exact immutable snapshot at the same capture point. The
+separate player roster remains owned because the baseline projection mutates
+its epochs and sequences; this change does not alias mutable player snapshots.
+
+The complete embedded two-player mesh reconnect uses a pre-issued token,
+disconnects the guest, negotiates a fresh socket and restores its identity. With
+0 / 1,024 / 65,536 bytes of incumbent Custom metadata, original allocations are
+188 / 194 / 194 and allocated bytes are 41,133 / 47,277 / 434,349. The five-copy
+bound fails on the original source in Nextest
+`1f56bedd-23fb-4912-9ee1-43de670b1c82`. The revised operation allocates
+176 / 181 / 181 times and 38,765 / 43,885 / 366,445 bytes. The v3 baseline still
+omits connection metadata as required, rotates the token, precedes the plan and
+retains both players. The incumbent receives the reconnect lifecycle before its
+matching-generation mesh plan. Stored incumbent metadata remains exact.
+
+Nextest `b35b68e7-b5af-43c3-914a-d2032855fa0f` passes 25 scoped publication,
+reconnect baseline-failure, token-retry and panic-recovery histories for F236 and
+F237. The v3 projection and all existing assertions remain unchanged.
+
+External clients are unaffected by F236 and F237. Rust `src/mesh.rs` at
+`da8f2d16`, .NET `src/SignalFish.Client/Protocol/MessagesMesh.cs` at `e467c871`, and
+Godot `addons/signal_fish/protocol/sf_session_types.gd` at `3cfc3e20` consume the
+same baseline and plan contracts. Wire fields, errors, defaults, capabilities,
+generation rules, event order, reconnect semantics and encoding do not change.
+The new shared snapshot is private to the server. No client migration is needed.
+
+### F238 — Registry replay duplicates the complete parsed identity table
+
+Scope: #1378, #775, #636 and #826, session 609, baseline `d7adedcc`.
+
+Canonical registry rows used the internally tagged enum decoder, which buffers
+all sender entries before building their typed map. The direct tag-first visitor
+now decodes registry fields into that map without the temporary enum buffer.
+Extended and reordered rows retain the historical tagged decoder. Rows that
+require last-key-wins fallback parsed into `serde_json::Value`, cloned their
+complete `senders` subtree, then consumed the clone. That fallback now takes the
+owned subtree from the parsed object without an intermediate deep copy.
+
+Focused controls compare exact values and errors with the historical decoder.
+They cover empty registries, Unicode and escaped names, maximum epochs, repeated
+identity keys, repeated outer fields, unknown fields, missing fields, invalid
+container types and invalid tuple values. Valid and invalid rows also pass
+through the complete artifact reader. Replay admission limits and delivery validation stay unchanged.
+
+The initial direct fallback-decoder profile retains 127,872 entries: 15,984 peer
+identities over eight incarnations. Its input is 6,171,765 bytes. Both decoders
+check every identity, peer name and epoch, with checksum 5,468,432. Original process RSS is
+12,152,832 bytes before decoding and 93,450,240 after decoding; revised RSS is
+12,156,928 before and 59,064,320 after. Decode elapsed times are 553,616 and
+509,867 microseconds respectively. These observations include allocator-retained
+pages and do not identify peak live bytes, production capacity or remote latency.
+The planned ten-minute cell and broader #775 campaign remain unqualified.
+
+Initial fresh-process fallback-decoder controls at 15,984 / 63,936 / 127,872
+identities compare the old clone path with the consuming decoder. Every
+identity, name and epoch stays exact. Linux `wait4` reports peak process RSS of 20,873,216 / 52,068,352 /
+93,618,176 bytes for cloning and 16,711,680 / 35,160,064 / 59,539,456 bytes for
+consumption. These increasing cohorts isolate removable decoder overhead;
+allocator retention and process overhead remain part of the observations.
+These direct fallback measurements do not describe canonical artifact replay.
+
+The final profile uses `read_records_with_limits` on actual artifact files. Its
+original reference uses the same bounded line reader, tagged enum decoder and
+record admission, including the clone fallback for duplicate outer tags. Every
+identity, name and epoch stays exact at 15,984 / 63,936 / 127,872 entries.
+Canonical rows have peak process RSS of 17,162,240 / 33,939,456 / 56,221,696 bytes
+with the original decoder and 16,711,680 / 29,335,552 / 47,570,944 with direct
+registry fields. Duplicate-tag fallback rows have peaks of
+23,048,192 / 56,614,912 / 101,179,392 bytes originally and
+18,866,176 / 39,444,480 / 66,969,600 with consumption. Canonical inputs contain
+771,503 / 3,085,901 / 6,171,765 bytes; fallback inputs add 20 bytes. This separates
+canonical buffering savings from the larger fallback-copy savings. Exact
+artifact-reader comparisons cover malformed-input errors as well as valid rows.
+Those paired memory observations use the default 16 MiB line budget. The final
+profile also reads the normal replay-limit environment settings once, uses the
+same selected limits in both branches and reports all three limits. Twelve
+matched canonical/fallback, original/revised profiles at the three identity
+counts pass with their line budgets set to the exact input sizes. Earlier
+fixed-default profiles do not establish memory use under other line budgets.
+
+The first hosted Linux failure was a discarded-result policy violation in the
+new allocation fixture, not a server failure. The fixture now checks each setup
+message and binds terminal queue reads before asserting emptiness. The scanner
+passes in `82ecea70-b31c-462b-90cc-666c4b5a7499`; allocation bounds stay unchanged.
+
+F236–F238 require current-head hosted qualification before closure. The broad
+campaigns #636 and #826 remain open. No spectator workload is added this session.
+
+### F239 — Held-callback timeout lacks a transport progress timeline
+
+Scope: open #1319 and #826, session 609, PR #1379 head `7f7c4372`.
+
+Native Client Interop run `41508262950`, job `125493045520`, fails
+`godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair` during
+receiver-offerer, second-generation held setup. All 2,048 distinct 4 KiB sends are
+admitted. The 15-second refusal wait performs 1,340 polls. The job has 326 passes
+and this one failure. It does not reach callback resume in the failed cell.
+
+The last receiver snapshot has physical generation 2, 3,112 accepted SCTP chunks,
+zero refused or redundant chunks, 68 acknowledgement timeouts and 526 reliable
+transport messages / 2,154,496 bytes. Engine receipts and pending application
+counts are zero. The sender has 5,202,536 outstanding reliable bytes,
+3,451 emitted chunks, 323 retransmissions, 137 fast retransmissions and one
+retransmission timeout. Both transports remain connected, with no closure or
+receive rejection. The retained decoded log has SHA-256
+`efc35a86022762958d122a3cfe6d2186ce74243aa2d096d4d0bdb1b3186677ff`.
+
+This excludes incomplete send admission for this attempt. The last snapshot does
+not show when progress stopped or distinguish a progressing path, credit
+backpressure, retransmission timing and observation contention. No historical
+cause or production repair is established. No rerun of this failed head was
+requested.
+
+Both held-refusal fixtures now retain eight fixed scalar checkpoints after the
+wait begins, plus the latest observation. They record actual elapsed time,
+accepted/refused chunks, acknowledgement timeouts and reliable transport counts
+and bytes. Missing fields stay absent values, distinct from zero. A delayed
+sample can satisfy several checkpoint times; each row retains its actual sample
+time rather than inventing earlier observations. State stays bounded after any
+number of polls. The normal ten-millisecond observation interval, caller-owned
+deadlines, positive refusal precondition, receive limits, offered burst and exact
+receipt checks remain unchanged. Full snapshots remain in timeout evidence.
+
+The deterministic control checks 16,000 observations, incomplete snapshots,
+checkpoint times, reliable-label selection, fixed storage and delayed first
+samples. Existing observer-progress and ten malformed/incomplete-refusal cases
+retain their assertions. The focused live control passes all four role/generation
+cells, each with 2,048 exact receipts and zero sender debt after resume. These
+four controls pass in Nextest `d8de70cb-f610-4a30-85f3-4639eff99101`. The local pass
+does not explain the hosted failure. Keep #1319 open for measured cause and
+qualification. This is test-fixture evidence only; server and external-client
+contracts do not change, and no release-note entry is required.

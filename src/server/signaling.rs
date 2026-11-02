@@ -482,13 +482,13 @@ impl EnhancedGameServer {
     /// terminal epoch cannot appear without a matching opening event.
     pub(crate) async fn publish_finalized_join_membership(
         self: &Arc<Self>,
-        room: &Room,
+        room: Arc<Room>,
         joiner: PlayerId,
         joiner_snapshot: PlayerInfo,
         room_event_guard: RoomEventMutationGuard,
     ) -> bool {
         let room_id = room.id;
-        let baseline_room = room.clone();
+        let baseline_room = room;
         let expected_join_epoch = joiner_snapshot.epoch.or_else(|| {
             self.connection_manager
                 .current_relay_stamp_in_room(&joiner, &room_id)
@@ -511,26 +511,27 @@ impl EnhancedGameServer {
                     // reservation retry.
                     let mut mixed_path_observed = false;
                     loop {
-                        let publication_room = match server.database.get_room_by_id(&room_id).await {
+                        let refreshed_room = match server.database.get_room_by_id(&room_id).await {
                             Ok(Some(room))
                                 if room.lobby_state == LobbyState::Finalized
                                     && room.players.contains_key(&joiner) =>
                             {
-                                room
+                                Some(room)
                             }
                             Ok(Some(_)) => {
                                 tracing::warn!(%room_id, %joiner, "Joined-room refresh no longer matched the already-delivered finalized baseline; using that baseline for publication");
-                                baseline_room.clone()
+                                None
                             }
                             Ok(None) => {
                                 tracing::warn!(%room_id, %joiner, "Joined room disappeared during finalized publication refresh; using the already-delivered baseline");
-                                baseline_room.clone()
+                                None
                             }
                             Err(error) => {
                                 tracing::warn!(%room_id, %joiner, %error, "Failed to refresh joined room before finalized publication; using the already-delivered baseline");
-                                baseline_room.clone()
+                                None
                             }
                         };
+                        let publication_room = refreshed_room.as_ref().unwrap_or(&baseline_room);
                         let routed = match server
                             .message_coordinator
                             .routed_player_ids(&room_id)
