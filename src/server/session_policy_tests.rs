@@ -107,7 +107,7 @@ fn member(
         player_name: name.to_string(),
         is_authority: false,
         joined_at: base_time(),
-        connection_info: Some(ConnectionInfo::Direct {
+        direct_endpoint: Some(crate::protocol::DirectEndpoint {
             host: "127.0.0.1".to_string(),
             port: 7777,
         }),
@@ -800,7 +800,7 @@ fn host_direct_requires_a_valid_endpoint_and_elects_an_executable_host() {
         vec![Transport::Relay, Transport::Direct],
         vec![Topology::Relay, Topology::Host],
     );
-    authority_member.connection_info = None;
+    authority_member.direct_endpoint = None;
     let executable_member = member(
         executable,
         "Executable",
@@ -871,7 +871,9 @@ fn host_direct_rejects_missing_and_malformed_host_endpoints() {
             vec![Transport::Relay, Transport::Direct],
             vec![Topology::Relay, Topology::Host],
         );
-        candidate.connection_info = endpoint;
+        candidate.direct_endpoint = endpoint
+            .as_ref()
+            .and_then(crate::protocol::DirectEndpoint::from_connection_info);
         let decision = choose_session_plan("game", None, vec![candidate], &cfg);
         assert_eq!(
             (decision.topology, decision.transport, decision.host),
@@ -1349,7 +1351,7 @@ fn direct_host_reconnect_and_failover_revalidate_endpoint_availability() {
         vec![Transport::Relay, Transport::Direct],
         vec![Topology::Relay, Topology::Host],
     );
-    old_host_without_endpoint.connection_info = None;
+    old_host_without_endpoint.direct_endpoint = None;
     let replacement_with_endpoint = member(
         replacement,
         "Replacement",
@@ -4674,7 +4676,7 @@ mod properties {
     use super::super::signaling::local_initiates;
     use super::base_time;
     use crate::config::SessionConfig;
-    use crate::protocol::{ConnectionInfo, IceServer, PlayerId, Topology, Transport};
+    use crate::protocol::{IceServer, PlayerId, Topology, Transport};
     use proptest::prelude::*;
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -4719,8 +4721,8 @@ mod properties {
         member_supports(member, topology, transport)
             && (transport != Transport::Direct
                 || matches!(
-                    member.connection_info,
-                    Some(ConnectionInfo::Direct { ref host, port })
+                    member.direct_endpoint,
+                    Some(crate::protocol::DirectEndpoint { ref host, port })
                         if host == "127.0.0.1" && port == 7777
                 ))
     }
@@ -4802,16 +4804,12 @@ mod properties {
                                 player_name: format!("p{id}"),
                                 is_authority: false,
                                 joined_at: base_time() + chrono::Duration::seconds(offset),
-                                connection_info: match endpoint_kind {
-                                    0 => None,
-                                    1 => Some(ConnectionInfo::Direct {
+                                direct_endpoint: match endpoint_kind {
+                                    1 => Some(crate::protocol::DirectEndpoint {
                                         host: "127.0.0.1".to_string(),
                                         port: 7777,
                                     }),
-                                    _ => Some(ConnectionInfo::Direct {
-                                        host: "0.0.0.0".to_string(),
-                                        port: 7777,
-                                    }),
+                                    _ => None,
                                 },
                                 version,
                                 transports,
@@ -5857,4 +5855,83 @@ async fn aborted_replan_transaction_retains_the_wedged_entry_for_the_next_event(
     assert_silent(&mut member_b_rx).await;
     assert_silent(&mut member_c_rx).await;
     assert_silent(&mut host_rx).await;
+}
+
+/// Raw legacy metadata must keep its wire value while selection retains only usable Direct endpoints.
+#[tokio::test]
+async fn session_member_projection_preserves_identity_capabilities_and_validates_raw_endpoints() {
+    use crate::protocol::DirectEndpoint;
+    let server = create_server_with_session(mesh_config()).await;
+    let (id, _receiver) = register_client(&server).await;
+    server.set_client_protocol(&id, v3_webrtc());
+    for (raw, expected) in [
+        (None, None),
+        (
+            Some(ConnectionInfo::Custom {
+                data: serde_json::json!({"nested": ["x".repeat(65536)]}),
+            }),
+            None,
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "0.0.0.0".into(),
+                port: 7777,
+            }),
+            None,
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "example.com".into(),
+                port: 0,
+            }),
+            None,
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "192.0.2.10".into(),
+                port: 7777,
+            }),
+            Some(DirectEndpoint {
+                host: "192.0.2.10".into(),
+                port: 7777,
+            }),
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "game.example.com.".into(),
+                port: 65535,
+            }),
+            Some(DirectEndpoint {
+                host: "game.example.com.".into(),
+                port: 65535,
+            }),
+        ),
+        (
+            Some(ConnectionInfo::Direct {
+                host: "::1".into(),
+                port: 7777,
+            }),
+            Some(DirectEndpoint {
+                host: "::1".into(),
+                port: 7777,
+            }),
+        ),
+    ] {
+        let mut player = player_info(id, "Player-未知", true);
+        player.connection_info = raw;
+        let before = serde_json::to_value(&player).unwrap();
+        let members = server.session_members_from(std::iter::once(&player));
+        assert_eq!(members.len(), 1);
+        let member = &members[0];
+        assert_eq!(member.player_id, id);
+        assert_eq!(member.player_name, player.name);
+        assert!(member.is_authority);
+        assert_eq!(Some(member.joined_at), player.connected_at);
+        assert_eq!(member.direct_endpoint, expected);
+        assert_eq!(member.version, 3);
+        assert_eq!(member.transports, v3_webrtc().transports);
+        assert_eq!(member.topologies, v3_webrtc().topologies);
+        assert_eq!(serde_json::to_value(&player).unwrap(), before);
+    }
+    assert!(server.session_members_from(std::iter::empty()).is_empty());
 }

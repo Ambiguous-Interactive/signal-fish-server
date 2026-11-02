@@ -1,5 +1,7 @@
 //! Finalized readiness must not copy unrelated room metadata.
 
+mod allocation_harness;
+
 use signal_fish_server::database::{
     FinalizeRoomGameExpectation, FinalizeRoomGameOutcome, GameDatabase, InMemoryDatabase,
 };
@@ -10,7 +12,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// Copy exact ready identities with fixed allocation cost as unrelated spectator metadata grows.
-#[tokio::test]
 async fn finalized_readiness_projection_copies_only_ready_identities() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 255] {
@@ -118,4 +119,16 @@ async fn finalized_readiness_projection_copies_only_ready_identities() {
         profiles.iter().all(|profile| *profile == profiles[0]),
         "profiles={profiles:?}"
     );
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![allocation_harness::trial(
+        "finalized_readiness_projection_copies_only_ready_identities",
+        || {
+            allocation_harness::block_on(
+                finalized_readiness_projection_copies_only_ready_identities(),
+            )
+        },
+    )]);
 }

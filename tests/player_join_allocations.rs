@@ -2,6 +2,8 @@
 
 mod test_helpers;
 
+mod allocation_harness;
+
 use signal_fish_server::protocol::{ServerMessage, SpectatorInfo};
 use uuid::Uuid;
 
@@ -9,7 +11,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// Bound roster copies while preserving the joining player's complete baseline.
-#[tokio::test]
 async fn player_admission_does_not_copy_the_room_to_find_its_lane() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 255] {
@@ -129,4 +130,12 @@ async fn player_admission_does_not_copy_the_room_to_find_its_lane() {
         assert!(allocations <= empty_allocations + 4 * usize::try_from(spectators).unwrap() + 8,
             "player admission exceeds four spectator copies: spectators={spectators} allocations={allocations} empty={empty_allocations}");
     }
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![allocation_harness::trial(
+        "player_admission_does_not_copy_the_room_to_find_its_lane",
+        || allocation_harness::block_on(player_admission_does_not_copy_the_room_to_find_its_lane()),
+    )]);
 }

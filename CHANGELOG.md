@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory used to start P2P sessions and refresh peer membership (#1371).
 - Reduce memory used to replan sessions after players leave rooms with spectators (#636).
 - Reduce memory used for player and spectator departures in rooms with large spectator rosters (#636).
 - Reduce CPU work when sizing JSON gameplay strings and integer arrays (#636).

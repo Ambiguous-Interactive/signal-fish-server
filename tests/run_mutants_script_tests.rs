@@ -271,3 +271,45 @@ fn test_run_mutants_warm_mode_uses_exact_unmutated_oracle() {
          Full output:\n{stdout}"
     );
 }
+
+/// Both command paths must override cache-action incremental settings at process launch.
+#[cfg(unix)]
+#[test]
+fn test_run_mutants_commands_enable_incremental_when_parent_disables_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let cargo = fixture.path().join("cargo");
+    std::fs::write(&cargo, "#!/bin/sh\nprintf 'incremental=%s\\n' \"$CARGO_INCREMENTAL\"\nprintf 'args=%s\\n' \"$*\"\n").unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for arguments in [vec!["--warm"], vec!["--shard", "0/46"]] {
+        let mut paths = vec![fixture.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let output = bash_command()
+            .arg("scripts/run-mutants.sh")
+            .args(&arguments)
+            .current_dir(repo_root())
+            .env_remove("MUTANTS_DRY_RUN")
+            .env("CARGO_INCREMENTAL", "0")
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.lines().any(|line| line == "incremental=1"),
+            "{arguments:?}: {stdout}"
+        );
+        assert!(
+            stdout.contains(if arguments[0] == "--warm" {
+                "args=nextest run"
+            } else {
+                "args=mutants"
+            }),
+            "{stdout}"
+        );
+    }
+}

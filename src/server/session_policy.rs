@@ -126,13 +126,29 @@ pub(crate) struct SessionMember {
     pub player_name: String,
     pub is_authority: bool,
     pub joined_at: chrono::DateTime<chrono::Utc>,
-    pub connection_info: Option<ConnectionInfo>,
+    pub direct_endpoint: Option<DirectEndpoint>,
     pub version: u16,
     pub transports: Vec<Transport>,
     pub topologies: Vec<Topology>,
 }
 
 impl SessionMember {
+    fn from_player(player: &PlayerInfo, protocol: NegotiatedProtocol) -> Self {
+        Self {
+            player_id: player.id,
+            player_name: player.name.clone(),
+            is_authority: player.is_authority,
+            joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
+            direct_endpoint: player
+                .connection_info
+                .as_ref()
+                .and_then(DirectEndpoint::from_connection_info),
+            version: protocol.version,
+            transports: protocol.transports,
+            topologies: protocol.topologies,
+        }
+    }
+
     /// Whether this member negotiated protocol v3 or higher.
     fn supports_v3(&self) -> bool {
         self.version >= 3
@@ -161,9 +177,7 @@ impl SessionMember {
 
     /// Validated direct endpoint this member can expose when elected host.
     fn direct_endpoint(&self) -> Option<DirectEndpoint> {
-        self.connection_info
-            .as_ref()
-            .and_then(DirectEndpoint::from_connection_info)
+        self.direct_endpoint.clone()
     }
 
     /// Whether this member can anchor the selected host transport. Direct
@@ -171,12 +185,7 @@ impl SessionMember {
     /// WebRTC carries its own connection establishment through signaling.
     fn can_host(&self, topology: Topology, transport: Transport) -> bool {
         self.supports_session(topology, transport)
-            && (transport != Transport::Direct
-                || self
-                    .connection_info
-                    .as_ref()
-                    .and_then(DirectEndpoint::validated_parts)
-                    .is_some())
+            && (transport != Transport::Direct || self.direct_endpoint.is_some())
     }
 }
 
@@ -726,24 +735,13 @@ impl EnhancedGameServer {
     /// unconfirmed peer; the relay floor always works) and is correct under the
     /// room-affinity model.
     /// Revisit when a single room can span nodes.
-    pub(crate) fn session_members_from(&self, players: &[PlayerInfo]) -> Vec<SessionMember> {
+    pub(crate) fn session_members_from<'a>(
+        &self,
+        players: impl IntoIterator<Item = &'a PlayerInfo>,
+    ) -> Vec<SessionMember> {
         players
-            .iter()
-            .map(|player| {
-                let proto = self.client_protocol(&player.id);
-                SessionMember {
-                    player_id: player.id,
-                    player_name: player.name.clone(),
-                    is_authority: player.is_authority,
-                    // Server-internal room state always carries a join
-                    // timestamp; `now` only covers a hand-built snapshot.
-                    joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
-                    connection_info: player.connection_info.clone(),
-                    version: proto.version,
-                    transports: proto.transports.clone(),
-                    topologies: proto.topologies.clone(),
-                }
-            })
+            .into_iter()
+            .map(|player| SessionMember::from_player(player, self.client_protocol(&player.id)))
             .collect()
     }
 
@@ -770,19 +768,7 @@ impl EnhancedGameServer {
                 .members
                 .iter()
                 .map(|player| {
-                    let protocol = connection_manager.protocol(&player.id);
-                    SessionMember {
-                        player_id: player.id,
-                        player_name: player.name.clone(),
-                        is_authority: player.is_authority,
-                        // See `session_members_from`: `now` only covers a
-                        // hand-built snapshot without a join timestamp.
-                        joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
-                        connection_info: player.connection_info.clone(),
-                        version: protocol.version,
-                        transports: protocol.transports,
-                        topologies: protocol.topologies,
-                    }
+                    SessionMember::from_player(player, connection_manager.protocol(&player.id))
                 })
                 .collect();
             let decision = choose_session_plan(
@@ -1072,15 +1058,11 @@ impl EnhancedGameServer {
             }
         };
         let stored_players_empty = room.players.is_empty();
-        let remaining: Vec<PlayerInfo> = room
-            .players
-            .into_iter()
-            .filter(|member| {
-                routed_player_ids
-                    .as_ref()
-                    .is_none_or(|routed| routed.contains(&member.id))
-            })
-            .collect();
+        let members = self.session_members_from(room.players.iter().filter(|member| {
+            routed_player_ids
+                .as_ref()
+                .is_none_or(|routed| routed.contains(&member.id))
+        }));
 
         // Last published member left. Storage may still hold an admitted
         // member whose route has not committed yet — a failed finalized
@@ -1090,7 +1072,7 @@ impl EnhancedGameServer {
         // session instead of downgrading the whole generation to the relay
         // floor; the maintenance prune drops the entry if the room itself is
         // removed first.
-        if remaining.is_empty() {
+        if members.is_empty() {
             if stored_players_empty {
                 self.active_session_plans.remove(room_id);
             }
@@ -1100,7 +1082,6 @@ impl EnhancedGameServer {
         // Sticky topology/transport: only an invalid *host* invalidates a plan
         // parameter. Mesh departures, and host-topology departures that leave
         // a still-capable stored host in place, re-emit nothing.
-        let members = self.session_members_from(&remaining);
         if !stored.host_invalid(&members) {
             return;
         }

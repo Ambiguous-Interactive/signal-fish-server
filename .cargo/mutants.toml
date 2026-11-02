@@ -86,6 +86,9 @@ exclude_globs = [
 # (not test gaps).
 #
 exclude_re = [
+    # Equal keys include the returned player ID. Choosing another tied reference
+    # cannot change later comparisons or the result.
+    "^src/server/session_policy\\.rs:[0-9]+:[0-9]+: replace < with <= in elect_host$",
     # This constructor exists only behind `allocation-tracking` so the external
     # allocation benchmark can build a production-shaped classified handle.
     # The mutation oracle deliberately enables only `trace-validation`, while

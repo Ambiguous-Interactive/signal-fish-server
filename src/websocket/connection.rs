@@ -5203,190 +5203,234 @@ mod tests {
         assert!(!server.has_active_socket_tasks());
     }
 
-    // Regression #839: retain ownership through supervisor unwind and child failure.
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
-    async fn socket_task_failures_close_registration_and_retain_tracking() {
-        for kind in [
+    async fn socket_failure_supervisor_panic_closes_registration_and_retains_tracking() {
+        assert_socket_failure_closes_registration_and_retains_tracking(
             SocketFailureKind::SupervisorPanic,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn socket_failure_reconnected_supervisor_panic_closes_registration_and_retains_tracking()
+    {
+        assert_socket_failure_closes_registration_and_retains_tracking(
             SocketFailureKind::SupervisorReconnected,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn socket_failure_reader_abort_closes_registration_and_retains_tracking() {
+        assert_socket_failure_closes_registration_and_retains_tracking(
             SocketFailureKind::ReaderAbort,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn socket_failure_writer_abort_closes_registration_and_retains_tracking() {
+        assert_socket_failure_closes_registration_and_retains_tracking(
             SocketFailureKind::WriterAbort,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn socket_failure_ping_abort_closes_registration_and_retains_tracking() {
+        assert_socket_failure_closes_registration_and_retains_tracking(
             SocketFailureKind::PingAbort,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn socket_failure_stats_abort_closes_registration_and_retains_tracking() {
+        assert_socket_failure_closes_registration_and_retains_tracking(
             SocketFailureKind::StatsAbort,
-        ] {
-            let request_id = format!("socket-failure-audit-{kind:?}");
-            let injection = Arc::new(SocketFailureInjection {
-                kind,
-                player_id: std::sync::Mutex::new(None),
-                reached: tokio::sync::Notify::new(),
-                release: tokio::sync::Notify::new(),
-            });
-            SOCKET_FAILURE_INJECTIONS.insert(request_id.clone(), Arc::clone(&injection));
-            let mut config = ServerConfig::default();
-            if matches!(kind, SocketFailureKind::PingAbort) {
-                config.websocket_config.server_ping_interval_secs = 1;
-            }
-            if matches!(kind, SocketFailureKind::StatsAbort) {
-                config.websocket_config.delivery_stats_interval_secs = 1;
-            }
-            let server = test_server_with_config(config).await;
+        )
+        .await;
+    }
+
+    async fn assert_socket_failure_closes_registration_and_retains_tracking(
+        kind: SocketFailureKind,
+    ) {
+        let request_id = format!("socket-failure-audit-{kind:?}");
+        let injection = Arc::new(SocketFailureInjection {
+            kind,
+            player_id: std::sync::Mutex::new(None),
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        SOCKET_FAILURE_INJECTIONS.insert(request_id.clone(), Arc::clone(&injection));
+        let mut config = ServerConfig::default();
+        if matches!(kind, SocketFailureKind::PingAbort) {
+            config.websocket_config.server_ping_interval_secs = 1;
+        }
+        if matches!(kind, SocketFailureKind::StatsAbort) {
+            config.websocket_config.delivery_stats_interval_secs = 1;
+        }
+        let server = test_server_with_config(config).await;
+        let UpgradedSocketPair {
+            server_sink,
+            _server_stream: server_stream,
+            mut client,
+            serve_task,
+        } = UpgradedSocketPair::connect().await;
+        let socket = server_sink.reunite(server_stream).expect("reunite socket");
+        let handler = tokio::spawn(handle_socket(
+            socket,
+            Arc::clone(&server),
+            "127.0.0.1:45556".parse().unwrap(),
+            None,
+            3,
+            request_id,
+        ));
+        tokio::time::timeout(Duration::from_secs(5), injection.reached.notified())
+            .await
+            .expect("supervisor reached failure boundary");
+        let transient_id = injection
+            .player_id
+            .lock()
+            .unwrap()
+            .expect("transient identity");
+        let physical_lifecycle = server
+            .client_lifecycle(&transient_id)
+            .expect("physical lifecycle");
+        let player_id = if matches!(kind, SocketFailureKind::SupervisorReconnected) {
             let UpgradedSocketPair {
                 server_sink,
                 _server_stream: server_stream,
-                mut client,
-                serve_task,
+                client: mut original_client,
+                serve_task: original_serve_task,
             } = UpgradedSocketPair::connect().await;
-            let socket = server_sink.reunite(server_stream).expect("reunite socket");
-            let handler = tokio::spawn(handle_socket(
-                socket,
+            let original_handler = tokio::spawn(handle_socket(
+                server_sink.reunite(server_stream).expect("original socket"),
                 Arc::clone(&server),
-                "127.0.0.1:45556".parse().unwrap(),
+                "127.0.0.1:45559".parse().unwrap(),
                 None,
                 3,
-                request_id,
+                "original-before-supervisor-failure".to_string(),
             ));
-            tokio::time::timeout(Duration::from_secs(5), injection.reached.notified())
+            let original =
+                join_socket_audit_room(&mut original_client, "socket-failure-audit", None).await;
+            drop(original_client);
+            tokio::time::timeout(Duration::from_secs(5), original_handler)
                 .await
-                .expect("supervisor reached failure boundary");
-            let transient_id = injection
-                .player_id
-                .lock()
-                .unwrap()
-                .expect("transient identity");
-            let physical_lifecycle = server
-                .client_lifecycle(&transient_id)
-                .expect("physical lifecycle");
-            let player_id = if matches!(kind, SocketFailureKind::SupervisorReconnected) {
-                let UpgradedSocketPair {
-                    server_sink,
-                    _server_stream: server_stream,
-                    client: mut original_client,
-                    serve_task: original_serve_task,
-                } = UpgradedSocketPair::connect().await;
-                let original_handler = tokio::spawn(handle_socket(
-                    server_sink.reunite(server_stream).expect("original socket"),
-                    Arc::clone(&server),
-                    "127.0.0.1:45559".parse().unwrap(),
-                    None,
-                    3,
-                    "original-before-supervisor-failure".to_string(),
-                ));
-                let original =
-                    join_socket_audit_room(&mut original_client, "socket-failure-audit", None)
-                        .await;
-                drop(original_client);
-                tokio::time::timeout(Duration::from_secs(5), original_handler)
-                    .await
-                    .expect("original unregister deadline")
-                    .expect("original caller");
-                original_serve_task.abort();
-                let _ = original_serve_task.await;
-                client
-                    .send(TungsteniteMessage::Text(
-                        serde_json::to_string(&ClientMessage::Reconnect {
-                            player_id: original.player_id,
-                            room_id: original.room_id,
-                            auth_token: original.reconnection_token.expect("original token"),
-                        })
-                        .unwrap()
-                        .into(),
-                    ))
-                    .await
-                    .expect("reconnect before supervisor failure");
-                let restored_id = tokio::time::timeout(Duration::from_secs(5), async {
-                    loop {
-                        let frame = client
-                            .next()
-                            .await
-                            .expect("reconnect stream")
-                            .expect("reconnect frame");
-                        if let TungsteniteMessage::Text(text) = frame {
-                            if let ServerMessage::Reconnected(reconnected) =
-                                serde_json::from_str(&text).unwrap()
-                            {
-                                break reconnected.player_id;
-                            }
+                .expect("original unregister deadline")
+                .expect("original caller");
+            original_serve_task.abort();
+            let _ = original_serve_task.await;
+            client
+                .send(TungsteniteMessage::Text(
+                    serde_json::to_string(&ClientMessage::Reconnect {
+                        player_id: original.player_id,
+                        room_id: original.room_id,
+                        auth_token: original.reconnection_token.expect("original token"),
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .expect("reconnect before supervisor failure");
+            let restored_id = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let frame = client
+                        .next()
+                        .await
+                        .expect("reconnect stream")
+                        .expect("reconnect frame");
+                    if let TungsteniteMessage::Text(text) = frame {
+                        if let ServerMessage::Reconnected(reconnected) =
+                            serde_json::from_str(&text).unwrap()
+                        {
+                            break reconnected.player_id;
                         }
                     }
-                })
+                }
+            })
+            .await
+            .expect("reconnect baseline deadline");
+            assert_eq!(restored_id, original.player_id);
+            assert!(server.client_lifecycle(&transient_id).is_none());
+            assert!(Arc::ptr_eq(
+                &physical_lifecycle,
+                &server
+                    .client_lifecycle(&restored_id)
+                    .expect("restored lifecycle")
+            ));
+            restored_id
+        } else {
+            join_socket_audit_room(&mut client, "socket-failure-audit", None)
                 .await
-                .expect("reconnect baseline deadline");
-                assert_eq!(restored_id, original.player_id);
-                assert!(server.client_lifecycle(&transient_id).is_none());
-                assert!(Arc::ptr_eq(
-                    &physical_lifecycle,
-                    &server
-                        .client_lifecycle(&restored_id)
-                        .expect("restored lifecycle")
-                ));
-                restored_id
-            } else {
-                join_socket_audit_room(&mut client, "socket-failure-audit", None)
-                    .await
-                    .player_id
-            };
-            #[cfg(signal_fish_repository_tests)]
-            let held_reader = if matches!(kind, SocketFailureKind::SupervisorPanic) {
-                let pause = arm_receive_ownership_pause(player_id);
-                client
-                    .send(TungsteniteMessage::Text(
-                        serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
-                    ))
-                    .await
-                    .expect("hold reader during supervisor cleanup");
-                tokio::time::timeout(Duration::from_secs(5), pause.reached.notified())
-                    .await
-                    .expect("reader holds a frame");
-                Some(pause)
-            } else {
-                None
-            };
-            injection.release.notify_one();
-            #[cfg(signal_fish_repository_tests)]
-            if let Some(pause) = held_reader {
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while server.client_lifecycle(&player_id).is_some() {
-                        tokio::task::yield_now().await;
-                    }
-                })
+                .player_id
+        };
+        #[cfg(signal_fish_repository_tests)]
+        let held_reader = if matches!(kind, SocketFailureKind::SupervisorPanic) {
+            let pause = arm_receive_ownership_pause(player_id);
+            client
+                .send(TungsteniteMessage::Text(
+                    serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+                ))
                 .await
-                .expect("panic cleanup removed registration");
-                let tracked_while_reader_held = server.has_active_socket_tasks();
-                let supervisor_waits_for_reader = !handler.is_finished();
-                pause.release.notify_one();
-                assert!(
-                    tracked_while_reader_held,
-                    "tracking must outlive registration until the held reader ends"
-                );
-                assert!(
-                    supervisor_waits_for_reader,
-                    "supervisor must join the held reader before returning"
-                );
-            }
-            tokio::time::timeout(Duration::from_secs(5), handler)
+                .expect("hold reader during supervisor cleanup");
+            tokio::time::timeout(Duration::from_secs(5), pause.reached.notified())
                 .await
-                .expect("failure cleanup deadline")
-                .expect("caller completed");
-            let registered = server.client_lifecycle(&player_id).is_some();
-            let tracked = server.has_active_socket_tasks();
-            // Settle the pre-repair zombie before asserting so the red test
-            // leaves no live socket tasks behind.
-            if registered {
-                server.unregister_client(&player_id).await;
-            }
-            let _ = client.close(None).await;
-            serve_task.abort();
-            let _ = serve_task.await;
+                .expect("reader holds a frame");
+            Some(pause)
+        } else {
+            None
+        };
+        injection.release.notify_one();
+        #[cfg(signal_fish_repository_tests)]
+        if let Some(pause) = held_reader {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while server.client_lifecycle(&player_id).is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("panic cleanup removed registration");
+            let tracked_while_reader_held = server.has_active_socket_tasks();
+            let supervisor_waits_for_reader = !handler.is_finished();
+            pause.release.notify_one();
             assert!(
-                !registered,
-                "{kind:?}: failed socket must unregister before its supervisor returns"
+                tracked_while_reader_held,
+                "tracking must outlive registration until the held reader ends"
             );
             assert!(
-                !tracked,
-                "{kind:?}: all socket halves must finish before tracking ends"
+                supervisor_waits_for_reader,
+                "supervisor must join the held reader before returning"
             );
         }
+        tokio::time::timeout(Duration::from_secs(5), handler)
+            .await
+            .expect("failure cleanup deadline")
+            .expect("caller completed");
+        let registered = server.client_lifecycle(&player_id).is_some();
+        let tracked = server.has_active_socket_tasks();
+        // Settle the pre-repair zombie before asserting so the red test
+        // leaves no live socket tasks behind.
+        if registered {
+            server.unregister_client(&player_id).await;
+        }
+        let _ = client.close(None).await;
+        serve_task.abort();
+        let _ = serve_task.await;
+        assert!(
+            !registered,
+            "{kind:?}: failed socket must unregister before its supervisor returns"
+        );
+        assert!(
+            !tracked,
+            "{kind:?}: all socket halves must finish before tracking ends"
+        );
     }
 
     #[cfg(signal_fish_repository_tests)]

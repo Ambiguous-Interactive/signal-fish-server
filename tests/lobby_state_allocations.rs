@@ -1,5 +1,7 @@
 //! Allocation bound for the ready-toggle room-state projection.
 
+mod allocation_harness;
+
 use signal_fish_server::coordination::{
     ClientDeliveryHandle, ConnectionCloseSignal, InMemoryRoomOperationCoordinator,
     MessageCoordinator, RoomOperationCoordinatorTrait,
@@ -14,8 +16,6 @@ use uuid::Uuid;
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
 /// A ready-state read must not copy spectator names or the room's member map.
-#[tokio::test]
-#[serial_test::serial(readiness_allocations)]
 async fn lobby_state_projection_allocates_only_its_async_result() {
     // Exclude the current-thread scheduler's first deferred-waker allocation.
     tokio::task::yield_now().await;
@@ -394,9 +394,6 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
 }
 
 /// Attribute the first yielding readiness read to scheduler initialization.
-#[test]
-#[ignore = "isolated runtime allocation attribution control"]
-#[serial_test::serial(readiness_allocations)]
 fn cooperative_runtime_allocation_profile() {
     let mut profiles = Vec::new();
     for warm_scheduler in [false, true] {
@@ -503,17 +500,11 @@ async fn diagnose_untouched_snapshot_allocations() {
 }
 
 /// Run the bounded failure diagnostics independently of the allocation assertion.
-#[tokio::test]
-#[ignore = "isolated allocation component diagnostics"]
-#[serial_test::serial(readiness_allocations)]
 async fn untouched_snapshot_component_diagnostics() {
     diagnose_untouched_snapshot_allocations().await;
 }
 
 /// Pin native lock initialization separately from readiness snapshot allocations.
-#[tokio::test]
-#[ignore = "isolated native-lock allocation qualification"]
-#[serial_test::serial(readiness_allocations)]
 async fn native_readiness_lock_initialization_qualification() {
     let coordinator = InMemoryRoomOperationCoordinator::new(
         Arc::new(InMemoryMessageCoordinator::new()),
@@ -539,4 +530,31 @@ async fn native_readiness_lock_initialization_qualification() {
         assert_eq!(cold.bytes_allocated, warm.bytes_allocated + 64);
         assert_eq!(cold.deallocations, warm.deallocations);
     }
+}
+
+/// Keep each original history and diagnostic discoverable on the measuring thread.
+fn main() {
+    allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "lobby_state_projection_allocates_only_its_async_result",
+            || {
+                allocation_harness::block_on(
+                    lobby_state_projection_allocates_only_its_async_result(),
+                )
+            },
+        ),
+        allocation_harness::trial(
+            "cooperative_runtime_allocation_profile",
+            cooperative_runtime_allocation_profile,
+        )
+        .with_ignored_flag(true),
+        allocation_harness::trial("untouched_snapshot_component_diagnostics", || {
+            allocation_harness::block_on(untouched_snapshot_component_diagnostics())
+        })
+        .with_ignored_flag(true),
+        allocation_harness::trial("native_readiness_lock_initialization_qualification", || {
+            allocation_harness::block_on(native_readiness_lock_initialization_qualification())
+        })
+        .with_ignored_flag(true),
+    ]);
 }
