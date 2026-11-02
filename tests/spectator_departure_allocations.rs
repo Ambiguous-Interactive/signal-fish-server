@@ -2,15 +2,15 @@
 
 mod test_helpers;
 
+mod allocation_harness;
+
 use signal_fish_server::protocol::{ServerMessage, SpectatorInfo, SpectatorStateChangeReason};
 use uuid::Uuid;
 
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
-/// Verify departure and read costs in one test without concurrent libtest allocation bookkeeping.
-#[test]
-#[serial_test::serial]
+/// Run departure and read histories in one entry to avoid overlap between fixture tests.
 fn spectator_departure_copies_only_the_two_published_rosters() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 254] {
@@ -227,4 +227,12 @@ fn spectator_snapshot_cost_is_independent_of_seated_player_metadata() {
         assert_eq!(profiles[0].allocations, profiles[1].allocations);
         assert_eq!(profiles[0].bytes_allocated, profiles[1].bytes_allocated);
     }
+}
+
+/// Run allocation histories without a concurrent test-runner thread.
+fn main() {
+    allocation_harness::run(
+        "spectator_departure_copies_only_the_two_published_rosters",
+        spectator_departure_copies_only_the_two_published_rosters,
+    );
 }

@@ -225,6 +225,7 @@ axum-test = "21.1.0"
 proptest = "1.12.0"
 criterion = "0.8.2"
 stats_alloc = "0.1.10"
+libtest-mimic = "0.8.2"
 syn = { version = "3.0.9", features = ["full", "visit"] }
 trybuild = "1.0.122"
 # YAML 1.2 parser used by tests/ci_config_tests.rs to validate workflow files by
@@ -240,6 +241,23 @@ path = "src/main.rs"
 [lib]
 name = "signal_fish_server"
 path = "src/lib.rs"
+
+# Global allocator fixtures run on their process main thread. A worker-based
+# harness can allocate concurrently even when it has only one registered test.
+[[test]]
+name = "session_snapshot_allocations"
+path = "tests/session_snapshot_allocations.rs"
+harness = false
+
+[[test]]
+name = "spectator_departure_allocations"
+path = "tests/spectator_departure_allocations.rs"
+harness = false
+
+[[test]]
+name = "spectator_join_allocations"
+path = "tests/spectator_join_allocations.rs"
+harness = false
 
 [[bench]]
 name = "response_time_tracker"

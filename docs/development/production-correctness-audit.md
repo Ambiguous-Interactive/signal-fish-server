@@ -13544,7 +13544,7 @@ The experiment is removed. The additional zero-allocation timer assertion also
 had a parallel-libtest interference risk identified in review; that additional
 test is removed with the rejected experiment.
 
-The next diagnostic retains cumulative allocation counts and bytes at sixteen
+The next diagnostic retains cumulative allocation counts and bytes at twenty
 admission boundaries. It uses fixed atomic storage and a nonallocating observer
 behind the existing dev-only `allocation-tracking` feature. The original single
 allocation test emits the stage deltas after measurement; it adds no independent
@@ -13564,5 +13564,34 @@ The candidate gives both this binary and the new spectator departure binary
 one test entry each. Each entry executes both original histories sequentially.
 Every message, metadata, persistence, count and byte assertion remains. Scoped
 Nextest and plain libtest with eight test threads retain all four histories.
-Exact-head hosted qualification remains required; no allocation site or gameplay
-copy defect is inferred from the historical extra 608 bytes.
+This removes overlap between fixture histories, but does not exclude all runner
+allocations: Rust 1.94 libtest can allocate on its main thread after it spawns
+even a sole test worker. This candidate alone cannot close #1366. Exact-head hosted qualification remains
+required; no allocation site or gameplay copy defect is inferred from the
+historical extra 608 bytes.
+
+Head `85854a17` reproduces #1359 in macOS job `125119068983`, full CI
+`41396407054`. The 16-spectator cohort has 62 allocations / 7,218 bytes
+between `before_spawn` and `owned_start`; the zero and 254 cohorts both have
+61 / 7,154 in that interval. Later stages retain expected roster growth.
+This places the extra 64 bytes before the owned admission body, but does not
+identify a call site or exclude runner interference. Four finer checkpoints
+separate task preparation, first task poll, lifecycle lookup and lock acquisition.
+All original message assertions and allocation bounds remain.
+
+The next repair replaces the built-in harness for the session snapshot, spectator
+departure and spectator admission binaries with `libtest-mimic` 0.8.2. A shared
+runner forces its single-thread mode, which calls each history on the process
+main thread. It prints results before or after each history and creates no
+concurrent test-runner thread. Each trial asserts that it runs on the captured
+main thread. The three fixtures retain all original operations, bounds and
+message assertions. The dependency is development-only; it adds one new
+transitive crate and requires Rust 1.65, below this repository's MSRV.
+
+All three entries pass scoped Nextest and plain Cargo with eight requested test
+threads. A worker-mode negative control fails the thread identity assertion.
+A deliberately added spectator roster read fails the unchanged three-copy
+admission bound. Both mutations are removed. Exact-head hosted coverage and
+OS qualification remain required. The other allocation binaries keep their
+existing harnesses; a separate sweep remains follow-up work. This repair does
+not identify the historical #1359 allocation site.

@@ -250,6 +250,8 @@ impl SpectatorService {
         .await
     }
 
+    /// Own admission and panic compensation under the captured client lifecycle.
+    /// Caller cancellation does not cancel the spawned transaction.
     pub(crate) async fn join_operation_from_lifecycle(
         &self,
         player_id: &PlayerId,
@@ -276,7 +278,11 @@ impl SpectatorService {
         // `join_owned` consumes the service clone, so the compensation arm
         // needs its own handle.
         let rollback_service = service.clone();
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("task_prepared");
         tokio::spawn(async move {
+            #[cfg(feature = "allocation-tracking")]
+            super::allocation_benchmark::record_spectator_allocation_stage("task_started");
             // The lifecycle guard is taken HERE, outside the panicking
             // transaction, and held across the compensation: unwind drops the
             // guards inside `join_owned`, and a compensation that ran without
@@ -293,7 +299,11 @@ impl SpectatorService {
             };
             // Held (not merely acquired) through the compensation below:
             // dropping it early would reopen the concurrent-admission race.
+            #[cfg(feature = "allocation-tracking")]
+            super::allocation_benchmark::record_spectator_allocation_stage("lifecycle_found");
             let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            #[cfg(feature = "allocation-tracking")]
+            super::allocation_benchmark::record_spectator_allocation_stage("lifecycle_locked");
             if lifecycle.player_id() != player_id
                 || !service
                     .connection_manager
@@ -359,6 +369,8 @@ impl SpectatorService {
         })?
     }
 
+    /// Admit a spectator under the room lane while its client lifecycle is held.
+    /// Roll back stored membership if the baseline cannot be published.
     async fn join_owned(
         self,
         player_id: PlayerId,
