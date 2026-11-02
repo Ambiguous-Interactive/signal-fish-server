@@ -13826,6 +13826,12 @@ registry fields. Duplicate-tag fallback rows have peaks of
 771,503 / 3,085,901 / 6,171,765 bytes; fallback inputs add 20 bytes. This separates
 canonical buffering savings from the larger fallback-copy savings. Exact
 artifact-reader comparisons cover malformed-input errors as well as valid rows.
+Those paired memory observations use the default 16 MiB line budget. The final
+profile also reads the normal replay-limit environment settings once, uses the
+same selected limits in both branches and reports all three limits. Twelve
+matched canonical/fallback, original/revised profiles at the three identity
+counts pass with their line budgets set to the exact input sizes. Earlier
+fixed-default profiles do not establish memory use under other line budgets.
 
 The first hosted Linux failure was a discarded-result policy violation in the
 new allocation fixture, not a server failure. The fixture now checks each setup

@@ -1489,6 +1489,7 @@ mod tests {
         let original_reference =
             std::env::var_os("CAPACITY_REGISTRY_PROBE_ORIGINAL_REFERENCE").is_some();
         let fallback = std::env::var_os("CAPACITY_REGISTRY_PROBE_FALLBACK").is_some();
+        let limits = ReplayLimits::from_env().expect("profile replay limits");
         let count = 15_984 * generations;
         let mut line = Vec::new();
         line.extend_from_slice(if fallback {
@@ -1521,7 +1522,7 @@ mod tests {
             visit_jsonl_with_limits(
                 BufReader::new(fs::File::open(&path).unwrap()),
                 &path,
-                ReplayLimits::default(),
+                limits,
                 |line| {
                     if let Ok(event) = serde_json::from_slice::<DeliveryEvent<ReplayName<'_>>>(line)
                     {
@@ -1542,7 +1543,7 @@ mod tests {
             .unwrap();
             records
         } else {
-            read_records_with_limits(output.path(), ReplayLimits::default()).unwrap()
+            read_records_with_limits(output.path(), limits).unwrap()
         };
         let elapsed_us = started.elapsed().as_micros();
         assert_eq!(records.registry.len(), count);
@@ -1557,6 +1558,8 @@ mod tests {
             "REGISTRY_REPLAY_PROFILE {}",
             serde_json::json!({"entries":count,
             "original_reference":original_reference, "fallback":fallback,
+            "line_budget_bytes":limits.line_bytes, "input_budget_bytes":limits.input_bytes,
+            "record_budget":limits.records,
             "input_bytes":line.len(), "before_rss_bytes":before,
             "after_rss_bytes":crate::diagnostics::resident_memory_bytes(std::process::id()),
             "elapsed_us":elapsed_us, "checksum":checksum})
