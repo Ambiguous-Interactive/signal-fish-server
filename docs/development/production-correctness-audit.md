@@ -13965,3 +13965,10 @@ Final local qualification: six complete allocation histories pass in Nextest
 controls pass in Nextest `85f7491b-bd14-4e33-b461-a2968bf28aae`. Full all-target, all-feature strict
 Clippy passes with zero warnings. Hosted platform and review qualification
 remain required for the published PR head.
+
+The scoped mutation inventory grows from 451 to 455 sites after the session
+selection changes. Matched original and candidate inventories preserve all old
+sites. The inventory constant is updated; the 46 shards, 29-second per-mutant
+budget and ten-minute deadline stay unchanged. The worst shard remains ten
+mutants, or 290 seconds, below the five-minute target. The first full hosted
+Linux run rejected the stale 451 constant before this inventory correction.
