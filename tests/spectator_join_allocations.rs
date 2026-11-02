@@ -10,6 +10,7 @@ static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::I
 
 /// Bound roster-copy growth in isolated runtimes with warmed scheduler storage.
 #[test]
+#[serial_test::serial]
 fn spectator_admission_reuses_its_owned_room_and_roster() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 254] {
@@ -94,6 +95,7 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
                 ServerMessage::SpectatorDisconnected { .. }
             ));
 
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             let game_name = "spectator-profile".into();
             let room_code = "SPROF1".into();
             let spectator_name = "Viewer".into();
@@ -169,5 +171,41 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
             allocations <= empty_allocations + 3 * usize::try_from(spectators).unwrap(),
             "spectator roster allocation growth exceeded three copies: spectators={spectators} allocations={allocations} empty={empty_allocations}"
         );
+    }
+}
+
+/// Separate deferred scheduling, native-lock initialization and the first timer wait.
+#[test]
+#[serial_test::serial]
+fn scheduler_and_native_lock_allocation_profiles() {
+    for warm in [false, true] {
+        let lock = std::sync::Mutex::new(());
+        if warm {
+            drop(lock.lock().unwrap());
+        }
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        drop(lock.lock().unwrap());
+        let lock_stats = region.change();
+        println!("NATIVE_LOCK_PROFILE warm={warm} stats={lock_stats:?}");
+        if warm {
+            assert_eq!(lock_stats.allocations, 0);
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::task::yield_now().await;
+            if warm {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            let stats = region.change();
+            println!("TIMER_WAIT_PROFILE warm={warm} stats={stats:?}");
+            if warm {
+                assert_eq!(stats.allocations, 0, "warmed timer wait: {stats:?}");
+            }
+        });
     }
 }

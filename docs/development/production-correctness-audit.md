@@ -13469,3 +13469,81 @@ Final restored controls pass in `1c76a15b` (both allocation contracts),
 (fifteen snapshot and session-departure histories). Strict all-target/all-feature
 Clippy passes. The mutation inventory remains 451; no mutation campaign ran
 locally. Both deliberate negative attempts remain recorded as failures.
+
+### F231 — Spectator departure copies unrelated room state and repeats roster copies
+
+Scope: #636, #826 and #775, session 607, starting at `9ea7aac1`.
+
+Spectator departure read a complete room, copied its spectator roster, and
+copied that roster into its acknowledgement. The peer notification consumed
+the other copy. The first read also copied all seated-player metadata, which
+neither terminal message uses. Ghost-repair notification repeated the complete
+room read and roster copy.
+
+`GameDatabase::get_room_spectator_snapshot` now pairs the current room code and
+spectator roster in one read. The in-memory implementation holds one room read
+lock and copies no player metadata. The default method consumes one complete
+snapshot so custom backends retain pending-room visibility, missing-room results
+and storage errors. Departure filters the owned vector in place before the
+existing durable removal. Both terminal messages retain the exact captured
+roster. Ghost repair consumes the same projected roster.
+
+The complete departure control first fails against the original source in
+Nextest `2e5a2f2c`: 74 / 123 / 837 allocations and 13,510 / 18,618 / 101,734
+bytes for 0 / 16 / 254 remaining spectators. The two-copy allocation bound
+rejects the old three-copy growth after every message and persistence assertion.
+The final candidate passes in `544d1a3c`: 64 / 97 / 573 allocations and
+11,589 / 14,173 / 55,109 bytes. These are isolated operation measurements,
+not server-throughput or historical macOS allocation attribution claims.
+
+The read-only allocation control in that run compares one seated player with
+sixteen. Fifteen extra players carry 64 KiB of nested metadata each. The
+projected read uses identical allocations and bytes in both cohorts: 2 / 19 /
+257 allocations and 126 / 1,502 / 21,970 bytes for the same spectator counts.
+Exact names, timestamps, code and stored member counts remain intact.
+
+The atomic-read control covers empty and full rosters, pending rooms, Unicode
+and NUL names, timestamps, a canceled read blocked by a writer, a paired code
+and roster update, storage errors and deletion. The custom-backend control
+pins one complete fallback read. Thirty-three focused histories pass in
+`0dec92d8`, including durable-remove failures, missing rooms, both detach panic
+boundaries, caller cancellation, FIFO publication, ghost-repair retries and
+reconnection replay. No wire schema, error code, admission rule or lifecycle
+order changes.
+
+For #775, replay previously copied every JSONL row into scratch storage even
+when the buffered reader already held a complete row. The visitor now borrows
+complete buffered rows and assembles fragmented or unterminated rows as before.
+Byte, line and row admission checks still run before decoding. A callback error
+still consumes its current row and never reads its tail. The original borrowing
+control fails in `bbbf768b`; the corrected reader passes in `78c53e5d`.
+With the normal 8 KiB reader buffer and 10,000 receipt rows, 1,637,268 bytes
+borrow the input buffer and 32,732 bytes need assembly, versus 1,670,000 copied
+bytes before the change. Decoded receipt evidence is identical. The focused
+controls retain fragmented UTF-8, CRLF, final rows without newlines, blank-line
+budget costs, malformed rows, late read errors, all event types, duplicate-key
+semantics and exact live-run replay. The large ten-minute campaign remains
+unqualified; this reduction does not close #775.
+
+External clients remain unaffected. The Rust client's `src/protocol.rs`, the
+.NET client's `MessagesSpectators.cs` and the Godot client's `sf_events.gd`
+consume the same spectator messages. The additive database method has a default
+implementation and belongs to the server library. These clients do not implement
+that backend interface. All three campaigns remain open.
+
+Hosted follow-up: macOS job `125090091747` in full CI `41386859043` passes
+both new departure controls, then reproduces #1359 in the unchanged admission
+control. Its profiles are exactly 144 / 193 / 906 allocations and 22,021 /
+28,151 / 130,997 bytes. The job records 3,014 passes and one failure; fail-fast
+leaves 532 tests unrun. Linux with all features passes the original admission
+control in `33ff47e7`. This is not attributed to the departure projection.
+
+The admission fixture now performs a real timer wait before measurement, in
+addition to warming deferred scheduling. Paired native-lock and cold/warm timer
+controls print their exact costs and require the warmed operations to allocate
+nothing. Both controls and the unchanged admission ceiling pass on Linux in
+`7d0af9cb`. Rust's macOS mutex backend initializes a boxed native mutex lazily;
+a yield alone does not force a driver wait. This is a candidate isolation fix,
+not proof of the historical allocation site. Keep #1359 open until the paired
+macOS evidence establishes or rejects this explanation. No limit or roster
+assertion was relaxed.

@@ -1050,7 +1050,7 @@ impl SpectatorService {
         ghost_id: &PlayerId,
         room_event_guard: RoomEventMutationGuard,
     ) {
-        let room = match self.database.get_room_by_id(room_id).await {
+        let room = match self.database.get_room_spectator_snapshot(room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 // The room row is gone; nobody remains to correct.
@@ -1074,7 +1074,7 @@ impl SpectatorService {
                 return;
             }
         };
-        let current_spectators = room.get_spectators();
+        let current_spectators = room.spectators;
         let notification = Arc::new(ServerMessage::SpectatorDisconnected {
             spectator_id: *ghost_id,
             reason: Some(SpectatorStateChangeReason::Disconnected),
@@ -1369,7 +1369,7 @@ impl SpectatorService {
         // Capture the authoritative pre-mutation snapshot under the same room
         // guard. After a successful remove, filtering the departed id produces
         // the exact committed roster without a fallible post-commit refetch.
-        let room = match self.database.get_room_by_id(&room_id).await {
+        let mut room = match self.database.get_room_spectator_snapshot(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 warn!(%player_id, %room_id, "Spectator room disappeared before detach");
@@ -1403,11 +1403,9 @@ impl SpectatorService {
                 return false;
             }
         };
-        let current_spectators: Vec<_> = room
-            .get_spectators()
-            .into_iter()
-            .filter(|spectator| spectator.id != *player_id)
-            .collect();
+        room.spectators
+            .retain(|spectator| spectator.id != *player_id);
+        let current_spectators = room.spectators;
 
         match self
             .database
@@ -1440,7 +1438,7 @@ impl SpectatorService {
         let acknowledgement = Arc::new(
             (ServerMessage::SpectatorLeft {
                 room_id: Some(room_id),
-                room_code: Some(room.code.clone()),
+                room_code: Some(room.room_code),
                 reason: Some(reason.clone()),
                 current_spectators: current_spectators.clone(),
             })
