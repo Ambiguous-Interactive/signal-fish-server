@@ -537,6 +537,27 @@ pub mod allocation_benchmark {
         );
     }
 
+    /// Select Direct host capabilities for embedded allocation fixtures.
+    pub fn negotiate_direct_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+    ) {
+        server.set_client_protocol(
+            player_id,
+            super::connection_manager::NegotiatedProtocol {
+                version: 3,
+                transports: vec![
+                    crate::protocol::Transport::Relay,
+                    crate::protocol::Transport::Direct,
+                ],
+                topologies: vec![
+                    crate::protocol::Topology::Relay,
+                    crate::protocol::Topology::Host,
+                ],
+            },
+        );
+    }
+
     /// Retain selection inputs between allocation measurements.
     pub struct HostElectionFixture {
         members: Vec<super::session_policy::SessionMember>,

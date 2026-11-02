@@ -13885,3 +13885,83 @@ four controls pass in Nextest `d8de70cb-f610-4a30-85f3-4639eff99101`. The local 
 does not explain the hosted failure. Keep #1319 open for measured cause and
 qualification. This is test-fixture evidence only; server and external-client
 contracts do not change, and no release-note entry is required.
+
+### F240 — Host departure retains unrelated legacy player metadata
+
+Scope: #1380, #636 and #826, session 610, baseline `48c9e6e7`.
+
+Departure planning read a complete seated-player roster before projecting session
+selection fields. One remaining player's nested Custom payload therefore added
+one full copy to the leave transaction, although the session used WebRTC.
+An additive storage projection now captures identity, name, authority flag,
+join time and validated Direct endpoint together with authority and lobby state.
+The in-memory backend reads those fields under one room read lock. The default
+backend implementation projects the existing session snapshot. The original
+full-player snapshot API retains its complete metadata contract.
+
+The complete three-player Host/WebRTC leave varies one remaining guest's Custom
+payload over 0 / 1,024 / 65,536 bytes. Original allocated bytes are
+30,115 / 31,139 / 95,651. The candidate allocates 29,038 bytes in every cell.
+The original-source negative control fails in Nextest
+`693be417-c670-4b32-b4f7-d759f22148bb`. The same history checks terminal
+watermarks, authority release before plans, a fresh shared generation, exact
+star peer sets and offer roles, and unchanged stored metadata. Storage controls
+cover pending visibility, all lobby states, canceled reads, missing rooms and
+read failures. This is an allocation result, not measured socket latency.
+
+### F241 — Direct host endpoint refresh copies the whole room
+
+Scope: #1381, #636 and #826, session 610, baseline `48c9e6e7`.
+
+Direct host refresh read a full room and cloned the replacement metadata into
+that snapshot. It now uses the same atomic selection projection as departure.
+It moves the validated replacement endpoint into the selection input and keeps
+the original metadata for the durable update. It also consumes the projected
+players directly instead of allocating another player vector. Identical usable
+endpoints still update metadata without publishing a generation.
+
+The complete three-player Host/Direct update varies one guest's Custom payload
+over 0 / 1,024 / 65,536 bytes. Original allocated bytes are
+17,140 / 18,164 / 82,676. The final candidate allocates 14,884 bytes in every
+cell. The original-source negative control fails in Nextest
+`693be417-c670-4b32-b4f7-d759f22148bb`. The unchanged history checks the exact
+new endpoint, shared fresh generation, exact star peer sets and initiate flags,
+and durable preservation of guest metadata. Existing endpoint-loss, explicit
+Relay reset, serialization and cancellation histories qualify the same source.
+No remote-network performance claim follows from this embedded measurement.
+
+### F242 — Reconnect restore and panic recovery copy an immutable claim
+
+Scope: #1382, #636 and #826, session 610, baseline `48c9e6e7`.
+
+The reconnect supervisor deep-cloned the claimed record, and the normal restore
+cloned its disconnected-player snapshot again. Both now retain one immutable
+`Arc<ClaimedReconnection>`. Rejection, completion and panic recovery still call
+the same manager methods with the same opaque claim identity and phase state.
+The guard still does not release from `Drop`. Retaining data does not retain
+or reopen a manager reservation after explicit completion or release.
+
+The complete two-player mesh reconnect varies the actor's configured valid name
+over 5 / 1,029 / 65,541 bytes. The fixture explicitly raises the configured name
+limit for this history; the normal default remains 32 bytes. Original allocated
+bytes are 38,765 / 51,053 / 825,197. Revised bytes are
+35,341 / 45,581 / 690,701. The ten-copy name slope fails on the original source
+in Nextest `693be417-c670-4b32-b4f7-d759f22148bb` and passes after removing two
+copies. Old endpoint metadata is cleared before claiming by the existing
+contract; it was excluded as a retained-payload hypothesis after measurement.
+The regression keeps baseline identity, rotated token presence, lifecycle-before-
+plan ordering, exact peer sets, generations and stored names. Existing unwind,
+supervisor, retry and terminal-publication controls qualify claim ownership.
+
+External-client assessment for F240–F242: the Rust protocol reference at
+`da8f2d16`, .NET event contract at `e467c871`, and Godot event decoder at
+`4d32b1fc` retain the same plans, lifecycle fields and reconnect rules. No
+message, encoding, default, negotiation, ordering, error or token rule changes.
+All three clients are unaffected; no migration or client tracking issue is
+required. The additive database projection is a server-side backend API.
+
+Final local qualification: six complete allocation histories pass in Nextest
+`d044a831-156c-4124-bbbf-db31adbd2ac0`; 28 storage, Direct-refresh, departure and reconnect-panic
+controls pass in Nextest `85f7491b-bd14-4e33-b461-a2968bf28aae`. Full all-target, all-feature strict
+Clippy passes with zero warnings. Hosted platform and review qualification
+remain required for the published PR head.

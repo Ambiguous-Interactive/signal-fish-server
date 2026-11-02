@@ -183,6 +183,47 @@ pub struct RoomSessionSnapshot {
     pub lobby_state: crate::protocol::LobbyState,
 }
 
+/// Player fields needed to select a live peer session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPlayer {
+    /// Stable player identity.
+    pub id: PlayerId,
+    /// Current player name used in peer plans.
+    pub name: String,
+    /// Stored authority flag.
+    pub is_authority: bool,
+    /// Stored join time used for deterministic host election.
+    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Validated Direct endpoint, when present.
+    pub direct_endpoint: Option<crate::protocol::DirectEndpoint>,
+}
+
+impl From<&PlayerInfo> for SessionPlayer {
+    fn from(player: &PlayerInfo) -> Self {
+        Self {
+            id: player.id,
+            name: player.name.clone(),
+            is_authority: player.is_authority,
+            connected_at: player.connected_at,
+            direct_endpoint: player
+                .connection_info
+                .as_ref()
+                .and_then(crate::protocol::DirectEndpoint::from_connection_info),
+        }
+    }
+}
+
+/// Live session selection fields captured from one room storage read.
+#[derive(Debug, Clone)]
+pub struct RoomSessionSelectionSnapshot {
+    /// Stored members, including unpublished routes.
+    pub players: Vec<SessionPlayer>,
+    /// Authority preference from the same storage read.
+    pub authority_player: Option<PlayerId>,
+    /// Lifecycle state from the same storage read.
+    pub lobby_state: crate::protocol::LobbyState,
+}
+
 /// Room code and spectator roster from one storage snapshot.
 #[derive(Debug, Clone)]
 pub struct RoomSpectatorSnapshot {
@@ -480,6 +521,21 @@ pub trait GameDatabase: Send + Sync {
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state,
             }))
+    }
+
+    /// Read live session selection fields without retaining legacy peer metadata.
+    /// Pending visibility and storage errors match [`Self::get_room_session_snapshot`].
+    async fn get_room_session_selection_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSessionSelectionSnapshot>> {
+        Ok(self.get_room_session_snapshot(room_id).await?.map(|room| {
+            RoomSessionSelectionSnapshot {
+                players: room.players.iter().map(SessionPlayer::from).collect(),
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state,
+            }
+        }))
     }
 
     /// Read the spectator roster and code atomically, including pending rooms.
@@ -2266,6 +2322,24 @@ impl GameDatabase for InMemoryDatabase {
             .get(room_id)
             .map(|room| RoomSessionSnapshot {
                 players: room.players.values().cloned().collect(),
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
+    async fn get_room_session_selection_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSessionSelectionSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSessionSelectionSnapshot {
+                players: room.players.values().map(SessionPlayer::from).collect(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state.clone(),
             }))
