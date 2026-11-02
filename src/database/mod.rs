@@ -3376,10 +3376,14 @@ mod tests {
             .unwrap();
         database.release_paused_get_room_by_id_for_test();
         assert_eq!(read.await.unwrap(), Some("CODE03".into()));
-        database.fail_get_room_by_id_for_test(true);
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(database.get_room_code(&room.id).await.is_err());
         assert!(database.get_room_code(&missing).await.is_err());
-        database.fail_get_room_by_id_for_test(false);
+        database
+            .fail_get_room_by_id
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         database.delete_room(&room.id).await.unwrap();
         assert_eq!(database.get_room_code(&room.id).await.unwrap(), None);
     }
