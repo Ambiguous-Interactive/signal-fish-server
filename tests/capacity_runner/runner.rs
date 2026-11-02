@@ -196,7 +196,7 @@ impl PreparationEvidence<'_> {
 }
 
 impl Drop for PreparationEvidence<'_> {
-    /// Persist partial evidence when preparation exits before successful arming.
+    /// Persist partial evidence without claiming that spawned producers have stopped.
     fn drop(&mut self) {
         if self.finished {
             return;
@@ -206,7 +206,12 @@ impl Drop for PreparationEvidence<'_> {
             artifacts::write_json(self.output_dir.join("peer-progress.json"), &progress),
             artifacts::write_json(
                 self.output_dir.join("preparation.json"),
-                &json!({"status": "cancelled", "workload_started": false}),
+                &json!({
+                    "status": "cancelled",
+                    "workload_started": false,
+                    "capture_contract": "partial_at_owner_exit",
+                    "producer_quiescence": "not_guaranteed",
+                }),
             ),
             artifacts::write_deliveries(self.output_dir, &self.log.take_records()),
         ];
@@ -2830,6 +2835,141 @@ mod session_poll_tests {
             assert_eq!(status["workload_started"], false);
             abort_and_join(vec![server]).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    /// Owner cancellation captures partial evidence before late producer returns (#1358).
+    async fn held_readiness_cancellation_labels_partial_capture_and_late_records() {
+        let output = tempfile::tempdir().unwrap();
+        let context = crate::unit_context();
+        let log = Arc::new(EventLog::for_plans(&context.plans, false).unwrap());
+        log.push_join_failure("r0p1: initial refusal before arming".into());
+        let progress: BTreeMap<_, _> = context
+            .plans
+            .iter()
+            .map(|plan| (plan.name.clone(), PeerProgress::new()))
+            .collect();
+        let peer_progress = progress["r0p0"].clone();
+        peer_progress.connection_stage("prepared");
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut start, receiver) = tokio::sync::watch::channel(None);
+        let (peer_ready, peer_readiness) = tokio::sync::oneshot::channel();
+        let (auxiliary_ready, auxiliary_readiness) = tokio::sync::oneshot::channel();
+        let (peer_entered, observe_peer) = tokio::sync::oneshot::channel();
+        let (auxiliary_entered, observe_auxiliary) = tokio::sync::oneshot::channel();
+        let (release_auxiliary, hold_auxiliary) = tokio::sync::oneshot::channel();
+        let mut peers = vec![tokio::spawn({
+            let mut receiver = receiver.clone();
+            let log = Arc::clone(&log);
+            let order = Arc::clone(&order);
+            async move {
+                order.lock().unwrap().push("peer_entered");
+                peer_entered.send(()).unwrap();
+                let detail = ready_for_epoch(peer_ready, &mut receiver)
+                    .await
+                    .unwrap_err();
+                assert_eq!(detail, "run epoch channel closed before arming");
+                log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail });
+                peer_progress.returned();
+                order.lock().unwrap().push("peer_returned");
+            }
+        })];
+        let mut auxiliaries = vec![tokio::spawn({
+            let mut receiver = receiver;
+            let log = Arc::clone(&log);
+            let order = Arc::clone(&order);
+            async move {
+                order.lock().unwrap().push("auxiliary_entered");
+                auxiliary_entered.send(()).unwrap();
+                hold_auxiliary.await.unwrap();
+                let detail = ready_for_epoch(auxiliary_ready, &mut receiver)
+                    .await
+                    .unwrap_err();
+                assert_eq!(detail, "run readiness receiver closed before arming");
+                log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail });
+                order.lock().unwrap().push("auxiliary_returned");
+            }
+        })];
+        observe_peer.await.unwrap();
+        observe_auxiliary.await.unwrap();
+        let preparation = PreparationEvidence {
+            output_dir: output.path(),
+            progress: &progress,
+            log: &log,
+            finished: false,
+        };
+        let peer_handles = &mut peers;
+        let auxiliary_handles = &mut auxiliaries;
+        let mut owner = Box::pin(async move {
+            preparation
+                .arm(
+                    vec![peer_readiness, auxiliary_readiness],
+                    &mut start,
+                    Instant::now() + Duration::from_secs(30),
+                    peer_handles,
+                    auxiliary_handles,
+                )
+                .await
+        });
+        assert!(futures_util::poll!(owner.as_mut()).is_pending());
+        order.lock().unwrap().push("owner_cancelled");
+        drop(owner);
+        let records = artifacts::read_records(output.path()).unwrap();
+        assert_eq!(
+            records.join_failures,
+            vec!["r0p1: initial refusal before arming"]
+        );
+        assert!(records.faults.is_empty());
+        let rows: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.path().join("peer-progress.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows.as_object().unwrap().len(), context.plans.len());
+        assert_eq!(rows["r0p0"]["stage"], "prepared");
+        assert_eq!(rows["r0p0"]["task_returned"], false);
+        assert!(progress.values().all(|row| row.epoch.get().is_none()));
+        assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
+        order.lock().unwrap().push("artifacts_captured");
+        release_auxiliary.send(()).unwrap();
+        for handle in peers.into_iter().chain(auxiliaries) {
+            handle.await.unwrap();
+        }
+        assert!(progress["r0p0"].snapshot().task_returned);
+        let late = log.take_records();
+        assert_eq!(
+            late.faults.len(),
+            2,
+            "only derivative cancellation notices arrive late"
+        );
+        assert!(late.join_failures.is_empty());
+        assert_eq!(
+            artifacts::read_records(output.path())
+                .unwrap()
+                .join_failures,
+            records.join_failures
+        );
+        let order = order.lock().unwrap();
+        let capture = order
+            .iter()
+            .position(|event| *event == "artifacts_captured")
+            .unwrap();
+        for event in ["peer_returned", "auxiliary_returned"] {
+            assert!(
+                order
+                    .iter()
+                    .position(|observed| *observed == event)
+                    .unwrap()
+                    > capture,
+                "{order:?}"
+            );
+        }
+        let status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(output.path().join("preparation.json")).unwrap())
+                .unwrap();
+        assert_eq!(status["status"], "cancelled");
+        assert_eq!(status["workload_started"], false);
+        assert_eq!(status["capture_contract"], "partial_at_owner_exit");
+        assert_eq!(status["producer_quiescence"], "not_guaranteed");
     }
 
     #[tokio::test]

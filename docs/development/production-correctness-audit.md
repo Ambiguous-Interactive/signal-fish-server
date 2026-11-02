@@ -13361,3 +13361,49 @@ passes in `2638d125`, with cold 3 allocations / 336 bytes versus warmed
 extra complete roster copy inside measurement fails the same ceiling in
 `bde58a8f-fe62-4187-9074-1c4bc70e1c44`. This removes an uncontrolled measurement factor;
 it does not identify the historical allocation producer or close #1359.
+
+### F229 — Departure logging copies unrelated rosters; owner-exit evidence is partial
+
+Scope: #636, #826 and #1358, session 605, starting at
+`843761c1d3a80b19e2ae48dddd2fe49b3e6c87f5`.
+
+A successful player departure fetched an owned room solely to log its current
+code. That copies every stored player and spectator name after the departure
+is already committed. The in-memory backend now reads only the code under the
+room read lock. The additive database-trait method defaults to the previous
+full-snapshot query for custom backends. Missing rooms, pending visibility and
+storage errors retain the full query's semantics. The log still uses the latest
+code and reports unknown after a missing room or read error.
+
+The isolated 64-read baseline allocates 576 / 1,664 / 16,896 objects and
+64,640 / 289,792 / 3,669,376 bytes for 0 / 16 / 254 stored spectators. The
+projection allocates 128 objects and 8,064 bytes in every cell. The full leave
+control retains its confirmation, peer departure, routing, room membership and
+all spectator names. Its repaired counts are 41 allocations and 10,678 bytes
+in every cell. Restoring the old departure lookup fails the same full-operation
+ceiling in `ed1bdc95`: 48 / 65 / 303 allocations and
+11,529 / 15,047 / 67,853 bytes. The repaired allocation controls pass in
+`a2dcb93b`. The test bounds roster-dependent growth; it does not claim a
+whole-server throughput improvement.
+
+Lifecycle controls cover missing and pending rooms, publication, rotation,
+a rotation while a code read is held, deletion and storage failure. Existing
+leave controls retain the storage-error rollback and ordered terminal/join
+history. The Rust, .NET and Godot clients need no migration: this changes a
+server storage projection, not their protocol messages, errors or event order.
+
+The held-readiness cancellation control qualifies the distinct #1358 boundary.
+An owner-exit artifact precedes producer return and can omit later derivative
+channel-closure notices and task-return flags. The marker now declares that
+partial contract. Exact initial refusals and all planned rows survive, no
+workload epoch is published, and no success summary is written. Each producer
+is joined in the control after its late evidence is observed. Returned arming
+errors retain their existing abort-and-join path. See the owner-exit section in
+`arm-capacity-audit.md` for the capture contract. The broader audit remains open.
+
+The held-readiness control first fails on the absent capture-contract marker in
+`a0544238`, then passes with the marker in `9c5a1cad` alongside returned
+readiness failure, bounded protocol write and unchanged replacement controls.
+Code-query lifecycle and existing departure-order controls pass in `31a1608d`.
+Strict all-target/all-feature Clippy passes. The historical #1352 and #1359
+investigations remain open; these results do not attribute their source causes.
