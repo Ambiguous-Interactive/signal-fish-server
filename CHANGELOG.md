@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Report session metrics scan and capture times in trace logs.
+- Expose spectator admission stages to Rust allocation profiling tools (#1359).
 
 ### Changed
 

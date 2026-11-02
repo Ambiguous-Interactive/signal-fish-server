@@ -498,6 +498,23 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    static SPECTATOR_ALLOCATION_OBSERVER: std::sync::OnceLock<fn(&'static str)> =
+        std::sync::OnceLock::new();
+
+    /// Attach a nonallocating observer for isolated spectator admission profiles.
+    pub fn install_spectator_allocation_observer(
+        observer: fn(&'static str),
+    ) -> Result<(), fn(&'static str)> {
+        SPECTATOR_ALLOCATION_OBSERVER.set(observer)
+    }
+
+    /// Report a measurement boundary only when a dev observer is attached.
+    pub(super) fn record_spectator_allocation_stage(stage: &'static str) {
+        if let Some(observer) = SPECTATOR_ALLOCATION_OBSERVER.get() {
+            observer(stage);
+        }
+    }
+
     /// Select WebRTC capabilities for embedded allocation fixtures without socket tasks.
     pub fn negotiate_webrtc_for_measurement(
         server: &super::EnhancedGameServer,

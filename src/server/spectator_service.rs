@@ -260,6 +260,8 @@ impl SpectatorService {
         password: Option<String>,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> Result<(), SpectatorError> {
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("before_spawn");
         let service = self.clone();
         let player_id = *player_id;
         // Compensation key for a panic between the durable admission and the
@@ -367,6 +369,8 @@ impl SpectatorService {
         password: Option<String>,
         pending_rollback: Arc<std::sync::Mutex<Option<(RoomId, bool)>>>,
     ) -> Result<(), SpectatorError> {
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("owned_start");
         let player_id = &player_id;
         // The lifecycle guard and identity validation live in `join_operation`
         // so they outlive a panic; this body runs with the connection already
@@ -434,6 +438,8 @@ impl SpectatorService {
         // spectator cap. Resolve the code and enter the room event lane while
         // holding the same lock, or a spectator can join against the fresh
         // room's temporary unlimited cap.
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("code_lock");
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let lock_handle = self
             .distributed_lock
@@ -485,6 +491,8 @@ impl SpectatorService {
                 self.metrics.increment_distributed_lock_release_failures();
             }
         }
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("room_read");
         let (room_id, room_event_guard) = room_and_guard?;
         // The lookup by code only identifies the room lane. Capacity and every
         // baseline field come from a fresh read inside that lane so an admission
@@ -505,6 +513,8 @@ impl SpectatorService {
                 ));
             }
         };
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("policy_checks");
         if !self
             .database
             .is_room_published(&room.id)
@@ -577,6 +587,8 @@ impl SpectatorService {
             ));
         }
 
+        #[cfg(feature = "allocation-tracking")]
+        super::allocation_benchmark::record_spectator_allocation_stage("insert");
         let spectator = SpectatorInfo {
             id: *player_id,
             name: spectator_name.clone(),
@@ -612,6 +624,8 @@ impl SpectatorService {
                 self.trigger_spectator_join_panic_for_test(
                     SpectatorJoinPanicPoint::JoinAfterDurableAdmission,
                 );
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("generation");
                 self.connection_manager
                     .advance_delivery_generation(player_id)
                     .await;
@@ -625,6 +639,8 @@ impl SpectatorService {
                     SpectatorJoinPanicPoint::JoinAfterGenerationAdvance,
                 );
                 let recipient_is_v3 = self.connection_manager.supports_v3(player_id);
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("baseline_read");
                 let current_room = match self.database.get_room_by_id(&room.id).await {
                     Ok(Some(current_room)) => current_room,
                     Ok(None) => {
@@ -645,6 +661,8 @@ impl SpectatorService {
                         ));
                     }
                 };
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("readiness");
                 let ready_players = crate::server::ready_state::snapshot_ready_players(
                     &current_room,
                     self.room_coordinator.as_ref(),
@@ -654,6 +672,8 @@ impl SpectatorService {
                 // this room's mutation guard was held, so it is the
                 // authoritative roster for both the baseline and broadcast.
                 // Never turn a storage read failure into an empty roster.
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("roster");
                 let spectator_snapshot: Vec<_> = current_room.spectators.into_values().collect();
 
                 let join_reason = SpectatorStateChangeReason::Joined;
@@ -668,6 +688,8 @@ impl SpectatorService {
                         Some(ErrorCode::SpectatorJoinFailed),
                     ));
                 };
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("registration");
                 let snapshot_spectators = spectator_snapshot.clone();
                 let connection_manager = Arc::clone(&self.connection_manager);
                 let baseline_delivered = self
@@ -728,6 +750,8 @@ impl SpectatorService {
                     .await
                     .map(|outcome| outcome == crate::coordination::DeliveryOutcome::Delivered)
                     .unwrap_or(false);
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("registered");
                 if !baseline_delivered {
                     self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                         .await;
@@ -775,6 +799,8 @@ impl SpectatorService {
                         .await;
                 }
 
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("notification");
                 let spectator_count =
                     Some(u32::try_from(spectator_snapshot.len()).unwrap_or(u32::MAX));
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
@@ -822,6 +848,8 @@ impl SpectatorService {
                     }),
                 );
                 let _ = completion.await;
+                #[cfg(feature = "allocation-tracking")]
+                super::allocation_benchmark::record_spectator_allocation_stage("completed");
                 if !committed.load(Ordering::Acquire) {
                     return Ok(());
                 }

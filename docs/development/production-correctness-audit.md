@@ -13538,12 +13538,18 @@ control. Its profiles are exactly 144 / 193 / 906 allocations and 22,021 /
 leaves 532 tests unrun. Linux with all features passes the original admission
 control in `33ff47e7`. This is not attributed to the departure projection.
 
-The admission fixture now performs a real timer wait before measurement, in
-addition to warming deferred scheduling. Paired native-lock and cold/warm timer
-controls print their exact costs and require the warmed operations to allocate
-nothing. Both controls and the unchanged admission ceiling pass on Linux in
-`7d0af9cb`. Rust's macOS mutex backend initializes a boxed native mutex lazily;
-a yield alone does not force a driver wait. This is a candidate isolation fix,
-not proof of the historical allocation site. Keep #1359 open until the paired
-macOS evidence establishes or rejects this explanation. No limit or roster
-assertion was relaxed.
+A timer-wait warmup experiment in head `28771688` does not change the macOS
+profiles. Job `125097722865` in full CI `41389439954` rejects the same ceiling.
+The experiment is removed. The additional zero-allocation timer assertion also
+had a parallel-libtest interference risk identified in review; that additional
+test is removed with the rejected experiment.
+
+The next diagnostic retains cumulative allocation counts and bytes at sixteen
+admission boundaries. It uses fixed atomic storage and a nonallocating observer
+behind the existing dev-only `allocation-tracking` feature. The original single
+allocation test emits the stage deltas after measurement; it adds no independent
+concurrent allocation test. The Linux all-feature profile remains 139 / 187 /
+901 allocations, including the observer. All original admission, notification
+and three-copy assertions remain unchanged. This can locate the extra macOS
+allocation within a smaller operation but does not yet identify its allocation
+site. Keep #1359 open.
