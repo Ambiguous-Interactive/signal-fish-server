@@ -13783,33 +13783,54 @@ The new shared snapshot is private to the server. No client migration is needed.
 
 Scope: #1378, #775, #636 and #826, session 609, baseline `d7adedcc`.
 
-The artifact decoder parsed the registry row into `serde_json::Value`, cloned
-its full `senders` subtree, then consumed the clone into the typed registry.
-The original tree remained live during conversion. The decoder now takes the
-owned subtree from the parsed object. It preserves the historical parser and
-consumes the same final duplicate-key value without an intermediate deep copy.
+Canonical registry rows used the internally tagged enum decoder, which buffers
+all sender entries before building their typed map. The direct tag-first visitor
+now decodes registry fields into that map without the temporary enum buffer.
+Extended and reordered rows retain the historical tagged decoder. Rows that
+require last-key-wins fallback parsed into `serde_json::Value`, cloned their
+complete `senders` subtree, then consumed the clone. That fallback now takes the
+owned subtree from the parsed object without an intermediate deep copy.
 
 Focused controls compare exact values and errors with the historical decoder.
 They cover empty registries, Unicode and escaped names, maximum epochs, repeated
 identity keys, repeated outer fields, unknown fields, missing fields, invalid
-container types and invalid tuple values. Valid rows also pass through the full
-artifact reader. Replay admission limits and delivery validation stay unchanged.
+container types and invalid tuple values. Valid and invalid rows also pass
+through the complete artifact reader. Replay admission limits and delivery validation stay unchanged.
 
-The isolated 127,872-entry profile retains 15,984 peer identities over eight
-incarnations. Its input is 6,171,765 bytes. Both implementations check every
-identity, peer name and epoch, with checksum 5,468,432. Original process RSS is
+The initial direct fallback-decoder profile retains 127,872 entries: 15,984 peer
+identities over eight incarnations. Its input is 6,171,765 bytes. Both decoders
+check every identity, peer name and epoch, with checksum 5,468,432. Original process RSS is
 12,152,832 bytes before decoding and 93,450,240 after decoding; revised RSS is
 12,156,928 before and 59,064,320 after. Decode elapsed times are 553,616 and
 509,867 microseconds respectively. These observations include allocator-retained
 pages and do not identify peak live bytes, production capacity or remote latency.
 The planned ten-minute cell and broader #775 campaign remain unqualified.
 
-Matched fresh-process controls at 15,984 / 63,936 / 127,872 identities compare the
-old clone path with the consuming decoder. Every identity, name and epoch stays
-exact. Linux `wait4` reports peak process RSS of 20,873,216 / 52,068,352 /
+Initial fresh-process fallback-decoder controls at 15,984 / 63,936 / 127,872
+identities compare the old clone path with the consuming decoder. Every
+identity, name and epoch stays exact. Linux `wait4` reports peak process RSS of 20,873,216 / 52,068,352 /
 93,618,176 bytes for cloning and 16,711,680 / 35,160,064 / 59,539,456 bytes for
 consumption. These increasing cohorts isolate removable decoder overhead;
 allocator retention and process overhead remain part of the observations.
+These direct fallback measurements do not describe canonical artifact replay.
+
+The final profile uses `read_records_with_limits` on actual artifact files. Its
+original reference uses the same bounded line reader, tagged enum decoder and
+record admission, including the clone fallback for duplicate outer tags. Every
+identity, name and epoch stays exact at 15,984 / 63,936 / 127,872 entries.
+Canonical rows have peak process RSS of 17,162,240 / 33,939,456 / 56,221,696 bytes
+with the original decoder and 16,711,680 / 29,335,552 / 47,570,944 with direct
+registry fields. Duplicate-tag fallback rows have peaks of
+23,048,192 / 56,614,912 / 101,179,392 bytes originally and
+18,866,176 / 39,444,480 / 66,969,600 with consumption. Canonical inputs contain
+771,503 / 3,085,901 / 6,171,765 bytes; fallback inputs add 20 bytes. This separates
+canonical buffering savings from the larger fallback-copy savings. Exact
+artifact-reader comparisons cover malformed-input errors as well as valid rows.
+
+The first hosted Linux failure was a discarded-result policy violation in the
+new allocation fixture, not a server failure. The fixture now checks each setup
+message and binds terminal queue reads before asserting emptiness. The scanner
+passes in `82ecea70-b31c-462b-90cc-666c4b5a7499`; allocation bounds stay unchanged.
 
 F236–F238 require current-head hosted qualification before closure. The broad
 campaigns #636 and #826 remain open. No spectator workload is added this session.

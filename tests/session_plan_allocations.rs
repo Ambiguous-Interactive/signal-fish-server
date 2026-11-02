@@ -98,6 +98,48 @@ fn session_plans_do_not_copy_custom_connection_metadata() {
     });
 }
 
+fn drain_membership_setup(
+    receiver: &mut tokio::sync::mpsc::Receiver<std::sync::Arc<ServerMessage>>,
+    allow_disconnected: bool,
+) -> Option<String> {
+    let mut token = None;
+    loop {
+        match receiver.try_recv() {
+            Ok(message) => match message.as_ref() {
+                ServerMessage::RoomJoined(payload) => token = payload.reconnection_token.clone(),
+                other => assert!(
+                    matches!(
+                        other,
+                        ServerMessage::PlayerJoined { .. }
+                            | ServerMessage::LobbyStateChanged { .. }
+                            | ServerMessage::AuthorityChanged { .. }
+                            | ServerMessage::GameStarting { .. }
+                            | ServerMessage::SessionPlan(_)
+                            | ServerMessage::PlayerLeft { .. }
+                    ),
+                    "unexpected setup message: {other:?}"
+                ),
+            },
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) if allow_disconnected => {
+                break
+            }
+            Err(error) => panic!("setup channel closed: {error}"),
+        }
+    }
+    token
+}
+
+fn assert_membership_queue_empty(
+    receiver: &mut tokio::sync::mpsc::Receiver<std::sync::Arc<ServerMessage>>,
+) {
+    let trailing = receiver.try_recv();
+    assert!(
+        matches!(trailing, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+        "unexpected trailing message: {trailing:?}"
+    );
+}
+
 fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
     let mut profiles = Vec::new();
     for bytes in [0, 1024, 64 * 1024] {
@@ -148,12 +190,7 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
                     .await;
                 server.handle_player_ready(&player).await;
             }
-            let mut token = None;
-            while let Ok(message) = guest_rx.try_recv() {
-                if let ServerMessage::RoomJoined(payload) = message.as_ref() {
-                    token = payload.reconnection_token.clone();
-                }
-            }
+            let token = drain_membership_setup(&mut guest_rx, false);
             server.handle_start_game(&host).await;
             let room_id = server.get_client_room(&host).await.unwrap();
             let metadata = serde_json::json!({"nested": ["x".repeat(bytes)]});
@@ -172,8 +209,8 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
             if reconnect {
                 server.unregister_client(&guest).await;
             }
-            while host_rx.try_recv().is_ok() {}
-            while guest_rx.try_recv().is_ok() {}
+            drain_membership_setup(&mut host_rx, false);
+            drain_membership_setup(&mut guest_rx, reconnect);
             let temporary = Uuid::from_u128(4);
             let connection = if reconnect { temporary } else { actor };
             let (actor_tx, mut actor_rx) = tokio::sync::mpsc::channel(64);
@@ -290,19 +327,10 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool) {
                 let peers: std::collections::BTreeSet<_> =
                     plan.peers.iter().map(|peer| peer.player_id).collect();
                 assert_eq!(peers, [host, actor].into_iter().collect());
-                assert!(matches!(
-                    guest_rx.try_recv(),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                ));
+                assert_membership_queue_empty(&mut guest_rx);
             }
-            assert!(matches!(
-                actor_rx.try_recv(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            ));
-            assert!(matches!(
-                host_rx.try_recv(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            ));
+            assert_membership_queue_empty(&mut actor_rx);
+            assert_membership_queue_empty(&mut host_rx);
             let stored = server
                 .database()
                 .get_room_by_id(&room_id)

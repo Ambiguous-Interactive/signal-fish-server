@@ -778,6 +778,12 @@ fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, ser
     const SENT: u8 = 1;
     const RECEIPT: u8 = 2;
     const GAP: u8 = 4;
+    const REGISTRY: u8 = 8;
+
+    #[derive(serde::Deserialize)]
+    struct Registry {
+        senders: std::collections::BTreeMap<String, (String, u32)>,
+    }
 
     struct KnownFields<M> {
         map: M,
@@ -801,6 +807,7 @@ fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, ser
                 "seq" | "application_bytes" | "encoded_frame_body_bytes" => SENT | RECEIPT,
                 "server_seq" | "received_us" => RECEIPT,
                 "from_seq" | "to_seq" | "reason" => GAP,
+                "senders" => REGISTRY,
                 _ => 0,
             };
             if compatible & self.kind == 0 {
@@ -840,6 +847,7 @@ fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, ser
                 "sent" => SENT,
                 "receipt" => RECEIPT,
                 "gap" => GAP,
+                "registry" => REGISTRY,
                 _ => return Err(serde::de::Error::custom("other delivery event")),
             };
             let fields = serde::de::value::MapAccessDeserializer::new(KnownFields {
@@ -849,7 +857,12 @@ fn decode_replay_event(line: &[u8]) -> Result<DeliveryEvent<ReplayName<'_>>, ser
             match selected {
                 SENT => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Sent),
                 RECEIPT => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Receipt),
-                _ => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Gap),
+                GAP => serde::Deserialize::deserialize(fields).map(DeliveryEvent::Gap),
+                _ => <Registry as serde::Deserialize>::deserialize(fields).map(|registry| {
+                    DeliveryEvent::Registry {
+                        senders: registry.senders,
+                    }
+                }),
             }
         }
     }
@@ -1454,26 +1467,35 @@ mod tests {
                 senders
             });
             assert_eq!(actual, historical, "{line}");
-            if let Ok(expected) = actual {
-                let output = tempfile::tempdir().unwrap();
-                fs::write(output.path().join(DELIVERIES_FILE), format!("{line}\n")).unwrap();
-                assert_eq!(read_records(output.path()).unwrap().registry, expected);
-            }
+            let output = tempfile::tempdir().unwrap();
+            fs::write(output.path().join(DELIVERIES_FILE), format!("{line}\n")).unwrap();
+            assert_eq!(
+                read_records_with_limits(output.path(), ReplayLimits::default())
+                    .map(|records| records.registry),
+                historical,
+                "artifact path: {line}"
+            );
         }
     }
 
     #[test]
-    #[ignore = "isolated registry replay memory profile; run in a fresh process"]
+    #[ignore = "isolated registry artifact replay memory profile; run in a fresh process"]
     fn registry_replay_memory_profile() {
         let generations: usize = std::env::var("CAPACITY_REGISTRY_PROBE_GENERATIONS")
             .unwrap_or_else(|_| "8".into())
             .parse()
             .expect("probe generations");
         assert!((1..=8).contains(&generations));
-        let clone_reference = std::env::var_os("CAPACITY_REGISTRY_PROBE_CLONE_REFERENCE").is_some();
+        let original_reference =
+            std::env::var_os("CAPACITY_REGISTRY_PROBE_ORIGINAL_REFERENCE").is_some();
+        let fallback = std::env::var_os("CAPACITY_REGISTRY_PROBE_FALLBACK").is_some();
         let count = 15_984 * generations;
         let mut line = Vec::new();
-        write!(&mut line, "{{\"event_kind\":\"registry\",\"senders\":{{").unwrap();
+        line.extend_from_slice(if fallback {
+            b"{\"event_kind\":\"sent\",\"event_kind\":\"registry\",\"senders\":{"
+        } else {
+            b"{\"event_kind\":\"registry\",\"senders\":{"
+        });
         for index in 0..count {
             if index != 0 {
                 line.push(b',');
@@ -1488,23 +1510,44 @@ mod tests {
             .unwrap();
         }
         line.extend_from_slice(b"}}");
+        let output = tempfile::tempdir().unwrap();
+        let path = output.path().join(DELIVERIES_FILE);
+        fs::write(&path, &line).unwrap();
         let before = crate::diagnostics::resident_memory_bytes(std::process::id());
         let started = std::time::Instant::now();
-        let event = if clone_reference {
-            let value: Value = serde_json::from_slice(&line).unwrap();
-            let senders = serde_json::from_value(value["senders"].clone()).unwrap();
-            std::hint::black_box(&value);
-            DeliveryEvent::Registry { senders }
+        let records = if original_reference {
+            let mut records = RunRecords::default();
+            let mut names = crate::records::ReceiptNames::default();
+            visit_jsonl_with_limits(
+                BufReader::new(fs::File::open(&path).unwrap()),
+                &path,
+                ReplayLimits::default(),
+                |line| {
+                    if let Ok(event) = serde_json::from_slice::<DeliveryEvent<ReplayName<'_>>>(line)
+                    {
+                        append_delivery_event(&mut records, &mut names, event);
+                    } else {
+                        let value: Value = serde_json::from_slice(line).unwrap();
+                        let senders = serde_json::from_value(value["senders"].clone()).unwrap();
+                        std::hint::black_box(&value);
+                        append_delivery_event(
+                            &mut records,
+                            &mut names,
+                            DeliveryEvent::<String>::Registry { senders },
+                        );
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            records
         } else {
-            read_delivery_event(&line, Path::new("deliveries.jsonl")).unwrap()
+            read_records_with_limits(output.path(), ReplayLimits::default()).unwrap()
         };
         let elapsed_us = started.elapsed().as_micros();
-        let DeliveryEvent::Registry { senders } = event else {
-            panic!("{event:?}");
-        };
-        assert_eq!(senders.len(), count);
+        assert_eq!(records.registry.len(), count);
         let mut checksum = 0_u64;
-        for (index, (identity, (name, epoch))) in senders.iter().enumerate() {
+        for (index, (identity, (name, epoch))) in records.registry.iter().enumerate() {
             assert_eq!(identity, &format!("{index:032x}"));
             assert_eq!(name, &format!("r{}p{}", index % 999, index % 16));
             assert_eq!(*epoch as usize, index / 15_984 + 1);
@@ -1512,12 +1555,13 @@ mod tests {
         }
         println!(
             "REGISTRY_REPLAY_PROFILE {}",
-            serde_json::json!({"entries":count, "clone_reference":clone_reference,
+            serde_json::json!({"entries":count,
+            "original_reference":original_reference, "fallback":fallback,
             "input_bytes":line.len(), "before_rss_bytes":before,
             "after_rss_bytes":crate::diagnostics::resident_memory_bytes(std::process::id()),
             "elapsed_us":elapsed_us, "checksum":checksum})
         );
-        std::hint::black_box((senders, line));
+        std::hint::black_box((records, line));
     }
 
     #[test]
