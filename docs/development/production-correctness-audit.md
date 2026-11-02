@@ -13553,3 +13553,16 @@ concurrent allocation test. The Linux all-feature profile remains 139 / 187 /
 and three-copy assertions remain unchanged. This can locate the extra macOS
 allocation within a smaller operation but does not yet identify its allocation
 site. Keep #1359 open.
+
+Coverage follow-up #1366: head `e0bd5d38` fails job `125107697359` in full
+CI `41392638859`. The pre-existing session snapshot binary records 5 allocations
+and 1,475 bytes for zero spectators, then 4 and 867 for both larger cohorts.
+Its exact equality check fails; the host-departure history passes. The binary
+has two global-allocation tests. Serial body locks do not serialize libtest
+thread setup and result collection, so those allocations can overlap a region.
+The candidate gives both this binary and the new spectator departure binary
+one test entry each. Each entry executes both original histories sequentially.
+Every message, metadata, persistence, count and byte assertion remains. Scoped
+Nextest and plain libtest with eight test threads retain all four histories.
+Exact-head hosted qualification remains required; no allocation site or gameplay
+copy defect is inferred from the historical extra 608 bytes.

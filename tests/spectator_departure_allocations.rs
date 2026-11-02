@@ -8,7 +8,7 @@ use uuid::Uuid;
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
-/// Bound complete departure growth to two roster copies and verify both terminal messages.
+/// Verify departure and read costs in one test without concurrent libtest allocation bookkeeping.
 #[test]
 #[serial_test::serial]
 fn spectator_departure_copies_only_the_two_published_rosters() {
@@ -176,11 +176,10 @@ fn spectator_departure_copies_only_the_two_published_rosters() {
             "only two published roster buffers and names: {profiles:?}"
         );
     }
+    spectator_snapshot_cost_is_independent_of_seated_player_metadata();
 }
 
 /// The departure read must not retain unrelated seated-player metadata.
-#[test]
-#[serial_test::serial]
 fn spectator_snapshot_cost_is_independent_of_seated_player_metadata() {
     use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
     use signal_fish_server::protocol::ConnectionInfo;
