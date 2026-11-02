@@ -183,6 +183,15 @@ pub struct RoomSessionSnapshot {
     pub lobby_state: crate::protocol::LobbyState,
 }
 
+/// Room code and spectator roster from one storage snapshot.
+#[derive(Debug, Clone)]
+pub struct RoomSpectatorSnapshot {
+    /// Current code used in spectator departure acknowledgements.
+    pub room_code: String,
+    /// Stored spectators, including rows awaiting local publication or repair.
+    pub spectators: Vec<SpectatorInfo>,
+}
+
 /// Exact room state from which a game-start publication was prepared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeRoomGameExpectation {
@@ -470,6 +479,21 @@ pub trait GameDatabase: Send + Sync {
                 players: room.players.into_values().collect(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state,
+            }))
+    }
+
+    /// Read the spectator roster and code atomically, including pending rooms.
+    /// The default preserves complete-snapshot visibility and storage errors.
+    async fn get_room_spectator_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSpectatorSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|room| RoomSpectatorSnapshot {
+                room_code: room.code,
+                spectators: room.spectators.into_values().collect(),
             }))
     }
 
@@ -2244,6 +2268,24 @@ impl GameDatabase for InMemoryDatabase {
                 players: room.players.values().cloned().collect(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
+    /// Copy the spectator roster and code without player or session metadata.
+    async fn get_room_spectator_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSpectatorSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSpectatorSnapshot {
+                room_code: room.code.clone(),
+                spectators: room.get_spectators(),
             }))
     }
 
