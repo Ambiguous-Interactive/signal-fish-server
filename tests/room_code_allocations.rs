@@ -104,8 +104,17 @@ fn player_leave_does_not_copy_stored_spectator_names() {
                     Some(4), Some(true), None, None, None,
                 ).await;
             }
-            while host_receiver.try_recv().is_ok() {}
-            while guest_receiver.try_recv().is_ok() {}
+            for receiver in [&mut host_receiver, &mut guest_receiver] {
+                loop {
+                    match receiver.try_recv() {
+                        Ok(message) => assert!(matches!(message.as_ref(),
+                            ServerMessage::RoomJoined(_) | ServerMessage::PlayerJoined { .. }
+                            | ServerMessage::LobbyStateChanged { .. }), "unexpected setup message: {message:?}"),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(error) => panic!("setup channel closed: {error}"),
+                    }
+                }
+            }
             let room_id = server.get_client_room(&host).await.unwrap();
             server.database().set_room_max_spectators(&room_id, Some(255)).await.unwrap();
             for index in 0..spectators {
@@ -120,10 +129,14 @@ fn player_leave_does_not_copy_stored_spectator_names() {
             let stats = region.change();
             println!("PLAYER_LEAVE_PROFILE spectators={spectators} stats={stats:?}");
             profiles.push((spectators, stats.allocations));
-            assert!(matches!(guest_receiver.try_recv().unwrap().as_ref(), ServerMessage::RoomLeft));
-            assert!(matches!(host_receiver.try_recv().unwrap().as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == guest));
-            assert!(guest_receiver.try_recv().is_err());
-            assert!(host_receiver.try_recv().is_err());
+            let confirmation = guest_receiver.try_recv().unwrap();
+            assert!(matches!(confirmation.as_ref(), ServerMessage::RoomLeft));
+            let departure = host_receiver.try_recv().unwrap();
+            assert!(matches!(departure.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == guest));
+            let guest_trailing = guest_receiver.try_recv();
+            assert!(matches!(guest_trailing, Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+            let host_trailing = host_receiver.try_recv();
+            assert!(matches!(host_trailing, Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
             assert_eq!(server.get_client_room(&guest).await, None);
             assert_eq!(server.get_client_room(&host).await, Some(room_id));
             let room = server.database().get_room_by_id(&room_id).await.unwrap().unwrap();
