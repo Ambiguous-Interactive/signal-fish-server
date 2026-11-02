@@ -56,7 +56,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
-| A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123 |
+| A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123; exact JSON sizing in F228 |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36; interrupted heartbeat retry in F224 |
@@ -65,7 +65,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197; premature native rebuild success in F198 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97; closed-epoch delivery evidence in F130 |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97; closed-epoch delivery evidence in F130; initial join cancellation and state-matched allocation evidence in F228 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -13195,3 +13195,169 @@ JSON serialization and gameplay throughput. They do not establish a production
 latency bound. The ignored `session_snapshot_scan_duration_profile` retains
 the four cells. Nextest `192e438d` passes 22 focused controls; `ebac8c5b` passes
 the isolated profile. Adversarial review finds no remaining issue.
+
+### F228 — Initial joins lose progress and completed refusals on cancellation (#1355)
+
+At `b7c41a31`, initial joins have no lifecycle tracker. The manifest is written
+only after they finish. A held first-room upgrade leaves no run identity or
+planned-peer progress when the caller cancels. A refusal that returns while
+another join remains pending also stays inside `join_all` until the whole room
+finishes. Cancellation discards that completed failure.
+
+The cancellation regression fails before the repair in Nextest `5f0f7346`
+(the retained log names the missing initial manifest). A second negative control
+restores the old post-`join_all` error recording while keeping the new early
+manifest. It fails in `b8eba0a6`: the cancelled run retains zero completed
+refusals instead of one. The repair writes the
+manifest before connecting, creates one fixed-size row for each planned peer,
+and records each refusal as soon as it returns. Successful peers reuse those
+trackers during workload and churn. Preparation and workload timestamps name
+separate clocks. Each handshake write has a step deadline; each room's initial
+joins have a six-step outer deadline. Other rooms get their own setup budget.
+
+Dropping preparation writes partial progress, exact completed failures and an
+explicit cancelled-preparation marker. It does not write a successful summary.
+The normal path writes progress before arming and after all producers finish.
+Held upgrade, negotiation and baseline controls retain every planned peer,
+including unstarted rooms. A mixed held/refused control retains the completed
+refusal. The unchanged replacement workload still requires every receipt and
+an identical replay verdict. These controls do not explain the historical
+post-epoch second replacement in #1352. That investigation remains open.
+
+#### JSON gameplay sizing (#636)
+
+The relay byte measure now counts JSON value structure, integer digits and
+string escape overhead directly. Ordinary string fragments skip eight bytes
+at a time with safe integer operations. Float formatting still uses the same
+serializer. The serializer remains the byte-count reference; no wire encoding,
+payload limit, admission budget or relay ordering changes.
+
+Property histories cover nested values, Unicode keys and values, signed and
+unsigned integers, and floats. Explicit histories cover every ASCII byte at
+every eight-byte offset, control escapes, UTF-8 boundaries, integer limits,
+negative zero and small/large floats. The text-lane byte-budget and payload-size
+controls remain exact. Allocation benchmarks check both sizing methods.
+
+The first scalar candidate takes 3.098 microseconds for the 4 KiB ASCII cell,
+versus the 1.445 microsecond serializer baseline, and is rejected. A second
+candidate improves escaped strings and integers but regresses ASCII to
+4.211 microseconds. Its matched serializer control takes 1.430 microseconds.
+These attempts remain part of the evidence; neither ships.
+
+The retained first benchmark also stops when Criterion cannot find a baseline
+for the newly added serializer control. That tooling error does not qualify the
+unmeasured cells. Later attempts save separate baselines and retain both paths.
+
+The final safe word scan has these matched component times on Linux aarch64,
+Rust 1.94.0, in the release bench profile (20 samples, one-second warm-up,
+three-second measurement per cell):
+
+| Payload | Direct count (µs) | Serializer (µs) |
+| --- | ---: | ---: |
+| 4 KiB ASCII object | 0.558 | 1.720 |
+| 96-byte ASCII value in an object | 0.023 | 0.081 |
+| Unicode string object | 0.781 | 2.101 |
+| Escaped string object | 4.112 | 8.996 |
+| 512 unsigned integers | 2.204 | 3.546 |
+| 64 floats | 1.316 | 1.267 |
+
+The float-only array costs about 4% more in this observation. These are sizing
+component measurements on one shared host. End-to-end relay throughput and
+remote-network capacity remain unmeasured. The portable comparison is
+`cargo bench --locked --bench relay_serialization_runtime --features allocation-tracking -- payload_sizing`.
+
+#### Readiness allocation comparison (#1356)
+
+Main CI run `41304770223`, job `124843195926`, records 3 allocations / 336 bytes
+for Waiting and 2 allocations / 272 bytes for Lobby. Each state has the same
+profile at 0, 16 and 255 spectators. The old assertion compares all states as
+one profile. It fails even though neither state grows with the spectator count.
+The corrected assertion compares the same ordered state history across roster
+sizes. It retains exact allocation/byte equality and diagnostics on mismatch.
+No source for the extra 64-byte allocation is inferred from this log.
+
+#### External-client assessment
+
+The Rust client at `da8f2d16` has no server dependency. The .NET client at
+`e467c871` is an independent `netstandard2.1` package. The Godot client at
+`5d4c1801` uses its GDScript WebSocket client. Each is unaffected: gameplay
+bytes, message schemas, ordering, errors and defaults stay the same. Initial
+preparation artifacts and the allocation comparison are internal. No migration
+or client tracking issue is required. Campaigns #636 and #826 remain open.
+
+#### Local qualification
+
+The held-stage, clock, refusal/replay, write-deadline and unchanged replacement
+controls pass in Nextest `a6bf9668` (10 selected tests). The exact JSON sizing
+property, byte-offset and text-lane controls pass in `d7c4c46e` (four tests).
+The corrected readiness comparison passes in `fb8d16e1`.
+
+The full local formatting and all-target/all-feature Clippy gate passes with
+zero warnings. The deterministic relay allocation gate passes; both sizing
+paths allocate zero bytes at 96, 1,024, 16,384 and 65,536 payload bytes. CI
+configuration, documentation consistency and Markdown checks pass.
+
+Final cancellation flags pass in `f5f23274`; the unchanged replacement history
+also proves that prepared trackers survive into the workload clock and later
+incarnations. Both relay allocation gates pass with their existing wire digests
+and ceilings. The final all-target/all-feature Clippy gate passes again after
+the terminal-flag assertions.
+
+Review found that the guard was disarmed before sampler construction and task
+arming. The extended readiness-failure control fails in `5afb6083`: a completed
+initial refusal has no persisted deliveries file. The guard now owns the arming
+call and disarms only after the workload epoch is published. Arming failures
+stop and join every producer before the guard writes partial records. Sampler
+construction errors also retain the active guard. No workload timing changes.
+
+The repaired guard passes eleven selected preparation, readiness and unchanged
+replacement controls in `a07ce725`. Exact completed refusals and cancellation
+markers survive both returned readiness failure and readiness timeout.
+
+The earlier full run `41358544147` passes macOS and coverage at `cc87ede39a62e9d746196af0fcc6dcd46d10c1e5`.
+Its Windows job `125004398596` fails the held-socket write control: the 16 MiB
+send completes successfully, so no pending write exists to time out. That
+fixture inferred backpressure from payload size and was not portable. The
+replacement uses a controlled pending sink through the same protocol-write
+helper. It checks readiness before the exact deadline, expiry at the deadline,
+immediate success and the unchanged transport error. Removing the timeout
+fails in `2ced1737`; the bounded control passes in `3e2a2c81`. Live held
+upgrade, negotiation and room-baseline controls remain unchanged.
+
+Function documentation now covers all touched sizing, benchmark, preparation,
+readiness and allocation functions. The PR explicitly states the #636 sizing
+requirements; that broader campaign remains open.
+
+Portable preparation and replacement controls pass in `74c0737f` (eleven tests);
+JSON sizing and text-lane controls pass in `ddae9193` (four tests). Strict
+all-target/all-feature Clippy, Markdown and doc consistency pass. Production
+sizing and benchmark bodies remain identical to the measured source; later
+changes to those paths add Rustdoc only.
+
+A further review control blocks each cancellation artifact path with a directory.
+The old short-circuit fails in `55244216`: a progress-file error prevents the
+cancellation marker and exact failures from reaching their writable paths. The
+guard now attempts all three writes independently before reporting errors.
+Blocked progress, marker and delivery paths each preserve the other writable
+outputs. No successful summary is written for partial preparation.
+
+All twelve artifact, preparation and replacement controls pass in
+`f9066f14-5e60-4d66-804c-601bd749d190`. Strict all-target/all-feature Clippy, spelling,
+Markdown and doc consistency checks pass. Review reports 100% documentation
+coverage for touched complex functions and accepts the explicit #636 scope.
+
+Full macOS verification later fails a separate spectator-admission allocation
+profile in run `41362145836`, job `125015008082`. Counts are 144, 193 and
+906 for 0, 16 and 254 stored spectators. The middle cell exceeds the same
+three-copy ceiling by one allocation; its cross-platform difference includes
+an additional 64 bytes. The historical allocation site is untraced; #1359
+retains that investigation. No gameplay fault or fourth roster copy is proved.
+
+The profile now owns a fresh runtime per cohort and warms deferred scheduler
+storage before setup. Every admission/message assertion and the exact
+three-copy ceiling remains unchanged. The existing controlled scheduler probe
+passes in `2638d125`, with cold 3 allocations / 336 bytes versus warmed
+2 / 272. Local isolated spectator counts remain 139, 187 and 901. Adding one
+extra complete roster copy inside measurement fails the same ceiling in
+`bde58a8f-fe62-4187-9074-1c4bc70e1c44`. This removes an uncontrolled measurement factor;
+it does not identify the historical allocation producer or close #1359.

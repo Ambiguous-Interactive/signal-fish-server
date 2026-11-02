@@ -1428,3 +1428,86 @@ mod admission_and_budget {
         }
     }
 }
+
+mod json_size_tests {
+    use super::super::game_data::game_data_json_len;
+    use proptest::prelude::*;
+
+    /// Generate bounded nested values for the independent serializer oracle.
+    fn json_values() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(|value| serde_json::json!(value)),
+            any::<u64>().prop_map(|value| serde_json::json!(value)),
+            any::<f64>().prop_map(|value| serde_json::json!(value)),
+            any::<String>().prop_map(serde_json::Value::String),
+        ]
+        .prop_recursive(5, 128, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(serde_json::Value::Array),
+                proptest::collection::btree_map(any::<String>(), inner, 0..8)
+                    .prop_map(|values| serde_json::Value::Object(values.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        #[cfg_attr(miri, ignore)]
+        /// Compare nested JSON size counts with independent serializer output.
+        fn game_data_json_size_matches_canonical_serialization(value in json_values()) {
+            prop_assert_eq!(game_data_json_len(&value), serde_json::to_vec(&value).unwrap().len());
+        }
+    }
+
+    #[test]
+    /// Pin escape counts, byte offsets and numeric boundaries against serialization.
+    fn game_data_json_size_preserves_escapes_numbers_and_chunk_boundaries() {
+        for byte in 0_u8..=127 {
+            for offset in 0..8 {
+                let mut text = "x".repeat(offset);
+                text.push(char::from(byte));
+                text.push_str("é雪😀");
+                let value = serde_json::json!(text);
+                assert_eq!(
+                    game_data_json_len(&value),
+                    serde_json::to_vec(&value).unwrap().len()
+                );
+            }
+        }
+        let controls: String = (0_u8..=127).map(char::from).collect();
+        for length in [0, 1, 7, 8, 9, 15, 16, 17, 255, 256, 257] {
+            for value in [
+                serde_json::json!("x".repeat(length)),
+                serde_json::json!({controls.clone(): [controls.repeat(length), "雪😀é"]}),
+            ] {
+                assert_eq!(
+                    game_data_json_len(&value),
+                    serde_json::to_vec(&value).unwrap().len()
+                );
+            }
+        }
+        for value in [0_u64, 1, 9, 10, 99, 100, u64::MAX] {
+            let value = serde_json::json!(value);
+            assert_eq!(
+                game_data_json_len(&value),
+                serde_json::to_vec(&value).unwrap().len()
+            );
+        }
+        for value in [i64::MIN, -100, -10, -1, 0, i64::MAX] {
+            let value = serde_json::json!(value);
+            assert_eq!(
+                game_data_json_len(&value),
+                serde_json::to_vec(&value).unwrap().len()
+            );
+        }
+        for value in [-0.0, f64::MIN, f64::MAX, f64::MIN_POSITIVE, 1e-200, 1e200] {
+            let value = serde_json::json!(value);
+            assert_eq!(
+                game_data_json_len(&value),
+                serde_json::to_vec(&value).unwrap().len()
+            );
+        }
+    }
+}

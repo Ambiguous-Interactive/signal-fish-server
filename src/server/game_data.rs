@@ -284,6 +284,7 @@ impl EnhancedGameServer {
             .await;
     }
 
+    /// Count payload bytes once before the coordinated JSON relay handoff.
     pub(crate) async fn handle_game_data_from_lifecycle(
         &self,
         player_id: &PlayerId,
@@ -334,7 +335,7 @@ impl EnhancedGameServer {
         // per frame.
         let mut payload_bytes_cache: Option<usize> = None;
         let mut payload_bytes =
-            || *payload_bytes_cache.get_or_insert_with(|| canonical_json_len(&data));
+            || *payload_bytes_cache.get_or_insert_with(|| game_data_json_len(&data));
         if let Some(cap) = self
             .config
             .max_game_data_bytes
@@ -732,6 +733,83 @@ where
             }
         }
     }
+}
+
+/// Count canonical JSON game-data bytes without formatting string escapes or integers.
+pub(super) fn game_data_json_len(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(value) => json_string_len(value),
+        serde_json::Value::Array(values) => {
+            values.iter().enumerate().fold(2, |size, (index, value)| {
+                size.saturating_add(usize::from(index != 0))
+                    .saturating_add(game_data_json_len(value))
+            })
+        }
+        serde_json::Value::Object(values) => {
+            values
+                .iter()
+                .enumerate()
+                .fold(2, |size, (index, (key, value))| {
+                    size.saturating_add(usize::from(index != 0))
+                        .saturating_add(json_string_len(key))
+                        .saturating_add(1)
+                        .saturating_add(game_data_json_len(value))
+                })
+        }
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                integer_json_len(value)
+            } else if let Some(value) = value.as_i64() {
+                1_usize.saturating_add(integer_json_len(value.unsigned_abs()))
+            } else {
+                canonical_json_len(value)
+            }
+        }
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(true) => 4,
+        serde_json::Value::Bool(false) => 5,
+    }
+}
+
+/// Count the decimal digits of one unsigned JSON integer.
+fn integer_json_len(value: u64) -> usize {
+    usize::try_from(value.checked_ilog10().unwrap_or(0))
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+}
+
+/// Count JSON escapes while skipping eight ordinary UTF-8 bytes at a time.
+fn json_string_len(value: &str) -> usize {
+    let mut size = value.len().saturating_add(2);
+    let mut remaining = value.as_bytes();
+    while let Some((chunk, rest)) = remaining.split_first_chunk::<8>() {
+        let word = u64::from_le_bytes(*chunk);
+        if contains_zero_byte(word & 0xe0e0_e0e0_e0e0_e0e0)
+            || contains_zero_byte(word ^ 0x2222_2222_2222_2222)
+            || contains_zero_byte(word ^ 0x5c5c_5c5c_5c5c_5c5c)
+        {
+            size = size.saturating_add(json_escape_overhead(chunk));
+        }
+        remaining = rest;
+    }
+    size.saturating_add(json_escape_overhead(remaining))
+}
+
+/// Detect a zero byte with independent high bits; subtraction may borrow between bytes.
+fn contains_zero_byte(word: u64) -> bool {
+    word.wrapping_sub(0x0101_0101_0101_0101) & !word & 0x8080_8080_8080_8080 != 0
+}
+
+/// Count the extra bytes for at most one eight-byte fragment.
+fn json_escape_overhead(fragment: &[u8]) -> usize {
+    fragment
+        .iter()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 1,
+            0..=31 => 5,
+            _ => 0,
+        })
+        .sum()
 }
 
 pub(super) fn one_shot_message_builder<F>(build_message: F) -> impl FnMut() -> Option<ServerMessage>

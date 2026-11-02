@@ -332,6 +332,7 @@ async fn lobby_promotion_allocations_do_not_grow_with_spectator_rosters() {
     );
 }
 
+/// Compare allocation profiles across rosters within the same lobby-state history.
 async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 255] {
@@ -369,6 +370,7 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
         );
         // Initialize the native wait-queue mutex without creating readiness entries.
         assert!(coordinator.ready_player_room_ids().await.is_empty());
+        let mut state_profiles = Vec::new();
         for state in [LobbyState::Waiting, LobbyState::Lobby] {
             if state == LobbyState::Lobby {
                 database.transition_room_to_lobby(&room.id).await.unwrap();
@@ -378,8 +380,9 @@ async fn untouched_ready_snapshot_allocations_do_not_grow_with_spectator_rosters
             let stats = region.change();
             assert!(ready.is_empty());
             println!("UNTOUCHED_READY_SNAPSHOT_PROFILE spectators={spectators} state={state:?} stats={stats:?}");
-            profiles.push((stats.allocations, stats.bytes_allocated));
+            state_profiles.push((state, stats.allocations, stats.bytes_allocated));
         }
+        profiles.push(state_profiles);
     }
     if !profiles.iter().all(|profile| *profile == profiles[0]) {
         diagnose_untouched_snapshot_allocations().await;

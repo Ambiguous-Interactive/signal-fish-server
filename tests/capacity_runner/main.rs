@@ -5559,6 +5559,7 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
 /// and the artifacts must replay to the same summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
+/// Require exact delivery, tracker continuity and replay through room replacement.
 async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -5638,6 +5639,27 @@ async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
         "some room was replaced twice across the two waves, so its members \
          reached a third incarnation: {rejoined:?}"
     );
+
+    let progress: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(output.path().join("peer-progress.json")).expect("peer lifecycle artifact"),
+    )
+    .expect("peer lifecycle JSON");
+    assert_eq!(progress.as_object().expect("planned peers").len(), 4);
+    for (name, row) in progress.as_object().expect("planned peers") {
+        let incarnation = rejoined
+            .iter()
+            .filter(|event| event.recipient == *name)
+            .filter_map(|event| event.epoch)
+            .max()
+            .unwrap_or(1);
+        assert_eq!(row["incarnation"], incarnation);
+        assert_eq!(row["clock"], "workload");
+        assert_eq!(row["task_returned"], true);
+        if incarnation == 1 {
+            assert_eq!(row["last_completed_stage"], "prepared");
+            assert_eq!(row["last_completed_clock"], "preparation");
+        }
+    }
 
     let replayed = artifacts::replay(output.path()).expect("replay artifacts");
     assert_eq!(
