@@ -14412,3 +14412,49 @@ async fn room_id_default_preserves_code_lookup_and_storage_errors() {
         None
     );
 }
+
+/// #826: custom backends inherit one-snapshot session reads and their errors.
+#[tokio::test]
+async fn default_session_snapshot_retains_custom_backend_read_semantics() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let room = inner
+        .create_pending_room_classified(
+            "session-adapter".into(),
+            Some("ADAPT1".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let adapter = DrainAfterCreateDatabase::new(inner.clone());
+    let expected = inner.get_room_by_id(&room.id).await.unwrap().unwrap();
+    let actual = adapter
+        .get_room_session_snapshot(&room.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual.authority_player, expected.authority_player);
+    assert_eq!(actual.lobby_state, expected.lobby_state);
+    assert_eq!(actual.players.len(), expected.players.len());
+    for player in actual.players {
+        assert_eq!(
+            serde_json::to_value(&player).unwrap(),
+            serde_json::to_value(&expected.players[&player.id]).unwrap()
+        );
+        assert_eq!(player.region_id, expected.players[&player.id].region_id);
+    }
+    inner.fail_get_room_by_id_for_test(true);
+    assert!(adapter.get_room_session_snapshot(&room.id).await.is_err());
+    inner.fail_get_room_by_id_for_test(false);
+    assert!(inner.delete_room(&room.id).await.unwrap());
+    assert!(adapter
+        .get_room_session_snapshot(&room.id)
+        .await
+        .unwrap()
+        .is_none());
+}

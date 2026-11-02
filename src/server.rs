@@ -492,12 +492,33 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
     JoinAfterAdmission = 10,
 }
 
-/// Narrow dev-only entry point for measuring the production game-data handoff
-/// without constructing an `EnhancedGameServer` or spawning background tasks.
+/// Dev-only entry points for allocation measurements of production server paths.
 #[cfg(feature = "allocation-tracking")]
 #[doc(hidden)]
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
+
+    /// Select WebRTC capabilities for embedded allocation fixtures without socket tasks.
+    pub fn negotiate_webrtc_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+    ) {
+        server.set_client_protocol(
+            player_id,
+            super::connection_manager::NegotiatedProtocol {
+                version: 3,
+                transports: vec![
+                    crate::protocol::Transport::Relay,
+                    crate::protocol::Transport::WebRtc,
+                ],
+                topologies: vec![
+                    crate::protocol::Topology::Relay,
+                    crate::protocol::Topology::Host,
+                    crate::protocol::Topology::Mesh,
+                ],
+            },
+        );
+    }
 
     /// Retain selection inputs between allocation measurements.
     pub struct HostElectionFixture {

@@ -1035,7 +1035,7 @@ impl EnhancedGameServer {
             return;
         };
 
-        let room = match self.database.get_room_by_id(room_id).await {
+        let room = match self.database.get_room_session_snapshot(room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 // The room itself is gone; drop the stale decision.
@@ -1071,15 +1071,15 @@ impl EnhancedGameServer {
                 return;
             }
         };
+        let stored_players_empty = room.players.is_empty();
         let remaining: Vec<PlayerInfo> = room
             .players
-            .values()
+            .into_iter()
             .filter(|member| {
                 routed_player_ids
                     .as_ref()
                     .is_none_or(|routed| routed.contains(&member.id))
             })
-            .cloned()
             .collect();
 
         // Last published member left. Storage may still hold an admitted
@@ -1091,7 +1091,7 @@ impl EnhancedGameServer {
         // floor; the maintenance prune drops the entry if the room itself is
         // removed first.
         if remaining.is_empty() {
-            if room.players.is_empty() {
+            if stored_players_empty {
                 self.active_session_plans.remove(room_id);
             }
             return;

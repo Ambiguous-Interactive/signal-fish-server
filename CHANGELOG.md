@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory used to replan sessions after players leave rooms with spectators (#636).
 - Reduce memory used when players leave rooms with large spectator rosters (#636).
 - Reduce CPU work when sizing JSON gameplay strings and integer arrays (#636).
 - Reduce memory retained by completed-session history (#636).

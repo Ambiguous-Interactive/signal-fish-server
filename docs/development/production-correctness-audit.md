@@ -13408,3 +13408,64 @@ readiness failure, bounded protocol write and unchanged replacement controls.
 Code-query lifecycle and existing departure-order controls pass in `31a1608d`.
 Strict all-target/all-feature Clippy passes. The historical #1352 and #1359
 investigations remain open; these results do not attribute their source causes.
+
+### F230 — Departure replanning copies unrelated spectator and member metadata
+
+Scope: #636 and #826, session 606, starting at `193785e0`.
+
+Finalized-session departure replanning fetched a complete room and then cloned
+its remaining players into a second collection. The storage read copied all
+spectator names although host election uses only player metadata, authority and
+lobby state. The in-memory backend now reads those three inputs under one room
+lock. The default database-trait method projects the existing complete snapshot,
+so custom backends keep their visibility and error behavior. Replanning consumes
+the owned player vector instead of copying its members again.
+
+The isolated read control first fails against the full-snapshot default in
+Nextest `5f426d74`: 10 / 27 / 265 allocations and 1,749 / 5,267 / 58,073 bytes
+for 0 / 16 / 254 spectators. The optimized control passes in `48cf7c6d`, using
+4 allocations and 867 bytes in each cohort. Exact player metadata and stored
+spectator counts remain intact. These are storage-read measurements, not a
+whole-server throughput claim.
+
+The complete host-departure control includes the leave confirmation, ordered
+peer departure, one fresh Host/WebRTC plan naming the survivor, stored membership
+and unchanged spectator counts. It passes in `8e9358ff` with 100 allocations and
+23,017 bytes in every cohort. The feature-gated allocation fixture negotiates
+capabilities without unrelated socket tasks; it uses the production join,
+readiness, game-start and departure methods.
+
+Restoring the full room read inside the departure path fails the same complete
+operation bound in `f03f3523`: 106 / 123 / 361 allocations and
+23,882 / 26,706 / 68,886 bytes for 0 / 16 / 254 spectators. Every event and
+membership assertion completes before the allocation assertion rejects the
+regression. This control uses spectator names within the default name limit.
+
+The lifecycle control retains pending-room visibility, all three lobby states,
+exact nested player metadata, authority changes, a canceled contended read,
+storage errors and deletion. Existing departure histories retain host election,
+legacy recipients, session reset, non-host silence, missing rooms and retention
+of a sticky decision while storage holds an unpublished member. The Rust, .NET
+and Godot clients are unaffected: messages, errors, plan selection and event
+order stay unchanged. Both campaigns remain open.
+
+The bounded send-progress controls advance the separate #1352 investigation.
+They record the most recent send attempt's sequence, incarnation, intended time,
+stage and stage-start time, plus the last completed send. A held socket write
+retains its exact phase after cancellation; a completed send clears the active
+attempt only after its event enters the ledger. Generator lag and preparation
+failures retain explicit terminal phases across rejoin. The unchanged replacement
+workload compares completion identities with its exact send ledger and replay.
+These controls do not explain the historical coverage wait. Issue #1352 stays
+open until its cause and unchanged instrumented workload are qualified.
+
+The premature-completion negative control fails in `23695227`: marking a held
+write complete before transport completion destroys the required pending attempt.
+The candidate is restored after the control. Send/lifecycle storage remains
+bounded across 10,000 incarnations, including full-width sequence values.
+
+Final restored controls pass in `1c76a15b` (both allocation contracts),
+`602d49a7` (five send/lifecycle/replacement histories), and `a48522c1`
+(fifteen snapshot and session-departure histories). Strict all-target/all-feature
+Clippy passes. The mutation inventory remains 451; no mutation campaign ran
+locally. Both deliberate negative attempts remain recorded as failures.
