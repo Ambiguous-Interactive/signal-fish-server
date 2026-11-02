@@ -425,6 +425,12 @@ pub trait GameDatabase: Send + Sync {
     /// Get room by ID
     async fn get_room_by_id(&self, room_id: &RoomId) -> Result<Option<Room>>;
 
+    /// Read the current room code without requiring an owned room snapshot.
+    /// Pending rooms and storage errors match [`Self::get_room_by_id`].
+    async fn get_room_code(&self, room_id: &RoomId) -> Result<Option<String>> {
+        Ok(self.get_room_by_id(room_id).await?.map(|room| room.code))
+    }
+
     /// Read game-start policy fields from one room snapshot.
     /// Pending rooms and storage errors match [`Self::get_room_by_id`].
     /// Membership is read separately through [`Self::get_room_players`].
@@ -2165,6 +2171,19 @@ impl GameDatabase for InMemoryDatabase {
         Ok(rooms.get(room_id).cloned())
     }
 
+    /// Copy only the current code, including rooms pending publication.
+    async fn get_room_code(&self, room_id: &RoomId) -> Result<Option<String>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| room.code.clone()))
+    }
+
     /// Copy game-start policy fields without member or spectator metadata.
     async fn get_room_start_snapshot(&self, room_id: &RoomId) -> Result<Option<RoomStartSnapshot>> {
         #[cfg(test)]
@@ -3313,6 +3332,61 @@ mod tests {
     use crate::protocol::ErrorCode;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    /// Code-only reads preserve pending visibility, rotation, deletion and storage errors.
+    #[tokio::test]
+    async fn room_code_projection_matches_full_room_lifecycle() {
+        let database = InMemoryDatabase::new();
+        let missing = RoomId::from_u128(999);
+        assert_eq!(database.get_room_code(&missing).await.unwrap(), None);
+        let room = database
+            .create_pending_room_classified(
+                "code-query".into(),
+                Some("CODE01".into()),
+                4,
+                true,
+                PlayerId::from_u128(1),
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!database.is_room_published(&room.id).await.unwrap());
+        assert_eq!(
+            database.get_room_code(&room.id).await.unwrap(),
+            Some(room.code)
+        );
+        database.publish_room(&room.id).await.unwrap();
+        database
+            .update_room_code(&room.id, "CODE02".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            database.get_room_code(&room.id).await.unwrap(),
+            Some("CODE02".into())
+        );
+        database.pause_next_get_room_by_id_for_test();
+        let mut read = Box::pin(database.get_room_code(&room.id));
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        database
+            .update_room_code(&room.id, "CODE03".into())
+            .await
+            .unwrap();
+        database.release_paused_get_room_by_id_for_test();
+        assert_eq!(read.await.unwrap(), Some("CODE03".into()));
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(database.get_room_code(&room.id).await.is_err());
+        assert!(database.get_room_code(&missing).await.is_err());
+        database
+            .fail_get_room_by_id
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        database.delete_room(&room.id).await.unwrap();
+        assert_eq!(database.get_room_code(&room.id).await.unwrap(), None);
+    }
 
     /// Background metrics must not consume pauses or observations for room operations.
     #[tokio::test]

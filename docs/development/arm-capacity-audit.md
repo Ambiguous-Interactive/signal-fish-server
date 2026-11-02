@@ -6863,3 +6863,26 @@ whole-generator memory qualification under #775 remains separate.
 The preparation guard stays active through sampler construction and task arming.
 It disarms only after publication of the workload epoch. Readiness failures
 and timeouts stop and join all producers before partial artifacts are written.
+
+### Owner-exit capture boundary (#1358, session 605)
+
+Preparation cancellation artifacts describe partial state at owner exit. They
+are not a quiesced producer census or an atomic snapshot across files. The
+marker declares `capture_contract=partial_at_owner_exit` and
+`producer_quiescence=not_guaranteed`. Each progress row and the event log are
+read under their own locks. Concurrent producers can complete between reads.
+
+The held-readiness control starts a peer waiting for the epoch and an auxiliary
+whose readiness is held. It polls the owning arming future pending, drops that
+future, and reads the artifacts before either producer returns. The exact
+initial refusal and all planned peer rows survive. No workload epoch or success
+summary exists. The owner drops both worker handles. Separate completion signals and task-state
+handles prove both detached producers return after the capture.
+Their two later records are derivative epoch-channel/readiness-channel closure
+notices. The peer's later return flag is also absent from the earlier capture.
+The control retains producer entry, owner cancellation, capture and return order.
+
+This is the chosen cancellation-instant contract, with sequential partial reads;
+fully quiesced capture is not required. Returned readiness errors and timeouts
+still abort and join producers before returning. These controls do not identify
+a server gameplay fault or explain the post-epoch replacement wait in #1352.

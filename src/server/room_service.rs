@@ -1976,10 +1976,7 @@ impl EnhancedGameServer {
         // instead (`forget_player_ready`, in `join_room_with_coordination`), so
         // a new membership starts unready while a reconnect — the same
         // membership resumed — keeps what it had.
-        let mut latest_room_code: Option<String> = None;
-        if let Ok(Some(room)) = self.database.get_room_by_id(&room_id).await {
-            latest_room_code = Some(room.code.clone());
-        }
+        let latest_room_code = self.database.get_room_code(&room_id).await.ok().flatten();
         if let Some(code) = &latest_room_code {
             leave_span.record("room_code", tracing::field::display(code));
         }
