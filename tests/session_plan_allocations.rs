@@ -184,7 +184,7 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
                         &player,
                         "membership-profile".into(),
                         Some("MEMB01".into()),
-                        if actor_name && player == guest {
+                        if actor_name && player == actor {
                             "G".repeat(bytes + 5)
                         } else {
                             name.into()
@@ -238,7 +238,11 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
                         &actor,
                         "membership-profile".into(),
                         Some("MEMB01".into()),
-                        "Joiner".into(),
+                        if actor_name {
+                            "J".repeat(bytes + 5)
+                        } else {
+                            "Joiner".into()
+                        },
                         Some(4),
                         Some(true),
                         None,
@@ -261,6 +265,16 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
                 _ => panic!("unexpected baseline: {baseline:?}"),
             };
             assert_eq!(players.len(), if reconnect { 2 } else { 3 });
+            let actor_snapshot = players.iter().find(|player| player.id == actor).unwrap();
+            let expected_actor_name = if actor_name {
+                if reconnect { "G" } else { "J" }.repeat(bytes + 5)
+            } else if reconnect {
+                "Guest".into()
+            } else {
+                "Joiner".into()
+            };
+            assert_eq!(actor_snapshot.name, expected_actor_name);
+            assert!(actor_snapshot.epoch.is_some());
             let connection_info = &players
                 .iter()
                 .find(|player| player.id == host)
@@ -285,6 +299,16 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
                 .iter()
                 .all(|peer| peer.player_id != actor && peer.initiate == (actor < peer.player_id)));
             let lifecycle = host_rx.try_recv().unwrap();
+            let lifecycle_actor = match lifecycle.as_ref() {
+                ServerMessage::PlayerJoined { player } => player,
+                ServerMessage::PlayerReconnected {
+                    player: Some(player),
+                    ..
+                } => player.as_ref(),
+                _ => panic!("missing actor snapshot: {lifecycle:?}"),
+            };
+            assert_eq!(lifecycle_actor.name, expected_actor_name);
+            assert_eq!(lifecycle_actor.epoch, actor_snapshot.epoch);
             assert!(
                 match lifecycle.as_ref() {
                     ServerMessage::PlayerJoined { player } => !reconnect && player.id == actor,
@@ -349,7 +373,7 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
             assert!(stored.players[&guest].connection_info.is_none());
             assert_eq!(
                 stored.players[&guest].name,
-                if actor_name {
+                if actor_name && reconnect {
                     "G".repeat(bytes + 5)
                 } else {
                     "Guest".into()
@@ -361,7 +385,7 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
     }
     let baseline = profiles[0].bytes_allocated;
     for (bytes, stats) in [0, 1024, 64 * 1024].into_iter().zip(profiles) {
-        assert!(stats.bytes_allocated <= baseline + (if actor_name { 10 } else if reconnect { 5 } else { 4 }) * bytes + 1024,
+        assert!(stats.bytes_allocated <= baseline + (if actor_name { 9 } else if reconnect { 5 } else { 3 }) * bytes + 1024,
                 "redundant membership snapshot: reconnect={reconnect} bytes={bytes} baseline={baseline} stats={stats:?}");
     }
 }
@@ -369,6 +393,9 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial("finalized_join_shares_recovery_player_name", || {
+            finalized_membership_reuses_owned_room_snapshots(false, true)
+        }),
         allocation_harness::trial("reconnect_claim_shares_retained_player_name", || {
             finalized_membership_reuses_owned_room_snapshots(true, true)
         }),

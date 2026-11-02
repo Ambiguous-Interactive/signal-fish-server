@@ -13972,3 +13972,74 @@ sites. The inventory constant is updated; the 46 shards, 29-second per-mutant
 budget and ten-minute deadline stay unchanged. The worst shard remains ten
 mutants, or 290 seconds, below the five-minute target. The first full hosted
 Linux run rejected the stale 451 constant before this inventory correction.
+
+### F243 — Finalized join refresh copies unrelated legacy metadata
+
+Scope: #1384, #636 and #826, session 611, baseline `43dba677`.
+
+Finalized join publication refreshed a complete room before selecting session
+fields. It now reads the existing atomic selection projection and consumes its
+players. Missing rooms, read errors, changed lobby state and missing actors still
+use the delivered baseline. Routing filtering and transaction retries stay intact.
+
+The complete three-player Mesh/WebRTC join varies one incumbent Custom payload
+over 0 / 1,024 / 65,536 bytes. Original allocated bytes are
+39,286 / 43,382 / 301,430. Revised bytes are 37,324 / 40,396 / 233,932.
+The three-copy payload ceiling fails on the original source in Nextest
+`add6e57a-9635-4a5e-8c46-f8a114d224cc`. It passes with the candidate. The
+legacy baseline and stored metadata remain complete. This measures embedded
+allocation work, not socket latency or remote gameplay throughput.
+
+### F244 — Finalized join duplicates its actor for failure recovery
+
+Scope: #1385, #636 and #826, session 611, baseline `43dba677`.
+
+The opening PlayerJoined message and the recovery closure each owned a complete
+actor snapshot. The message now owns that snapshot. Recovery borrows it and
+clones only when it must preserve a disconnected generation. This keeps the
+same failure teardown and lifecycle replay without a second happy-path copy.
+
+The complete join varies the actor name over 5 / 1,029 / 65,541 bytes with an
+explicitly raised fixture name limit. Original allocated bytes are
+39,275 / 50,539 / 760,171. Revised bytes are 37,315 / 46,531 / 627,139.
+The original eleven-copy slope fails the ten-copy ceiling in Nextest
+`21cb56ad-45c6-46e9-9b4e-0173977b7176`. The final nine-copy ceiling also
+pins the name copy removed by consuming the selection projection. Baseline and
+peer lifecycle snapshots retain the exact actor name and epoch. Default player
+name limits remain 32 bytes.
+
+### F245 — Reconnect duplicates its peer notification snapshot
+
+Scope: #1386, #636 and #826, session 611, baseline `43dba677`.
+
+Reconnect recovery and PlayerReconnected each owned an actor snapshot. The
+notification now owns it and recovery borrows it. Guard loss, transaction failure,
+hook rejection and exhausted routing retries still retain complete actor metadata
+when they close the failed generation. Token consumption and rotation stay intact.
+
+The complete two-player Mesh/WebRTC reconnect varies the actor name over
+5 / 1,029 / 65,541 bytes with the same explicit fixture override. Original
+allocated bytes are 35,341 / 45,581 / 690,701. Revised bytes are
+34,777 / 43,993 / 624,601. The nine-copy ceiling fails on the original source
+in Nextest `b36a255f-42c1-4665-bafb-e88674e80cec`. The candidate passes.
+This is one fewer name copy; it does not change the default name limit.
+
+Four complete allocation histories pass in Nextest
+`61a92798-ae5a-4da2-b7cc-9627d62521ee`. They check exact actor names and
+epochs, lifecycle-before-plan ordering, shared generation, exact peer sets and
+offer roles, token presence and durable metadata. Twenty focused publication,
+retry, baseline-fallback and panic-recovery controls pass in Nextest
+`160e4c0a-9fa6-4c78-b494-ab78c6147833`.
+
+External-client assessment: inspected Rust `src/protocol.rs` at `da8f2d16`,
+.NET `MessagesPlayers.cs` and `MessagesV3.cs` at `e467c871`, and Godot
+`sf_events.gd` at `99be9be6`. Rust retains its baseline, lifecycle and plan
+schemas. .NET retains its player epoch and generation contract. Godot validates
+the same lifecycle metadata and session plans. All three clients are unaffected:
+no message, encoding, negotiation, default, ordering, error or reconnect rule
+changes. No client migration or tracking issue is required.
+
+Matched original/candidate mutation inventories report 455 / 456 sites. Every
+old mutation class remains; the selection actor search adds one equality site.
+The constant now matches 456. The 46 shards and 29-second per-mutant budget
+still yield at most ten sites, or 290 seconds, below the five-minute target.

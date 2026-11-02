@@ -749,7 +749,7 @@ impl EnhancedGameServer {
             .collect()
     }
 
-    fn session_members_from_selection(
+    pub(super) fn session_members_from_selection(
         &self,
         players: impl IntoIterator<Item = crate::database::SessionPlayer>,
     ) -> Vec<SessionMember> {

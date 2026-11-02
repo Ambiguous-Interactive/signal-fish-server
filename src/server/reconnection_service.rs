@@ -2043,7 +2043,7 @@ impl EnhancedGameServer {
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: *reconnect_player_id,
             epoch: Some(stamp.epoch),
-            player: reconnect_player_snapshot.clone().map(Box::new),
+            player: reconnect_player_snapshot.map(Box::new),
         });
         let reconnect_was_authority = authority_player == Some(*reconnect_player_id);
         let finalized = publication_room.lobby_state == crate::protocol::LobbyState::Finalized;
@@ -2059,12 +2059,16 @@ impl EnhancedGameServer {
                 tracing::error!(%reconnect_player_id, %room_id, "Reconnect publication also lost its retained recovery lease");
                 return true;
             };
-            if let Some(player_info) = reconnect_player_snapshot {
+            if let ServerMessage::PlayerReconnected {
+                player: Some(player),
+                ..
+            } = notification.as_ref()
+            {
                 self.terminate_room_generation_after_publication_failure(
                     *reconnect_player_id,
                     *room_id,
                     reconnect_epoch,
-                    player_info,
+                    player.as_ref().clone(),
                     reconnect_was_authority,
                     "reconnect_publication_guard",
                 )
@@ -2088,6 +2092,10 @@ impl EnhancedGameServer {
             lifecycle_guard,
             Box::new(move || {
                 Box::pin(async move {
+                    let ServerMessage::PlayerReconnected { player, .. } = notification.as_ref() else {
+                        return Err(anyhow::anyhow!("reconnect publication requires a lifecycle message"));
+                    };
+                    let reconnect_player_snapshot = player.as_deref();
                     let mut live_players = publication_players;
                     let mut attempts_remaining = live_players.len().saturating_add(1);
                     // Mixed-path membership is a fact about the room snapshot
@@ -2210,7 +2218,7 @@ impl EnhancedGameServer {
                                     %error,
                                     "Reconnect room publication transaction failed"
                                 );
-                                if let Some(player_info) = reconnect_player_snapshot.clone() {
+                                if let Some(player_info) = reconnect_player_snapshot.cloned() {
                                     server_for_publication
                                         .terminate_room_generation_after_publication_failure(
                                             reconnect_player_for_publication,
@@ -2261,7 +2269,7 @@ impl EnhancedGameServer {
                                 return Ok(true);
                             }
                             RoomMessageTransactionOutcome::HookRejected => {
-                                if let Some(player_info) = reconnect_player_snapshot.clone() {
+                                if let Some(player_info) = reconnect_player_snapshot.cloned() {
                                     server_for_publication
                                         .terminate_room_generation_after_publication_failure(
                                             reconnect_player_for_publication,
@@ -2329,7 +2337,7 @@ impl EnhancedGameServer {
                         live_players.retain(|player| routed.contains(&player.id));
                         let actor_is_routed = routed.contains(&reconnect_player_for_publication);
                         if attempts_remaining == 0 && actor_is_routed {
-                            if let Some(player_info) = reconnect_player_snapshot.clone() {
+                            if let Some(player_info) = reconnect_player_snapshot.cloned() {
                                 server_for_publication
                                     .terminate_room_generation_after_publication_failure(
                                         reconnect_player_for_publication,
@@ -2343,7 +2351,7 @@ impl EnhancedGameServer {
                             }
                         }
                         if !actor_is_routed {
-                            if let Some(player_info) = reconnect_player_snapshot.clone() {
+                            if let Some(player_info) = reconnect_player_snapshot.cloned() {
                                 server_for_publication
                                     .terminate_room_generation_after_publication_failure(
                                         reconnect_player_for_publication,
