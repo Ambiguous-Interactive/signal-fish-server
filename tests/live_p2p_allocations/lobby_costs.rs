@@ -73,13 +73,20 @@ pub(crate) fn unready_start_skips_player_metadata() {
                     .unwrap());
             }
             for receiver in &mut receivers {
-                while receiver.try_recv().is_ok() {}
+                drain_membership_setup(receiver, false);
             }
             for ready_actor in [false, true] {
                 if ready_actor {
                     server.handle_player_ready(&actor).await;
                     for receiver in &mut receivers {
-                        while receiver.try_recv().is_ok() {}
+                        let message = receiver.try_recv().unwrap();
+                        assert!(
+                            matches!(message.as_ref(), ServerMessage::LobbyStateChanged {
+                            lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
+                            ready_players, all_ready: false,
+                        } if ready_players == &[actor])
+                        );
+                        assert_membership_queue_empty(receiver);
                     }
                 }
                 let region = stats_alloc::Region::new(ALLOCATOR);
@@ -98,9 +105,9 @@ pub(crate) fn unready_start_skips_player_metadata() {
                     ),
                     "{reply:?}"
                 );
-                assert!(receivers
-                    .iter_mut()
-                    .all(|receiver| receiver.try_recv().is_err()));
+                for receiver in &mut receivers {
+                    assert_membership_queue_empty(receiver);
+                }
                 assert_ne!(
                     server.database().get_room_lobby_state(&room).await.unwrap(),
                     Some(signal_fish_server::protocol::LobbyState::Finalized)
@@ -181,7 +188,7 @@ pub(crate) fn ready_snapshot_scales_with_ready_members() {
                 assert!(
                     matches!(message.as_ref(), ServerMessage::LobbyStateChanged { ready_players, all_ready: false, .. } if ready_players == &[actor])
                 );
-                assert!(receiver.try_recv().is_err());
+                assert_membership_queue_empty(receiver);
             }
             assert_eq!(
                 coordinator.current_ready_players(&room.id).await,

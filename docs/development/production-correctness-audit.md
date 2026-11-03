@@ -14320,3 +14320,11 @@ passes the all-feature bounds. The successful two-player start control uses
 14,177 bytes, 224 bytes above the preceding session's control, in exchange for
 the lean readiness read. Its exact legacy payload and plan-order checks pass.
 The 11 targeted all-feature contract controls pass in Nextest `bd183489`.
+
+Initial-head Linux qualification found a fixture assertion defect in
+`test_try_recv_results_are_not_discarded_in_tests` (PR job `125755897776` and
+full-run job `125756470340`). Setup receipts were discarded and two silence
+checks accepted any queue error. The fixture now checks setup messages, exact
+ready fields and `Empty` queue state. No production path or allocation bound
+changes. The focused policy control fails before the correction and passes in
+Nextest `de041e77`; all three all-feature allocation histories still pass.
