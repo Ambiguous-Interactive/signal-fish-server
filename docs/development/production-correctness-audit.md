@@ -14521,6 +14521,17 @@ validation passes, measures 43.8 ms for the original scan and 24.8 ms for sorted
 lookup, including one sort per transaction.
 These local timings do not establish a production capacity result.
 
+The review follow-up counts key comparisons through the same generic lookup
+used by production. The production key projection is a zero-sized function
+item; counting occurs only in the test closure. For 100 transactions with two
+255-player validations each, the original scan makes 6,528,000 comparisons.
+The repaired lookup makes 459,000, within the asserted per-recipient logarithmic
+bound. Sort key reads have a separate bound and timer; lookup timers exclude
+roster rotation on both paths. No elapsed-time threshold affects pass/fail.
+Restoring a linear search in the production helper fails the comparison bound
+with 6,528,000 comparisons. The complete publication control still measures
+525 allocations after the generic key projection is introduced.
+
 Start and finalized-join incumbent batches previously allocated one frame slot,
 then grew when adding the optional v3 plan. A shared constructor reserves the
 final one- or two-frame size. Its original two-frame history reallocates once;

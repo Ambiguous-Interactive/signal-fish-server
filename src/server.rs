@@ -4008,13 +4008,15 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    /// Match channels against unique reservations sorted by the supplied player key.
     fn sorted_batch_reservations_cover_recipients(
         reservations: &[RoomBatchReservation],
         recipients: &[(PlayerId, ClientDeliveryHandle)],
+        mut reserved_player: impl FnMut(&RoomBatchReservation) -> Option<PlayerId>,
     ) -> bool {
         recipients.iter().all(|(player_id, handle)| {
             reservations
-                .binary_search_by_key(&Some(*player_id), RoomBatchReservation::reserved_player)
+                .binary_search_by_key(&Some(*player_id), &mut reserved_player)
                 .ok()
                 .and_then(|index| reservations.get(index))
                 .is_some_and(|reservation| match reservation {
@@ -5056,6 +5058,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 || !Self::sorted_batch_reservations_cover_recipients(
                     guard.get(),
                     &seated_recipients,
+                    RoomBatchReservation::reserved_player,
                 )
             {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
@@ -5064,6 +5067,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 || !Self::sorted_batch_reservations_cover_recipients(
                     guard.get(),
                     &current_recipients,
+                    RoomBatchReservation::reserved_player,
                 )
             {
                 // Observer churn cannot invalidate a seated start or replan.
