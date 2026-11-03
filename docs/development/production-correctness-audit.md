@@ -14328,3 +14328,79 @@ checks accepted any queue error. The fixture now checks setup messages, exact
 ready fields and `Empty` queue state. No production path or allocation bound
 changes. The focused policy control fails before the correction and passes in
 Nextest `de041e77`; all three all-feature allocation histories still pass.
+
+### F255 — Live room-code identity reads copy both lookup strings
+
+Scope: #1400, #636 and #826, session 615, baseline `81d80a5c`.
+
+The in-memory room-code index used an owned `(String, String)` lookup key.
+The complete original-source control `d712b97a` records hits and misses at
+8 / 1,024 / 65,536 bytes per key. A hit allocates 200 / 2,232 / 131,256 bytes
+in three allocations. One allocation is the existing async-trait future;
+the other two copy lookup text. The final one-allocation bound fails.
+The large cells exercise the storage API directly, not accepted wire limits.
+
+The index now groups room codes by game and borrows both lookup strings.
+A hit or miss allocates one 184-byte future at every input size in the local
+control. Full room reads use the same borrowed lookup before their required
+snapshot copy. Creation, rotation, deletion, empty-room cleanup and expiry
+retain the existing lock order and atomic index updates. Removal drops an
+empty game group. A per-game map adds index overhead for games with few rooms;
+these measurements establish lookup allocation savings, not lower total index
+memory or greater remote throughput.
+
+Controls retain same-code rooms in different games, Unicode game identity,
+collisions without mutation, rotation, stale entries, hidden pending rooms,
+publication, last-room removal, code reuse and lookup lock boundaries.
+
+### F256 — Lobby ICE eligibility copies capability lists
+
+Scope: #1401, #636 and #826, session 615.
+
+`pregather_ice_servers` cloned the complete negotiated protocol before testing
+eligibility. Original-source Nextest `3ddb392b` records two allocations for
+both v2 and v3 clients in Waiting and Finalized rooms, even with no ICE entries
+configured. The zero-allocation bound fails in all four cells.
+
+The eligibility predicate now reads one borrowed negotiation snapshot under
+the connection entry guard. Missing clients remain ineligible. The guard ends
+before ICE composition. The same four cells allocate zero times. Existing
+policy and emission controls retain operator gates, game topology, version,
+WebRTC membership, finalized-room behavior, static/derived ICE ordering and
+issuance accounting. No credential format, lifetime or issuance rule changes.
+
+### F257 — Session selection allocates capability lists for every member
+
+Scope: #1402, #636 and #826, session 615.
+
+Each session member previously owned two cloned capability vectors. Complete
+original-source Nextest `3ddb392b` records 7 / 49 / 766 allocations and
+284 / 2,272 / 36,210 bytes for 2 / 16 / 255 one-character players without
+endpoints. The final bound allows one output vector and one owned name per
+member and fails on the original source. Empty input allocates nothing.
+
+Session selection now projects the version and all six transport/topology
+membership flags into a Copy value. Start, departure, join and reconnect
+selection use this projection; reconnect retry refreshes only those flags.
+The same cells use 3 / 17 / 256 allocations and 194 / 1,552 / 24,735 bytes.
+Names and validated Direct endpoints retain their existing ownership rules.
+The full negotiation snapshot remains available to callers that need it.
+
+The compact projection control checks all 64 transport/topology subsets at
+versions 0 / 2 / 3 / 4, including empty, duplicate and reordered inputs. It
+checks default capabilities before registration and after disconnection.
+Existing policy oracles retain exact election, topology, transport, fallback,
+pairability, generation, Direct endpoints and per-recipient plan behavior.
+All 466 scoped mutation sites remain included; 47 shards keep the modeled
+worst shard at `ceil(466/47) * 29 = 290` seconds.
+
+External-client assessment for F255–F257: connector reads at Rust
+`da8f2d16` (`src/protocol.rs`), .NET `e467c871`
+(`src/SignalFish.Client/Protocol/MessagesMesh.cs`) and Godot `00f75a6a`
+(`addons/signal_fish/protocol/sf_events.gd`) retain the same room baseline,
+ICE and session-plan surfaces. Each client is unaffected: no schema, encoding,
+negotiation, default, error, order, generation or reconnect rule changes.
+No client migration or tracking issue is needed. These are embedded allocation
+measurements; no remote latency improvement is claimed. Current-head hosted
+qualification is required before closing #1400–#1402. Both broader campaigns
+remain open.

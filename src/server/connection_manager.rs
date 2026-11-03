@@ -925,13 +925,23 @@ impl ConnectionManager {
             .unwrap_or(false)
     }
 
-    // Read the full negotiated protocol for a connection. Consumed by the
-    // session-plan/topology selection path.
+    /// Read an owned negotiation snapshot with the complete capability lists.
     pub fn protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.clients
             .get(player_id)
             .map(|conn| conn.protocol.clone())
             .unwrap_or_default()
+    }
+
+    /// Project one negotiation snapshot while borrowing its connection.
+    pub(super) fn project_protocol<R>(
+        &self,
+        player_id: &PlayerId,
+        project: impl FnOnce(&NegotiatedProtocol) -> R,
+    ) -> Option<R> {
+        self.clients
+            .get(player_id)
+            .map(|connection| project(&connection.protocol))
     }
 
     /// Record the last-reported data-path transport state for a connection

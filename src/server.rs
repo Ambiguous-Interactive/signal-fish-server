@@ -579,9 +579,17 @@ pub mod allocation_benchmark {
                             host: "127.0.0.1".to_string(),
                             port: 7777,
                         }),
-                        version: 3,
-                        transports: vec![Transport::Relay, Transport::WebRtc, Transport::Direct],
-                        topologies: vec![Topology::Relay, Topology::Host],
+                        capabilities: super::session_policy::SessionCapabilities::from(
+                            &super::NegotiatedProtocol {
+                                version: 3,
+                                transports: vec![
+                                    Transport::Relay,
+                                    Transport::WebRtc,
+                                    Transport::Direct,
+                                ],
+                                topologies: vec![Topology::Relay, Topology::Host],
+                            },
+                        ),
                     })
                     .collect(),
                 config: crate::config::SessionConfig {
@@ -627,8 +635,8 @@ pub mod allocation_benchmark {
             use super::session_policy::SessionPlanDecision;
             use crate::protocol::{PlayerId, SessionGeneration, Topology, Transport};
             for member in &mut self.members {
-                if mesh && !member.topologies.contains(&Topology::Mesh) {
-                    member.topologies.push(Topology::Mesh);
+                if mesh {
+                    member.capabilities.mesh_topology = true;
                 }
             }
             let decision = SessionPlanDecision {
@@ -642,6 +650,23 @@ pub mod allocation_benchmark {
             self.members = decision.members;
             plan
         }
+    }
+
+    /// Exercise the production session-member projection without publishing frames.
+    pub fn session_members_for_measurement(
+        server: &super::EnhancedGameServer,
+        players: &[crate::protocol::PlayerInfo],
+    ) -> usize {
+        std::hint::black_box(server.session_members_from(players)).len()
+    }
+
+    /// Exercise the production lobby ICE path with caller-owned room state.
+    pub fn pregather_for_measurement(
+        server: &super::EnhancedGameServer,
+        room: &crate::protocol::Room,
+        player: &crate::protocol::PlayerId,
+    ) -> Vec<crate::protocol::IceServer> {
+        server.pregather_ice_servers(room, player)
     }
 
     /// Measure the production JSON game-data sizing path.
@@ -1456,9 +1481,6 @@ impl EnhancedGameServer {
     }
 
     /// Fetch the negotiated protocol capabilities for a client (defaults to v2 relay-only).
-    ///
-    /// Built in P1; consumed by the P3 session-plan/topology selection path
-    /// (`session_policy::EnhancedGameServer::emit_session_plan`).
     pub(crate) fn client_protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.connection_manager.protocol(player_id)
     }

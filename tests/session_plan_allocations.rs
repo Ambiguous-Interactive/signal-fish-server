@@ -4,6 +4,8 @@ mod allocation_harness;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
+#[path = "live_p2p_allocations/setup_costs.rs"]
+mod setup_costs;
 
 use signal_fish_server::config::*;
 use signal_fish_server::database::DatabaseConfig;
@@ -400,6 +402,14 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "ice_eligibility_does_not_copy_capabilities",
+            setup_costs::ice_eligibility_does_not_copy_capabilities,
+        ),
+        allocation_harness::trial(
+            "session_selection_keeps_capabilities_inline",
+            setup_costs::session_selection_keeps_capabilities_inline,
+        ),
         allocation_harness::trial(
             "unready_start_skips_player_metadata",
             lobby_costs::unready_start_skips_player_metadata,
