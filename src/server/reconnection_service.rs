@@ -349,7 +349,7 @@ impl EnhancedGameServer {
         room_id: RoomId,
     ) -> Option<String> {
         let reconnection_manager = self.reconnection_manager.as_ref()?;
-        if self.client_protocol(player_id).version < 3 {
+        if !self.client_supports_v3(player_id) {
             return None;
         }
         Some(
@@ -1277,7 +1277,7 @@ impl EnhancedGameServer {
                     if let Some(records) = self.session_records() {
                         records.record_member_protocol_version(
                             room_id,
-                            self.client_protocol(current_player_id).version,
+                            self.client_protocol_version(current_player_id),
                         );
                     }
                     panic_recovery
