@@ -24,7 +24,7 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
             .build()
             .unwrap();
         runtime.block_on(async {
-            tokio::task::yield_now().await;
+            allocation_harness::warm_current_thread_runtime().await;
             let server = test_helpers::create_test_server().await;
             let host = Uuid::from_u128(1);
             let spectator = Uuid::from_u128(2);
@@ -249,10 +249,53 @@ fn print_stages(spectators: u128) {
     }
 }
 
+/// Bare task admission separates lazy native registry locks from room work.
+fn runtime_task_registry_initializes_each_shard_once() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::task::yield_now().await;
+        let mut profiles = Vec::with_capacity(8);
+        for _ in 0..8 {
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            tokio::spawn(std::future::ready(())).await.unwrap();
+            profiles.push(region.change());
+        }
+        println!("TASK_REGISTRY profiles={profiles:?}");
+        for index in 0..4 {
+            let cold = profiles[index];
+            let warm = profiles[index + 4];
+            #[cfg(target_os = "macos")]
+            {
+                assert_eq!(cold.allocations, warm.allocations + 1, "{profiles:?}");
+                assert_eq!(
+                    cold.bytes_allocated,
+                    warm.bytes_allocated + 64,
+                    "{profiles:?}"
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                assert_eq!(cold.allocations, warm.allocations, "{profiles:?}");
+                assert_eq!(cold.bytes_allocated, warm.bytes_allocated, "{profiles:?}");
+            }
+            assert_eq!(warm.allocations, 1, "{profiles:?}");
+            assert_eq!(warm.reallocations, 0, "{profiles:?}");
+        }
+    });
+}
+
 /// Run allocation histories without a concurrent test-runner thread.
 fn main() {
-    allocation_harness::run(
-        "spectator_admission_reuses_its_owned_room_and_roster",
-        spectator_admission_reuses_its_owned_room_and_roster,
-    );
+    allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "spectator_admission_reuses_its_owned_room_and_roster",
+            spectator_admission_reuses_its_owned_room_and_roster,
+        ),
+        allocation_harness::trial(
+            "runtime_task_registry_initializes_each_shard_once",
+            runtime_task_registry_initializes_each_shard_once,
+        ),
+    ]);
 }

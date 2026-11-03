@@ -32,3 +32,12 @@ pub fn block_on(future: impl std::future::Future<Output = ()>) {
         .unwrap()
         .block_on(future);
 }
+
+/// Initialize the current-thread runtime's four task-registry shards before measurement.
+#[allow(dead_code)]
+pub async fn warm_current_thread_runtime() {
+    tokio::task::yield_now().await;
+    for _ in 0..4 {
+        tokio::spawn(std::future::ready(())).await.unwrap();
+    }
+}
