@@ -14121,3 +14121,13 @@ Matched baseline/candidate inventories preserve every old mutation class and
 add only `SessionMember::refresh_protocol`.
 Valid and unusable Direct host endpoint reconnects preserve both recipients'
 exact plans and relay resets in Nextest `ef14cadf-4f5d-48f6-a733-05ea51365047`.
+
+PR #1391 review added a caller-level capability-refresh control. One slow
+incumbent blocks the first reconnect decision. A surviving peer then keeps its
+WebRTC capabilities or changes to relay-only before the routing retry. The
+committed plans retain the exact surviving routes and shared generation, and
+exclude the downgraded peer from both P2P peer lists. Removing only the caller's
+refresh loop fails with a stale peer in Nextest
+`bf3f4df8-2134-4fc1-89b2-95fd0d033590`. The restored caller passes the paired
+history in `def907cb-ed08-4bfe-88ab-4f92e3e701df`. This control adds no runtime
+instrumentation and does not change the allocation ceilings.

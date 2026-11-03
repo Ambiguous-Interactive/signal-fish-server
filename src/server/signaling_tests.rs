@@ -454,7 +454,8 @@ async fn finalized_reconnect_spectator_gets_public_lifecycle_without_session_pla
 async fn reconnect_notification_contains_current_metadata_for_members_and_spectators() {
     for (finalized, ready) in [(false, false), (false, true), (true, false)] {
         let server = create_test_server_with_session(mesh_session_config()).await;
-        let mut fixture = setup_mesh_reconnect_with_ready(&server, 2, 16, finalized, ready).await;
+        let mut fixture =
+            setup_mesh_reconnect_with_ready(&server, 2, 16, finalized, ready, 2).await;
         let mut spectator_rx = register_publication_spectator(&server, fixture.room_id).await;
         server
             .message_coordinator
@@ -1330,6 +1331,7 @@ async fn setup_mesh_reconnect(
         current_capacity,
         finalized,
         false,
+        2,
     )
     .await
 }
@@ -1340,6 +1342,7 @@ async fn setup_mesh_reconnect_with_ready(
     current_capacity: usize,
     finalized: bool,
     ready: bool,
+    max_players: u8,
 ) -> FinalizedReconnectFixture {
     let (existing, mut existing_rx) =
         register_client_with_queue_capacity(server, existing_capacity).await;
@@ -1349,7 +1352,7 @@ async fn setup_mesh_reconnect_with_ready(
     server.set_client_protocol(&reconnecting, v3_webrtc());
     server.set_client_protocol(&current, v3_webrtc());
 
-    let room_id = create_db_room_with_max(server, existing, 2).await;
+    let room_id = create_db_room_with_max(server, existing, max_players).await;
     store_active_plan(server, room_id, Topology::Mesh, Transport::WebRtc, None);
     let reconnecting_info = player_info(reconnecting, "reconnecting");
     server
@@ -7648,5 +7651,136 @@ async fn reconnect_publication_preserves_validated_direct_host_endpoints() {
         assert!(
             matches!(stored.connection_info, Some(ConnectionInfo::Direct {host, port}) if host == host_address && port == 7777)
         );
+    }
+}
+
+/// #1390: retries must reread capabilities after the first decision was built.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_routing_retry_applies_changed_survivor_capabilities() {
+    for downgrade in [false, true] {
+        let server = create_test_server_with_config(ServerConfig {
+            websocket_config: WebSocketConfig {
+                slow_consumer_timeout_ms: 10,
+                ..WebSocketConfig::default()
+            },
+            ..ServerConfig::default()
+        })
+        .await;
+        let mut fixture = setup_mesh_reconnect_with_ready(&server, 1, 16, true, false, 3).await;
+        let (survivor, mut survivor_rx) = register_client(&server).await;
+        server.set_client_protocol(&survivor, v3_webrtc());
+        assert!(server
+            .database
+            .add_player_to_room(&fixture.room_id, player_info(survivor, "survivor"))
+            .await
+            .unwrap());
+        server
+            .connection_manager
+            .assign_client_to_room(&survivor, fixture.room_id)
+            .await;
+        assert!(server
+            .message_coordinator
+            .try_send_to_player(&fixture.existing, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap());
+        let reconnect = {
+            let server = Arc::clone(&server);
+            let current = fixture.current;
+            let reconnecting = fixture.reconnecting;
+            let room_id = fixture.room_id;
+            let token = fixture.token.clone();
+            tokio::spawn(async move {
+                server
+                    .handle_reconnect(&current, &reconnecting, &room_id, &token)
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(1), async {
+            while server
+                .metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the first decision must wait for the slow incumbent");
+        assert!(!reconnect.is_finished());
+        if downgrade {
+            server.set_client_protocol(&survivor, v3_relay_only());
+        }
+        assert!(timeout(Duration::from_secs(1), reconnect)
+            .await
+            .unwrap()
+            .unwrap());
+        let baseline = recv(&mut fixture.current_rx).await;
+        assert!(
+            matches!(baseline.as_ref(), ServerMessage::Reconnected(payload)
+            if payload.player_id == fixture.reconnecting && payload.current_players.len() == 3)
+        );
+        let actor_plan = recv(&mut fixture.current_rx).await;
+        let ServerMessage::SessionPlan(actor_plan) = actor_plan.as_ref() else {
+            panic!("{actor_plan:?}");
+        };
+        let lifecycle = recv(&mut survivor_rx).await;
+        assert!(
+            matches!(lifecycle.as_ref(), ServerMessage::PlayerReconnected {player_id, player: Some(player), ..}
+            if *player_id == fixture.reconnecting && player.id == fixture.reconnecting)
+        );
+        let survivor_plan = recv(&mut survivor_rx).await;
+        let ServerMessage::SessionPlan(survivor_plan) = survivor_plan.as_ref() else {
+            panic!("{survivor_plan:?}");
+        };
+        assert_eq!(actor_plan.generation, survivor_plan.generation);
+        for (recipient, plan) in [
+            (fixture.reconnecting, actor_plan),
+            (survivor, survivor_plan),
+        ] {
+            assert_eq!(plan.topology, Topology::Mesh);
+            assert_eq!(plan.transport, Transport::WebRtc);
+            assert_eq!(plan.fallback, Transport::Relay);
+            assert_eq!(plan.host, None);
+            assert_eq!(plan.direct_endpoint, None);
+            let expected = if downgrade {
+                Vec::new()
+            } else {
+                vec![if recipient == survivor {
+                    fixture.reconnecting
+                } else {
+                    survivor
+                }]
+            };
+            assert_eq!(
+                plan.peers
+                    .iter()
+                    .map(|peer| peer.player_id)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(plan
+                .peers
+                .iter()
+                .all(|peer| peer.initiate == (recipient < peer.player_id)));
+        }
+        let mut routed = server
+            .message_coordinator
+            .routed_player_ids(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        routed.sort_unstable();
+        let mut expected_routed = vec![fixture.reconnecting, survivor];
+        expected_routed.sort_unstable();
+        assert_eq!(routed, expected_routed);
+        assert!(matches!(
+            recv(&mut fixture.existing_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+        assert_silent(&mut fixture.existing_rx).await;
+        assert_silent(&mut fixture.current_rx).await;
+        assert_silent(&mut survivor_rx).await;
     }
 }
