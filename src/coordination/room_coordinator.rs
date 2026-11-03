@@ -769,6 +769,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         // Captured under the lock for the post-release broadcast.
         let mut relay_type_for_broadcast: Option<String> = None;
         let mut lobby_state_for_finalize = None;
+        let mut members_for_finalize = None;
         let result = async {
             let room = match self.database.get_room_start_snapshot(room_id).await {
                 Ok(Some(room)) => room,
@@ -791,34 +792,52 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 }
             }
 
-            let room_players = match self.database.get_room_players(room_id).await {
-                Ok(players) => players,
-                Err(e) => return Err(e.context("failed to load room membership for game start")),
-            };
-            let routed_players = self.coordinator.routed_player_ids(room_id).await?;
-            let room_players: Vec<PlayerInfo> = match routed_players {
-                Some(routed_players) => {
-                    let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
-                    room_players
-                        .into_iter()
-                        .filter(|player| routed.contains(&player.id))
-                        .collect()
-                }
-                None => room_players,
-            };
+            let member_ids = self
+                .database
+                .get_room_player_ids(room_id)
+                .await
+                .map_err(|error| error.context("failed to load room membership for game start"))?;
+            let routed = self
+                .coordinator
+                .routed_player_ids(room_id)
+                .await?
+                .map(|ids| ids.into_iter().collect::<HashSet<PlayerId>>());
+            let mut member_ids: Vec<_> = member_ids
+                .into_iter()
+                .filter(|id| routed.as_ref().is_none_or(|routed| routed.contains(id)))
+                .collect();
 
-            // All current players must be ready (min 1 — solo is allowed).
             let ready_map = self.ready_players.read().await;
             let ready_set = ready_map.get(room_id);
-            let all_ready = !room_players.is_empty()
-                && room_players
+            let all_ready = !member_ids.is_empty()
+                && member_ids
                     .iter()
-                    .all(|p| ready_set.is_some_and(|set| set.contains(&p.id)));
+                    .all(|id| ready_set.is_some_and(|set| set.contains(id)));
             drop(ready_map);
 
             if !all_ready {
                 return Ok(StartGameOutcome::NotReady);
             }
+
+            let mut room_players = self
+                .database
+                .get_room_players(room_id)
+                .await
+                .map_err(|error| error.context("failed to load room membership for game start"))?;
+            room_players.retain(|player| {
+                routed
+                    .as_ref()
+                    .is_none_or(|routed| routed.contains(&player.id))
+            });
+            member_ids.sort_unstable();
+            if room_players.len() != member_ids.len()
+                || room_players
+                    .iter()
+                    .any(|player| member_ids.binary_search(&player.id).is_err())
+            {
+                anyhow::bail!("room membership changed while preparing game start");
+            }
+            members_for_finalize = Some(member_ids);
 
             Ok(StartGameOutcome::Started(FinalizedRoom {
                 game_name: room.game_name,
@@ -841,8 +860,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 PeerConnectionInfo::from_players(&finalized.members, &relay_type);
             let game_start_message =
                 Arc::new(crate::protocol::ServerMessage::GameStarting { peer_connections });
-            let expected_members: Vec<PlayerId> =
-                finalized.members.iter().map(|member| member.id).collect();
+            let Some(expected_members) = members_for_finalize.take() else {
+                anyhow::bail!("start candidate omitted its checked member identities");
+            };
             let finalize_expectation = crate::database::FinalizeRoomGameExpectation {
                 members: expected_members.clone(),
                 authority_player: finalized.authority_player,
@@ -991,12 +1011,12 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         // never reported as ready. A failed membership read fails closed to an
         // empty set: reporting the unfiltered set would fabricate readiness for
         // departed members precisely when the data is known-stale.
-        match self.database.get_room_player_ids(room_id).await {
-            Ok(players) => {
-                let current: HashSet<PlayerId> = players.into_iter().collect();
-                ready_players.retain(|id| current.contains(id));
-                ready_players
-            }
+        match self
+            .database
+            .retain_room_player_ids(room_id, &mut ready_players)
+            .await
+        {
+            Ok(()) => ready_players,
             Err(error) => {
                 tracing::warn!(
                     %room_id,
@@ -2635,6 +2655,114 @@ mod tests {
             durable, expected,
             "a finalized room must report its durable ready set"
         );
+    }
+
+    /// Reject identity drift or storage failure between the ready check and full snapshot.
+    #[cfg(signal_fish_repository_tests)]
+    #[tokio::test]
+    async fn start_revalidates_members_after_lean_readiness_check() {
+        for change in ["remove", "replace", "add", "read_error", "metadata"] {
+            let database = Arc::new(InMemoryDatabase::new());
+            let messages = Arc::new(RecordingMessageCoordinator::default());
+            let coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+                messages.clone(),
+                database.clone(),
+                None,
+            ));
+            let actor = PlayerId::from_u128(1);
+            let other = PlayerId::from_u128(2);
+            let room = database
+                .create_room(
+                    "start-drift".into(),
+                    None,
+                    4,
+                    false,
+                    actor,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            coordinator
+                .ready_players
+                .write()
+                .await
+                .insert(room.id, HashSet::from([actor]));
+            database.pause_next_get_room_players_for_test();
+            let start = {
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move { coordinator.handle_start_game(&room.id, &actor).await })
+            };
+            timeout(
+                Duration::from_secs(1),
+                database.wait_for_paused_get_room_players_for_test(),
+            )
+            .await
+            .unwrap();
+            database.pause_next_get_room_players_for_test();
+            database.release_paused_get_room_players_for_test();
+            timeout(
+                Duration::from_secs(1),
+                database.wait_for_paused_get_room_players_for_test(),
+            )
+            .await
+            .unwrap();
+            match change {
+                "remove" | "replace" => {
+                    database
+                        .remove_player_from_room(&room.id, &actor)
+                        .await
+                        .unwrap();
+                }
+                "read_error" => database.fail_get_room_players_for_test(true),
+                "metadata" => {
+                    database
+                        .update_player_connection_info(
+                            &room.id,
+                            &actor,
+                            crate::protocol::ConnectionInfo::Custom {
+                                data: serde_json::json!({"exact": "fresh"}),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            if matches!(change, "replace" | "add") {
+                database
+                    .add_player_to_room(&room.id, player_fixture(other, "Other", false, None))
+                    .await
+                    .unwrap();
+            }
+            database.release_paused_get_room_players_for_test();
+            let outcome = timeout(Duration::from_secs(1), start)
+                .await
+                .unwrap()
+                .unwrap();
+            if change == "metadata" {
+                let StartGameOutcome::Started(finalized) = outcome.unwrap() else {
+                    panic!("metadata-only change must start");
+                };
+                assert_eq!(finalized.members.len(), 1);
+                assert_eq!(finalized.members[0].id, actor);
+                assert!(
+                    matches!(&finalized.members[0].connection_info, Some(crate::protocol::ConnectionInfo::Custom { data }) if *data == serde_json::json!({"exact": "fresh"}))
+                );
+            } else {
+                assert!(outcome.is_err(), "{change}: {outcome:?}");
+                assert!(messages.broadcasts().await.is_empty(), "{change}");
+                assert_ne!(
+                    database.get_room_lobby_state(&room.id).await.unwrap(),
+                    Some(crate::protocol::LobbyState::Finalized)
+                );
+                assert_eq!(
+                    coordinator.ready_players.read().await[&room.id],
+                    HashSet::from([actor])
+                );
+            }
+        }
     }
 
     /// A membership read must not retain the ready-map lock or reread live readiness.
