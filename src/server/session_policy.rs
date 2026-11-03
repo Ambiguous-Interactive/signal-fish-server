@@ -1688,12 +1688,21 @@ fn compose_ice_servers_for(
     recipient: PlayerId,
     now_unix: i64,
 ) -> (Vec<IceServer>, u64) {
-    let mut ice = session_config.ice_servers.clone();
     let turn_derived = crate::security::build_ice_servers(turn_config, recipient, now_unix);
     let minted = turn_derived
         .iter()
         .filter(|server| server.username.is_some())
         .count() as u64;
+    if session_config.ice_servers.is_empty() {
+        return (turn_derived, minted);
+    }
+    let mut ice = Vec::with_capacity(
+        session_config
+            .ice_servers
+            .len()
+            .saturating_add(turn_derived.len()),
+    );
+    ice.extend(session_config.ice_servers.iter().cloned());
     ice.extend(turn_derived);
     (ice, minted)
 }
