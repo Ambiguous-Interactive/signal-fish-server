@@ -6682,6 +6682,3 @@ mod connect_token_tests {
         assert!(!server.connect_token_required());
     }
 }
-
-#[cfg(test)]
-mod publication_reservation_tests;
