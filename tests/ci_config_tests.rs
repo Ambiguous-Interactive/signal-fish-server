@@ -34247,7 +34247,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 46 shards, ceil(455/46) * 29s remains 290s.
 // 466 (was 460): compact session capability projections add six sites (#1402).
 // With 47 shards, ceil(466/47) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 466;
+// 467 (was 466): the final-capacity publication constructor adds one site (#1414).
+// With 47 shards, ceil(467/47) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 467;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
