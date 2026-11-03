@@ -14495,3 +14495,86 @@ ready membership and ICE values remain identical. .NET needs no change:
 `LobbyStateChanged` fields and readiness semantics remain identical. Godot
 needs no change: lobby events, ICE ordering and session-plan fields remain
 identical. No schema, negotiation or migration change is introduced.
+
+### F264–F266 — Live P2P publication costs
+
+Issues #1412, #1413 and #1414; source `1ad5ffcf`. Exact-membership room
+transactions copied their owned seated batch map and every frame vector on
+each reservation attempt. They now borrow those batches while keeping
+observer batches separate. No borrowed guard crosses an added await.
+
+The isolated complete two-frame, 255-player transaction drops from 781
+allocations and 625,033 allocated bytes to 525 allocations and 587,665 bytes.
+The all-feature layout uses 604,041 bytes with the same 525 allocations.
+Controls include two and 16 players and verify the exact frame Arc identities,
+per-recipient order, outcome and empty trailing queues. The original batch
+copy exceeds the allocation ceiling. This is allocation evidence, not a
+throughput or network-latency measurement.
+
+Reservation validation previously scanned every reservation for every current
+recipient twice under the routing gate. Reservations are now sorted once
+before that gate, then searched by player ID and checked against the current
+sender channel. The exact member comparison and independent observer retry
+remain in place. Empty batches still reserve and validate their sender identity.
+A matched debug control with 255 members and 100 transactions, each with two
+validation passes, measures 43.8 ms for the original scan and 24.8 ms for sorted
+lookup, including one sort per transaction.
+These local timings do not establish a production capacity result.
+
+The review follow-up counts key comparisons through the same generic lookup
+used by production. The production key projection is a zero-sized function
+item; counting occurs only in the test closure. For 100 transactions with two
+255-player validations each, the original scan makes 6,528,000 comparisons.
+The repaired lookup makes 459,000, within the asserted per-recipient logarithmic
+bound. Sort key reads have a separate bound and timer; lookup timers exclude
+roster rotation on both paths. No elapsed-time threshold affects pass/fail.
+Restoring a linear search in the production helper fails the comparison bound
+with 6,528,000 comparisons. The complete publication control still measures
+525 allocations after the generic key projection is introduced.
+
+A later review restores the original observer-first batch precedence in one
+shared lookup used for both reservation size and phase delivery. A two-frame
+seated batch and one-frame observer batch for the same identity select the
+observer frame; restoring seated-first precedence fails that control.
+The retry allocation history parks a seated queue, admits an observer after
+the first recipient snapshot, then releases the queue. The single commit hook
+requires exactly 510 canceled permits, proving the old 255-player reservation
+set was released before retry. Every seated frame keeps its exact Arc identity
+and order; the observer receives its baseline and one lifecycle frame.
+The complete call measures 1,060 allocations against a 1,120 ceiling. Adding a
+seated-map clone only inside the observer-mismatch retry branch produces 1,316
+allocations and fails. The original no-retry 530-allocation ceiling stays intact.
+
+The macOS full matrix at `5467674b` passed the retry control but failed the
+no-retry control at 534 allocations, versus 525 on Linux. Each transaction
+created and dropped a false watch channel. Tokio's watch sender and receiver
+destructors initialize nine native notification mutexes on macOS. A separate
+channel-lifecycle probe asserts ten allocations on macOS and one on Linux and
+Windows; hosted macOS confirmation of this probe is pending.
+The coordinator now retains one unchanged watch sender and subscribes per
+transaction. It never sends a drain update. Linux measures 524 publication
+allocations and 1,059 retry allocations. The no-retry ceiling tightens to 524;
+the retry workload and its 1,120 ceiling remain unchanged. This removes the
+per-publication channel setup instead of excluding it from measurement.
+Restoring the per-call channel produces 525 Linux allocations and fails the
+tighter bound. The original seated-clone and lookup controls remain in place.
+
+Start and finalized-join incumbent batches previously allocated one frame slot,
+then grew when adding the optional v3 plan. A shared constructor reserves the
+final one- or two-frame size. Its original two-frame history reallocates once;
+the repaired constructor allocates once without reallocating. Both histories
+check exact Arc identity and order. v2 members keep their single lifecycle
+frame, and v3 members keep the same authoritative plan.
+
+Focused transaction controls retain phase-zero-before-phase-one ordering,
+minimum queue capacity, empty member batches, sender replacement, queue
+failure, hook rejection/error and observer independence. F264–F266 advance
+the open campaigns #636 and #826.
+
+External-client assessment inspected Rust `src/protocol.rs` blob `c20396a3`,
+.NET `MessagesGameStart.cs` blob `6f2f7318` and `MessagesMesh.cs` blob `5ce1a0b8`,
+and Godot `sf_events.gd` blob `5c4e66e6`. Rust needs no change because plan,
+lifecycle and generation values remain identical. .NET needs no change because
+GameStarting data and negotiated v3 messages stay identical. Godot needs no
+change because session events, per-recipient frame order and peer fields stay
+identical. No schema, negotiation or migration change is introduced.

@@ -124,6 +124,17 @@ impl RoomRecipientMessages {
         Self::from_first_phase(player_id, 0, messages)
     }
 
+    pub(crate) fn with_followup(
+        player_id: PlayerId,
+        first: Arc<ServerMessage>,
+        followup: Option<Arc<ServerMessage>>,
+    ) -> Self {
+        let mut messages = Vec::with_capacity(if followup.is_some() { 2 } else { 1 });
+        messages.push(first);
+        messages.extend(followup);
+        Self::in_order(player_id, messages)
+    }
+
     pub(crate) fn phase_count(&self) -> usize {
         self.first_phase.saturating_add(self.messages.len())
     }

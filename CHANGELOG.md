@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce temporary memory use and peer lookup work for live P2P starts, joins, and session-plan updates
+  (#1412, #1413, #1414).
 - Reduce temporary memory used for live P2P ready toggles, lobby entry, and ICE lists (#1408, #1409, #1410).
 - Reduce memory used for live P2P seat fills, session version tracking, and reconnect-token checks
   (#1404, #1405, #1406).

@@ -6,6 +6,8 @@ mod allocation_harness;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
+#[path = "live_p2p_allocations/publication_costs.rs"]
+mod publication_costs;
 #[path = "live_p2p_allocations/readiness_costs.rs"]
 mod readiness_costs;
 #[path = "live_p2p_allocations/setup_costs.rs"]
@@ -406,6 +408,18 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "observer_retry_reuses_owned_seated_batches",
+            publication_costs::observer_retry_reuses_owned_seated_batches,
+        ),
+        allocation_harness::trial(
+            "two_phase_batch_reserves_once",
+            publication_costs::two_phase_batch_reserves_once,
+        ),
+        allocation_harness::trial(
+            "transaction_reuses_owned_batches",
+            publication_costs::transaction_reuses_owned_batches,
+        ),
         allocation_harness::trial(
             "ice_composition_reserves_combined_list",
             setup_costs::ice_composition_reserves_combined_list,

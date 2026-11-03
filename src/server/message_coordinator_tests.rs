@@ -5507,3 +5507,6 @@ async fn routed_pair_waits_for_the_routing_write_before_reading_both_routes() {
     drop(held);
     assert_eq!(read.await.unwrap(), Some([true, true]));
 }
+
+#[path = "../../tests/support/publication_reservation_tests.rs"]
+mod publication_reservation_tests;

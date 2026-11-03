@@ -635,9 +635,7 @@ impl EnhancedGameServer {
                                         plan.into_iter().collect(),
                                     )
                                 } else {
-                                    let mut messages = vec![Arc::clone(&player_joined)];
-                                    messages.extend(plan);
-                                    RoomRecipientMessages::in_order(member.player_id, messages)
+                                    RoomRecipientMessages::with_followup(member.player_id, Arc::clone(&player_joined), plan)
                                 }
                             })
                             .collect();

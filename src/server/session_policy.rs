@@ -877,11 +877,10 @@ impl EnhancedGameServer {
                 .members
                 .iter()
                 .map(|member| {
-                    let mut messages = vec![Arc::clone(&game_starting)];
                     let supports_v3 = decision.members.iter().any(|candidate| {
                         candidate.player_id == member.id && candidate.supports_v3()
                     });
-                    if supports_v3 {
+                    let followup = if supports_v3 {
                         let (ice_servers, minted) = now_unix.map_or_else(
                             || (Vec::new(), 0),
                             |now| {
@@ -894,15 +893,17 @@ impl EnhancedGameServer {
                             },
                         );
                         turn_credentials_issued = turn_credentials_issued.saturating_add(minted);
-                        messages.push(Arc::new(ServerMessage::SessionPlan(Box::new(
+                        Some(Arc::new(ServerMessage::SessionPlan(Box::new(
                             decision.plan_for(member.id, ice_servers),
-                        ))));
-                    }
-                    RoomRecipientMessages {
-                        player_id: member.id,
-                        first_phase: 0,
-                        messages,
-                    }
+                        ))))
+                    } else {
+                        None
+                    };
+                    RoomRecipientMessages::with_followup(
+                        member.id,
+                        Arc::clone(&game_starting),
+                        followup,
+                    )
                 })
                 .collect();
 
