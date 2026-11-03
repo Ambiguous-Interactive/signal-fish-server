@@ -8,6 +8,7 @@ use signal_fish_server::server::InMemoryMessageCoordinator;
 use std::sync::Arc;
 
 pub(crate) fn transaction_reuses_owned_batches() {
+    watch_channel_lifecycle_cost();
     for count in [2_u128, 16, 255] {
         allocation_harness::block_on(async {
             allocation_harness::warm_current_thread_runtime().await;
@@ -61,7 +62,7 @@ pub(crate) fn transaction_reuses_owned_batches() {
                     println!("PUBLICATION_COST members={count} stats={stats:?}");
                     if count == 255 {
                         assert!(
-                            stats.allocations <= 530,
+                            stats.allocations <= 524,
                             "publication copied seated batches: {stats:?}"
                         );
                     }
@@ -78,6 +79,22 @@ pub(crate) fn transaction_reuses_owned_batches() {
             }
         });
     }
+}
+
+fn watch_channel_lifecycle_cost() {
+    let region = stats_alloc::Region::new(ALLOCATOR);
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    assert!(!*receiver.borrow());
+    drop(receiver);
+    drop(sender);
+    let stats = region.change();
+    println!("PUBLICATION_WATCH_LIFECYCLE stats={stats:?}");
+    // A new watch channel owns one allocation on Linux/Windows. macOS also
+    // initializes nine native notification mutexes when its halves are dropped.
+    #[cfg(target_os = "macos")]
+    assert_eq!(stats.allocations, 10, "watch lifecycle: {stats:?}");
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    assert_eq!(stats.allocations, 1, "watch lifecycle: {stats:?}");
 }
 
 pub(crate) fn two_phase_batch_reserves_once() {

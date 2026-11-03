@@ -14545,6 +14545,20 @@ The complete call measures 1,060 allocations against a 1,120 ceiling. Adding a
 seated-map clone only inside the observer-mismatch retry branch produces 1,316
 allocations and fails. The original no-retry 530-allocation ceiling stays intact.
 
+The macOS full matrix at `5467674b` passed the retry control but failed the
+no-retry control at 534 allocations, versus 525 on Linux. Each transaction
+created and dropped a false watch channel. Tokio's watch sender and receiver
+destructors initialize nine native notification mutexes on macOS. A separate
+channel-lifecycle probe asserts ten allocations on macOS and one on Linux and
+Windows; hosted macOS confirmation of this probe is pending.
+The coordinator now retains one unchanged watch sender and subscribes per
+transaction. It never sends a drain update. Linux measures 524 publication
+allocations and 1,059 retry allocations. The no-retry ceiling tightens to 524;
+the retry workload and its 1,120 ceiling remain unchanged. This removes the
+per-publication channel setup instead of excluding it from measurement.
+Restoring the per-call channel produces 525 Linux allocations and fails the
+tighter bound. The original seated-clone and lookup controls remain in place.
+
 Start and finalized-join incumbent batches previously allocated one frame slot,
 then grew when adding the optional v3 plan. A shared constructor reserves the
 final one- or two-frame size. Its original two-frame history reallocates once;

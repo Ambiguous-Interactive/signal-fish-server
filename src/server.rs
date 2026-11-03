@@ -2389,6 +2389,9 @@ pub struct InMemoryMessageCoordinator {
     metrics: Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: Duration,
     room_event_sequencer: Arc<RoomEventSequencer>,
+    // Exact publications have no external drain signal. Keep this unchanged
+    // sender alive so each call can subscribe without building a new channel.
+    publication_drain: watch::Sender<bool>,
     #[cfg(test)]
     fail_room_transactions: AtomicBool,
     #[cfg(test)]
@@ -2913,6 +2916,7 @@ impl InMemoryMessageCoordinator {
             metrics,
             slow_consumer_timeout,
             room_event_sequencer: Arc::new(RoomEventSequencer::default()),
+            publication_drain: watch::Sender::new(false),
             #[cfg(test)]
             fail_room_transactions: AtomicBool::new(false),
             #[cfg(test)]
@@ -4950,7 +4954,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .max(spectator_messages.len());
         let mut before_send = Some(before_send);
         let mut after_first_phase = Some(after_first_phase);
-        let (_drain_tx, drain) = watch::channel(false);
+        let drain = self.publication_drain.subscribe();
         let should_send = || true;
 
         loop {
