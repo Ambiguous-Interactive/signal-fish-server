@@ -68,6 +68,17 @@ pub struct RoomPlayerSnapshot {
     pub authority_player: Option<PlayerId>,
 }
 
+/// Restored actor and application ownership from one room storage read.
+#[derive(Debug, Clone)]
+pub struct RoomReconnectSnapshot {
+    /// Current room code for the completed reconnect log.
+    pub code: String,
+    /// Application that owns this room.
+    pub application_id: Option<Uuid>,
+    /// Restored actor, or `None` when its durable membership is absent.
+    pub player: Option<PlayerInfo>,
+}
+
 /// Result of atomically transitioning a room into the finalized state.
 ///
 /// Callers use this compare-and-set result to ensure only the winner publishes
@@ -567,6 +578,23 @@ pub trait GameDatabase: Send + Sync {
             .map(|mut room| RoomPlayerSnapshot {
                 player: room.players.remove(player_id),
                 authority_player: room.authority_player,
+            }))
+    }
+
+    /// Read restored membership and application ownership atomically.
+    /// Pending rooms, missing rooms and storage errors match [`Self::get_room_by_id`].
+    async fn get_room_reconnect_snapshot(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<RoomReconnectSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|mut room| RoomReconnectSnapshot {
+                code: room.code,
+                application_id: room.application_id,
+                player: room.players.remove(player_id),
             }))
     }
 
@@ -2413,6 +2441,25 @@ impl GameDatabase for InMemoryDatabase {
             }))
     }
 
+    async fn get_room_reconnect_snapshot(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<RoomReconnectSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomReconnectSnapshot {
+                code: room.code.clone(),
+                application_id: room.application_id,
+                player: room.players.get(player_id).cloned(),
+            }))
+    }
+
     /// Check all stored room rows without copying room or player state.
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool> {
         #[cfg(test)]
@@ -3548,6 +3595,53 @@ mod tests {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         database.delete_room(&room.id).await.unwrap();
         assert_eq!(database.get_room_code(&room.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn reconnect_projection_preserves_room_read_errors_and_freshness() {
+        let database = InMemoryDatabase::new();
+        let actor = PlayerId::from_u128(1);
+        let room = database
+            .create_room(
+                "reconnect-projection".into(),
+                None,
+                4,
+                true,
+                actor,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        database.pause_next_get_room_by_id_for_test();
+        let mut read = Box::pin(database.get_room_reconnect_snapshot(&room.id, &actor));
+        assert!(futures_util::poll!(read.as_mut()).is_pending());
+        let application = Uuid::from_u128(99);
+        database
+            .set_room_application_id(&room.id, application)
+            .await
+            .unwrap();
+        database
+            .update_room_code(&room.id, "FRESH1".into())
+            .await
+            .unwrap();
+        database.release_paused_get_room_by_id_for_test();
+        let actual = read.await.unwrap().unwrap();
+        assert_eq!(actual.application_id, Some(application));
+        assert_eq!(actual.code, "FRESH1");
+        assert_eq!(actual.player.unwrap().id, actor);
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(database
+            .get_room_reconnect_snapshot(&room.id, &actor)
+            .await
+            .is_err());
+        assert!(database
+            .get_room_reconnect_snapshot(&RoomId::nil(), &actor)
+            .await
+            .is_err());
     }
 
     /// Background metrics must not consume pauses or observations for room operations.

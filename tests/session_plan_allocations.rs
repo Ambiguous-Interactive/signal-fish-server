@@ -384,8 +384,13 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
         });
     }
     let baseline = profiles[0].bytes_allocated;
+    let allowed_copies = match (actor_name, reconnect) {
+        (true, true) => 8,
+        (true, false) => 9,
+        (false, _) => 3,
+    };
     for (bytes, stats) in [0, 1024, 64 * 1024].into_iter().zip(profiles) {
-        assert!(stats.bytes_allocated <= baseline + (if actor_name { 9 } else if reconnect { 5 } else { 3 }) * bytes + 1024,
+        assert!(stats.bytes_allocated <= baseline + allowed_copies * bytes + 1024,
                 "redundant membership snapshot: reconnect={reconnect} bytes={bytes} baseline={baseline} stats={stats:?}");
     }
 }

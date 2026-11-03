@@ -14043,3 +14043,101 @@ Matched original/candidate mutation inventories report 455 / 456 sites. Every
 old mutation class remains; the selection actor search adds one equality site.
 The constant now matches 456. The 46 shards and 29-second per-mutant budget
 still yield at most ten sites, or 290 seconds, below the five-minute target.
+
+### F246 — Reconnect post-restore read copies unrelated members
+
+Scope: #1388, #636 and #826, session 612, baseline `22c99aad`.
+
+After restoring a seat and its authority, reconnect read a complete room for
+application adoption, actor recovery and the completion log. The new atomic
+projection reads only application ownership, room code and the restored actor.
+It preserves missing rooms, storage errors and pending-room visibility. Its
+trait default retains the complete-read semantics for custom database backends.
+
+The complete two-player Mesh/WebRTC reconnect varies one incumbent Custom
+payload over 0 / 1,024 / 65,536 bytes. Original allocated bytes are
+34,777 / 39,897 / 362,457. With only this repair they are
+32,859 / 36,955 / 295,003. The four-copy ceiling fails on the original source
+in Nextest `2f5cf5c8-fa94-4e37-8c2a-837726354495` and passes in
+`dc3d27b2-0992-442f-9235-d73cda930b50`.
+
+### F247 — Reconnect publication retains unused legacy metadata
+
+Scope: #1389, #636 and #826, session 612.
+
+The baseline builder copied all response players for subsequent publication.
+Publication now retains only session selection fields and one complete actor
+for its lifecycle message. Validated Direct endpoints, names, join times and
+authority stay available. The baseline and stored legacy metadata stay intact.
+
+With F246 applied, the three-copy Custom-payload ceiling fails in Nextest
+`7b718562-0899-412b-88cb-65c0d96d29e5`. After this repair, allocated bytes are
+32,351 / 35,423 / 228,959 for the same complete reconnect and payload sizes.
+It passes in Nextest `3721294f-9918-4c08-9f4e-ef38c4babefa`.
+
+### F248 — Reconnect selection duplicates owned member names
+
+Scope: #1390, #636 and #826, session 612.
+
+The publication job copied retained member names when creating each session
+decision. It now moves the owned selection input into that decision. A routing
+retry recovers the owned members, filters departed peers and refreshes every
+remaining member's negotiated capabilities before selecting the next decision.
+The actor lifecycle retains its complete failure-recovery metadata.
+
+The complete reconnect varies its actor name over 5 / 1,029 / 65,541 bytes
+with an explicitly raised fixture limit. With F246 and F247 applied, allocated
+bytes are 32,351 / 41,567 / 622,175. The eight-copy name ceiling fails in
+Nextest `86002643-0ecb-437a-bb0c-0a7c02136c2d`. Revised bytes are
+32,350 / 40,542 / 556,638. Both final reconnect ceilings pass in Nextest
+`06843136-7b84-46fe-b57c-7991ec9baa92`. The default name limit stays 32 bytes.
+
+These allocation histories preserve exact actor names and epochs, rotated token
+presence, baseline-before-plan and lifecycle-before-plan order, shared generation,
+peer sets and offer roles. They measure embedded server allocation work, not
+remote gameplay throughput or socket latency. Projection controls retain atomic
+freshness across a paused read, error propagation, pending and missing rooms,
+missing actors, application ownership and independence from unrelated metadata.
+
+External-client assessment: Rust `src/protocol.rs` at `da8f2d16`, .NET
+`MessagesPlayers.cs` at `e467c871`, and Godot `sf_events.gd` at `99be9be6`
+retain the same baselines, lifecycle snapshots, epochs and session plans.
+All three clients are unaffected: no schema, encoding, default, negotiation,
+ordering, error or reconnect rule changes. No migration or tracking issue is
+required. The additive database projection is a server backend API.
+
+The scoped mutation inventory grows from 456 to 457 sites. The new site is
+capability refresh. The inventory constant changes with it; 46 shards and a
+29-second per-mutant budget still produce a worst shard of ten mutants, or
+290 seconds, below the five-minute target. Hosted qualification and review
+remain required for the published head.
+
+Local qualification: 43 reconnect, routing retry, baseline failure, replay,
+authority restore and panic-recovery controls pass in Nextest
+`899720f8-3799-4ba0-af50-e3eba1030bf8`. Four complete allocation histories pass
+with all features in `ab60a3b0-5091-435d-a78f-ba245633a3c6`. The storage
+projection allocation control passes in `efa154e8-9267-4a27-849d-1e31a6c49fb8`.
+Matched baseline/candidate inventories preserve every old mutation class and
+add only `SessionMember::refresh_protocol`.
+Valid and unusable Direct host endpoint reconnects preserve both recipients'
+exact plans and relay resets in Nextest `ef14cadf-4f5d-48f6-a733-05ea51365047`.
+
+PR #1391 review added a caller-level capability-refresh control. One slow
+incumbent blocks the first reconnect decision. A surviving peer then keeps its
+WebRTC capabilities or changes to relay-only before the routing retry. The
+committed plans retain the exact surviving routes and shared generation, and
+exclude the downgraded peer from both P2P peer lists. Removing only the caller's
+refresh loop fails with a stale peer in Nextest
+`bf3f4df8-2134-4fc1-89b2-95fd0d033590`. The restored caller passes the paired
+history in `def907cb-ed08-4bfe-88ab-4f92e3e701df`. This control adds no runtime
+instrumentation and does not change the allocation ceilings.
+
+Hosted package qualification found a test-only scope error at the first head:
+the new storage control called a repository-only fault helper from a test that
+also ships in the package. Linux job `125638103975`, macOS `125638104053`,
+Windows `125638103893`, MSRV `125638103778` and coverage `125638103836` all
+reported the same `E0599` in the package compile control. The test now sets its
+existing private fault flag directly, as neighboring package-compatible tests
+do. No test is excluded and no production behavior changes.
+The unchanged package inventory and strict archive compile control passes after
+this correction in Nextest `8a92e2de-07a9-40a5-9c03-079d530f28bb`.

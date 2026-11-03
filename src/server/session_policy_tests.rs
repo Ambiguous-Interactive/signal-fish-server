@@ -5935,3 +5935,40 @@ async fn session_member_projection_preserves_identity_capabilities_and_validates
     }
     assert!(server.session_members_from(std::iter::empty()).is_empty());
 }
+
+#[tokio::test]
+async fn reconnect_retry_refreshes_capabilities_without_copying_member_names() {
+    let server = create_server_with_session(mesh_config()).await;
+    let (id, _receiver) = register_client(&server).await;
+    server.set_client_protocol(&id, v3_webrtc());
+    let mut player = player_info(id, "Player-未知", true);
+    player.connection_info = Some(ConnectionInfo::Direct {
+        host: "192.0.2.1".into(),
+        port: 7777,
+    });
+    let mut members = server.session_members_from(std::iter::once(&player));
+    let member = &mut members[0];
+    let name_pointer = member.player_name.as_ptr();
+    let endpoint = member.direct_endpoint.clone();
+    let joined_at = member.joined_at;
+    for protocol in [
+        NegotiatedProtocol::default(),
+        v3_webrtc(),
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Direct],
+            topologies: vec![Topology::Host],
+        },
+    ] {
+        member.refresh_protocol(protocol.clone());
+        assert_eq!(member.version, protocol.version);
+        assert_eq!(member.transports, protocol.transports);
+        assert_eq!(member.topologies, protocol.topologies);
+        assert_eq!(member.player_name.as_ptr(), name_pointer);
+        assert_eq!(member.player_name, player.name);
+        assert_eq!(member.player_id, player.id);
+        assert!(member.is_authority);
+        assert_eq!(member.joined_at, joined_at);
+        assert_eq!(member.direct_endpoint, endpoint);
+    }
+}

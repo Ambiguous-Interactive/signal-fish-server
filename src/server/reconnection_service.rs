@@ -15,6 +15,12 @@ use crate::coordination::{
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
 use super::{ClientLifecycle, EnhancedGameServer, PendingApplicationClaimRollback};
 
+struct ReconnectPublicationSnapshot {
+    room: Arc<crate::protocol::Room>,
+    session_players: Vec<crate::database::SessionPlayer>,
+    actor: Option<PlayerInfo>,
+}
+
 /// Count the actual JSON wire bytes without allocating an aggregate frame.
 fn reconnect_json_size(value: &impl serde::Serialize) -> Result<usize, serde_json::Error> {
     #[derive(Default)]
@@ -1419,7 +1425,11 @@ impl EnhancedGameServer {
         // an owned copy so the rejection paths keep the whole restore state.
         let restored_authority = restore.restored_authority;
 
-        let room = match self.database.get_room_by_id(room_id).await {
+        let room = match self
+            .database
+            .get_room_reconnect_snapshot(room_id, reconnect_player_id)
+            .await
+        {
             Ok(Some(room)) => room,
             Ok(None) => {
                 return self
@@ -1645,10 +1655,20 @@ impl EnhancedGameServer {
                         }
 
                         if server.should_retain_room_publication_snapshot() {
+                            let snapshot = ReconnectPublicationSnapshot {
+                                room: Arc::clone(&current_room),
+                                session_players: response_players
+                                    .iter()
+                                    .map(crate::database::SessionPlayer::from)
+                                    .collect(),
+                                actor: response_players
+                                    .iter()
+                                    .find(|player| player.id == response_player_id)
+                                    .cloned(),
+                            };
                             *baseline_publication_in_builder
                                 .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                Some((Arc::clone(&current_room), response_players.clone()));
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
                         }
 
                         // Get missed events inside the coordinator registration
@@ -1953,16 +1973,19 @@ impl EnhancedGameServer {
             epoch: Some(stamp.epoch),
             player: None,
         });
-        let Some((publication_room, publication_players)) = baseline_publication
+        let Some(ReconnectPublicationSnapshot {
+            room: publication_room,
+            session_players: publication_players,
+            actor: publication_actor,
+        }) = baseline_publication
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
         else {
             tracing::warn!(%reconnect_player_id, %room_id, "Reconnect baseline committed without its publication snapshot");
             if let Some(player_info) = room
-                .players
-                .get(reconnect_player_id)
-                .cloned()
+                .player
+                .clone()
                 .or_else(|| disconnected.player_info.clone())
             {
                 self.terminate_room_generation_after_publication_failure(
@@ -2030,16 +2053,12 @@ impl EnhancedGameServer {
         let room_id_for_publication = *room_id;
         let reconnect_player_for_publication = *reconnect_player_id;
         let authority_player = publication_room.authority_player;
-        let reconnect_player_snapshot = publication_players
-            .iter()
-            .find(|player| player.id == *reconnect_player_id)
-            .cloned()
-            .map(|mut player| {
-                player.is_authority = authority_player == Some(*reconnect_player_id);
-                player.epoch = Some(stamp.epoch);
-                player.seq = Some(0);
-                player
-            });
+        let reconnect_player_snapshot = publication_actor.map(|mut player| {
+            player.is_authority = authority_player == Some(*reconnect_player_id);
+            player.epoch = Some(stamp.epoch);
+            player.seq = Some(0);
+            player
+        });
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: *reconnect_player_id,
             epoch: Some(stamp.epoch),
@@ -2096,8 +2115,8 @@ impl EnhancedGameServer {
                         return Err(anyhow::anyhow!("reconnect publication requires a lifecycle message"));
                     };
                     let reconnect_player_snapshot = player.as_deref();
-                    let mut live_players = publication_players;
-                    let mut attempts_remaining = live_players.len().saturating_add(1);
+                    let mut live_members = server_for_publication.session_members_from_selection(publication_players);
+                    let mut attempts_remaining = live_members.len().saturating_add(1);
                     // Mixed-path membership is a fact about the room snapshot
                     // this publication resolved, not about its delivery
                     // outcome: observe it exactly once per event, not once per
@@ -2112,7 +2131,7 @@ impl EnhancedGameServer {
                                 })
                                 .flatten(),
                             authority_player,
-                            server_for_publication.session_members_from(&live_players),
+                            live_members,
                         );
                         if finalized && !mixed_path_observed {
                             server_for_publication.observe_mixed_path_members(
@@ -2293,6 +2312,7 @@ impl EnhancedGameServer {
                             RoomMessageTransactionOutcome::RoutingChanged => {}
                         }
 
+                        live_members = resolved.decision.members;
                         attempts_remaining = attempts_remaining.saturating_sub(1);
                         let routed = match server_for_publication
                             .message_coordinator
@@ -2300,18 +2320,18 @@ impl EnhancedGameServer {
                             .await
                         {
                             Ok(Some(routed)) => routed.into_iter().collect::<HashSet<_>>(),
-                            Ok(None) => live_players
+                            Ok(None) => live_members
                                 .iter()
                                 .filter(|player| {
                                     server_for_publication
                                         .connection_manager
                                         .current_relay_stamp_in_room(
-                                            &player.id,
+                                            &player.player_id,
                                             &room_id_for_publication,
                                         )
                                         .is_some()
                                 })
-                                .map(|player| player.id)
+                                .map(|player| player.player_id)
                                 .collect(),
                             Err(error) => {
                                 tracing::warn!(
@@ -2319,22 +2339,25 @@ impl EnhancedGameServer {
                                     %error,
                                     "Failed to refresh reconnect routing; deriving the local route from generation-fenced connections"
                                 );
-                                live_players
+                                live_members
                                     .iter()
                                     .filter(|player| {
                                         server_for_publication
                                             .connection_manager
                                             .current_relay_stamp_in_room(
-                                                &player.id,
+                                                &player.player_id,
                                                 &room_id_for_publication,
                                             )
                                             .is_some()
                                     })
-                                    .map(|player| player.id)
+                                    .map(|player| player.player_id)
                                     .collect()
                             }
                         };
-                        live_players.retain(|player| routed.contains(&player.id));
+                        live_members.retain(|player| routed.contains(&player.player_id));
+                        for member in &mut live_members {
+                            member.refresh_protocol(server_for_publication.client_protocol(&member.player_id));
+                        }
                         let actor_is_routed = routed.contains(&reconnect_player_for_publication);
                         if attempts_remaining == 0 && actor_is_routed {
                             if let Some(player_info) = reconnect_player_snapshot.cloned() {
