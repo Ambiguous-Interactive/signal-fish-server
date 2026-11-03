@@ -131,11 +131,16 @@ pub(crate) fn observer_retry_reuses_owned_seated_batches() {
             error_code: None,
         });
         let mut receivers = Vec::new();
+        let mut lock_allocations = 0;
+        let mut lock_bytes = 0;
         for (index, &id) in members.iter().enumerate() {
             let (sender, receiver) = tokio::sync::mpsc::channel(if index == 0 { 2 } else { 4 });
             if index == 0 {
                 sender.try_send(filler.clone()).unwrap();
             }
+            let initialized = warm_control_permit(&sender);
+            lock_allocations += initialized.0;
+            lock_bytes += initialized.1;
             receivers.push(receiver);
             coordinator
                 .register_local_client(
@@ -148,6 +153,10 @@ pub(crate) fn observer_retry_reuses_owned_seated_batches() {
         }
         let observer = Uuid::from_u128(999);
         let (observer_sender, mut observer_receiver) = tokio::sync::mpsc::channel(4);
+        let initialized = warm_control_permit(&observer_sender);
+        lock_allocations += initialized.0;
+        lock_bytes += initialized.1;
+        println!("PERMIT_LOCK_INIT channels=256 allocations={lock_allocations} bytes={lock_bytes}");
         let observer_handle =
             ClientDeliveryHandle::new(observer_sender, ConnectionCloseSignal::detached());
         let baseline = Arc::new(ServerMessage::SpectatorJoined(Box::new(
@@ -242,4 +251,28 @@ pub(crate) fn observer_retry_reuses_owned_seated_batches() {
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
     });
+}
+
+fn warm_control_permit(sender: &tokio::sync::mpsc::Sender<Arc<ServerMessage>>) -> (usize, usize) {
+    let cold_region = stats_alloc::Region::new(ALLOCATOR);
+    drop(sender.clone().try_reserve_owned().unwrap());
+    let cold = cold_region.change();
+    let warm_region = stats_alloc::Region::new(ALLOCATOR);
+    drop(sender.clone().try_reserve_owned().unwrap());
+    let warm = warm_region.change();
+    assert_eq!(
+        warm.allocations, 0,
+        "repeated permit release allocated: {warm:?}"
+    );
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(cold.allocations, 1, "native semaphore lock: {cold:?}");
+        assert_eq!(cold.bytes_allocated, 64, "native semaphore lock: {cold:?}");
+    }
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(
+        cold.allocations, 0,
+        "permit initialization allocated: {cold:?}"
+    );
+    (cold.allocations, cold.bytes_allocated)
 }
