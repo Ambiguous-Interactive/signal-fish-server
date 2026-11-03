@@ -280,3 +280,35 @@ async fn canceling_early_ready_after_promotion_preserves_readiness_and_publicati
         .await
         .unwrap());
 }
+
+#[tokio::test]
+async fn lobby_entry_borrows_ready_members_and_sorts_the_exact_intersection() {
+    let first = PlayerId::from_u128(1);
+    let second = PlayerId::from_u128(2);
+    let ghost = PlayerId::from_u128(3);
+    for (name, ready, expected, all_ready) in [
+        ("empty", vec![], vec![], false),
+        ("partial with ghost", vec![first, ghost], vec![first], false),
+        ("all with ghost", vec![second, ghost, first], vec![first, second], true),
+        ("ghost only", vec![ghost], vec![], false),
+    ] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let room = database.create_room("ready-intersection".into(), None, 4, false, first,
+            "relay".into(), "test".into(), None).await.unwrap();
+        let mut peer = room.players[&first].clone();
+        peer.id = second;
+        peer.name = "Peer".into();
+        assert!(database.add_player_to_room(&room.id, peer).await.unwrap());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let coordinator = InMemoryRoomOperationCoordinator::new(messages.clone(), database, None);
+        let ready: HashSet<_> = ready.into_iter().collect();
+        coordinator.ready_players.write().await.insert(room.id, ready.clone());
+        assert!(coordinator.transition_room_to_lobby(&room.id).await.unwrap(), "{name}");
+        let events = messages.broadcasts().await;
+        assert_eq!(events.len(), 1, "{name}");
+        assert!(matches!(&events[0].message,
+            ServerMessage::LobbyStateChanged { lobby_state: LobbyState::Lobby, ready_players, all_ready: actual }
+            if *ready_players == expected && *actual == all_ready), "{name}: {:?}", events[0].message);
+        assert_eq!(coordinator.ready_players.read().await[&room.id], ready, "{name}");
+    }
+}
