@@ -558,6 +558,40 @@ pub mod allocation_benchmark {
         );
     }
 
+    /// Remove storage and routing before measuring the departure policy hook.
+    pub async fn prepare_departure_for_measurement(
+        server: &super::EnhancedGameServer,
+        room_id: &crate::protocol::RoomId,
+        player_id: &crate::protocol::PlayerId,
+    ) -> anyhow::Result<()> {
+        server
+            .database
+            .remove_player_from_room(room_id, player_id)
+            .await?;
+        let delivery = server
+            .connection_manager
+            .clear_room_assignment(player_id)
+            .ok_or_else(|| anyhow::anyhow!("measurement player is not connected"))?;
+        server
+            .message_coordinator
+            .register_local_client(*player_id, None, delivery)
+            .await?;
+        Ok(())
+    }
+
+    /// Exercise the production departure hook without measuring fixture teardown.
+    pub async fn session_departure_for_measurement(
+        server: &super::EnhancedGameServer,
+        room_id: &crate::protocol::RoomId,
+        player_id: &crate::protocol::PlayerId,
+    ) -> bool {
+        let before = server.active_session_plan(room_id);
+        server
+            .handle_session_member_departure(room_id, player_id)
+            .await;
+        before == server.active_session_plan(room_id)
+    }
+
     /// Build the production one- or two-phase frame batch for isolated profiles.
     pub fn publication_batch_for_measurement(
         player_id: crate::protocol::PlayerId,
@@ -2552,7 +2586,8 @@ enum RoomBatchReservation {
     Reserved {
         player_id: PlayerId,
         sender: DeliverySender,
-        permits: Vec<Option<DeliveryPermit>>,
+        permits: [Option<DeliveryPermit>; 2],
+        metrics: Arc<ServerMetrics>,
         stats: Option<Arc<ConnectionDeliveryStats>>,
     },
     ChannelClosed {
@@ -2575,51 +2610,18 @@ impl RoomBatchReservation {
     }
 }
 
-/// Drop accounting for a room transaction's reserved-but-undelivered frames.
-///
-/// Armed from the moment the transaction owns reservations until its end.
-/// Every exit that is not the commit loop's own per-frame accounting —
-/// routing change, hook rejection, hook error, or an unwind between
-/// reservation and phase commit — releases the permits through this guard,
-/// so no reserved frame is released without its cancellation accounting.
-/// The commit loop consumes permits through [`Self::reservations_mut`], so
-/// taken frames are already `None` and are never counted here.
-struct RoomBatchReservationGuard<'a> {
-    metrics: &'a ServerMetrics,
-    reservations: &'a mut [RoomBatchReservation],
-}
-
-impl<'a> RoomBatchReservationGuard<'a> {
-    fn arm(metrics: &'a ServerMetrics, reservations: &'a mut Vec<RoomBatchReservation>) -> Self {
-        Self {
-            metrics,
-            reservations: reservations.as_mut_slice(),
-        }
-    }
-
-    fn get(&self) -> &[RoomBatchReservation] {
-        self.reservations
-    }
-
-    fn reservations_mut(&mut self) -> &mut [RoomBatchReservation] {
-        self.reservations
-    }
-}
-
-impl Drop for RoomBatchReservationGuard<'_> {
+impl Drop for RoomBatchReservation {
     fn drop(&mut self) {
-        for reservation in self.reservations.iter() {
-            if let RoomBatchReservation::Reserved {
-                player_id, permits, ..
-            } = reservation
-            {
-                for _ in permits.iter().filter(|permit| permit.is_some()) {
-                    self.metrics.increment_websocket_deliveries_canceled();
-                    tracing::debug!(
-                        %player_id,
-                        "Room transaction reservation released without delivery"
-                    );
-                }
+        if let Self::Reserved {
+            player_id,
+            permits,
+            metrics,
+            ..
+        } = self
+        {
+            for _ in permits.iter().flatten() {
+                metrics.increment_websocket_deliveries_canceled();
+                tracing::debug!(%player_id, "Room transaction reservation released without delivery");
             }
         }
     }
@@ -3959,57 +3961,47 @@ impl InMemoryMessageCoordinator {
         drain: watch::Receiver<bool>,
         room_id: RoomId,
     ) -> RoomBatchReservation {
-        let mut permits = Vec::with_capacity(frame_count);
-        let sender = handle.sender.clone();
-        let mut stats = None;
-
-        for _ in 0..frame_count {
-            match self
-                .reserve_one_if(
-                    player_id,
-                    handle.clone(),
-                    should_send,
-                    drain.clone(),
-                    Some(room_id),
-                    None,
-                )
-                .await
-            {
-                ConditionalDeliveryReservation::Reserved {
-                    permit,
-                    stats: reservation_stats,
-                    ..
-                } => {
-                    stats = reservation_stats;
-                    permits.push(Some(permit));
-                }
-                ConditionalDeliveryReservation::ChannelClosed { player_id, sender } => {
-                    for _ in &permits {
-                        self.record_canceled_delivery(player_id);
+        let mut reservation = RoomBatchReservation::Reserved {
+            player_id,
+            sender: handle.sender.clone(),
+            permits: [None, None],
+            metrics: Arc::clone(&self.metrics),
+            stats: None,
+        };
+        if let RoomBatchReservation::Reserved { permits, stats, .. } = &mut reservation {
+            for slot in permits.iter_mut().take(frame_count) {
+                match self
+                    .reserve_one_if(
+                        player_id,
+                        handle.clone(),
+                        should_send,
+                        drain.clone(),
+                        Some(room_id),
+                        None,
+                    )
+                    .await
+                {
+                    ConditionalDeliveryReservation::Reserved {
+                        permit,
+                        stats: reservation_stats,
+                        ..
+                    } => {
+                        *stats = reservation_stats;
+                        *slot = Some(permit);
                     }
-                    return RoomBatchReservation::ChannelClosed { player_id, sender };
-                }
-                ConditionalDeliveryReservation::SlowConsumer { player_id, sender } => {
-                    for _ in &permits {
-                        self.record_canceled_delivery(player_id);
+                    ConditionalDeliveryReservation::ChannelClosed { player_id, sender } => {
+                        return RoomBatchReservation::ChannelClosed { player_id, sender };
                     }
-                    return RoomBatchReservation::SlowConsumer { player_id, sender };
-                }
-                ConditionalDeliveryReservation::Canceled => {
-                    for _ in &permits {
-                        self.record_canceled_delivery(player_id);
+                    ConditionalDeliveryReservation::SlowConsumer { player_id, sender } => {
+                        return RoomBatchReservation::SlowConsumer { player_id, sender };
                     }
-                    return RoomBatchReservation::Canceled;
+                    ConditionalDeliveryReservation::Canceled => {
+                        return RoomBatchReservation::Canceled;
+                    }
                 }
             }
         }
-
-        RoomBatchReservation::Reserved {
-            player_id,
-            sender,
-            permits,
-            stats,
-        }
+        reservation
     }
 
     /// Preserve observer precedence when a role changes during reservation.
@@ -4023,26 +4015,25 @@ impl InMemoryMessageCoordinator {
             .or_else(|| seated_messages.get(player_id))
     }
 
-    /// Match channels against unique reservations sorted by the supplied player key.
-    fn sorted_batch_reservations_cover_recipients(
+    /// Match one routed channel against unique sorted reservations.
+    fn batch_reservation_covers_recipient(
         reservations: &[RoomBatchReservation],
-        recipients: &[(PlayerId, ClientDeliveryHandle)],
-        mut reserved_player: impl FnMut(&RoomBatchReservation) -> Option<PlayerId>,
+        player_id: PlayerId,
+        handle: &ClientDeliveryHandle,
+        reserved_player: impl FnMut(&RoomBatchReservation) -> Option<PlayerId>,
     ) -> bool {
-        recipients.iter().all(|(player_id, handle)| {
-            reservations
-                .binary_search_by_key(&Some(*player_id), &mut reserved_player)
-                .ok()
-                .and_then(|index| reservations.get(index))
-                .is_some_and(|reservation| match reservation {
-                    RoomBatchReservation::Reserved { sender, .. } => {
-                        sender.same_channel(&handle.sender)
-                    }
-                    RoomBatchReservation::ChannelClosed { .. }
-                    | RoomBatchReservation::SlowConsumer { .. }
-                    | RoomBatchReservation::Canceled => false,
-                })
-        })
+        reservations
+            .binary_search_by_key(&Some(player_id), reserved_player)
+            .ok()
+            .and_then(|index| reservations.get(index))
+            .is_some_and(|reservation| match reservation {
+                RoomBatchReservation::Reserved { sender, .. } => {
+                    sender.same_channel(&handle.sender)
+                }
+                RoomBatchReservation::ChannelClosed { .. }
+                | RoomBatchReservation::SlowConsumer { .. }
+                | RoomBatchReservation::Canceled => false,
+            })
     }
 
     async fn broadcast_to_room_if_with_hook<'a>(
@@ -4961,13 +4952,12 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             let mut recipients = self.collect_room_recipients(room_id, None).await;
             recipients
                 .retain(|(id, _)| !self.is_spectator_route(id) || !spectator_messages.is_empty());
-            let mut routed: Vec<PlayerId> = recipients
+            let mut seated_routes = recipients
                 .iter()
-                .filter(|(id, _)| !self.is_spectator_route(id))
-                .map(|(player_id, _)| *player_id)
-                .collect();
-            routed.sort_unstable();
-            if routed != expected {
+                .filter(|(id, _)| !self.is_spectator_route(id));
+            if seated_routes.clone().count() != expected.len()
+                || !seated_routes.all(|(id, _)| expected.binary_search(id).is_ok())
+            {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
 
@@ -5006,10 +4996,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 ))
                 .await;
 
-            let mut guard = RoomBatchReservationGuard::arm(&self.metrics, &mut reservations);
-
-            if guard
-                .get()
+            if reservations
+                .as_slice()
                 .iter()
                 .any(|reservation| matches!(reservation, RoomBatchReservation::Canceled))
             {
@@ -5017,8 +5005,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 continue;
             }
 
-            let unavailable_recipients: Vec<(PlayerId, DeliverySender)> = guard
-                .get()
+            let unavailable_recipients: Vec<(PlayerId, DeliverySender)> = reservations
+                .as_slice()
                 .iter()
                 .filter_map(|reservation| match reservation {
                     RoomBatchReservation::SlowConsumer { player_id, sender }
@@ -5036,53 +5024,43 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 continue;
             }
 
-            guard
-                .reservations_mut()
+            reservations
+                .as_mut_slice()
                 .sort_unstable_by_key(RoomBatchReservation::reserved_player);
             let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
-            let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
+            let mut current_members = 0_usize;
+            let mut current_recipients = 0_usize;
+            let mut seated_routes_match = true;
+            let mut all_routes_match = true;
+            for (player_id, handle) in room_players
                 .get(room_id)
-                .map(|players| {
-                    players
-                        .iter()
-                        .filter(|id| !self.is_spectator_route(id) || !spectator_messages.is_empty())
-                        .filter_map(|player_id| {
-                            clients
-                                .get(player_id)
-                                .map(|handle| (*player_id, handle.clone()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut current_members: Vec<PlayerId> = current_recipients
-                .iter()
-                .filter(|(id, _)| !self.is_spectator_route(id))
-                .map(|(player_id, _)| *player_id)
-                .collect();
-            current_members.sort_unstable();
-            let seated_recipients: Vec<_> = current_recipients
-                .iter()
-                .filter(|(id, _)| !self.is_spectator_route(id))
-                .cloned()
-                .collect();
-            if current_members != expected
-                || !Self::sorted_batch_reservations_cover_recipients(
-                    guard.get(),
-                    &seated_recipients,
-                    RoomBatchReservation::reserved_player,
-                )
+                .into_iter()
+                .flat_map(|players| players.iter())
+                .filter_map(|id| clients.get(id).map(|handle| (*id, handle)))
             {
+                let spectator = self.is_spectator_route(&player_id);
+                if spectator && spectator_messages.is_empty() {
+                    continue;
+                }
+                let reserved = Self::batch_reservation_covers_recipient(
+                    reservations.as_slice(),
+                    player_id,
+                    handle,
+                    RoomBatchReservation::reserved_player,
+                );
+                current_recipients = current_recipients.saturating_add(1);
+                all_routes_match &= reserved;
+                if !spectator {
+                    current_members = current_members.saturating_add(1);
+                    seated_routes_match &= reserved && expected.binary_search(&player_id).is_ok();
+                }
+            }
+            if current_members != expected.len() || !seated_routes_match {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
-            if guard.get().len() != current_recipients.len()
-                || !Self::sorted_batch_reservations_cover_recipients(
-                    guard.get(),
-                    &current_recipients,
-                    RoomBatchReservation::reserved_player,
-                )
-            {
+            if reservations.as_slice().len() != current_recipients || !all_routes_match {
                 // Observer churn cannot invalidate a seated start or replan.
                 // Release its stale reservations and resolve observers again.
                 drop(clients);
@@ -5111,7 +5089,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             let mut failed_frames = 0_usize;
             for phase in 0..max_phases {
                 let failed_before_phase = failed_frames;
-                for reservation in guard.reservations_mut() {
+                for reservation in reservations.as_mut_slice() {
                     let RoomBatchReservation::Reserved {
                         player_id,
                         permits,
@@ -5223,7 +5201,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         // The outcome field must name every unpublished frame;
                         // the still-armed guard counts their cancellation
                         // metric exactly once at drop.
-                        for reservation in guard.get() {
+                        for reservation in reservations.as_slice() {
                             let RoomBatchReservation::Reserved {
                                 player_id, permits, ..
                             } = reservation

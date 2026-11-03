@@ -5510,3 +5510,103 @@ async fn routed_pair_waits_for_the_routing_write_before_reading_both_routes() {
 
 #[path = "../../tests/support/publication_reservation_tests.rs"]
 mod publication_reservation_tests;
+
+/// #1419: cancellation owns both completed batches and partially acquired slots.
+#[tokio::test(start_paused = true)]
+async fn dropping_room_transaction_accounts_completed_and_partial_reservations() {
+    for filled in [1, 2] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(60),
+            metrics.clone(),
+        );
+        let room = RoomId::from_u128(700);
+        let stable = PlayerId::from_u128(701);
+        let blocked = PlayerId::from_u128(702);
+        let members = [stable, blocked];
+        let (stable_sender, mut stable_receiver) = mpsc::channel(2);
+        let (blocked_sender, mut blocked_receiver) = mpsc::channel(2);
+        let filler = Arc::new(ServerMessage::Error {
+            message: "retained queue prefix".into(),
+            error_code: None,
+        });
+        for _ in 0..filled {
+            blocked_sender.try_send(filler.clone()).unwrap();
+        }
+        for (id, sender) in [
+            (stable, stable_sender.clone()),
+            (blocked, blocked_sender.clone()),
+        ] {
+            coordinator
+                .register_local_client(
+                    id,
+                    Some(room),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        }
+        let committed = AtomicBool::new(false);
+        let mut transaction = coordinator.commit_room_messages_if_members_with_hook(
+            &room,
+            &members,
+            vec![two_frame_batch(stable), two_frame_batch(blocked)],
+            vec![],
+            Box::new(|| {
+                Box::pin(async {
+                    committed.store(true, Ordering::Relaxed);
+                    Ok(true)
+                })
+            }),
+            Box::new(|_| panic!("a canceled reservation cannot reach phase commit")),
+        );
+        assert!(futures_util::poll!(tokio::task::unconstrained(transaction.as_mut())).is_pending());
+        assert_eq!(
+            stable_sender.capacity(),
+            0,
+            "both stable permits must be acquired"
+        );
+        assert_eq!(
+            blocked_sender.capacity(),
+            0,
+            "the blocked peer must wait after acquiring its available slots"
+        );
+        drop(transaction);
+        assert!(!committed.load(Ordering::Relaxed));
+        assert_eq!(
+            metrics
+                .websocket_deliveries_canceled
+                .load(Ordering::Relaxed),
+            4 - filled,
+            "filled={filled}: count every acquired permit once"
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            1,
+            "the unacquired parked attempt has its own drop accounting"
+        );
+        assert_eq!(
+            metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+            5 - filled
+        );
+        let tail = stable_receiver.try_recv();
+        assert!(matches!(tail, Err(mpsc::error::TryRecvError::Empty)));
+        for _ in 0..filled {
+            assert!(Arc::ptr_eq(&blocked_receiver.try_recv().unwrap(), &filler));
+        }
+        let tail = blocked_receiver.try_recv();
+        assert!(matches!(tail, Err(mpsc::error::TryRecvError::Empty)));
+        for (sender, receiver) in [
+            (&stable_sender, &mut stable_receiver),
+            (&blocked_sender, &mut blocked_receiver),
+        ] {
+            assert_eq!(sender.capacity(), 2, "cancellation must release every slot");
+            for _ in 0..2 {
+                sender.try_send(filler.clone()).unwrap();
+            }
+            for _ in 0..2 {
+                assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &filler));
+            }
+        }
+    }
+}

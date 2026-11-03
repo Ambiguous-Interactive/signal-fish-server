@@ -3,6 +3,8 @@
 #[path = "live_p2p_allocations/admission_costs.rs"]
 mod admission_costs;
 mod allocation_harness;
+#[path = "live_p2p_allocations/departure_costs.rs"]
+mod departure_costs;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
@@ -408,6 +410,10 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "mesh_departure_skips_survivor_selection",
+            departure_costs::mesh_departure_skips_survivor_selection,
+        ),
         allocation_harness::trial(
             "observer_retry_reuses_owned_seated_batches",
             publication_costs::observer_retry_reuses_owned_seated_batches,

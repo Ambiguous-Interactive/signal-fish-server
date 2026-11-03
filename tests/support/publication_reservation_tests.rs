@@ -3,6 +3,21 @@ use crate::protocol::PlayerId;
 use crate::server::{InMemoryMessageCoordinator, RoomBatchReservation};
 use tokio::sync::mpsc;
 
+fn sorted_covers(
+    reservations: &[RoomBatchReservation],
+    recipients: &[(PlayerId, ClientDeliveryHandle)],
+    mut reserved_player: impl FnMut(&RoomBatchReservation) -> Option<PlayerId>,
+) -> bool {
+    recipients.iter().all(|(id, handle)| {
+        InMemoryMessageCoordinator::batch_reservation_covers_recipient(
+            reservations,
+            *id,
+            handle,
+            &mut reserved_player,
+        )
+    })
+}
+
 fn original_covers(
     reservations: &[RoomBatchReservation],
     recipients: &[(PlayerId, ClientDeliveryHandle)],
@@ -35,7 +50,8 @@ fn sorted_reservation_validation_preserves_identity_and_channel_checks() {
             reservations.push(RoomBatchReservation::Reserved {
                 player_id: id,
                 sender: handle.sender.clone(),
-                permits: vec![],
+                permits: [None, None],
+                metrics: std::sync::Arc::new(crate::metrics::ServerMetrics::new()),
                 stats: None,
             });
             recipients.push((id, handle));
@@ -54,16 +70,14 @@ fn sorted_reservation_validation_preserves_identity_and_channel_checks() {
         });
         reservations.sort_unstable_by_key(RoomBatchReservation::reserved_player);
         recipients.reverse();
-        assert!(
-            InMemoryMessageCoordinator::sorted_batch_reservations_cover_recipients(
-                &reservations,
-                &recipients,
-                RoomBatchReservation::reserved_player,
-            )
-        );
+        assert!(sorted_covers(
+            &reservations,
+            &recipients,
+            RoomBatchReservation::reserved_player,
+        ));
         assert_eq!(
             original_covers(&reservations, &recipients, || {}),
-            InMemoryMessageCoordinator::sorted_batch_reservations_cover_recipients(
+            sorted_covers(
                 &reservations,
                 &recipients,
                 RoomBatchReservation::reserved_player,
@@ -73,23 +87,19 @@ fn sorted_reservation_validation_preserves_identity_and_channel_checks() {
             let original = handle.clone();
             let (sender, _receiver) = mpsc::channel(2);
             *handle = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
-            assert!(
-                !InMemoryMessageCoordinator::sorted_batch_reservations_cover_recipients(
-                    &reservations,
-                    &recipients,
-                    RoomBatchReservation::reserved_player,
-                )
-            );
+            assert!(!sorted_covers(
+                &reservations,
+                &recipients,
+                RoomBatchReservation::reserved_player,
+            ));
             let entry = recipients.first_mut().unwrap();
             entry.1 = original;
             entry.0 = PlayerId::from_u128(count + 1);
-            assert!(
-                !InMemoryMessageCoordinator::sorted_batch_reservations_cover_recipients(
-                    &reservations,
-                    &recipients,
-                    RoomBatchReservation::reserved_player,
-                )
-            );
+            assert!(!sorted_covers(
+                &reservations,
+                &recipients,
+                RoomBatchReservation::reserved_player,
+            ));
         }
     }
 }
@@ -107,7 +117,8 @@ fn sorted_reservation_validation_matches_original_large_roster() {
         reservations.push(RoomBatchReservation::Reserved {
             player_id: id,
             sender: handle.sender.clone(),
-            permits: vec![],
+            permits: [None, None],
+            metrics: std::sync::Arc::new(crate::metrics::ServerMetrics::new()),
             stats: None,
         });
         recipients.push((id, handle));
@@ -148,16 +159,14 @@ fn sorted_reservation_validation_matches_original_large_roster() {
         sort_elapsed += sort_started.elapsed();
         let lookup_started = tokio::time::Instant::now();
         for _ in 0..validations_per_transaction {
-            assert!(
-                InMemoryMessageCoordinator::sorted_batch_reservations_cover_recipients(
-                    std::hint::black_box(&reservations),
-                    &recipients,
-                    |reservation| {
-                        lookup_comparisons += 1;
-                        reservation.reserved_player()
-                    }
-                )
-            );
+            assert!(sorted_covers(
+                std::hint::black_box(&reservations),
+                &recipients,
+                |reservation| {
+                    lookup_comparisons += 1;
+                    reservation.reserved_player()
+                }
+            ));
         }
         lookup_elapsed += lookup_started.elapsed();
     }

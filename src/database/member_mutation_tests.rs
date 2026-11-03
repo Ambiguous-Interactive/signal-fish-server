@@ -774,3 +774,89 @@ async fn borrowed_code_index_preserves_games_rotation_and_last_room_cleanup() {
         Some(replacement.id)
     );
 }
+
+/// #1418: lifecycle reads retain pending visibility, empty state and storage errors.
+#[tokio::test]
+async fn session_lifecycle_snapshot_is_atomic_and_preserves_storage_semantics() {
+    let database = InMemoryDatabase::new();
+    let room = database
+        .create_pending_room_classified(
+            "lifecycle".into(),
+            Some("LIFECY".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    for state in [
+        crate::protocol::LobbyState::Waiting,
+        crate::protocol::LobbyState::Lobby,
+        crate::protocol::LobbyState::Finalized,
+    ] {
+        database
+            .rooms
+            .write()
+            .await
+            .get_mut(&room.id)
+            .unwrap()
+            .lobby_state = state.clone();
+        assert_eq!(
+            database
+                .get_room_session_lifecycle_snapshot(&room.id)
+                .await
+                .unwrap(),
+            Some(RoomSessionLifecycleSnapshot {
+                lobby_state: state,
+                has_players: true
+            })
+        );
+    }
+    assert!(!database.is_room_published(&room.id).await.unwrap());
+    let held = database.rooms.write().await;
+    let mut read = Box::pin(database.get_room_session_lifecycle_snapshot(&room.id));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    drop(read);
+    drop(held);
+    database.publish_room(&room.id).await.unwrap();
+    database
+        .rooms
+        .write()
+        .await
+        .get_mut(&room.id)
+        .unwrap()
+        .players
+        .clear();
+    assert_eq!(
+        database
+            .get_room_session_lifecycle_snapshot(&room.id)
+            .await
+            .unwrap(),
+        Some(RoomSessionLifecycleSnapshot {
+            lobby_state: crate::protocol::LobbyState::Finalized,
+            has_players: false
+        })
+    );
+    database
+        .fail_get_room_by_id
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(database
+        .get_room_session_lifecycle_snapshot(&room.id)
+        .await
+        .is_err());
+    database
+        .fail_get_room_by_id
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(database.delete_room(&room.id).await.unwrap());
+    assert_eq!(
+        database
+            .get_room_session_lifecycle_snapshot(&room.id)
+            .await
+            .unwrap(),
+        None
+    );
+}

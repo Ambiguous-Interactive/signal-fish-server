@@ -6117,3 +6117,113 @@ async fn admission_protocol_projections_match_owned_snapshots_after_replacement_
         }
     }
 }
+
+/// #1418: mesh cleanup retains admitted seats and survives storage failures.
+#[tokio::test(start_paused = true)]
+async fn mesh_departure_preserves_pending_members_errors_and_terminal_cleanup() {
+    let server = create_server_with_session(mesh_config()).await;
+    let (owner, mut owner_rx) = register_client(&server).await;
+    let (pending, mut pending_rx) = register_client(&server).await;
+    let room = finalized_db_room_with(&server, owner, &[(pending, "Pending")]).await;
+    let stored = ActiveSessionPlan {
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+    };
+    server.active_session_plans.insert(room, stored);
+    publish_room_members(&server, &room, &[owner]).await;
+    server
+        .database
+        .remove_player_from_room(&room, &owner)
+        .await
+        .unwrap();
+    unpublish_room_member(&server, &owner).await;
+    server.handle_session_member_departure(&room, &owner).await;
+    assert_eq!(
+        server.active_session_plan(&room),
+        Some(stored),
+        "unpublished stored seats retain the sticky mesh"
+    );
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.fail_get_room_by_id_for_test(true);
+    server.handle_session_member_departure(&room, &owner).await;
+    assert_eq!(
+        server.active_session_plan(&room),
+        Some(stored),
+        "a failed read cannot clear the plan"
+    );
+    database.fail_get_room_by_id_for_test(false);
+    server
+        .database
+        .remove_player_from_room(&room, &pending)
+        .await
+        .unwrap();
+    server
+        .handle_session_member_departure(&room, &pending)
+        .await;
+    assert_eq!(
+        server.active_session_plan(&room),
+        None,
+        "the last stored seat clears the plan"
+    );
+    server.active_session_plans.insert(room, stored);
+    assert!(server.database.delete_room(&room).await.unwrap());
+    server
+        .handle_session_member_departure(&room, &pending)
+        .await;
+    assert_eq!(
+        server.active_session_plan(&room),
+        None,
+        "a missing room clears stale state"
+    );
+    assert_silent(&mut owner_rx).await;
+    assert_silent(&mut pending_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+/// #1418: an anomalous pre-finalization sticky mesh remains unchanged.
+#[tokio::test(start_paused = true)]
+async fn mesh_departure_from_empty_non_finalized_room_keeps_sticky_state() {
+    let server = create_server_with_session(mesh_config()).await;
+    let (owner, mut receiver) = register_client(&server).await;
+    let room = server
+        .database
+        .create_room(
+            "mesh-game".into(),
+            None,
+            2,
+            true,
+            owner,
+            "udp".into(),
+            "region-a".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let stored = ActiveSessionPlan {
+        topology: Topology::Mesh,
+        transport: Transport::WebRtc,
+        host: None,
+    };
+    server.active_session_plans.insert(room.id, stored);
+    server
+        .database
+        .remove_player_from_room(&room.id, &owner)
+        .await
+        .unwrap();
+    server
+        .handle_session_member_departure(&room.id, &owner)
+        .await;
+    assert_eq!(server.active_session_plan(&room.id), Some(stored));
+    assert_silent(&mut receiver).await;
+}
