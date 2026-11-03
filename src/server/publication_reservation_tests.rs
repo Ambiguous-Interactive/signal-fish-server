@@ -129,7 +129,8 @@ fn sorted_reservation_validation_matches_original_large_roster() {
         }
     }
     println!("RESERVATION_LOOKUP members=255 transactions=100 validations_per_transaction=2 original={original_elapsed:?} sorted={:?}", sorted_started.elapsed());
-    assert!(receivers
-        .iter_mut()
-        .all(|receiver| receiver.try_recv().is_err()));
+    for receiver in &mut receivers {
+        let trailing = receiver.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+    }
 }

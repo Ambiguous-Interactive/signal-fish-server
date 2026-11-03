@@ -129,7 +129,7 @@ impl RoomRecipientMessages {
         first: Arc<ServerMessage>,
         followup: Option<Arc<ServerMessage>>,
     ) -> Self {
-        let mut messages = Vec::with_capacity(1 + usize::from(followup.is_some()));
+        let mut messages = Vec::with_capacity(if followup.is_some() { 2 } else { 1 });
         messages.push(first);
         messages.extend(followup);
         Self::in_order(player_id, messages)

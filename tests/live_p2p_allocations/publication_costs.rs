@@ -69,7 +69,11 @@ pub(crate) fn transaction_reuses_owned_batches() {
                 for receiver in &mut receivers {
                     assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &first));
                     assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &second));
-                    assert!(receiver.try_recv().is_err());
+                    let trailing = receiver.try_recv();
+                    assert!(matches!(
+                        trailing,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ));
                 }
             }
         });
