@@ -1696,7 +1696,12 @@ fn compose_ice_servers_for(
     if session_config.ice_servers.is_empty() {
         return (turn_derived, minted);
     }
-    let mut ice = Vec::with_capacity(session_config.ice_servers.len() + turn_derived.len());
+    let mut ice = Vec::with_capacity(
+        session_config
+            .ice_servers
+            .len()
+            .saturating_add(turn_derived.len()),
+    );
     ice.extend(session_config.ice_servers.iter().cloned());
     ice.extend(turn_derived);
     (ice, minted)

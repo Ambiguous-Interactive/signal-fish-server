@@ -14482,7 +14482,9 @@ a throughput or latency claim.
 ICE composition copied the static vector before appending derived entries.
 A one-static-plus-one-STUN history fails the original zero-reallocation bound.
 The combined vector now reserves once; an empty static list returns the owned
-derived list directly. Controls with zero, one, four and 16 static entries
+derived list directly. Removing that transfer produces four allocations and
+fails the zero-static control's three-allocation ceiling despite zero vector
+reallocations. Controls with zero, one, four and 16 static entries
 retain exact entry order and fields. Existing TURN and real-socket pre-gather
 controls cover credential counts, recipient identity and v2 omission.
 

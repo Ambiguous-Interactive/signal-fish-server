@@ -188,6 +188,12 @@ pub(crate) fn ice_composition_reserves_combined_list() {
             assert!(ice
                 .iter()
                 .all(|entry| entry.username.is_none() && entry.credential.is_none()));
+            if static_count == 0 {
+                assert_eq!(
+                    stats.allocations, 3,
+                    "ICE composition copied the owned derived list: {stats:?}"
+                );
+            }
             assert_eq!(
                 stats.reallocations, 0,
                 "ICE list grew after copying static entries: {stats:?}"
