@@ -14141,3 +14141,100 @@ existing private fault flag directly, as neighboring package-compatible tests
 do. No test is excluded and no production behavior changes.
 The unchanged package inventory and strict archive compile control passes after
 this correction in Nextest `8a92e2de-07a9-40a5-9c03-079d530f28bb`.
+
+### F249 — Targeted P2P signals allocate for the full room roster
+
+Scope: #1392, #636 and #826, session 613, baseline `eb781189`.
+
+Each offer, answer or ICE frame collected and sorted every seated route, then
+built a hash set to check only its two endpoints. The in-memory coordinator now
+reads both routes under the same room-routing, roster and client locks without
+collecting the roster. The additive trait default derives both results from one
+existing snapshot, preserving custom coordinators and unknown routing.
+The signal handler retains its lifecycle, publication gate, target epoch,
+transport checks and fallback room-assignment check.
+
+The complete embedded signal history varies room size over 2 / 16 / 64 players.
+Original allocated bytes are 2,964 / 3,632 / 6,032. Nextest
+`74a6651f-b096-444b-ab68-62adb9decab6` fails the fixed-overhead growth bound.
+Revised bytes are 2,840 / 2,840 / 2,840 in Nextest
+`f26ac888-8a61-4e75-93de-05b05ac52f2f`. Each history checks exact sender,
+generation and opaque body, target-only delivery and empty other queues.
+
+### F250 — Routed membership snapshots repeatedly grow their output vector
+
+Scope: #1393, #636 and #826, session 613.
+
+The filtered flattened roster iterator exposed no useful lower size bound to
+`collect`. A warmed 16-player snapshot reallocates twice, reproduced in Nextest
+`35ec2f86-b8a4-48cb-9f1e-01fae57a6172`. The new snapshot reserves its output
+before collection and retains sorted, live, seated identities. It counts eligible
+routes under the same locks, so excluded routes do not consume output capacity. Nextest
+`f26ac888-8a61-4e75-93de-05b05ac52f2f` has zero reallocations at
+0 / 2 / 16 / 64 / 255 players. This repairs allocation work, not wire content.
+
+The first diagnostic included cold routing-gate storage and used an invalid
+256-byte async-overhead assumption. It failed at zero members before exercising
+vector growth. That bound was removed, the gate was warmed, and the final red
+history fails specifically on the vector's two reallocations. No cold-storage
+allocation is attributed to this finding.
+
+### F251 — P2P game start copies unrelated immutable configuration
+
+Scope: #1394, #636 and #826, session 613.
+
+Every owned game-start publication copied the full session and ICE configuration.
+The server now owns immutable configuration in shared storage and gives each
+publication shared ownership. Constructor arguments and per-recipient ICE
+composition stay unchanged; each required recipient list remains owned.
+
+The complete two-player start varies unrelated game mappings over 0 / 16 / 256.
+The selected game uses a Mesh override over a Relay default. Original allocated
+bytes are 14,166 / 15,352 / 35,428. Nextest
+`74a6651f-b096-444b-ab68-62adb9decab6` fails the fixed-overhead growth bound.
+Revised bytes are 13,777 / 13,777 / 13,777 in Nextest
+`f26ac888-8a61-4e75-93de-05b05ac52f2f`. Both recipients retain
+GameStarting-before-SessionPlan order, exact peer identities, offer roles,
+Mesh/WebRTC selection, relay fallback and a shared generation.
+
+These histories measure embedded server allocations, not remote throughput or
+latency. The three findings require current-head hosted qualification before
+closure. The broader #636 and #826 campaigns remain open.
+
+External-client assessment: Rust `src/protocol.rs` at `da8f2d16`, .NET
+`MessagesMesh.cs` at `e467c871`, and Godot
+`addons/signal_fish/protocol/sf_events.gd` at `1d93b43f` retain their current
+Signal and SessionPlan contracts. No schema, encoding, default, negotiation,
+ordering, error, epoch or reconnect rule changes. All three are unaffected and
+need no migration or tracking issue. The new coordinator method has a default
+for existing server backends; shared server fields are private.
+
+The mutation inventory grows from 457 to 460 sites. The three new sites replace
+the default pair lookup result. The paired membership controls exercise unknown,
+empty, partial, complete and reversed inputs. No old mutation class disappears.
+With 46 shards and a 29-second budget, the worst shard remains ten mutants,
+or 290 seconds, below the five-minute target.
+
+The final signal fixture first finalizes all 2 / 16 / 64 peers to one Mesh/WebRTC
+plan and uses that exact generation for ICE. Each baseline and plan is consumed
+before measuring. The fixed-space signal history passes in Nextest
+`3ffcd2ef-bfab-4fc9-b6f4-ff2d0bac045e`.
+
+The final all-feature negative control restores each old allocation path while
+keeping the additive API: full roster plus hash-set endpoint lookup, growing
+roster collection and deep configuration copies. All three tests fail in Nextest
+`4c01f8ad-8f9f-4be3-b769-4eaba3c89ec8`. At 64 peers signaling allocates
+6,176 bytes; at 256 unrelated mappings game start allocates 35,652 bytes.
+Restoring the candidate passes all three unchanged tests in Nextest
+`10b67436-b5cd-4256-8c35-1148f7bc177f`: signal bytes are fixed at 2,928,
+start bytes are fixed at 13,953, and all five roster sizes have zero
+reallocations. These all-feature figures include the feature-specific frames;
+they are compared only with the matching all-feature negative control.
+
+Route controls compare both endpoint results with the exact seated snapshot
+through spectator, reassigned, roomless and missing-client transitions. They
+also pin identical/reversed arguments, routing-write blocking and fresh read
+visibility, unknown/partial/complete default snapshots and propagated snapshot
+failure. Twenty-one focused signal, plan-builder and route controls pass in
+Nextest `bdc8111f-a917-4285-8a9b-e066f7bc4649`. The inventory and shard-budget
+controls pass with all 460 sites retained.

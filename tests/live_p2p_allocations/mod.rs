@@ -1,5 +1,11 @@
 //! Complete live host operations with exact plans and varied legacy metadata.
 
+mod routing;
+pub(super) use routing::{
+    game_start_shares_configuration, roster_snapshot_reserves_once,
+    signaling_cost_is_independent_of_room_size,
+};
+
 use super::*;
 use signal_fish_server::protocol::{DirectEndpoint, SessionPlanPayload};
 use signal_fish_server::server::allocation_benchmark::negotiate_direct_for_measurement;

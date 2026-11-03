@@ -75,12 +75,12 @@ impl EnhancedGameServer {
     /// coordinators fall back to the connection's current room assignment.
     pub(super) async fn signal_target_is_routed_after_gate(
         &self,
-        routed_members: Option<&HashSet<PlayerId>>,
+        routed_target: Option<bool>,
         target: &PlayerId,
         room_id: RoomId,
     ) -> bool {
-        match routed_members {
-            Some(members) => members.contains(target),
+        match routed_target {
+            Some(routed) => routed,
             None => self.get_client_room(target).await == Some(room_id),
         }
     }
@@ -282,17 +282,18 @@ impl EnhancedGameServer {
         // asynchronously cleared. Revalidate coordinator routing under the gate
         // so neither a removed sender nor a replacement target can act on the
         // stale pre-wait snapshot.
-        let routed_members = match self.message_coordinator.routed_player_ids(&from_room).await {
-            Ok(Some(players)) => Some(players.into_iter().collect::<HashSet<_>>()),
-            Ok(None) => None,
+        let routed_pair = match self
+            .message_coordinator
+            .routed_player_pair(&from_room, from, &to)
+            .await
+        {
+            Ok(pair) => pair,
             Err(error) => {
                 tracing::warn!(%from_room, %from, %to, %error, "Failed to revalidate signal routing");
                 return;
             }
         };
-        let sender_is_routed = routed_members
-            .as_ref()
-            .is_none_or(|members| members.contains(from));
+        let sender_is_routed = routed_pair.is_none_or(|[sender, _]| sender);
         if !sender_is_routed {
             self.reject_signal(
                 from,
@@ -305,7 +306,11 @@ impl EnhancedGameServer {
             return;
         }
         let target_is_routed = self
-            .signal_target_is_routed_after_gate(routed_members.as_ref(), &to, from_room)
+            .signal_target_is_routed_after_gate(
+                routed_pair.map(|[_, target]| target),
+                &to,
+                from_room,
+            )
             .await;
         let target_incarnation_matches = self
             .connection_manager

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce live P2P signaling, roster snapshot, and game-start memory use (#1392, #1393, #1394).
 - Reduce memory used to start P2P sessions and publish join, reconnect, and peer membership plans
   (#1371, #1376, #1377, #1384, #1385, #1386, #1388, #1389, #1390).
 - Reduce memory used for P2P host departures and Direct host endpoint updates (#1380, #1381).

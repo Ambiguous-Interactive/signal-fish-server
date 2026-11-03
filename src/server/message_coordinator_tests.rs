@@ -5404,3 +5404,106 @@ async fn observer_close_after_reservation_does_not_abort_seated_transaction_phas
         "the failed observer still has its delivery outcome accounted"
     );
 }
+
+#[tokio::test]
+async fn routed_pair_matches_seated_snapshot_through_route_changes() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::from_u128(101);
+    let other_room = RoomId::from_u128(102);
+    let first = PlayerId::from_u128(1);
+    let second = PlayerId::from_u128(2);
+    let absent = PlayerId::from_u128(3);
+    let (first_sender, _first_receiver) = mpsc::channel(4);
+    let (second_sender, _second_receiver) = mpsc::channel(4);
+    for (player, sender) in [(first, first_sender), (second, second_sender.clone())] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+    }
+    for state in [
+        "seated",
+        "spectator",
+        "other_room",
+        "roomless",
+        "missing_client",
+    ] {
+        match state {
+            "spectator" => coordinator.set_spectator_route(second, true),
+            "other_room" | "roomless" => {
+                coordinator
+                    .register_local_client(
+                        second,
+                        (state == "other_room").then_some(other_room),
+                        ClientDeliveryHandle::new(
+                            second_sender.clone(),
+                            ConnectionCloseSignal::detached(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+            "missing_client" => {
+                coordinator.local_clients.write().await.remove(&first);
+            }
+            _ => {}
+        }
+        for scope in [room, other_room, RoomId::nil()] {
+            let members = coordinator
+                .routed_player_ids(&scope)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                members.capacity(),
+                members.len(),
+                "state={state} room={scope}"
+            );
+            for (left, right) in [
+                (first, second),
+                (second, first),
+                (first, first),
+                (absent, second),
+            ] {
+                assert_eq!(
+                    coordinator
+                        .routed_player_pair(&scope, &left, &right)
+                        .await
+                        .unwrap(),
+                    Some([members.contains(&left), members.contains(&right)]),
+                    "state={state} room={scope}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn routed_pair_waits_for_the_routing_write_before_reading_both_routes() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::new_v4();
+    let player = PlayerId::new_v4();
+    let held = coordinator
+        .lock_player_routing_write(player, Some(room))
+        .await;
+    let mut read = Box::pin(coordinator.routed_player_pair(&room, &player, &player));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    let (sender, _receiver) = mpsc::channel(4);
+    coordinator
+        .room_players
+        .write()
+        .await
+        .entry(room)
+        .or_default()
+        .insert(player);
+    coordinator.local_clients.write().await.insert(
+        player,
+        ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+    );
+    drop(held);
+    assert_eq!(read.await.unwrap(), Some([true, true]));
+}
