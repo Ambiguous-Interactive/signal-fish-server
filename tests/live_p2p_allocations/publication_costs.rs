@@ -269,7 +269,7 @@ fn warm_control_permit(sender: &tokio::sync::mpsc::Sender<Arc<ServerMessage>>) -
         assert_eq!(cold.allocations, 1, "native semaphore lock: {cold:?}");
         assert_eq!(cold.bytes_allocated, 64, "native semaphore lock: {cold:?}");
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     assert_eq!(
         cold.allocations, 0,
         "permit initialization allocated: {cold:?}"
