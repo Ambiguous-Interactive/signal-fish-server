@@ -7545,3 +7545,108 @@ async fn refreshed_finalized_plans_carry_no_phantom_authority_after_departure() 
     assert_silent(&mut joiner_rx).await;
     assert_silent(&mut incumbent_rx).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn reconnect_publication_preserves_validated_direct_host_endpoints() {
+    for host_address in ["192.0.2.1", "0.0.0.0"] {
+        let server = create_test_server_with_session(mesh_session_config()).await;
+        let mut fixture = setup_mesh_reconnect(&server, 16, 16, true).await;
+        server.set_client_protocol(&fixture.existing, v3_webrtc_direct_host());
+        server.set_client_protocol(&fixture.current, v3_webrtc_direct_host());
+        store_active_plan(
+            &server,
+            fixture.room_id,
+            Topology::Host,
+            Transport::Direct,
+            Some(fixture.existing),
+        );
+        assert!(server
+            .database
+            .update_player_connection_info(
+                &fixture.room_id,
+                &fixture.existing,
+                ConnectionInfo::Direct {
+                    host: host_address.into(),
+                    port: 7777
+                }
+            )
+            .await
+            .unwrap());
+        assert!(
+            server
+                .handle_reconnect(
+                    &fixture.current,
+                    &fixture.reconnecting,
+                    &fixture.room_id,
+                    &fixture.token
+                )
+                .await
+        );
+        assert!(
+            matches!(recv(&mut fixture.current_rx).await.as_ref(), ServerMessage::Reconnected(payload)
+            if payload.player_id == fixture.reconnecting && payload.current_players.len() == 2)
+        );
+        let actor_plan = recv(&mut fixture.current_rx).await;
+        let ServerMessage::SessionPlan(actor_plan) = actor_plan.as_ref() else {
+            panic!("{actor_plan:?}");
+        };
+        let lifecycle = recv(&mut fixture.existing_rx).await;
+        assert!(
+            matches!(lifecycle.as_ref(), ServerMessage::PlayerReconnected {player_id, player: Some(player), ..}
+            if *player_id == fixture.reconnecting && player.id == fixture.reconnecting && player.name == "reconnecting")
+        );
+        let host_plan = recv(&mut fixture.existing_rx).await;
+        let ServerMessage::SessionPlan(host_plan) = host_plan.as_ref() else {
+            panic!("{host_plan:?}");
+        };
+        assert_eq!(host_plan.generation, actor_plan.generation);
+        for (recipient, plan) in [
+            (fixture.reconnecting, actor_plan),
+            (fixture.existing, host_plan),
+        ] {
+            assert_eq!(plan.fallback, Transport::Relay);
+            assert!(plan.ice_servers.is_empty());
+            if host_address == "192.0.2.1" {
+                assert_eq!(plan.topology, Topology::Host);
+                assert_eq!(plan.transport, Transport::Direct);
+                assert_eq!(plan.host, Some(fixture.existing));
+                assert_eq!(
+                    plan.direct_endpoint,
+                    Some(crate::protocol::DirectEndpoint {
+                        host: host_address.into(),
+                        port: 7777
+                    })
+                );
+                assert_eq!(plan.peers.len(), 1);
+                assert_eq!(
+                    plan.peers[0].player_id,
+                    if recipient == fixture.existing {
+                        fixture.reconnecting
+                    } else {
+                        fixture.existing
+                    }
+                );
+                assert_eq!(plan.peers[0].initiate, recipient != fixture.existing);
+            } else {
+                assert_eq!(plan.topology, Topology::Relay);
+                assert_eq!(plan.transport, Transport::Relay);
+                assert_eq!(plan.host, None);
+                assert_eq!(plan.direct_endpoint, None);
+                assert!(plan.peers.is_empty());
+            }
+        }
+        assert_silent(&mut fixture.current_rx).await;
+        assert_silent(&mut fixture.existing_rx).await;
+        let stored = server
+            .database
+            .get_room_player_snapshot(&fixture.room_id, &fixture.existing)
+            .await
+            .unwrap()
+            .unwrap()
+            .player
+            .unwrap();
+        assert!(
+            matches!(stored.connection_info, Some(ConnectionInfo::Direct {host, port}) if host == host_address && port == 7777)
+        );
+    }
+}

@@ -93,6 +93,32 @@ async fn room_player_projection_preserves_metadata_without_copying_other_members
             serde_json::to_value(&expected).unwrap()
         );
         assert_eq!(actual_player.region_id, expected.region_id);
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        let restored = database
+            .get_room_reconnect_snapshot(&room.id, &creator)
+            .await
+            .unwrap()
+            .unwrap();
+        let restored_stats = region.change();
+        assert_eq!(restored.code, baseline.code);
+        assert_eq!(restored.application_id, baseline.application_id);
+        let restored_player = restored.player.unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored_player).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(restored_player.region_id, expected.region_id);
+        assert!(
+            restored_stats.bytes_allocated <= stats.bytes_allocated + baseline.code.len() + 128,
+            "restored membership copied unrelated metadata: {restored_stats:?} {stats:?}"
+        );
+        assert!(database
+            .get_room_reconnect_snapshot(&room.id, &Uuid::nil())
+            .await
+            .unwrap()
+            .unwrap()
+            .player
+            .is_none());
         profiles.push((stats.allocations, stats.bytes_allocated));
         for expected in baseline.players.values() {
             let actual = database
@@ -142,7 +168,26 @@ async fn room_player_projection_preserves_metadata_without_copying_other_members
                 .authority_player,
             None
         );
+        let application = Uuid::from_u128(700);
+        database
+            .set_room_application_id(&room.id, application)
+            .await
+            .unwrap();
+        assert_eq!(
+            database
+                .get_room_reconnect_snapshot(&room.id, &creator)
+                .await
+                .unwrap()
+                .unwrap()
+                .application_id,
+            Some(application)
+        );
         assert!(database.delete_room(&room.id).await.unwrap());
+        assert!(database
+            .get_room_reconnect_snapshot(&room.id, &creator)
+            .await
+            .unwrap()
+            .is_none());
         assert!(database
             .get_room_player_snapshot(&room.id, &creator)
             .await
@@ -181,6 +226,14 @@ async fn room_player_projection_preserves_metadata_without_copying_other_members
         .unwrap();
     assert_eq!(snapshot.player.unwrap().id, creator);
     assert_eq!(snapshot.authority_player, pending.authority_player);
+    let restored = database
+        .get_room_reconnect_snapshot(&pending.id, &creator)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.player.unwrap().id, creator);
+    assert_eq!(restored.code, pending.code);
+    assert_eq!(restored.application_id, pending.application_id);
 }
 
 /// Keep each original history and diagnostic discoverable on the measuring thread.

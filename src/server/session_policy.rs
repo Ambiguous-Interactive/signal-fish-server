@@ -153,6 +153,12 @@ impl SessionMember {
         }
     }
 
+    pub(super) fn refresh_protocol(&mut self, protocol: NegotiatedProtocol) {
+        self.version = protocol.version;
+        self.transports = protocol.transports;
+        self.topologies = protocol.topologies;
+    }
+
     /// Whether this member negotiated protocol v3 or higher.
     fn supports_v3(&self) -> bool {
         self.version >= 3
