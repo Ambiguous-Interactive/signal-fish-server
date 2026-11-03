@@ -6050,3 +6050,70 @@ async fn compact_session_capabilities_preserve_every_negotiated_subset() {
         SessionCapabilities::default()
     );
 }
+
+#[tokio::test]
+async fn admission_protocol_projections_match_owned_snapshots_after_replacement_and_removal() {
+    let server = create_server_with_session(SessionConfig::default()).await;
+    let player = PlayerId::from_u128(1);
+    let (sender, _receiver) = mpsc::channel(8);
+    server.connect_client(player, sender).await;
+    for version in [2, 3, 4] {
+        for transports in [
+            vec![],
+            vec![Transport::Relay],
+            vec![Transport::WebRtc, Transport::Direct, Transport::WebRtc],
+            vec![Transport::Direct, Transport::WebRtc, Transport::Relay],
+        ] {
+            for topologies in [
+                vec![],
+                vec![Topology::Relay],
+                vec![Topology::Mesh, Topology::Host, Topology::Mesh],
+                vec![Topology::Host, Topology::Mesh, Topology::Relay],
+            ] {
+                let protocol = NegotiatedProtocol {
+                    version,
+                    transports: transports.clone(),
+                    topologies,
+                };
+                server.set_client_protocol(&player, protocol.clone());
+                assert_eq!(server.client_protocol_version(&player), protocol.version);
+                for topology in [Topology::Relay, Topology::Host, Topology::Mesh] {
+                    for transport in [Transport::Relay, Transport::Direct, Transport::WebRtc] {
+                        let stored = ActiveSessionPlan {
+                            topology,
+                            transport,
+                            host: None,
+                        };
+                        assert_eq!(
+                            server.client_supports_sticky_plan(&player, &stored),
+                            joiner_supports_sticky_plan(&protocol, &stored),
+                            "version={version} topology={topology:?} transport={transport:?} protocol={protocol:?}"
+                        );
+                    }
+                }
+                let owned = server.client_protocol(&player);
+                assert_eq!(owned.version, protocol.version);
+                assert_eq!(owned.transports, protocol.transports);
+                assert_eq!(owned.topologies, protocol.topologies);
+            }
+        }
+    }
+    server.disconnect_client(&player).await;
+    assert_eq!(
+        server.client_protocol_version(&player),
+        NegotiatedProtocol::default().version
+    );
+    for topology in [Topology::Relay, Topology::Host, Topology::Mesh] {
+        for transport in [Transport::Relay, Transport::Direct, Transport::WebRtc] {
+            let stored = ActiveSessionPlan {
+                topology,
+                transport,
+                host: None,
+            };
+            assert_eq!(
+                server.client_supports_sticky_plan(&player, &stored),
+                joiner_supports_sticky_plan(&NegotiatedProtocol::default(), &stored)
+            );
+        }
+    }
+}

@@ -1,7 +1,6 @@
 use super::{
-    session_policy::joiner_supports_sticky_plan, ClientLifecycle, EnhancedGameServer,
-    MaxPlayersPerApplicationExceededError, MaxRoomsExceededError,
-    MaxRoomsPerApplicationExceededError, MaxRoomsPerGameExceededError,
+    ClientLifecycle, EnhancedGameServer, MaxPlayersPerApplicationExceededError,
+    MaxRoomsExceededError, MaxRoomsPerApplicationExceededError, MaxRoomsPerGameExceededError,
     PendingApplicationClaimRollback,
 };
 use crate::coordination::RoomEventMutationGuard;
@@ -2179,7 +2178,7 @@ impl EnhancedGameServer {
                         Err(JoinRoomError::RoomFull)
                     } else if room.lobby_state == LobbyState::Finalized
                         && self.active_session_plan(&room.id).is_some_and(|stored| {
-                            !joiner_supports_sticky_plan(&self.client_protocol(player_id), &stored)
+                            !self.client_supports_sticky_plan(player_id, &stored)
                         })
                     {
                         // Running-session capability gate (issue #421): a
@@ -2709,7 +2708,7 @@ impl EnhancedGameServer {
         // admission and attribution simply no longer exists.
         if let Some(records) = self.session_records() {
             records
-                .record_member_protocol_version(&room.id, self.client_protocol(player_id).version);
+                .record_member_protocol_version(&room.id, self.client_protocol_version(player_id));
         }
         Ok((room, guard, admission_kind, creation_lock))
     }

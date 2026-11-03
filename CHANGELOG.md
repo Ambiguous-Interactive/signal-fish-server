@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory used for live P2P seat fills, session version tracking, and reconnect-token checks
+  (#1404, #1405, #1406).
 - Reduce memory used for live P2P room lookup, ICE preparation, and session capability snapshots
   (#1400, #1401, #1402).
 - Reduce memory used for rejected P2P starts, lobby readiness snapshots, and application UUID lookups

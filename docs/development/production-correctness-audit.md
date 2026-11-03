@@ -14404,3 +14404,59 @@ No client migration or tracking issue is needed. These are embedded allocation
 measurements; no remote latency improvement is claimed. Current-head hosted
 qualification is required before closing #1400–#1402. Both broader campaigns
 remain open.
+
+### F258 — Session version attribution copies capability lists
+
+Issue #1404; source `9e7c72a2`. Player admission and reconnect restoration
+used `client_protocol(...).version` for session-record attribution. The owned
+snapshot cloned both capability vectors. Missing connections constructed both
+default vectors. The scalar read now projects the version under one connection
+borrow and preserves `SERVER_MIN_PROTOCOL_VERSION` for absent clients.
+
+The red `membership_version_does_not_copy_capabilities` control measured two
+allocations for connected v2, connected v3 and missing IDs. The same control
+now measures zero allocations and reallocations in every cell. The control
+measures the production version-read seam, not a whole admission transaction.
+
+### F259 — Reconnect-token eligibility copies capability lists
+
+Issue #1405; source `9e7c72a2`. Token pre-issuance cloned the protocol snapshot
+only to test whether its version was at least three. It now uses the existing
+borrowed `supports_v3` predicate. Token creation, identity capture and rotation
+remain in the same order after that predicate. Disabled reconnection still
+returns before the connection read.
+
+The actual legacy-token path measured two allocations for both connected v2
+and missing IDs in the red control. Both now measure zero. The same history
+switches the connected client to v3 and verifies two nonempty, distinct tokens.
+This does not claim allocation-free v3 token creation or change token ownership.
+
+### F260 — P2P seat-fill admission copies capability lists
+
+Issue #1406; source `9e7c72a2`. Finalized-room admission cloned the protocol
+snapshot to check version, topology and transport. The existing sticky-plan
+predicate now runs while borrowing one connection. It releases that borrow
+before any await or room mutation. Missing connections remain ineligible.
+
+The red `sticky_admission_does_not_copy_capabilities` control measured two
+allocations for every allowed and refused Mesh/WebRTC and Host/Direct decision,
+including missing IDs. All now measure zero. An exhaustive unit matrix compares
+the projected predicate with the existing owned predicate across versions 2–4,
+empty, duplicate and reordered lists, all nine topology/transport pairs,
+negotiation replacement and connection removal. Owned snapshot values remain
+unchanged. The existing real-socket three-player seat-fill history checks the
+complete admission and session-plan publication separately.
+
+F258–F260 advance #636 and #826. They remove two temporary allocations per
+read; they do not establish a server throughput, latency or remote-network
+capacity gain. The original three allocation controls fail before the repair
+and pass after it; no limits or workloads were relaxed.
+
+External-client assessment: connector reads inspected Rust `src/protocol.rs`
+at `da8f2d16`, .NET `Protocol/MessagesHandshake.cs` at `e467c871`, and Godot
+`protocol/sf_messages.gd` at `00f75a6a`. Rust remains unaffected because version,
+transport and topology negotiation and all output schemas stay identical.
+.NET remains unaffected because both-axis admission, token presence and errors
+stay identical. Godot remains unaffected because P2P seat-fill decisions,
+reconnect rotation and session-plan ordering stay identical. No client migration
+or tracking issue is required for these server allocation changes.

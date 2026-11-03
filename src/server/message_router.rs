@@ -348,7 +348,7 @@ impl EnhancedGameServer {
                     // session that never requested the capability has a valid
                     // version; only the capability constraint is unmet, and
                     // "upgrade the client" guidance would be wrong.
-                    let error_code = if self.client_protocol(player_id).version >= 3 {
+                    let error_code = if self.client_supports_v3(player_id) {
                         crate::protocol::ErrorCode::InvalidInput
                     } else {
                         crate::protocol::ErrorCode::UnsupportedProtocolVersion

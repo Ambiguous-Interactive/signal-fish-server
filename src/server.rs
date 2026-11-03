@@ -558,6 +558,42 @@ pub mod allocation_benchmark {
         );
     }
 
+    /// Measure the version read used by admission and reconnect attribution.
+    pub fn membership_version_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+    ) -> u16 {
+        server.client_protocol_version(player_id)
+    }
+
+    /// Measure the production seat-fill capability check.
+    pub fn sticky_admission_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+        topology: crate::protocol::Topology,
+        transport: crate::protocol::Transport,
+    ) -> bool {
+        server.client_supports_sticky_plan(
+            player_id,
+            &super::session_policy::ActiveSessionPlan {
+                topology,
+                transport,
+                host: None,
+            },
+        )
+    }
+
+    /// Measure the production reconnection token path.
+    pub async fn pre_issue_token_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+        room_id: crate::protocol::RoomId,
+    ) -> Option<String> {
+        server
+            .pre_issue_reconnection_token_for(player_id, room_id)
+            .await
+    }
+
     /// Retain selection inputs between allocation measurements.
     pub struct HostElectionFixture {
         members: Vec<super::session_policy::SessionMember>,
@@ -1483,6 +1519,26 @@ impl EnhancedGameServer {
     /// Fetch the negotiated protocol capabilities for a client (defaults to v2 relay-only).
     pub(crate) fn client_protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.connection_manager.protocol(player_id)
+    }
+
+    /// Read the version used for session membership attribution.
+    pub(crate) fn client_protocol_version(&self, player_id: &PlayerId) -> u16 {
+        self.connection_manager
+            .project_protocol(player_id, |protocol| protocol.version)
+            .unwrap_or(crate::config::SERVER_MIN_PROTOCOL_VERSION)
+    }
+
+    /// Check a seat fill against the room's running session.
+    pub(super) fn client_supports_sticky_plan(
+        &self,
+        player_id: &PlayerId,
+        stored: &session_policy::ActiveSessionPlan,
+    ) -> bool {
+        self.connection_manager
+            .project_protocol(player_id, |protocol| {
+                session_policy::joiner_supports_sticky_plan(protocol, stored)
+            })
+            .unwrap_or(false)
     }
 
     /// Persist the client's last-reported data-path transport state (mirrors

@@ -1,5 +1,7 @@
 //! Exact P2P start publications retain legacy metadata without copying it into selection.
 
+#[path = "live_p2p_allocations/admission_costs.rs"]
+mod admission_costs;
 mod allocation_harness;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
@@ -402,6 +404,18 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "membership_version_does_not_copy_capabilities",
+            admission_costs::membership_version_does_not_copy_capabilities,
+        ),
+        allocation_harness::trial(
+            "sticky_admission_does_not_copy_capabilities",
+            admission_costs::sticky_admission_does_not_copy_capabilities,
+        ),
+        allocation_harness::trial(
+            "legacy_token_gate_does_not_copy_capabilities",
+            admission_costs::legacy_token_gate_does_not_copy_capabilities,
+        ),
         allocation_harness::trial(
             "ice_eligibility_does_not_copy_capabilities",
             setup_costs::ice_eligibility_does_not_copy_capabilities,
