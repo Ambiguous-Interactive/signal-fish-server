@@ -2356,7 +2356,7 @@ impl EnhancedGameServer {
                         };
                         live_members.retain(|player| routed.contains(&player.player_id));
                         for member in &mut live_members {
-                            member.refresh_protocol(server_for_publication.client_protocol(&member.player_id));
+                            member.refresh_protocol(server_for_publication.session_capabilities(&member.player_id));
                         }
                         let actor_is_routed = routed.contains(&reconnect_player_for_publication);
                         if attempts_remaining == 0 && actor_is_routed {

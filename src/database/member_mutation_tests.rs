@@ -372,7 +372,7 @@ async fn room_id_lookup_matches_full_snapshots_through_publication_rotation_and_
     db.room_codes
         .write()
         .await
-        .insert(("lookup".into(), "STALE1".into()), stale);
+        .insert("lookup".into(), "STALE1".into(), stale);
     assert_eq!(db.get_room_id("lookup", "STALE1").await.unwrap(), None);
 }
 
@@ -717,4 +717,60 @@ async fn session_player_projection_preserves_fields_and_validated_endpoints() {
         assert_eq!(selected.direct_endpoint, endpoint);
         assert_eq!(serde_json::to_value(&player).unwrap(), before);
     }
+}
+
+#[tokio::test]
+async fn borrowed_code_index_preserves_games_rotation_and_last_room_cleanup() {
+    let db = InMemoryDatabase::new();
+    let first = create_test_room(&db, "game-未知", "SHARED").await.unwrap();
+    let sibling = create_test_room(&db, "game-未知", "OTHER1").await.unwrap();
+    let other_game = create_test_room(&db, "other", "SHARED").await.unwrap();
+    assert_eq!(
+        db.get_room_id("game-未知", "SHARED").await.unwrap(),
+        Some(first.id)
+    );
+    assert_eq!(
+        db.get_room_id("other", "SHARED").await.unwrap(),
+        Some(other_game.id)
+    );
+    assert_eq!(db.get_room_id("absent", "SHARED").await.unwrap(), None);
+    assert_eq!(db.get_room_id("game-未知", "missing").await.unwrap(), None);
+    assert!(matches!(
+        db.update_room_code(&first.id, "OTHER1".into()).await,
+        Err(UpdateRoomCodeError::RoomCodeCollision { .. })
+    ));
+    assert_eq!(
+        db.get_room_id("game-未知", "SHARED").await.unwrap(),
+        Some(first.id)
+    );
+    let rotated = db
+        .update_room_code(&first.id, "NEW001".into())
+        .await
+        .unwrap();
+    assert_eq!(rotated.id, first.id);
+    assert_eq!(db.get_room_id("game-未知", "SHARED").await.unwrap(), None);
+    assert_eq!(
+        db.get_room_id("game-未知", "NEW001").await.unwrap(),
+        Some(first.id)
+    );
+    assert!(db.delete_room(&first.id).await.unwrap());
+    assert_eq!(db.get_room_id("game-未知", "NEW001").await.unwrap(), None);
+    assert_eq!(
+        db.get_room_id("game-未知", "OTHER1").await.unwrap(),
+        Some(sibling.id)
+    );
+    assert!(db.delete_room(&sibling.id).await.unwrap());
+    assert!(!db.room_codes.read().await.games.contains_key("game-未知"));
+    assert_eq!(
+        db.get_room_id("other", "SHARED").await.unwrap(),
+        Some(other_game.id)
+    );
+    assert!(db.delete_room(&other_game.id).await.unwrap());
+    assert!(db.room_codes.read().await.is_empty());
+    let replacement = create_test_room(&db, "game-未知", "SHARED").await.unwrap();
+    assert_ne!(replacement.id, first.id);
+    assert_eq!(
+        db.get_room_id("game-未知", "SHARED").await.unwrap(),
+        Some(replacement.id)
+    );
 }

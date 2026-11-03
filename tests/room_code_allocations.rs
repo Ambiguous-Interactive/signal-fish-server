@@ -156,9 +156,53 @@ fn player_leave_does_not_copy_stored_spectator_names() {
     }
 }
 
+fn room_identity_lookup_borrows_text() {
+    allocation_harness::block_on(async {
+        let database = InMemoryDatabase::new();
+        let mut profiles = Vec::new();
+        for bytes in [8, 1024, 65536] {
+            let game = "g".repeat(bytes);
+            let code = "c".repeat(bytes);
+            let room = database
+                .create_room(
+                    game.clone(),
+                    Some(code.clone()),
+                    4,
+                    true,
+                    Uuid::new_v4(),
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let missing = format!("{code}x");
+            for key in [&code, &missing] {
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                let actual = database.get_room_id(&game, key).await.unwrap();
+                let stats = region.change();
+                println!(
+                    "ROOM_IDENTITY bytes={bytes} found={} stats={stats:?}",
+                    actual.is_some()
+                );
+                assert_eq!(actual, (key == &code).then_some(room.id));
+                profiles.push(stats);
+            }
+        }
+        assert!(
+            profiles.iter().all(|stats| stats.allocations == 1),
+            "identity lookup copied text: {profiles:?}"
+        );
+    });
+}
+
 /// Keep each original history and diagnostic discoverable on the measuring thread.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "room_identity_lookup_borrows_text",
+            room_identity_lookup_borrows_text,
+        ),
         allocation_harness::trial(
             "room_code_read_cost_does_not_grow_with_spectator_rosters",
             room_code_read_cost_does_not_grow_with_spectator_rosters,

@@ -111,9 +111,11 @@ fn member(
             host: "127.0.0.1".to_string(),
             port: 7777,
         }),
-        version,
-        transports,
-        topologies,
+        capabilities: super::session_policy::SessionCapabilities::from(&NegotiatedProtocol {
+            version,
+            transports,
+            topologies,
+        }),
     }
 }
 
@@ -4710,9 +4712,17 @@ mod properties {
 
     /// Session-selection capability predicate, recomputed from raw member data.
     fn member_supports(member: &SessionMember, topology: Topology, transport: Transport) -> bool {
-        member.version >= 3
-            && member.topologies.contains(&topology)
-            && member.transports.contains(&transport)
+        member.capabilities.version >= 3
+            && match topology {
+                Topology::Relay => member.capabilities.relay_topology,
+                Topology::Host => member.capabilities.host_topology,
+                Topology::Mesh => member.capabilities.mesh_topology,
+            }
+            && match transport {
+                Transport::Relay => member.capabilities.relay_transport,
+                Transport::Direct => member.capabilities.direct_transport,
+                Transport::WebRtc => member.capabilities.webrtc_transport,
+            }
     }
 
     /// Independent executable-host predicate. Generated endpoints are either
@@ -4811,9 +4821,14 @@ mod properties {
                                     }),
                                     _ => None,
                                 },
-                                version,
-                                transports,
-                                topologies,
+                                capabilities:
+                                    super::super::session_policy::SessionCapabilities::from(
+                                        &crate::server::NegotiatedProtocol {
+                                            version,
+                                            transports,
+                                            topologies,
+                                        },
+                                    ),
                             }
                         },
                     )
@@ -5928,9 +5943,10 @@ async fn session_member_projection_preserves_identity_capabilities_and_validates
         assert!(member.is_authority);
         assert_eq!(Some(member.joined_at), player.connected_at);
         assert_eq!(member.direct_endpoint, expected);
-        assert_eq!(member.version, 3);
-        assert_eq!(member.transports, v3_webrtc().transports);
-        assert_eq!(member.topologies, v3_webrtc().topologies);
+        assert_eq!(
+            member.capabilities,
+            super::session_policy::SessionCapabilities::from(&v3_webrtc())
+        );
         assert_eq!(serde_json::to_value(&player).unwrap(), before);
     }
     assert!(server.session_members_from(std::iter::empty()).is_empty());
@@ -5960,10 +5976,11 @@ async fn reconnect_retry_refreshes_capabilities_without_copying_member_names() {
             topologies: vec![Topology::Host],
         },
     ] {
-        member.refresh_protocol(protocol.clone());
-        assert_eq!(member.version, protocol.version);
-        assert_eq!(member.transports, protocol.transports);
-        assert_eq!(member.topologies, protocol.topologies);
+        member.refresh_protocol(super::session_policy::SessionCapabilities::from(&protocol));
+        assert_eq!(
+            member.capabilities,
+            super::session_policy::SessionCapabilities::from(&protocol)
+        );
         assert_eq!(member.player_name.as_ptr(), name_pointer);
         assert_eq!(member.player_name, player.name);
         assert_eq!(member.player_id, player.id);
@@ -5971,4 +5988,65 @@ async fn reconnect_retry_refreshes_capabilities_without_copying_member_names() {
         assert_eq!(member.joined_at, joined_at);
         assert_eq!(member.direct_endpoint, endpoint);
     }
+}
+
+#[tokio::test]
+async fn compact_session_capabilities_preserve_every_negotiated_subset() {
+    use super::session_policy::SessionCapabilities;
+    let server = create_server_with_session(mesh_config()).await;
+    let (id, _receiver) = register_client(&server).await;
+    let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+    let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
+    assert_eq!(
+        server.session_capabilities(&PlayerId::new_v4()),
+        SessionCapabilities::default()
+    );
+    for version in [0, 2, 3, 4] {
+        for transport_mask in 0_u8..8 {
+            for topology_mask in 0_u8..8 {
+                let protocol = NegotiatedProtocol {
+                    version,
+                    transports: transports
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, value)| {
+                            (transport_mask & (1 << index) != 0).then_some(*value)
+                        })
+                        .collect(),
+                    topologies: topologies
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, value)| {
+                            (topology_mask & (1 << index) != 0).then_some(*value)
+                        })
+                        .collect(),
+                };
+                for duplicates in [false, true] {
+                    let mut input = protocol.clone();
+                    if duplicates {
+                        input.transports.extend(protocol.transports.iter().rev());
+                        input.topologies.extend(protocol.topologies.iter().rev());
+                        input.transports.reverse();
+                        input.topologies.reverse();
+                    }
+                    server.set_client_protocol(&id, input);
+                    let projected = server.session_capabilities(&id);
+                    assert_eq!(projected.version, version);
+                    for value in transports {
+                        assert_eq!(projected.supports_transport(value), protocol.transports.contains(&value),
+                            "version={version} transport_mask={transport_mask} topology_mask={topology_mask} duplicates={duplicates}");
+                    }
+                    for value in topologies {
+                        assert_eq!(projected.supports_topology(value), protocol.topologies.contains(&value),
+                            "version={version} transport_mask={transport_mask} topology_mask={topology_mask} duplicates={duplicates}");
+                    }
+                }
+            }
+        }
+    }
+    server.disconnect_client(&id).await;
+    assert_eq!(
+        server.session_capabilities(&id),
+        SessionCapabilities::default()
+    );
 }

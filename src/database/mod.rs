@@ -44,6 +44,40 @@ pub enum UpdateRoomCodeError {
 /// Room-code rotation result.
 pub type UpdateRoomCodeResult = std::result::Result<Room, UpdateRoomCodeError>;
 
+#[derive(Default)]
+struct RoomCodeIndex {
+    games: HashMap<String, HashMap<String, RoomId>>,
+}
+
+impl RoomCodeIndex {
+    fn get(&self, game: &str, code: &str) -> Option<&RoomId> {
+        self.games.get(game)?.get(code)
+    }
+
+    fn insert(&mut self, game: String, code: String, room: RoomId) {
+        self.games.entry(game).or_default().insert(code, room);
+    }
+
+    fn remove(&mut self, game: &str, code: &str) {
+        if let Some(codes) = self.games.get_mut(game) {
+            codes.remove(code);
+            if codes.is_empty() {
+                self.games.remove(game);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.games.is_empty()
+    }
+
+    #[cfg(test)]
+    fn values(&self) -> impl Iterator<Item = &RoomId> {
+        self.games.values().flat_map(HashMap::values)
+    }
+}
+
 /// Summary describing how many rooms were removed by the cleanup routine.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RoomCleanupOutcome {
@@ -1107,7 +1141,7 @@ pub struct InMemoryDatabase {
     /// join, leave, and close path below funnels through this registry.
     session_records: std::sync::Arc<crate::session_records::SessionRecords>,
     /// Maps (game_name, room_code) -> room_id to allow same room codes across different games
-    room_codes: std::sync::Arc<tokio::sync::RwLock<HashMap<(String, String), RoomId>>>,
+    room_codes: std::sync::Arc<tokio::sync::RwLock<RoomCodeIndex>>,
     /// Missing means published. Lock after rooms, codes, and liveness when
     /// those guards are also needed, so creation and deletion remain atomic.
     room_publication: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, PendingRoomState>>>,
@@ -1338,7 +1372,7 @@ impl InMemoryDatabase {
             #[cfg(test)]
             fail_update_room_activity_once: std::sync::atomic::AtomicBool::new(false),
             session_records: std::sync::Arc::new(crate::session_records::SessionRecords::new()),
-            room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(RoomCodeIndex::default())),
             room_publication: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_liveness_monotonic: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cleanup_events: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -1964,8 +1998,7 @@ impl InMemoryDatabase {
         let mut publication = self.room_publication.write().await;
 
         // Check room code uniqueness under the write lock (no TOCTOU gap)
-        let game_room_key = (game_name.clone(), room_code.clone());
-        if room_codes.contains_key(&game_room_key) {
+        if room_codes.get(&game_name, &room_code).is_some() {
             return Err(CreateRoomError::RoomCodeCollision {
                 game_name,
                 room_code,
@@ -2022,7 +2055,7 @@ impl InMemoryDatabase {
         // The join password rides the same insert: the room is born sealed,
         // so no admission can observe an unlocked row (issue #525).
         rooms.insert(room_id, room.clone());
-        room_codes.insert(game_room_key, room_id);
+        room_codes.insert(game_name, room_code, room_id);
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         if pending {
             publication.insert(
@@ -2199,10 +2232,8 @@ impl GameDatabase for InMemoryDatabase {
             ))
         })?;
 
-        let old_key = (room.game_name.clone(), room.code.clone());
-        let new_key = (room.game_name.clone(), new_code.clone());
         if room_codes
-            .get(&new_key)
+            .get(&room.game_name, &new_code)
             .is_some_and(|owner| owner != room_id)
         {
             return Err(UpdateRoomCodeError::RoomCodeCollision {
@@ -2216,10 +2247,10 @@ impl GameDatabase for InMemoryDatabase {
         // the in-process GC decides idle time from when one exists —
         // refreshing only the wall clock would leave the reaper working from
         // a stale instant (BUG-1 clock pairing).
+        room_codes.remove(&room.game_name, &room.code);
         room.code = new_code;
         room.last_activity = chrono::Utc::now();
-        room_codes.remove(&old_key);
-        room_codes.insert(new_key, *room_id);
+        room_codes.insert(room.game_name.clone(), room.code.clone(), *room_id);
         liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         self.session_records
             .record_room_code_changed(room_id, &room.code);
@@ -2290,8 +2321,7 @@ impl GameDatabase for InMemoryDatabase {
         let rooms = self.rooms.read().await;
         let room_codes = self.room_codes.read().await;
         let publication = self.room_publication.read().await;
-        let game_room_key = (game_name.to_string(), room_code.to_string());
-        if let Some(room_id) = room_codes.get(&game_room_key) {
+        if let Some(room_id) = room_codes.get(game_name, room_code) {
             if let Some(room) = rooms.get(room_id) {
                 if !publication.contains_key(room_id) {
                     return Ok(Some(room.clone()));
@@ -2306,9 +2336,8 @@ impl GameDatabase for InMemoryDatabase {
         let rooms = self.rooms.read().await;
         let room_codes = self.room_codes.read().await;
         let publication = self.room_publication.read().await;
-        let key = (game_name.to_string(), room_code.to_string());
         Ok(room_codes
-            .get(&key)
+            .get(game_name, room_code)
             .copied()
             .filter(|room_id| rooms.contains_key(room_id) && !publication.contains_key(room_id)))
     }
@@ -2835,7 +2864,7 @@ impl GameDatabase for InMemoryDatabase {
             }
             expired
         }) {
-            room_codes.remove(&(room.game_name, room.code));
+            room_codes.remove(&room.game_name, &room.code);
             self.session_records
                 .record_closed(&room_id, crate::session_records::SessionCloseReason::Empty);
             deleted_ids.push(room_id);
@@ -2874,7 +2903,7 @@ impl GameDatabase for InMemoryDatabase {
             expired
         }) {
             let was_empty = !room.has_occupants();
-            room_codes.remove(&(room.game_name, room.code));
+            room_codes.remove(&room.game_name, &room.code);
             self.session_records.record_closed(
                 &room_id,
                 crate::session_records::SessionCloseReason::Expired,
@@ -2930,8 +2959,7 @@ impl GameDatabase for InMemoryDatabase {
                 PendingRoomState::Creating { accounting, .. }
                 | PendingRoomState::Abandoned { accounting, .. } => accounting.clone(),
             });
-            let game_room_key = (room.game_name.clone(), room.code);
-            room_codes.remove(&game_room_key);
+            room_codes.remove(&room.game_name, &room.code);
             liveness.remove(room_id);
             publication.remove(room_id);
             if let Some(accounting) = accounting {
@@ -3051,9 +3079,8 @@ impl GameDatabase for InMemoryDatabase {
         if room.players.len() > 1 || room.players.keys().any(|player_id| player_id != creator_id) {
             return Ok(false);
         }
-        let key = (room.game_name.clone(), room.code.clone());
+        room_codes.remove(&room.game_name, &room.code);
         rooms.remove(room_id);
-        room_codes.remove(&key);
         liveness.remove(room_id);
         publication.remove(room_id);
         self.session_records

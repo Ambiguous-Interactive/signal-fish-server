@@ -115,6 +115,64 @@ impl ActiveSessionPlan {
     }
 }
 
+/// Version and set membership used by live session selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionCapabilities {
+    pub version: u16,
+    pub relay_transport: bool,
+    pub direct_transport: bool,
+    pub webrtc_transport: bool,
+    pub relay_topology: bool,
+    pub host_topology: bool,
+    pub mesh_topology: bool,
+}
+
+impl Default for SessionCapabilities {
+    fn default() -> Self {
+        Self {
+            version: crate::config::SERVER_MIN_PROTOCOL_VERSION,
+            relay_transport: true,
+            direct_transport: false,
+            webrtc_transport: false,
+            relay_topology: true,
+            host_topology: false,
+            mesh_topology: false,
+        }
+    }
+}
+
+impl From<&NegotiatedProtocol> for SessionCapabilities {
+    fn from(protocol: &NegotiatedProtocol) -> Self {
+        Self {
+            version: protocol.version,
+            relay_transport: protocol.transports.contains(&Transport::Relay),
+            direct_transport: protocol.transports.contains(&Transport::Direct),
+            webrtc_transport: protocol.transports.contains(&Transport::WebRtc),
+            relay_topology: protocol.topologies.contains(&Topology::Relay),
+            host_topology: protocol.topologies.contains(&Topology::Host),
+            mesh_topology: protocol.topologies.contains(&Topology::Mesh),
+        }
+    }
+}
+
+impl SessionCapabilities {
+    pub(super) fn supports_transport(self, transport: Transport) -> bool {
+        match transport {
+            Transport::Relay => self.relay_transport,
+            Transport::Direct => self.direct_transport,
+            Transport::WebRtc => self.webrtc_transport,
+        }
+    }
+
+    pub(super) fn supports_topology(self, topology: Topology) -> bool {
+        match topology {
+            Topology::Relay => self.relay_topology,
+            Topology::Host => self.host_topology,
+            Topology::Mesh => self.mesh_topology,
+        }
+    }
+}
+
 /// Per-member input to session selection: identity + negotiated capabilities +
 /// join time (for deterministic host election).
 ///
@@ -127,19 +185,17 @@ pub(crate) struct SessionMember {
     pub is_authority: bool,
     pub joined_at: chrono::DateTime<chrono::Utc>,
     pub direct_endpoint: Option<DirectEndpoint>,
-    pub version: u16,
-    pub transports: Vec<Transport>,
-    pub topologies: Vec<Topology>,
+    pub capabilities: SessionCapabilities,
 }
 
 impl SessionMember {
-    fn from_player(player: &PlayerInfo, protocol: NegotiatedProtocol) -> Self {
-        Self::from_session_player(crate::database::SessionPlayer::from(player), protocol)
+    fn from_player(player: &PlayerInfo, capabilities: SessionCapabilities) -> Self {
+        Self::from_session_player(crate::database::SessionPlayer::from(player), capabilities)
     }
 
     fn from_session_player(
         player: crate::database::SessionPlayer,
-        protocol: NegotiatedProtocol,
+        capabilities: SessionCapabilities,
     ) -> Self {
         Self {
             player_id: player.id,
@@ -147,31 +203,27 @@ impl SessionMember {
             is_authority: player.is_authority,
             joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
             direct_endpoint: player.direct_endpoint,
-            version: protocol.version,
-            transports: protocol.transports,
-            topologies: protocol.topologies,
+            capabilities,
         }
     }
 
-    pub(super) fn refresh_protocol(&mut self, protocol: NegotiatedProtocol) {
-        self.version = protocol.version;
-        self.transports = protocol.transports;
-        self.topologies = protocol.topologies;
+    pub(super) fn refresh_protocol(&mut self, capabilities: SessionCapabilities) {
+        self.capabilities = capabilities;
     }
 
     /// Whether this member negotiated protocol v3 or higher.
     fn supports_v3(&self) -> bool {
-        self.version >= 3
+        self.capabilities.version >= 3
     }
 
     /// Whether this member negotiated the given data-path transport.
     fn supports_transport(&self, transport: Transport) -> bool {
-        self.transports.contains(&transport)
+        self.capabilities.supports_transport(transport)
     }
 
     /// Whether this member negotiated the given session topology.
     fn supports_topology(&self, topology: Topology) -> bool {
-        self.topologies.contains(&topology)
+        self.capabilities.supports_topology(topology)
     }
 
     /// Whether this member negotiated everything required to run a session on
@@ -751,8 +803,14 @@ impl EnhancedGameServer {
     ) -> Vec<SessionMember> {
         players
             .into_iter()
-            .map(|player| SessionMember::from_player(player, self.client_protocol(&player.id)))
+            .map(|player| SessionMember::from_player(player, self.session_capabilities(&player.id)))
             .collect()
+    }
+
+    pub(super) fn session_capabilities(&self, player_id: &PlayerId) -> SessionCapabilities {
+        self.connection_manager
+            .project_protocol(player_id, |protocol| SessionCapabilities::from(protocol))
+            .unwrap_or_default()
     }
 
     pub(super) fn session_members_from_selection(
@@ -762,7 +820,7 @@ impl EnhancedGameServer {
         players
             .into_iter()
             .map(|player| {
-                let protocol = self.client_protocol(&player.id);
+                let protocol = self.session_capabilities(&player.id);
                 SessionMember::from_session_player(player, protocol)
             })
             .collect()
@@ -791,7 +849,14 @@ impl EnhancedGameServer {
                 .members
                 .iter()
                 .map(|player| {
-                    SessionMember::from_player(player, connection_manager.protocol(&player.id))
+                    SessionMember::from_player(
+                        player,
+                        connection_manager
+                            .project_protocol(&player.id, |protocol| {
+                                SessionCapabilities::from(protocol)
+                            })
+                            .unwrap_or_default(),
+                    )
                 })
                 .collect();
             let decision = choose_session_plan(
@@ -1581,13 +1646,18 @@ impl EnhancedGameServer {
         room: &Room,
         player_id: &PlayerId,
     ) -> Vec<IceServer> {
-        let protocol = self.client_protocol(player_id);
-        if !ice_pregather_eligible(
-            &self.session_config,
-            &room.game_name,
-            &room.lobby_state,
-            &protocol,
-        ) {
+        let eligible = self
+            .connection_manager
+            .project_protocol(player_id, |protocol| {
+                ice_pregather_eligible(
+                    &self.session_config,
+                    &room.game_name,
+                    &room.lobby_state,
+                    protocol,
+                )
+            })
+            .unwrap_or(false);
+        if !eligible {
             return Vec::new();
         }
 
