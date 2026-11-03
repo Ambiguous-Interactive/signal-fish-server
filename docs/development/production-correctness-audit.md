@@ -14495,3 +14495,48 @@ ready membership and ICE values remain identical. .NET needs no change:
 `LobbyStateChanged` fields and readiness semantics remain identical. Godot
 needs no change: lobby events, ICE ordering and session-plan fields remain
 identical. No schema, negotiation or migration change is introduced.
+
+### F264–F266 — Live P2P publication costs
+
+Issues #1412, #1413 and #1414; source `1ad5ffcf`. Exact-membership room
+transactions copied their owned seated batch map and every frame vector on
+each reservation attempt. They now borrow those batches while keeping
+observer batches separate. No borrowed guard crosses an added await.
+
+The isolated complete two-frame, 255-player transaction drops from 781
+allocations and 625,033 allocated bytes to 525 allocations and 587,665 bytes.
+The all-feature layout uses 604,041 bytes with the same 525 allocations.
+Controls include two and 16 players and verify the exact frame Arc identities,
+per-recipient order, outcome and empty trailing queues. The original batch
+copy exceeds the allocation ceiling. This is allocation evidence, not a
+throughput or network-latency measurement.
+
+Reservation validation previously scanned every reservation for every current
+recipient twice under the routing gate. Reservations are now sorted once
+before that gate, then searched by player ID and checked against the current
+sender channel. The exact member comparison and independent observer retry
+remain in place. Empty batches still reserve and validate their sender identity.
+A matched debug control with 255 members and 100 transactions, each with two
+validation passes, measures 43.8 ms for the original scan and 24.8 ms for sorted
+lookup, including one sort per transaction.
+These local timings do not establish a production capacity result.
+
+Start and finalized-join incumbent batches previously allocated one frame slot,
+then grew when adding the optional v3 plan. A shared constructor reserves the
+final one- or two-frame size. Its original two-frame history reallocates once;
+the repaired constructor allocates once without reallocating. Both histories
+check exact Arc identity and order. v2 members keep their single lifecycle
+frame, and v3 members keep the same authoritative plan.
+
+Focused transaction controls retain phase-zero-before-phase-one ordering,
+minimum queue capacity, empty member batches, sender replacement, queue
+failure, hook rejection/error and observer independence. F264–F266 advance
+the open campaigns #636 and #826.
+
+External-client assessment inspected Rust `src/protocol.rs` blob `c20396a3`,
+.NET `MessagesGameStart.cs` blob `6f2f7318` and `MessagesMesh.cs` blob `5ce1a0b8`,
+and Godot `sf_events.gd` blob `5c4e66e6`. Rust needs no change because plan,
+lifecycle and generation values remain identical. .NET needs no change because
+GameStarting data and negotiated v3 messages stay identical. Godot needs no
+change because session events, per-recipient frame order and peer fields stay
+identical. No schema, negotiation or migration change is introduced.

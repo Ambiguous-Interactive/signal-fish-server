@@ -558,6 +558,15 @@ pub mod allocation_benchmark {
         );
     }
 
+    /// Build the production one- or two-phase frame batch for isolated profiles.
+    pub fn publication_batch_for_measurement(
+        player_id: crate::protocol::PlayerId,
+        first: std::sync::Arc<crate::protocol::ServerMessage>,
+        followup: Option<std::sync::Arc<crate::protocol::ServerMessage>>,
+    ) -> crate::coordination::RoomRecipientMessages {
+        crate::coordination::RoomRecipientMessages::with_followup(player_id, first, followup)
+    }
+
     /// Measure the version read used by admission and reconnect attribution.
     pub fn membership_version_for_measurement(
         server: &super::EnhancedGameServer,
@@ -2554,6 +2563,15 @@ enum RoomBatchReservation {
     Canceled,
 }
 
+impl RoomBatchReservation {
+    fn reserved_player(&self) -> Option<PlayerId> {
+        match self {
+            Self::Reserved { player_id, .. } => Some(*player_id),
+            Self::ChannelClosed { .. } | Self::SlowConsumer { .. } | Self::Canceled => None,
+        }
+    }
+}
+
 /// Drop accounting for a room transaction's reserved-but-undelivered frames.
 ///
 /// Armed from the moment the transaction owns reservations until its end.
@@ -3990,21 +4008,23 @@ impl InMemoryMessageCoordinator {
         }
     }
 
-    fn batch_reservations_cover_recipients(
+    fn sorted_batch_reservations_cover_recipients(
         reservations: &[RoomBatchReservation],
         recipients: &[(PlayerId, ClientDeliveryHandle)],
     ) -> bool {
         recipients.iter().all(|(player_id, handle)| {
-            reservations.iter().any(|reservation| match reservation {
-                RoomBatchReservation::Reserved {
-                    player_id: reserved_player,
-                    sender,
-                    ..
-                } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
-                RoomBatchReservation::ChannelClosed { .. }
-                | RoomBatchReservation::SlowConsumer { .. }
-                | RoomBatchReservation::Canceled => false,
-            })
+            reservations
+                .binary_search_by_key(&Some(*player_id), RoomBatchReservation::reserved_player)
+                .ok()
+                .and_then(|index| reservations.get(index))
+                .is_some_and(|reservation| match reservation {
+                    RoomBatchReservation::Reserved { sender, .. } => {
+                        sender.same_channel(&handle.sender)
+                    }
+                    RoomBatchReservation::ChannelClosed { .. }
+                    | RoomBatchReservation::SlowConsumer { .. }
+                    | RoomBatchReservation::Canceled => false,
+                })
         })
     }
 
@@ -4934,10 +4954,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
 
-            let mut messages_by_player = seated_messages.clone();
+            let mut observer_messages = HashMap::new();
             for (id, _) in &recipients {
                 if self.is_spectator_route(id) {
-                    messages_by_player.insert(
+                    observer_messages.insert(
                         *id,
                         RoomRecipientMessages::in_order(*id, spectator_messages.clone()),
                     );
@@ -4947,8 +4967,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             let reservation_inputs: Option<Vec<_>> = recipients
                 .iter()
                 .map(|(player_id, handle)| {
-                    messages_by_player
+                    seated_messages
                         .get(player_id)
+                        .or_else(|| observer_messages.get(player_id))
                         .map(|batch| (*player_id, handle.clone(), batch.messages.len()))
                 })
                 .collect();
@@ -5000,6 +5021,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 continue;
             }
 
+            guard
+                .reservations_mut()
+                .sort_unstable_by_key(RoomBatchReservation::reserved_player);
             let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
@@ -5029,12 +5053,18 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .cloned()
                 .collect();
             if current_members != expected
-                || !Self::batch_reservations_cover_recipients(guard.get(), &seated_recipients)
+                || !Self::sorted_batch_reservations_cover_recipients(
+                    guard.get(),
+                    &seated_recipients,
+                )
             {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
             if guard.get().len() != current_recipients.len()
-                || !Self::batch_reservations_cover_recipients(guard.get(), &current_recipients)
+                || !Self::sorted_batch_reservations_cover_recipients(
+                    guard.get(),
+                    &current_recipients,
+                )
             {
                 // Observer churn cannot invalidate a seated start or replan.
                 // Release its stale reservations and resolve observers again.
@@ -5083,7 +5113,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     // Its queue still accounts failures, but it cannot cancel
                     // player plan phases or degrade a seated publication.
                     let seated = !self.is_spectator_route(player_id);
-                    let Some(batch) = messages_by_player.get(player_id) else {
+                    let Some(batch) = seated_messages
+                        .get(player_id)
+                        .or_else(|| observer_messages.get(player_id))
+                    else {
                         let skipped = permits.iter_mut().filter_map(Option::take).count();
                         failed_frames =
                             failed_frames.saturating_add(if seated { skipped } else { 0 });
@@ -6649,3 +6682,6 @@ mod connect_token_tests {
         assert!(!server.connect_token_required());
     }
 }
+
+#[cfg(test)]
+mod publication_reservation_tests;
