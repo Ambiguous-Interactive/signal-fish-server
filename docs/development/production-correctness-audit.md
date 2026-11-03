@@ -14460,3 +14460,36 @@ transport and topology negotiation and all output schemas stay identical.
 stay identical. Godot remains unaffected because P2P seat-fill decisions,
 reconnect rotation and session-plan ordering stay identical. No client migration
 or tracking issue is required for these server allocation changes.
+
+### F261–F263 — Live P2P readiness and ICE allocation costs
+
+Issues #1408, #1409 and #1410; source `16f139a2`. Ready toggles built two
+membership sets. Lobby entry also rebuilt effective membership through a
+filtered iterator and cloned the ready set. Both now reuse the routed set
+while intersecting stored membership in linear work. Lobby entry borrows the
+ready set only during synchronous snapshot construction; no guard crosses an
+await. Stored-only and routed-only IDs remain excluded. Coordinators without
+routing snapshots retain stored membership.
+
+The isolated complete 255-player ready toggle drops from 458,956 to 450,116
+allocated bytes. Lobby entry drops from 467,144 to 449,716 bytes. The controls
+also check two and 16 players, every exact lobby message, ready membership and
+`all_ready`. Their unchanged byte ceilings reject the original source.
+All-feature trace storage adds 8,184 bytes in each 255-player control; the
+ceilings allow this layout cost separately. This is allocation evidence, not
+a throughput or latency claim.
+
+ICE composition copied the static vector before appending derived entries.
+A one-static-plus-one-STUN history fails the original zero-reallocation bound.
+The combined vector now reserves once; an empty static list returns the owned
+derived list directly. Controls with zero, one, four and 16 static entries
+retain exact entry order and fields. Existing TURN and real-socket pre-gather
+controls cover credential counts, recipient identity and v2 omission.
+
+The external-client assessment inspected Rust `src/protocol.rs` blob
+`c20396a3`, .NET `MessagesLobby.cs` blob `d8e17539`, and Godot `sf_events.gd`
+blob `5c4e66e6` plus `sf_session_types.gd` blob `533aed6f`. Rust needs no change:
+ready membership and ICE values remain identical. .NET needs no change:
+`LobbyStateChanged` fields and readiness semantics remain identical. Godot
+needs no change: lobby events, ICE ordering and session-plan fields remain
+identical. No schema, negotiation or migration change is introduced.

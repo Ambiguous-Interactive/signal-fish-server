@@ -244,6 +244,22 @@ pub struct InMemoryRoomOperationCoordinator {
     reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
 }
 
+fn effective_room_members(
+    mut stored: Vec<PlayerId>,
+    routed: Option<Vec<PlayerId>>,
+) -> HashSet<PlayerId> {
+    match routed {
+        Some(routed) => {
+            let mut current: HashSet<PlayerId> = routed.into_iter().collect();
+            stored.retain(|id| current.contains(id));
+            current.clear();
+            current.extend(stored);
+            current
+        }
+        None => stored.into_iter().collect(),
+    }
+}
+
 impl InMemoryRoomOperationCoordinator {
     /// Create a new in-memory room operation coordinator
     pub fn new(
@@ -405,17 +421,7 @@ impl InMemoryRoomOperationCoordinator {
                 .routed_player_ids(room_id)
                 .await
                 .map_err(PlayerReadyError::Internal)?;
-            let room_players: Vec<PlayerId> = match routed_players {
-                Some(routed_players) => {
-                    let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
-                    room_players
-                        .into_iter()
-                        .filter(|player| routed.contains(player))
-                        .collect()
-                }
-                None => room_players,
-            };
-            let current_ids: HashSet<PlayerId> = room_players.iter().copied().collect();
+            let current_ids = effective_room_members(room_players, routed_players);
 
             // Membership gates the toggle: a caller whose membership row just
             // vanished (teardown racing the toggle between the caller's room
@@ -449,8 +455,8 @@ impl InMemoryRoomOperationCoordinator {
 
             // Every current player ready (min 1). Robust to a ready id that just
             // departed: membership, not a raw count, decides `all_ready`.
-            let all_ready = !room_players.is_empty()
-                && room_players
+            let all_ready = !current_ids.is_empty()
+                && current_ids
                     .iter()
                     .all(|player| room_ready_players.contains(player));
 
@@ -528,34 +534,23 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             return Ok(false);
         }
         let routed_players = self.coordinator.routed_player_ids(room_id).await?;
-        let current_ids: HashSet<PlayerId> = match routed_players {
-            Some(routed_players) => {
-                let routed: HashSet<PlayerId> = routed_players.into_iter().collect();
-                room_players
-                    .iter()
-                    .filter(|player| routed.contains(player))
-                    .copied()
-                    .collect()
-            }
-            None => room_players.iter().copied().collect(),
-        };
+        let current_ids = effective_room_members(room_players, routed_players);
         if current_ids.is_empty() {
             return Ok(false);
         }
-        let ready_set = self
-            .ready_players
-            .read()
-            .await
-            .get(room_id)
-            .cloned()
-            .unwrap_or_default();
-        let mut ready_players: Vec<PlayerId> =
-            ready_set.intersection(&current_ids).copied().collect();
-        ready_players.sort_unstable();
-        let all_ready = !current_ids.is_empty()
-            && current_ids
+        let (mut ready_players, all_ready) = {
+            let ready_map = self.ready_players.read().await;
+            let ready_set = ready_map.get(room_id);
+            let ready_players: Vec<PlayerId> = ready_set
+                .into_iter()
+                .flat_map(|ready| ready.intersection(&current_ids).copied())
+                .collect();
+            let all_ready = current_ids
                 .iter()
-                .all(|player_id| ready_set.contains(player_id));
+                .all(|player_id| ready_set.is_some_and(|ready| ready.contains(player_id)));
+            (ready_players, all_ready)
+        };
+        ready_players.sort_unstable();
         let message = crate::protocol::ServerMessage::LobbyStateChanged {
             lobby_state: crate::protocol::LobbyState::Lobby,
             ready_players,
@@ -1084,6 +1079,43 @@ mod tests {
     use tokio::time::timeout;
 
     use crate::protocol::ErrorCode;
+
+    #[test]
+    fn effective_membership_intersects_routes_without_adding_ghosts() {
+        let first = PlayerId::from_u128(1);
+        let second = PlayerId::from_u128(2);
+        let ghost = PlayerId::from_u128(3);
+        for (name, stored, routed, expected) in [
+            ("empty fallback", vec![], None, vec![]),
+            (
+                "stored fallback",
+                vec![first, second],
+                None,
+                vec![first, second],
+            ),
+            ("empty routes", vec![first], Some(vec![]), vec![]),
+            ("empty storage", vec![], Some(vec![ghost]), vec![]),
+            ("disjoint", vec![first], Some(vec![ghost]), vec![]),
+            (
+                "mixed ghosts",
+                vec![first, second],
+                Some(vec![second, ghost]),
+                vec![second],
+            ),
+            (
+                "duplicate routes",
+                vec![first, second],
+                Some(vec![second, first, second]),
+                vec![first, second],
+            ),
+        ] {
+            assert_eq!(
+                effective_room_members(stored, routed),
+                expected.into_iter().collect(),
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn player_ready_error_maps_each_variant_to_its_client_code() {

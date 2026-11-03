@@ -122,3 +122,76 @@ pub(crate) fn session_selection_keeps_capabilities_inline() {
         }
     });
 }
+
+pub(crate) fn ice_composition_reserves_combined_list() {
+    use signal_fish_server::protocol::IceServer;
+    for static_count in [0, 1, 4, 16] {
+        allocation_harness::block_on(async {
+            let static_servers: Vec<_> = (0..static_count)
+                .map(|index| IceServer {
+                    urls: vec![format!("stun:static-{index}.example:3478")],
+                    username: None,
+                    credential: None,
+                })
+                .collect();
+            let server = EnhancedGameServer::new(
+                ServerConfig::default(),
+                ProtocolConfig::default(),
+                RelayTypeConfig::default(),
+                SessionConfig {
+                    enable_webrtc: true,
+                    default_topology: Topology::Mesh,
+                    ice_servers: static_servers.clone(),
+                    ..Default::default()
+                },
+                TurnConfig {
+                    enabled: false,
+                    stun_urls: vec!["stun:derived.example:3478".into()],
+                    ..Default::default()
+                },
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                TransportSecurityConfig::default(),
+                vec![],
+            )
+            .await
+            .unwrap();
+            let id = Uuid::from_u128(1);
+            let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+            server.connect_client(id, sender).await;
+            negotiate_webrtc_for_measurement(&server, &id);
+            let room = server
+                .database()
+                .create_room(
+                    "ice-capacity".into(),
+                    None,
+                    2,
+                    false,
+                    id,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            let ice = pregather_for_measurement(&server, &room, &id);
+            let stats = region.change();
+            println!("ICE_COMPOSITION static_count={static_count} stats={stats:?}");
+            assert_eq!(
+                serde_json::to_value(&ice[..static_count]).unwrap(),
+                serde_json::to_value(&static_servers).unwrap()
+            );
+            assert_eq!(ice.len(), static_count + 1);
+            assert_eq!(ice[static_count].urls, ["stun:derived.example:3478"]);
+            assert!(ice
+                .iter()
+                .all(|entry| entry.username.is_none() && entry.credential.is_none()));
+            assert_eq!(
+                stats.reallocations, 0,
+                "ICE list grew after copying static entries: {stats:?}"
+            );
+        });
+    }
+}
