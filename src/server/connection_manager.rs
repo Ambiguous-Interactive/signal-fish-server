@@ -1050,7 +1050,9 @@ impl ConnectionManager {
     }
 
     pub fn app_id(&self, player_id: &PlayerId) -> Option<Uuid> {
-        self.app_context(player_id).map(|info| info.id)
+        self.clients
+            .get(player_id)
+            .and_then(|connection| connection.app_context.as_ref().map(|context| context.id))
     }
 
     /// Capture the terminal relay watermark and clear membership under one

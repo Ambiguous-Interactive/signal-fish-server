@@ -14238,3 +14238,85 @@ visibility, unknown/partial/complete default snapshots and propagated snapshot
 failure. Twenty-one focused signal, plan-builder and route controls pass in
 Nextest `bdc8111f-a917-4285-8a9b-e066f7bc4649`. The inventory and shard-budget
 controls pass with all 460 sites retained.
+
+### F252 — Unready P2P starts copy full player metadata
+
+Scope: #1396, #636 and #826, session 614, baseline `93dd1a69`.
+
+The coordinator loaded names and legacy connection metadata before checking
+readiness. The complete embedded two-player Mesh/WebRTC history varies each
+Custom payload over 0 / 1,024 / 65,536 bytes. Both zero-ready and one-ready
+starts allocate 4,659 / 6,707 / 135,731 bytes on the original source and return
+`GAME_START_NOT_READY`. The unchanged metadata-growth assertion fails in
+Nextest `a444dfba` (full identity retained in the local session record).
+
+The coordinator now checks stored and routed identities first. It loads full
+records only when every selected member is ready. It compares the full selected
+membership with the checked identities before publication, then reuses those
+identities for the existing finalization transaction. A successful start adds
+one lean storage read; it does not add another member vector to the transaction.
+The durable finalization CAS and exact routing transaction remain authoritative.
+No ready-map guard spans a storage read.
+
+Nextest `43058fb4` reports 2,659 allocated bytes at every metadata size for both
+rejection histories. Each history checks the error code, absence of plans and
+unchanged open room state. Separate deterministic two-read controls cover
+removal, equal-count replacement, addition, read failure and metadata-only
+updates. Identity drift and read failure reject without finalization; a pure
+metadata update starts with the fresh exact payload.
+
+### F253 — Ready snapshots copy every unready member
+
+Scope: #1397, #636 and #826, session 614.
+
+One ready candidate previously required copying all stored identities and
+building a hash set. At 2 / 16 / 255 stored members the snapshot allocates
+476 / 1,144 / 13,128 bytes. The fixed-space assertion fails on the original
+source. The in-memory database now filters the owned candidate vector under
+one storage read, with no full-roster allocation. The additive database method
+has a default that uses the existing member-ID read for custom adapters.
+
+Nextest `43058fb4` reports 344 bytes at all three sizes. The final fixture seats
+and routes every member and checks each readiness publication. Both storage
+and adapter controls retain candidate order and duplicates, empty candidates,
+missing and empty rooms, pending records and unchanged candidates on a read
+error. Existing readiness controls retain the captured ready set across a
+suspended membership read, release its lock before storage, exclude departed
+players and fall back to durable readiness after finalization.
+
+### F254 — Application UUID reads copy unrelated text
+
+Scope: #1398, #636 and #826, session 614.
+
+`client_app_id` cloned an owned application context to select one UUID. A
+1,024-byte application name plus organization allocated 2,048 bytes in two
+allocations. The server now projects the Copy UUID while borrowing the current
+connection entry. The owned context getter and every application policy stay
+unchanged. The zero-allocation assertion fails on the original source and
+passes at 0 / 1,024 / 65,536 text bytes in Nextest `43058fb4`. Controls cover an
+absent connection, missing context, exact identity, changed context and retained
+owned text.
+
+These are embedded allocation measurements. No remote throughput or latency
+improvement is claimed. The three findings need current-head hosted CI before
+closure. The broader #636 and #826 campaigns remain open. The scoped mutation
+inventory remains 460 sites.
+
+External-client assessment: Rust `da8f2d16`, .NET `e467c871` and Godot `00f75a6a`
+retain the existing StartGame, readiness and SessionPlan surfaces. The inspected
+protocol files are Rust `src/protocol.rs`, .NET
+`src/SignalFish.Client/Protocol/MessagesMesh.cs` and Godot
+`addons/signal_fish/protocol/sf_events.gd`. Each client is unaffected: no schema,
+encoding, default, negotiation, ordering, error-code, generation or reconnect
+rule changes. No client migration or tracking issue is needed. The additive
+storage trait method has a compatible default for server backends.
+
+The final all-feature negative control restores both original coordinator paths
+and the original UUID getter while retaining the new storage API and fixtures.
+All three allocation bounds fail in Nextest `f9df1e36`: the large rejected start
+allocates 135,747 bytes, the 255-member ready snapshot allocates 13,128 bytes,
+and the UUID getter copies both 1,024-byte text fields. Restoring the candidate
+passes the all-feature bounds. The successful two-player start control uses
+14,177 bytes, 224 bytes above the preceding session's control, in exchange for
+the lean readiness read. Its exact legacy payload and plan-order checks pass.
+The 11 targeted all-feature contract controls pass in Nextest `bd183489`.

@@ -14568,3 +14568,43 @@ async fn default_session_selection_retains_custom_backend_read_semantics() {
         .unwrap()
         .is_none());
 }
+
+/// Existing database adapters retain candidate order, duplicates and read errors.
+#[tokio::test]
+async fn default_member_filter_preserves_backend_contract() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let member = PlayerId::from_u128(1);
+    let absent = PlayerId::from_u128(2);
+    let room = inner
+        .create_room(
+            "filter-default".into(),
+            None,
+            4,
+            false,
+            member,
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let adapter = DrainAfterCreateDatabase::new(inner.clone());
+    let mut candidates = vec![absent, member, member, absent];
+    adapter
+        .retain_room_player_ids(&room.id, &mut candidates)
+        .await
+        .unwrap();
+    assert_eq!(candidates, vec![member, member]);
+    inner.fail_get_room_players_for_test(true);
+    assert!(adapter
+        .retain_room_player_ids(&room.id, &mut candidates)
+        .await
+        .is_err());
+    assert_eq!(candidates, vec![member, member]);
+    inner.fail_get_room_players_for_test(false);
+    adapter
+        .retain_room_player_ids(&absent, &mut candidates)
+        .await
+        .unwrap();
+    assert!(candidates.is_empty());
+}

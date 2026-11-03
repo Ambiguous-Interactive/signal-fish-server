@@ -726,6 +726,22 @@ pub trait GameDatabase: Send + Sync {
             .collect())
     }
 
+    /// Retain stored members in place, preserving candidate order and duplicates.
+    /// Missing rooms remove all candidates. Storage errors leave them unchanged.
+    async fn retain_room_player_ids(
+        &self,
+        room_id: &RoomId,
+        candidates: &mut Vec<PlayerId>,
+    ) -> Result<()> {
+        let members: HashSet<_> = self
+            .get_room_player_ids(room_id)
+            .await?
+            .into_iter()
+            .collect();
+        candidates.retain(|id| members.contains(id));
+        Ok(())
+    }
+
     /// Delete empty rooms and return their IDs for relay cleanup.
     ///
     /// Rooms in `protected` are never deleted regardless of age: they hold a
@@ -2774,6 +2790,22 @@ impl GameDatabase for InMemoryDatabase {
             .unwrap_or_default())
     }
 
+    async fn retain_room_player_ids(
+        &self,
+        room_id: &RoomId,
+        candidates: &mut Vec<PlayerId>,
+    ) -> Result<()> {
+        #[cfg(test)]
+        self.before_room_membership_read().await?;
+        let rooms = self.rooms.read().await;
+        if let Some(room) = rooms.get(room_id) {
+            candidates.retain(|id| room.players.contains_key(id));
+        } else {
+            candidates.clear();
+        }
+        Ok(())
+    }
+
     /// Remove expired empty published rooms, preserving protected rooms and all live indexes.
     async fn cleanup_empty_rooms(
         &self,
@@ -3935,6 +3967,95 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// Filter candidates from one stored snapshot without changing order or duplicates.
+    #[tokio::test]
+    async fn stored_member_filter_preserves_candidates_and_failure_state() {
+        let database = InMemoryDatabase::new();
+        let member = PlayerId::from_u128(1);
+        let absent = PlayerId::from_u128(2);
+        let room = database
+            .create_pending_room_classified(
+                "filter".into(),
+                None,
+                4,
+                false,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let second = PlayerId::from_u128(3);
+        let mut second_player = room.players[&member].clone();
+        second_player.id = second;
+        second_player.name = "Second".into();
+        assert!(database
+            .add_player_to_room(&room.id, second_player)
+            .await
+            .unwrap());
+        for state in [
+            crate::protocol::LobbyState::Waiting,
+            crate::protocol::LobbyState::Lobby,
+            crate::protocol::LobbyState::Finalized,
+        ] {
+            database
+                .rooms
+                .write()
+                .await
+                .get_mut(&room.id)
+                .unwrap()
+                .lobby_state = state;
+            for input in [
+                vec![],
+                vec![absent],
+                vec![member],
+                vec![absent, member, member, absent],
+                vec![second, absent, member, second],
+            ] {
+                let expected: Vec<_> = input
+                    .iter()
+                    .copied()
+                    .filter(|id| *id == member || *id == second)
+                    .collect();
+                let mut candidates = input;
+                database
+                    .retain_room_player_ids(&room.id, &mut candidates)
+                    .await
+                    .unwrap();
+                assert_eq!(candidates, expected);
+            }
+        }
+        let mut candidates = vec![member, absent, member];
+        database.fail_get_room_players_for_test(true);
+        assert!(database
+            .retain_room_player_ids(&room.id, &mut candidates)
+            .await
+            .is_err());
+        assert_eq!(candidates, vec![member, absent, member]);
+        database.fail_get_room_players_for_test(false);
+        database
+            .retain_room_player_ids(&absent, &mut candidates)
+            .await
+            .unwrap();
+        assert!(candidates.is_empty());
+        database
+            .rooms
+            .write()
+            .await
+            .get_mut(&room.id)
+            .unwrap()
+            .players
+            .clear();
+        candidates.push(member);
+        database
+            .retain_room_player_ids(&room.id, &mut candidates)
+            .await
+            .unwrap();
+        assert!(candidates.is_empty());
     }
 
     /// The server-wide room-cap pause hooks must stay usable from the
