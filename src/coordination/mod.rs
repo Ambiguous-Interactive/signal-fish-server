@@ -2048,6 +2048,21 @@ pub trait MessageCoordinator: Send + Sync {
         Ok(None)
     }
 
+    /// Read two seated routes from one routing snapshot, in argument order.
+    /// `None` retains the unknown-routing contract of [`Self::routed_player_ids`].
+    /// Backends may check the pair directly without collecting the room roster.
+    async fn routed_player_pair(
+        &self,
+        room_id: &RoomId,
+        first: &PlayerId,
+        second: &PlayerId,
+    ) -> anyhow::Result<Option<[bool; 2]>> {
+        Ok(self
+            .routed_player_ids(room_id)
+            .await?
+            .map(|members| [members.contains(first), members.contains(second)]))
+    }
+
     /// Deliver a room-scoped control frame only if routing still contains the
     /// exact member set used to build it.
     async fn send_to_player_in_room_if_members(
@@ -3231,9 +3246,51 @@ mod tests {
         assert_eq!(trace_actions(&trace), vec!["GraceExpired", "GraceExpired"]);
     }
 
+    #[tokio::test]
+    async fn routed_pair_default_preserves_unknown_and_known_membership() {
+        let first = PlayerId::from_u128(1);
+        let second = PlayerId::from_u128(2);
+        let room = RoomId::new_v4();
+        for members in [
+            None,
+            Some(vec![]),
+            Some(vec![second]),
+            Some(vec![first, second]),
+        ] {
+            let coordinator = FallbackCoordinator {
+                routed_player_ids: members.clone(),
+                ..Default::default()
+            };
+            for (left, right) in [(first, second), (second, first), (first, first)] {
+                assert_eq!(
+                    coordinator
+                        .routed_player_pair(&room, &left, &right)
+                        .await
+                        .unwrap(),
+                    members
+                        .as_ref()
+                        .map(|members| [members.contains(&left), members.contains(&right)])
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn routed_pair_default_propagates_snapshot_failure() {
+        let coordinator = FallbackCoordinator {
+            fail_routed_player_ids: true,
+            ..Default::default()
+        };
+        assert!(coordinator
+            .routed_player_pair(&RoomId::new_v4(), &PlayerId::new_v4(), &PlayerId::new_v4())
+            .await
+            .is_err());
+    }
+
     struct FallbackCoordinator {
         room_events: Arc<RoomEventSequencer>,
         routed_player_ids: Option<Vec<PlayerId>>,
+        fail_routed_player_ids: bool,
         sends: Mutex<Vec<(PlayerId, ServerMessage)>>,
         broadcasts_except: Mutex<Vec<(RoomId, PlayerId, ServerMessage)>>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
@@ -3246,6 +3303,7 @@ mod tests {
             Self {
                 room_events: Arc::new(RoomEventSequencer::default()),
                 routed_player_ids: None,
+                fail_routed_player_ids: false,
                 sends: Mutex::default(),
                 broadcasts_except: Mutex::default(),
                 registrations: Mutex::default(),
@@ -3285,6 +3343,9 @@ mod tests {
             &self,
             _room_id: &RoomId,
         ) -> anyhow::Result<Option<Vec<PlayerId>>> {
+            if self.fail_routed_player_ids {
+                anyhow::bail!("injected routing snapshot failure");
+            }
             Ok(self.routed_player_ids.clone())
         }
 

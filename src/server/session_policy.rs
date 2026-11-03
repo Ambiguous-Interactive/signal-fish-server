@@ -780,8 +780,8 @@ impl EnhancedGameServer {
         room_id: RoomId,
     ) -> StartGamePublicationBuilder {
         let connection_manager = Arc::clone(&self.connection_manager);
-        let session_config = self.session_config.clone();
-        let turn_config = self.turn_config.clone();
+        let session_config = Arc::clone(&self.session_config);
+        let turn_config = Arc::clone(&self.turn_config);
         let active_session_plans = Arc::clone(&self.active_session_plans);
         let metrics = Arc::clone(&self.metrics);
         let session_records = self.session_records();

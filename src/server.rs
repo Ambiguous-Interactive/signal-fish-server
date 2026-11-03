@@ -670,9 +670,9 @@ pub struct EnhancedGameServer {
     /// Legacy integration-label configuration; not a routing policy.
     relay_type_config: crate::config::RelayTypeConfig,
     /// Session topology/transport selection policy (protocol v3)
-    session_config: crate::config::SessionConfig,
+    session_config: Arc<crate::config::SessionConfig>,
     /// TURN / STUN ICE-server policy (protocol v3); drives `SessionPlan.ice_servers`
-    turn_config: crate::config::TurnConfig,
+    turn_config: Arc<crate::config::TurnConfig>,
     /// Rate limiter for room operations
     rate_limiter: Arc<RoomRateLimiter>,
     /// Server metrics
@@ -1223,8 +1223,8 @@ impl EnhancedGameServer {
             config,
             protocol_config,
             relay_type_config,
-            session_config,
-            turn_config,
+            session_config: Arc::new(session_config),
+            turn_config: Arc::new(turn_config),
             rate_limiter,
             metrics,
             message_coordinator,
@@ -4469,16 +4469,38 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-        let mut players: Vec<PlayerId> = room_players
+        let spectators = self
+            .spectator_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let members = room_players
             .get(room_id)
             .into_iter()
             .flat_map(|players| players.iter().copied())
-            .filter(|player_id| {
-                clients.contains_key(player_id) && !self.is_spectator_route(player_id)
-            })
-            .collect();
+            .filter(|player_id| clients.contains_key(player_id) && !spectators.contains(player_id));
+        let mut players = Vec::with_capacity(members.clone().count());
+        players.extend(members);
         players.sort_unstable();
         Ok(Some(players))
+    }
+
+    async fn routed_player_pair(
+        &self,
+        room_id: &RoomId,
+        first: &PlayerId,
+        second: &PlayerId,
+    ) -> anyhow::Result<Option<[bool; 2]>> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let routed = |player_id: &PlayerId| {
+            room_players
+                .get(room_id)
+                .is_some_and(|players| players.contains(player_id))
+                && clients.contains_key(player_id)
+                && !self.is_spectator_route(player_id)
+        };
+        Ok(Some([routed(first), routed(second)]))
     }
 
     async fn send_to_player_in_room_if_members(

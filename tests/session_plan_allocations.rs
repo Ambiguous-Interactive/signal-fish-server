@@ -398,6 +398,18 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "signaling_cost_is_independent_of_room_size",
+            live_p2p_allocations::signaling_cost_is_independent_of_room_size,
+        ),
+        allocation_harness::trial(
+            "roster_snapshot_reserves_once",
+            live_p2p_allocations::roster_snapshot_reserves_once,
+        ),
+        allocation_harness::trial(
+            "game_start_shares_configuration",
+            live_p2p_allocations::game_start_shares_configuration,
+        ),
         allocation_harness::trial("finalized_join_shares_recovery_player_name", || {
             finalized_membership_reuses_owned_room_snapshots(false, true)
         }),
