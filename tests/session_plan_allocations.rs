@@ -409,6 +409,10 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 fn main() {
     allocation_harness::run_trials(vec![
         allocation_harness::trial(
+            "observer_retry_reuses_owned_seated_batches",
+            publication_costs::observer_retry_reuses_owned_seated_batches,
+        ),
+        allocation_harness::trial(
             "two_phase_batch_reserves_once",
             publication_costs::two_phase_batch_reserves_once,
         ),

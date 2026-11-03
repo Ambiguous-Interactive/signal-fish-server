@@ -107,3 +107,139 @@ pub(crate) fn two_phase_batch_reserves_once() {
         assert_eq!(stats.reallocations, 0, "frame batch grew: {stats:?}");
     }
 }
+
+pub(crate) fn observer_retry_reuses_owned_seated_batches() {
+    use signal_fish_server::metrics::ServerMetrics;
+    use signal_fish_server::protocol::{LobbyState, SpectatorJoinedPayload};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+            std::time::Duration::from_secs(60),
+            metrics.clone(),
+        );
+        let room = Uuid::from_u128(1000);
+        let members: Vec<_> = (1..=255).map(Uuid::from_u128).collect();
+        let first = Arc::new(ServerMessage::Pong);
+        let second = Arc::new(ServerMessage::Error {
+            message: "second phase".into(),
+            error_code: None,
+        });
+        let filler = Arc::new(ServerMessage::Error {
+            message: "queue barrier".into(),
+            error_code: None,
+        });
+        let mut receivers = Vec::new();
+        for (index, &id) in members.iter().enumerate() {
+            let (sender, receiver) = tokio::sync::mpsc::channel(if index == 0 { 2 } else { 4 });
+            if index == 0 {
+                sender.try_send(filler.clone()).unwrap();
+            }
+            receivers.push(receiver);
+            coordinator
+                .register_local_client(
+                    id,
+                    Some(room),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        }
+        let observer = Uuid::from_u128(999);
+        let (observer_sender, mut observer_receiver) = tokio::sync::mpsc::channel(4);
+        let observer_handle =
+            ClientDeliveryHandle::new(observer_sender, ConnectionCloseSignal::detached());
+        let baseline = Arc::new(ServerMessage::SpectatorJoined(Box::new(
+            SpectatorJoinedPayload {
+                room_id: room,
+                room_code: "RETRY1".into(),
+                spectator_id: observer,
+                game_name: "publication-retry".into(),
+                current_players: vec![],
+                current_spectators: vec![],
+                lobby_state: LobbyState::Lobby,
+                reason: None,
+            },
+        )));
+        let batches = members
+            .iter()
+            .map(|&id| RoomRecipientMessages::in_order(id, vec![first.clone(), second.clone()]))
+            .collect();
+        let hook_calls = AtomicUsize::new(0);
+        let region = stats_alloc::Region::new(ALLOCATOR);
+        let mut transaction = coordinator.commit_room_messages_if_members_with_hook(
+            &room,
+            &members,
+            batches,
+            vec![first.clone()],
+            Box::new(|| {
+                Box::pin(async {
+                    assert_eq!(
+                        metrics
+                            .websocket_deliveries_canceled
+                            .load(Ordering::Relaxed),
+                        510,
+                        "the observer mismatch must release the complete first reservation set"
+                    );
+                    hook_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(true)
+                })
+            }),
+            Box::new(|failed| {
+                assert_eq!(failed, 0);
+                true
+            }),
+        );
+        assert!(futures_util::poll!(tokio::task::unconstrained(transaction.as_mut())).is_pending());
+        assert_eq!(
+            coordinator
+                .register_local_spectator_with_initial_message_async(
+                    observer,
+                    room,
+                    observer_handle,
+                    &|| true,
+                    None,
+                    None,
+                    Box::new(move |_| Box::pin(async move { Ok(baseline) })),
+                )
+                .await
+                .unwrap(),
+            signal_fish_server::coordination::DeliveryOutcome::Delivered
+        );
+        let queued = receivers[0].try_recv().unwrap();
+        assert!(Arc::ptr_eq(&queued, &filler));
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), transaction)
+            .await
+            .unwrap()
+            .unwrap();
+        let stats = region.change();
+        println!("PUBLICATION_RETRY members=255 stats={stats:?}");
+        assert!(
+            stats.allocations <= 1120,
+            "retry copied seated batches: {stats:?}"
+        );
+        assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);
+        assert_eq!(hook_calls.load(Ordering::Relaxed), 1);
+        for receiver in &mut receivers {
+            assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &first));
+            assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &second));
+            let trailing = receiver.try_recv();
+            assert!(matches!(
+                trailing,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        let received_baseline = observer_receiver.try_recv().unwrap();
+        assert!(matches!(
+            received_baseline.as_ref(),
+            ServerMessage::SpectatorJoined(_)
+        ));
+        assert!(Arc::ptr_eq(&observer_receiver.try_recv().unwrap(), &first));
+        let trailing = observer_receiver.try_recv();
+        assert!(matches!(
+            trailing,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}

@@ -14532,6 +14532,19 @@ Restoring a linear search in the production helper fails the comparison bound
 with 6,528,000 comparisons. The complete publication control still measures
 525 allocations after the generic key projection is introduced.
 
+A later review restores the original observer-first batch precedence in one
+shared lookup used for both reservation size and phase delivery. A two-frame
+seated batch and one-frame observer batch for the same identity select the
+observer frame; restoring seated-first precedence fails that control.
+The retry allocation history parks a seated queue, admits an observer after
+the first recipient snapshot, then releases the queue. The single commit hook
+requires exactly 510 canceled permits, proving the old 255-player reservation
+set was released before retry. Every seated frame keeps its exact Arc identity
+and order; the observer receives its baseline and one lifecycle frame.
+The complete call measures 1,060 allocations against a 1,120 ceiling. Adding a
+seated-map clone only inside the observer-mismatch retry branch produces 1,316
+allocations and fails. The original no-retry 530-allocation ceiling stays intact.
+
 Start and finalized-join incumbent batches previously allocated one frame slot,
 then grew when adding the optional v3 plan. A shared constructor reserves the
 final one- or two-frame size. Its original two-frame history reallocates once;

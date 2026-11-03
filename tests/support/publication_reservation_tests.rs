@@ -177,3 +177,36 @@ fn sorted_reservation_validation_matches_original_large_roster() {
         assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
     }
 }
+
+#[test]
+fn observer_batch_preserves_precedence_for_reservation_and_commit() {
+    use crate::coordination::RoomRecipientMessages;
+    use crate::protocol::ServerMessage;
+    use std::{collections::HashMap, sync::Arc};
+    let id = PlayerId::from_u128(1);
+    let seated_frame = Arc::new(ServerMessage::Pong);
+    let observer_frame = Arc::new(ServerMessage::Error {
+        message: "observer lifecycle".into(),
+        error_code: None,
+    });
+    let seated = HashMap::from([(
+        id,
+        RoomRecipientMessages::in_order(id, vec![seated_frame.clone(), seated_frame.clone()]),
+    )]);
+    let mut observers = HashMap::new();
+    let batch = InMemoryMessageCoordinator::room_recipient_batch(&id, &seated, &observers).unwrap();
+    assert_eq!(batch.messages.len(), 2);
+    observers.insert(
+        id,
+        RoomRecipientMessages::in_order(id, vec![observer_frame.clone()]),
+    );
+    let batch = InMemoryMessageCoordinator::room_recipient_batch(&id, &seated, &observers).unwrap();
+    assert_eq!(batch.messages.len(), 1);
+    assert!(Arc::ptr_eq(&batch.messages[0], &observer_frame));
+    assert!(InMemoryMessageCoordinator::room_recipient_batch(
+        &PlayerId::nil(),
+        &seated,
+        &observers
+    )
+    .is_none());
+}

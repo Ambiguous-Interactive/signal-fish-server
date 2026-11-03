@@ -4008,6 +4008,17 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    /// Preserve observer precedence when a role changes during reservation.
+    fn room_recipient_batch<'a>(
+        player_id: &PlayerId,
+        seated_messages: &'a HashMap<PlayerId, RoomRecipientMessages>,
+        observer_messages: &'a HashMap<PlayerId, RoomRecipientMessages>,
+    ) -> Option<&'a RoomRecipientMessages> {
+        observer_messages
+            .get(player_id)
+            .or_else(|| seated_messages.get(player_id))
+    }
+
     /// Match channels against unique reservations sorted by the supplied player key.
     fn sorted_batch_reservations_cover_recipients(
         reservations: &[RoomBatchReservation],
@@ -4969,9 +4980,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             let reservation_inputs: Option<Vec<_>> = recipients
                 .iter()
                 .map(|(player_id, handle)| {
-                    seated_messages
-                        .get(player_id)
-                        .or_else(|| observer_messages.get(player_id))
+                    Self::room_recipient_batch(player_id, &seated_messages, &observer_messages)
                         .map(|batch| (*player_id, handle.clone(), batch.messages.len()))
                 })
                 .collect();
@@ -5117,9 +5126,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     // Its queue still accounts failures, but it cannot cancel
                     // player plan phases or degrade a seated publication.
                     let seated = !self.is_spectator_route(player_id);
-                    let Some(batch) = seated_messages
-                        .get(player_id)
-                        .or_else(|| observer_messages.get(player_id))
+                    let Some(batch) =
+                        Self::room_recipient_batch(player_id, &seated_messages, &observer_messages)
                     else {
                         let skipped = permits.iter_mut().filter_map(Option::take).count();
                         failed_frames =
