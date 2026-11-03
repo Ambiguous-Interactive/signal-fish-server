@@ -3631,7 +3631,9 @@ mod tests {
         assert_eq!(actual.application_id, Some(application));
         assert_eq!(actual.code, "FRESH1");
         assert_eq!(actual.player.unwrap().id, actor);
-        database.fail_get_room_by_id_for_test(true);
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(database
             .get_room_reconnect_snapshot(&room.id, &actor)
             .await

@@ -14131,3 +14131,13 @@ refresh loop fails with a stale peer in Nextest
 `bf3f4df8-2134-4fc1-89b2-95fd0d033590`. The restored caller passes the paired
 history in `def907cb-ed08-4bfe-88ab-4f92e3e701df`. This control adds no runtime
 instrumentation and does not change the allocation ceilings.
+
+Hosted package qualification found a test-only scope error at the first head:
+the new storage control called a repository-only fault helper from a test that
+also ships in the package. Linux job `125638103975`, macOS `125638104053`,
+Windows `125638103893`, MSRV `125638103778` and coverage `125638103836` all
+reported the same `E0599` in the package compile control. The test now sets its
+existing private fault flag directly, as neighboring package-compatible tests
+do. No test is excluded and no production behavior changes.
+The unchanged package inventory and strict archive compile control passes after
+this correction in Nextest `8a92e2de-07a9-40a5-9c03-079d530f28bb`.
