@@ -258,6 +258,15 @@ impl From<&PlayerInfo> for SessionPlayer {
     }
 }
 
+/// The stored host and room lifecycle read from one snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomSessionHostSnapshot {
+    /// Current lobby lifecycle.
+    pub lobby_state: crate::protocol::LobbyState,
+    /// Host selection fields, or `None` when the host is not seated.
+    pub host: Option<SessionPlayer>,
+}
+
 /// Lifecycle and stored occupancy read atomically without player details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomSessionLifecycleSnapshot {
@@ -605,6 +614,25 @@ pub trait GameDatabase: Send + Sync {
                 lobby_state: room.lobby_state,
             }
         }))
+    }
+
+    /// Read one host and the room lifecycle atomically, including pending rooms.
+    /// Missing rooms and storage errors match [`Self::get_room_session_selection_snapshot`].
+    async fn get_room_session_host_snapshot(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+    ) -> Result<Option<RoomSessionHostSnapshot>> {
+        Ok(self
+            .get_room_session_selection_snapshot(room_id)
+            .await?
+            .map(|room| RoomSessionHostSnapshot {
+                lobby_state: room.lobby_state,
+                host: room
+                    .players
+                    .into_iter()
+                    .find(|player| player.id == *host_id),
+            }))
     }
 
     /// Read one member's validated Direct endpoint, including pending rooms.
@@ -2475,6 +2503,24 @@ impl GameDatabase for InMemoryDatabase {
                 players: room.players.values().map(SessionPlayer::from).collect(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
+    async fn get_room_session_host_snapshot(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+    ) -> Result<Option<RoomSessionHostSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSessionHostSnapshot {
+                lobby_state: room.lobby_state.clone(),
+                host: room.players.get(host_id).map(SessionPlayer::from),
             }))
     }
 

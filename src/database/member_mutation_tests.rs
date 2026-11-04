@@ -924,3 +924,87 @@ async fn direct_endpoint_read_matches_validated_member_without_roster_projection
         None
     );
 }
+
+#[tokio::test]
+async fn session_host_snapshot_preserves_pending_membership_and_read_failures() {
+    let database = InMemoryDatabase::new();
+    let host_id = PlayerId::from_u128(1);
+    let room = database
+        .create_pending_room_classified(
+            "host-snapshot".into(),
+            Some("HOSTSN".into()),
+            4,
+            true,
+            host_id,
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    for state in [
+        crate::protocol::LobbyState::Waiting,
+        crate::protocol::LobbyState::Lobby,
+        crate::protocol::LobbyState::Finalized,
+    ] {
+        database
+            .rooms
+            .write()
+            .await
+            .get_mut(&room.id)
+            .unwrap()
+            .lobby_state = state.clone();
+        let expected = database
+            .get_room_session_selection_snapshot(&room.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let actual = database
+            .get_room_session_host_snapshot(&room.id, &host_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual.lobby_state, state);
+        assert_eq!(
+            actual.host,
+            expected
+                .players
+                .into_iter()
+                .find(|player| player.id == host_id)
+        );
+    }
+    assert!(!database.is_room_published(&room.id).await.unwrap());
+    assert_eq!(
+        database
+            .get_room_session_host_snapshot(&room.id, &PlayerId::from_u128(99))
+            .await
+            .unwrap()
+            .unwrap()
+            .host,
+        None
+    );
+    let held = database.rooms.write().await;
+    let mut read = Box::pin(database.get_room_session_host_snapshot(&room.id, &host_id));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    drop(read);
+    drop(held);
+    database
+        .fail_get_room_by_id
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(database
+        .get_room_session_host_snapshot(&room.id, &host_id)
+        .await
+        .is_err());
+    database
+        .fail_get_room_by_id
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(database.delete_room(&room.id).await.unwrap());
+    assert_eq!(
+        database
+            .get_room_session_host_snapshot(&room.id, &host_id)
+            .await
+            .unwrap(),
+        None
+    );
+}

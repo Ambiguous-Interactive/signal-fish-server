@@ -2152,6 +2152,7 @@ impl EnhancedGameServer {
                             .decision
                             .uses_webrtc_signaling()
                             .then(|| chrono::Utc::now().timestamp());
+                        let projection = resolved.decision.projection();
                         let mut turn_credentials_issued = 0_u64;
                         let mut reconnector_has_plan = false;
                         let recipient_messages: Vec<_> = resolved
@@ -2161,9 +2162,9 @@ impl EnhancedGameServer {
                             .map(|member| {
                                 let plan = finalized
                                     .then(|| {
-                                        server_for_publication.build_session_plan_message(
-                                            &resolved.decision,
-                                            member.player_id,
+                                        server_for_publication.build_session_plan_message_for_member(
+                                            &projection,
+                                            member,
                                             now_unix,
                                         )
                                     })
