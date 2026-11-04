@@ -59,7 +59,7 @@ pub(crate) fn reconnect_baseline_reuses_player_roster() {
                 server.handle_player_ready(&ready).await;
                 server.unregister_client(&actor).await;
                 for receiver in &mut receivers {
-                    while receiver.try_recv().is_ok() {}
+                    drain_membership_setup(receiver, true);
                 }
                 let temporary = Uuid::from_u128(1000);
                 let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
@@ -121,10 +121,7 @@ pub(crate) fn reconnect_baseline_reuses_player_roster() {
                         assert_eq!(Some(watermark.seq), player.seq);
                     }
                 }
-                assert!(matches!(
-                    receiver.try_recv(),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                ));
+                assert_membership_queue_empty(&mut receiver);
             }
         }
         for pair in profiles.chunks_exact(2) {

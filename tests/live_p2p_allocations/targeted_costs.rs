@@ -111,7 +111,12 @@ pub(crate) fn targeted_room_delivery_borrows_healthy_sender() {
                 1,
             )
             .unwrap();
-        drop(receiver.try_recv().unwrap());
+        let baseline = receiver.try_recv().unwrap();
+        assert!(
+            matches!(baseline.payload, outbound_queue::OutboundPayload::Message(message)
+            if matches!(message.as_ref(), ServerMessage::RoomJoined(payload)
+                if payload.room_id == room && payload.player_id == player))
+        );
         coordinator
             .register_local_client(
                 player,
