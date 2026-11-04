@@ -20,6 +20,10 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
     let mut profiles = Vec::new();
     for spectators in [0_u128, 16, 254] {
         let runtime = tokio::runtime::Builder::new_current_thread()
+            // Poll both scheduler queues and the driver during warm-up. Their
+            // native locks must not first initialize inside the measured join.
+            .global_queue_interval(1)
+            .event_interval(1)
             .enable_all()
             .build()
             .unwrap();
