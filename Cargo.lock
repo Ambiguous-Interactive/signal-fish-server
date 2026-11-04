@@ -1792,9 +1792,9 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "matchbox_protocol"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "867e83a984f369eabc682318eec2db410aef1dbb5399cb1890e6659dfa9b7449"
+checksum = "aa2a0c21041c2f1ee7bd58d0f2f755e8d7af148fde83e6c8fa4d8eb8e49496c2"
 dependencies = [
  "cfg-if",
  "derive_more",
@@ -1805,9 +1805,9 @@ dependencies = [
 
 [[package]]
 name = "matchbox_signaling"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33d8eeb36f21a45699331d121b4c5d2c7fdd342f0216e4c0033787f5c5fc4470"
+checksum = "98f314396ec108a52ba975f00a7f4103ed78802aafbdabd7f8581ee3b40f65ef"
 dependencies = [
  "async-trait",
  "axum",
@@ -1819,7 +1819,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
- "tower-http 0.6.11",
+ "tower-http 0.7.1",
  "tracing",
  "uuid",
 ]
@@ -3326,7 +3326,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 
