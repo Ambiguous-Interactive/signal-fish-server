@@ -3838,6 +3838,7 @@ impl InMemoryMessageCoordinator {
         .await
     }
 
+    /// Reserve control capacity while honoring cancellation and the slow-consumer deadline.
     async fn reserve_one_if(
         &self,
         player_id: PlayerId,
@@ -4102,6 +4103,7 @@ impl InMemoryMessageCoordinator {
             })
     }
 
+    /// Reserve a uniform event, validate current routes, then record and send it.
     async fn broadcast_to_room_if_with_hook<'a>(
         &'a self,
         room_id: &RoomId,
@@ -4293,6 +4295,7 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    /// Match every current route to one reservation and reject extra reservations.
     fn reservations_cover_recipients<'a>(
         reservations: &[ConditionalDeliveryReservation],
         recipients: impl IntoIterator<Item = (PlayerId, &'a ClientDeliveryHandle)>,
