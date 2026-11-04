@@ -1444,6 +1444,16 @@ impl EnhancedGameServer {
         .await;
     }
 
+    #[tracing::instrument(
+        name = "room.leave",
+        skip_all,
+        fields(
+            player_id = %player_id,
+            room_id = tracing::field::Empty,
+            room_code = tracing::field::Empty,
+            instance_id = %self.instance_id
+        )
+    )]
     async fn leave_room_locked_operation(
         self: &Arc<Self>,
         player_id: &PlayerId,
@@ -1451,14 +1461,7 @@ impl EnhancedGameServer {
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
     ) {
-        let leave_span = tracing::info_span!(
-            "room.leave",
-            player_id = %player_id,
-            room_id = tracing::field::Empty,
-            room_code = tracing::field::Empty,
-            instance_id = %self.instance_id
-        );
-        let _span_guard = leave_span.enter();
+        let leave_span = tracing::Span::current();
         let Some(room_id) = self.get_client_room(player_id).await else {
             if let Some(operation_id) = operation_id {
                 let _ = self

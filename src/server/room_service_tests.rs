@@ -14608,3 +14608,6 @@ async fn default_member_filter_preserves_backend_contract() {
         .unwrap();
     assert!(candidates.is_empty());
 }
+
+#[path = "../../tests/support/room_leave_tracing_tests.rs"]
+mod room_leave_tracing_tests;

@@ -14726,3 +14726,26 @@ protocol-versioning docs at `e467c871`, and Godot event docs at `09a5b1a2`
 retain the same status, session and lifecycle surfaces. No client consumes the
 server's internal permit accounting or reservation lookup. All three clients
 need no change or migration.
+
+### F274 — Room departure spans leak across future suspension
+
+Issue: #1425. Source: `4a6a0b5a`. The room-leave operation holds a synchronous
+`Span::enter` guard across awaits. Holding its room-event gate and polling the
+actual departure to Pending leaves `room.leave` as the current span for
+unrelated work on that worker. The red production-path control observes
+`Some("room.leave")` where it requires `None`.
+
+The async operation now uses `tracing::instrument`. The span is entered only
+while that future is polled. Its current-span handle still records the same
+player, room, code and instance fields. The pending-context control passes.
+A separate control transfers the pending departure to another worker for
+cancellation and then emits an unrelated JSON log event on the origin worker.
+That control passes on both old and repaired sources; it is a preservation
+control, not proof of the historical panic cause. The production source sweep
+found no other raw entered-span guard across an await.
+
+Windows job 126327787655 in full CI 41754426614 reports missing current-span
+data in tracing-subscriber before a connection completes its handshake. Its
+full decoded log is retained with the source and runner identity. The trace
+leak is confirmed independently, but the Windows panic remains unattributed
+in #1426. A passing qualification must not close that investigation by itself.
