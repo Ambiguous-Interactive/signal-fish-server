@@ -258,6 +258,15 @@ impl From<&PlayerInfo> for SessionPlayer {
     }
 }
 
+/// Lifecycle and stored occupancy read atomically without player details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomSessionLifecycleSnapshot {
+    /// Current room lifecycle, including pending rooms.
+    pub lobby_state: crate::protocol::LobbyState,
+    /// Whether storage retains any player, including unpublished routes.
+    pub has_players: bool,
+}
+
 /// Live session selection fields captured from one room storage read.
 #[derive(Debug, Clone)]
 pub struct RoomSessionSelectionSnapshot {
@@ -549,6 +558,21 @@ pub trait GameDatabase: Send + Sync {
                 relay_type: room.relay_type,
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state,
+            }))
+    }
+
+    /// Read lifecycle and stored occupancy from one room snapshot.
+    /// Pending visibility and storage errors match [`Self::get_room_by_id`].
+    async fn get_room_session_lifecycle_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSessionLifecycleSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|room| RoomSessionLifecycleSnapshot {
+                lobby_state: room.lobby_state,
+                has_players: !room.players.is_empty(),
             }))
     }
 
@@ -2378,6 +2402,23 @@ impl GameDatabase for InMemoryDatabase {
                 relay_type: room.relay_type.clone(),
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
+    async fn get_room_session_lifecycle_snapshot(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Option<RoomSessionLifecycleSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSessionLifecycleSnapshot {
+                lobby_state: room.lobby_state.clone(),
+                has_players: !room.players.is_empty(),
             }))
     }
 

@@ -7,8 +7,10 @@ use signal_fish_server::coordination::{
 use signal_fish_server::server::InMemoryMessageCoordinator;
 use std::sync::Arc;
 
+/// #1416/#1417: measure permits and routing validation inside complete publications.
 pub(crate) fn transaction_reuses_owned_batches() {
     watch_channel_lifecycle_cost();
+    let mut profiles = Vec::new();
     for count in [2_u128, 16, 255] {
         allocation_harness::block_on(async {
             allocation_harness::warm_current_thread_runtime().await;
@@ -60,12 +62,7 @@ pub(crate) fn transaction_reuses_owned_batches() {
                 assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);
                 if measured {
                     println!("PUBLICATION_COST members={count} stats={stats:?}");
-                    if count == 255 {
-                        assert!(
-                            stats.allocations <= 524,
-                            "publication copied seated batches: {stats:?}"
-                        );
-                    }
+                    profiles.push((count, stats));
                 }
                 for receiver in &mut receivers {
                     assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &first));
@@ -79,6 +76,21 @@ pub(crate) fn transaction_reuses_owned_batches() {
             }
         });
     }
+    assert!(
+        profiles.iter().all(|(count, stats)| stats.reallocations
+            <= match count {
+                0..=4 => 0,
+                5..=32 => 2,
+                _ => 12,
+            }),
+        "publication validation grew temporary rosters: {profiles:?}"
+    );
+    assert!(
+        profiles
+            .iter()
+            .all(|(count, stats)| *count != 255 || stats.allocations <= 269),
+        "publication allocated per-recipient permit storage: {profiles:?}"
+    );
 }
 
 fn watch_channel_lifecycle_cost() {
@@ -242,7 +254,7 @@ pub(crate) fn observer_retry_reuses_owned_seated_batches() {
         let stats = region.change();
         println!("PUBLICATION_RETRY members=255 stats={stats:?}");
         assert!(
-            stats.allocations <= 1120,
+            stats.allocations <= 600,
             "retry copied seated batches: {stats:?}"
         );
         assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);

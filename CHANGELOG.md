@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Reduce temporary memory use and peer lookup work for live P2P starts, joins, and session-plan updates
-  (#1412, #1413, #1414).
+  and mesh departures (#1412, #1413, #1414, #1416, #1417, #1418).
 - Reduce temporary memory used for live P2P ready toggles, lobby entry, and ICE lists (#1408, #1409, #1410).
 - Reduce memory used for live P2P seat fills, session version tracking, and reconnect-token checks
   (#1404, #1405, #1406).
@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Count canceled P2P publication frames when cancellation interrupts queue reservations (#1419).
 - Keep active and completed session lists consistent when rooms close during a metrics request (#1353).
 - Keep room counts and occupancy percentiles consistent in each in-memory dashboard sample (#1349).
 - Preserve replay loss when Rust embedders clear buffered room events (#1347).

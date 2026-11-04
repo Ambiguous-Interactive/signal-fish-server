@@ -1110,6 +1110,28 @@ impl EnhancedGameServer {
             return;
         };
 
+        if stored.topology == Topology::Mesh {
+            match self
+                .database
+                .get_room_session_lifecycle_snapshot(room_id)
+                .await
+            {
+                Ok(None) => {
+                    self.active_session_plans.remove(room_id);
+                }
+                Ok(Some(room))
+                    if room.lobby_state == LobbyState::Finalized && !room.has_players =>
+                {
+                    self.active_session_plans.remove(room_id);
+                }
+                Ok(Some(_)) => {}
+                Err(error) => {
+                    tracing::warn!(%room_id, %departed, %error, "Failed to fetch room for departure re-planning")
+                }
+            }
+            return;
+        }
+
         let room = match self
             .database
             .get_room_session_selection_snapshot(room_id)

@@ -14578,3 +14578,84 @@ lifecycle and generation values remain identical. .NET needs no change because
 GameStarting data and negotiated v3 messages stay identical. Godot needs no
 change because session events, per-recipient frame order and peer fields stay
 identical. No schema, negotiation or migration change is introduced.
+
+### F267–F269 — Bounded publication permits and mesh departure reads
+
+Issues #1416, #1417 and #1418; source `b685cf6a`, session 619. These are
+first-party live P2P cost repairs. They advance #636 and the resource-bound
+coverage in #826 without closing either campaign.
+
+The room transaction accepts at most two ordered phases. Each recipient
+previously owned a heap vector for its reserved permits. The reservation now
+keeps two optional permits inline. Empty and one-frame batches retain unused
+empty slots. Partial reservation errors count only occupied slots. Each
+reservation now owns cancellation accounting before acquiring its first permit,
+including while another recipient is still waiting.
+
+Final routing validation previously built three temporary rosters. The initial
+membership comparison built a fourth. The transaction now checks unique
+expected IDs and sender channels directly against guarded routes and sorted
+reservations. Seated changes still return `RoutingChanged`; observer-only
+changes still release reservations and retry before the commit hook.
+
+The complete two-frame control retains exact frame Arc identities, per-peer
+order and empty queue tails. Original-source profiles for 2/16/255 players use
+15/29/524 allocations and 0/10/36 reallocations. Repaired profiles use
+9/9/265 allocations and 0/2/12 reallocations. At 255 players, allocated bytes
+drop from 587,313 to 585,265. The remaining reallocations include library
+reservation collection; the control measures the complete call and does not
+exclude that work. The tighter growth and allocation bounds reject the original
+source. This is allocation evidence, not a latency or throughput measurement.
+The complete 255-player observer retry uses 540 allocations and 1,175,472 bytes.
+It still releases exactly 510 first-attempt permits and invokes the commit hook
+once. Every seated recipient receives both exact frames once and in order.
+
+A stored mesh has no host to re-elect when a player departs. The departure hook
+previously copied every survivor's selection fields and built routed membership
+before deciding to keep the same plan. The new atomic lifecycle projection
+reads only room state and whether storage retains any player. The in-memory
+backend copies no roster. The default database method derives both fields from
+one owned room snapshot, preserving existing backend compatibility.
+
+The live mesh control starts a real service session and removes one stored and
+routed member before measurement. Original 2/16/64-player histories use
+11/25/73 allocations and 1,531/4,455/16,071 bytes. The repaired hook uses five
+allocations and 488 bytes at every size. The original-source constant-cost
+regression fails. No replacement plan is emitted and the sticky decision stays
+identical. Lifecycle controls cover pending stored seats, empty finalized rooms,
+missing rooms, non-finalized rooms, storage errors and atomic read locking.
+Host failover and Direct endpoint updates keep their existing path.
+
+External-client assessment inspected Rust `src/protocol.rs` blob `c20396a3`,
+.NET `MessagesGameStart.cs` blob `6f2f7318` and `MessagesMesh.cs` blob `5ce1a0b8`,
+and Godot `addons/signal_fish/protocol/sf_events.gd` blob `5c4e66e6`.
+Rust needs no change because lifecycle and generation values stay identical.
+.NET needs no change because GameStarting and plan payloads stay identical.
+Godot needs no change because peer events and per-recipient phase order stay
+identical. There is no wire, negotiation or migration change.
+
+### F270 — Cancellation before the complete room reservation set
+
+Issue #1419 was found while inspecting #1416. The prior accounting guard was
+armed only after `join_all` returned. Cancellation during a peer wait therefore
+dropped completed reservation futures and partially acquired batches before
+the guard existed. Queue capacity returned, but acquired frames had no canceled
+delivery attribution.
+
+The deterministic red history reserves both frames for one peer, reserves the
+one free slot for another and parks on that peer's second frame. Dropping the
+transaction reports zero canceled deliveries. There are three acquired permits.
+The unacquired wait separately records one dropped message. The first red
+assertion combined both counters; source inspection corrected the regression to
+require three canceled permits and one dropped wait for four attempts.
+The second cell fills both blocked-peer slots and requires two canceled permits
+plus one dropped wait for three attempts. Both cells verify no commit hook,
+no partial delivery, exact preexisting queue prefixes and full capacity reuse.
+
+`RoomBatchReservation` now owns its metrics handle and optional permit slots
+before the first acquisition. Its destructor accounts only occupied slots.
+Commit takes each slot before sending, so phase outcomes and the destructor
+cannot count the same permit twice. The later aggregate guard is removed.
+This also covers completed futures still held inside `join_all`. No wire or
+client change is required: Rust, .NET and Godot clients receive the same frames
+and use the same cancellation and reconnection contracts.
