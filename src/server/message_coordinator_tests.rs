@@ -5613,3 +5613,200 @@ async fn dropping_room_transaction_accounts_completed_and_partial_reservations()
 
 #[path = "../../tests/support/conditional_publication_tests.rs"]
 mod conditional_publication_tests;
+
+/// An owned classified reservation must not clone its delivery sender.
+#[cfg(feature = "allocation-tracking")]
+#[tokio::test]
+async fn owned_control_reservation_moves_its_sender() {
+    for closed in [false, true] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(1),
+            metrics.clone(),
+        );
+        let player = PlayerId::new_v4();
+        let (sender, mut receiver) = crate::coordination::outbound_queue::channel(1, 2);
+        let handle =
+            ClientDeliveryHandle::classified(sender.clone(), ConnectionCloseSignal::detached());
+        if closed {
+            receiver.close();
+        }
+        let clones_before = sender.clone_operations_for_allocation_benchmark();
+        let (_drain, drain) = watch::channel(false);
+        let reservation = coordinator
+            .reserve_one_if(player, handle, &|| true, drain, None, None)
+            .await;
+        let clones = sender.clone_operations_for_allocation_benchmark() - clones_before;
+        match reservation {
+            ConditionalDeliveryReservation::Reserved {
+                permit,
+                mut accounting,
+                ..
+            } => {
+                assert!(!closed);
+                assert!(permit.send(Arc::new(ServerMessage::Pong)).unwrap().enqueued);
+                accounting.defuse();
+                let queued = receiver.try_recv().unwrap();
+                assert!(matches!(queued.payload,
+                    crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::Pong)));
+            }
+            ConditionalDeliveryReservation::ChannelClosed { .. } => assert!(closed),
+            _ => panic!("unexpected reservation outcome"),
+        }
+        assert_eq!(
+            clones, 0,
+            "owned reservation cloned its sender: closed={closed}"
+        );
+        assert_eq!(
+            metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+            1
+        );
+    }
+}
+
+/// Complete classified publications clone only the initial routing snapshot.
+#[cfg(feature = "allocation-tracking")]
+#[tokio::test]
+async fn uniform_publication_clones_only_its_initial_routes() {
+    for exact in [false, true] {
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = RoomId::new_v4();
+        let members = [PlayerId::new_v4(), PlayerId::new_v4()];
+        let mut queues = Vec::new();
+        for &player in &members {
+            let (sender, mut receiver) = crate::coordination::outbound_queue::channel(1, 2);
+            sender.set_protocol_version(3);
+            sender
+                .try_enqueue_transition(
+                    Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                        SpectatorJoinedPayload {
+                            room_id: room,
+                            room_code: "CLONE1".into(),
+                            spectator_id: player,
+                            game_name: "clone-control".into(),
+                            current_players: vec![],
+                            current_spectators: vec![],
+                            lobby_state: LobbyState::Lobby,
+                            reason: None,
+                        },
+                    ))),
+                    1,
+                )
+                .unwrap();
+            receiver.try_recv().unwrap();
+            coordinator
+                .register_local_client(
+                    player,
+                    Some(room),
+                    ClientDeliveryHandle::classified_for_allocation_benchmark(
+                        sender.clone(),
+                        1,
+                        ConnectionCloseSignal::detached(),
+                    ),
+                )
+                .await
+                .unwrap();
+            let clones_before = sender.clone_operations_for_allocation_benchmark();
+            queues.push((sender, receiver, clones_before));
+        }
+        let message = Arc::new(ServerMessage::Pong);
+        let hooks = AtomicUsize::new(0);
+        let hook = Box::new(|| {
+            Box::pin(async {
+                hooks.fetch_add(1, Ordering::Relaxed);
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        });
+        let delivered = if exact {
+            coordinator
+                .broadcast_to_room_if_members_with_hook(&room, &members, message.clone(), hook)
+                .await
+                .unwrap()
+        } else {
+            coordinator
+                .broadcast_to_room_with_hook(&room, message.clone(), hook)
+                .await
+                .unwrap()
+        };
+        assert!(delivered);
+        assert_eq!(hooks.load(Ordering::Relaxed), 1);
+        for (sender, mut receiver, clones_before) in queues {
+            assert_eq!(
+                sender.clone_operations_for_allocation_benchmark() - clones_before,
+                1,
+                "uniform publication copied an owned or borrowed route: exact={exact}"
+            );
+            let queued = receiver.try_recv().unwrap();
+            assert!(matches!(queued.payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(received)
+                if Arc::ptr_eq(&received, &message)));
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+            ));
+        }
+    }
+}
+
+/// Exact-membership uniform events reject malformed expected sets before replay.
+#[tokio::test]
+async fn uniform_publication_requires_the_exact_unique_member_set() {
+    for kind in [ControlQueueKind::Legacy, ControlQueueKind::Classified] {
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = RoomId::new_v4();
+        let members = [PlayerId::new_v4(), PlayerId::new_v4()];
+        let mut receivers = Vec::new();
+        for &player in &members {
+            let (handle, receiver) = match kind {
+                ControlQueueKind::Legacy => {
+                    let (sender, receiver) = mpsc::channel(2);
+                    (
+                        ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                        ControlReceiver::Legacy(receiver),
+                    )
+                }
+                ControlQueueKind::Classified => {
+                    let (handle, _, _, receiver) = classified_room_member(room, player).await;
+                    (handle, ControlReceiver::Classified(receiver))
+                }
+            };
+            coordinator
+                .register_local_client(player, Some(room), handle)
+                .await
+                .unwrap();
+            receivers.push(receiver);
+        }
+        let message = Arc::new(ServerMessage::Pong);
+        for (expected, valid) in [
+            (vec![], false),
+            (vec![members[0]], false),
+            (vec![members[0], members[0]], false),
+            (vec![members[0], PlayerId::new_v4()], false),
+            (vec![members[0], members[1], PlayerId::new_v4()], false),
+            (vec![members[1], members[0]], true),
+        ] {
+            let hooks = AtomicUsize::new(0);
+            let delivered = coordinator
+                .broadcast_to_room_if_members_with_hook(
+                    &room,
+                    &expected,
+                    message.clone(),
+                    Box::new(|| {
+                        Box::pin(async {
+                            hooks.fetch_add(1, Ordering::Relaxed);
+                        })
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(delivered, valid, "kind={kind:?} expected={expected:?}");
+            assert_eq!(hooks.load(Ordering::Relaxed), usize::from(valid));
+            for receiver in &mut receivers {
+                if valid {
+                    assert!(Arc::ptr_eq(&receiver.pop_message("exact event"), &message));
+                }
+                receiver.assert_empty("no unexpected event");
+            }
+        }
+    }
+}

@@ -3853,7 +3853,7 @@ impl InMemoryMessageCoordinator {
 
         self.metrics.increment_websocket_delivery_attempts();
         let stats = self.metrics.connection_delivery_stats(&player_id);
-        let sender = handle.sender.clone();
+        let ClientDeliveryHandle { sender, close } = handle;
         match sender.try_reserve_control(room_id) {
             Ok(permit) => ConditionalDeliveryReservation::Reserved {
                 player_id,
@@ -3953,7 +3953,7 @@ impl InMemoryMessageCoordinator {
                             }
                             Ok(None) | Err(DeliveryReserveError::Full(_)) => {}
                         }
-                        let initiated_close = handle.close.request_close(CloseReason::SlowConsumer);
+                        let initiated_close = close.request_close(CloseReason::SlowConsumer);
                         if initiated_close {
                             self.metrics.increment_websocket_slow_consumer_disconnects();
                         }
@@ -4117,6 +4117,11 @@ impl InMemoryMessageCoordinator {
         >,
     ) -> anyhow::Result<bool> {
         let mut before_send = Some(before_send);
+        let expected_members = expected_members.map(|members| {
+            let mut members = members.to_vec();
+            members.sort_unstable();
+            members
+        });
 
         loop {
             if *drain.borrow() || !should_send() {
@@ -4126,18 +4131,19 @@ impl InMemoryMessageCoordinator {
 
             let recipients = self.collect_room_recipients(room_id, except_player).await;
 
-            let mut reservations =
-                futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
+            let mut reservations = futures_util::future::join_all(recipients.into_iter().map(
+                |(player_id, handle)| {
                     self.reserve_one_if(
-                        *player_id,
-                        handle.clone(),
+                        player_id,
+                        handle,
                         should_send,
                         drain.clone(),
                         Some(*room_id),
                         None,
                     )
-                }))
-                .await;
+                },
+            ))
+            .await;
             reservations.sort_unstable_by_key(ConditionalDeliveryReservation::routed_player);
 
             if *drain.borrow() || !should_send() {
@@ -4180,31 +4186,23 @@ impl InMemoryMessageCoordinator {
             let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
-            let current_recipients: Vec<(PlayerId, ClientDeliveryHandle)> = room_players
+            let current_recipients = room_players
                 .get(room_id)
-                .map(|players| {
-                    players
-                        .iter()
-                        .filter(|player_id| except_player != Some(*player_id))
-                        .filter_map(|player_id| {
-                            clients
-                                .get(player_id)
-                                .map(|handle| (*player_id, handle.clone()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+                .into_iter()
+                .flat_map(|players| players.iter())
+                .filter(|player_id| except_player != Some(*player_id))
+                .filter_map(|player_id| clients.get(player_id).map(|handle| (*player_id, handle)));
 
-            if let Some(expected_members) = expected_members {
-                let mut current: Vec<PlayerId> = current_recipients
-                    .iter()
-                    .filter(|(id, _)| !self.is_spectator_route(id))
-                    .map(|(player_id, _)| *player_id)
-                    .collect();
-                let mut expected = expected_members.to_vec();
-                current.sort_unstable();
-                expected.sort_unstable();
-                if current != expected {
+            if let Some(expected_members) = &expected_members {
+                let mut current_members = 0_usize;
+                let mut membership_matches = true;
+                for (player_id, _) in current_recipients.clone() {
+                    if !self.is_spectator_route(&player_id) {
+                        current_members = current_members.saturating_add(1);
+                        membership_matches &= expected_members.binary_search(&player_id).is_ok();
+                    }
+                }
+                if current_members != expected_members.len() || !membership_matches {
                     tracing::debug!(%room_id, "Room broadcast canceled because published membership changed");
                     return Ok(false);
                 }
@@ -4212,7 +4210,7 @@ impl InMemoryMessageCoordinator {
 
             if !Self::reservations_cover_recipients(
                 &reservations,
-                &current_recipients,
+                current_recipients,
                 ConditionalDeliveryReservation::routed_player,
             ) {
                 drop(clients);
@@ -4295,20 +4293,24 @@ impl InMemoryMessageCoordinator {
         }
     }
 
-    fn reservations_cover_recipients(
+    fn reservations_cover_recipients<'a>(
         reservations: &[ConditionalDeliveryReservation],
-        recipients: &[(PlayerId, ClientDeliveryHandle)],
+        recipients: impl IntoIterator<Item = (PlayerId, &'a ClientDeliveryHandle)>,
         mut reserved_player: impl FnMut(&ConditionalDeliveryReservation) -> Option<PlayerId>,
     ) -> bool {
-        reservations.len() == recipients.len()
-            && recipients.iter().all(|(player_id, handle)| {
-                Self::conditional_reservation_covers_recipient(
-                    reservations,
-                    *player_id,
-                    handle,
-                    &mut reserved_player,
-                )
-            })
+        let mut recipient_count = 0_usize;
+        for (player_id, handle) in recipients {
+            recipient_count = recipient_count.saturating_add(1);
+            if !Self::conditional_reservation_covers_recipient(
+                reservations,
+                player_id,
+                handle,
+                &mut reserved_player,
+            ) {
+                return false;
+            }
+        }
+        reservations.len() == recipient_count
     }
 
     fn conditional_reservation_covers_recipient(
@@ -5059,30 +5061,31 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 }
             }
 
-            let reservation_inputs: Option<Vec<_>> = recipients
-                .iter()
-                .map(|(player_id, handle)| {
-                    Self::room_recipient_batch(player_id, &seated_messages, &observer_messages)
-                        .map(|batch| (*player_id, handle.clone(), batch.messages.len()))
-                })
-                .collect();
-            let Some(reservation_inputs) = reservation_inputs else {
+            if recipients.iter().any(|(player_id, _)| {
+                Self::room_recipient_batch(player_id, &seated_messages, &observer_messages)
+                    .is_none()
+            }) {
                 anyhow::bail!("validated room transaction recipient lost its message batch");
-            };
-            let mut reservations =
-                futures_util::future::join_all(reservation_inputs.into_iter().map(
-                    |(player_id, handle, frame_count)| {
-                        self.reserve_room_batch(
-                            player_id,
-                            handle,
-                            frame_count,
-                            &should_send,
-                            drain.clone(),
-                            *room_id,
-                        )
-                    },
-                ))
-                .await;
+            }
+            let mut reservations = futures_util::future::join_all(recipients.into_iter().map(
+                |(player_id, handle)| {
+                    let frame_count = Self::room_recipient_batch(
+                        &player_id,
+                        &seated_messages,
+                        &observer_messages,
+                    )
+                    .map_or(0, |batch| batch.messages.len());
+                    self.reserve_room_batch(
+                        player_id,
+                        handle,
+                        frame_count,
+                        &should_send,
+                        drain.clone(),
+                        *room_id,
+                    )
+                },
+            ))
+            .await;
 
             if reservations
                 .as_slice()

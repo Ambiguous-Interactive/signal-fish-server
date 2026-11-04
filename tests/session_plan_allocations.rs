@@ -415,6 +415,10 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 fn main() {
     allocation_harness::run_trials(vec![
         allocation_harness::trial(
+            "uniform_publication_borrows_commit_routes",
+            publication_costs::uniform_publication_borrows_commit_routes,
+        ),
+        allocation_harness::trial(
             "transport_status_fallback_skips_player_metadata",
             status_costs::transport_status_fallback_skips_player_metadata,
         ),

@@ -63,12 +63,12 @@ pub(crate) fn transaction_reuses_owned_batches() {
                 if measured {
                     if count == 255 {
                         let trace_storage = if cfg!(feature = "trace-validation") {
-                            9_000
+                            13_000
                         } else {
                             0
                         };
                         assert!(
-                            stats.bytes_allocated <= 565_000 + trace_storage,
+                            stats.bytes_allocated <= 540_000 + trace_storage,
                             "publication rebuilt owned batch storage: {stats:?}"
                         );
                     }
@@ -315,4 +315,83 @@ fn warm_control_permit(sender: &tokio::sync::mpsc::Sender<Arc<ServerMessage>>) -
         "permit initialization allocated: {cold:?}"
     );
     (cold.allocations, cold.bytes_allocated)
+}
+
+/// Measure complete uniform room events with both membership validation modes.
+pub(crate) fn uniform_publication_borrows_commit_routes() {
+    for count in [2_u128, 16, 255] {
+        for exact in [false, true] {
+            allocation_harness::block_on(async {
+                allocation_harness::warm_current_thread_runtime().await;
+                let coordinator = InMemoryMessageCoordinator::new();
+                let room = Uuid::from_u128(1000);
+                let members: Vec<_> = (1..=count).map(Uuid::from_u128).collect();
+                let message = Arc::new(ServerMessage::LobbyStateChanged {
+                    lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
+                    ready_players: members.clone(),
+                    all_ready: true,
+                });
+                let mut receivers = Vec::new();
+                for &id in &members {
+                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                    receivers.push(receiver);
+                    coordinator
+                        .register_local_client(
+                            id,
+                            Some(room),
+                            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                        )
+                        .await
+                        .unwrap();
+                }
+                for measured in [false, true] {
+                    let hooks = std::sync::atomic::AtomicUsize::new(0);
+                    let hook = Box::new(|| {
+                        Box::pin(async {
+                            hooks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        })
+                            as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    });
+                    let region = stats_alloc::Region::new(ALLOCATOR);
+                    let delivered = if exact {
+                        coordinator
+                            .broadcast_to_room_if_members_with_hook(
+                                &room,
+                                &members,
+                                message.clone(),
+                                hook,
+                            )
+                            .await
+                            .unwrap()
+                    } else {
+                        coordinator
+                            .broadcast_to_room_with_hook(&room, message.clone(), hook)
+                            .await
+                            .unwrap()
+                    };
+                    let stats = region.change();
+                    assert!(delivered);
+                    assert_eq!(hooks.load(std::sync::atomic::Ordering::Relaxed), 1);
+                    if measured {
+                        println!(
+                            "UNIFORM_PUBLICATION members={count} exact={exact} stats={stats:?}"
+                        );
+                        if count == 255 {
+                            let trace_storage = if cfg!(feature = "trace-validation") {
+                                13_000
+                            } else {
+                                0
+                            };
+                            assert!(stats.bytes_allocated <= 425_000 + usize::from(exact) * 4_096 + trace_storage,
+                                "uniform publication copied commit routes: exact={exact} stats={stats:?}");
+                        }
+                    }
+                    for receiver in &mut receivers {
+                        assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &message));
+                        assert_membership_queue_empty(receiver);
+                    }
+                }
+            });
+        }
+    }
 }
