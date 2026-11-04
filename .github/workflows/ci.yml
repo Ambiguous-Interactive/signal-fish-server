@@ -392,9 +392,18 @@ jobs:
       - name: Profile transport-report allocation cohorts
         if: matrix.os == 'macos-latest'
         continue-on-error: true
-        run: >-
-          cargo nextest run --locked --test session_plan_allocations --all-features
-          -E 'test(transport_report_delivery_cost)' --no-capture
+        run: |
+          cargo nextest run --locked --test session_plan_allocations --all-features \
+            -E 'test(transport_report_delivery_cost)' --no-capture 2>&1 | tee transport-report-cohorts.log
+      - name: Retain transport-report allocation profile
+        if: always() && matrix.os == 'macos-latest'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: transport-report-cohorts-${{ github.run_id }}
+          path: transport-report-cohorts.log
+          retention-days: 7
+          if-no-files-found: error
       - name: Record root CPU budget before tests
         if: runner.os == 'Linux'
         shell: bash
