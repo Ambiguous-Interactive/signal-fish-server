@@ -179,6 +179,7 @@ struct RoomEventMutationLease {
 }
 
 struct QueuedRoomEvent {
+    mutation_guard: RoomEventMutationGuard,
     job: RoomEventJob,
     completion: tokio::sync::oneshot::Sender<anyhow::Result<bool>>,
 }
@@ -186,7 +187,24 @@ struct QueuedRoomEvent {
 #[derive(Default)]
 struct RoomEventQueue {
     running: bool,
-    jobs: VecDeque<QueuedRoomEvent>,
+    first: Option<QueuedRoomEvent>,
+    overflow: VecDeque<QueuedRoomEvent>,
+}
+
+impl RoomEventQueue {
+    fn push_back(&mut self, event: QueuedRoomEvent) {
+        if self.first.is_none() {
+            self.first = Some(event);
+        } else {
+            self.overflow.push_back(event);
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<QueuedRoomEvent> {
+        let first = self.first.take()?;
+        self.first = self.overflow.pop_front();
+        Some(first)
+    }
 }
 
 struct RoomEventLane {
@@ -199,7 +217,11 @@ struct RoomEventLane {
 }
 
 impl RoomEventLane {
-    fn enqueue(self: &Arc<Self>, job: RoomEventJob) -> RoomEventCompletion {
+    fn enqueue(
+        self: &Arc<Self>,
+        mutation_guard: RoomEventMutationGuard,
+        job: RoomEventJob,
+    ) -> RoomEventCompletion {
         let runtime = match tokio::runtime::Handle::try_current() {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -213,7 +235,11 @@ impl RoomEventLane {
         let (completion, receiver) = tokio::sync::oneshot::channel();
         let should_start = {
             let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
-            queue.jobs.push_back(QueuedRoomEvent { job, completion });
+            queue.push_back(QueuedRoomEvent {
+                mutation_guard,
+                job,
+                completion,
+            });
             if queue.running {
                 false
             } else {
@@ -238,7 +264,7 @@ impl RoomEventLane {
         loop {
             let next = {
                 let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
-                match queue.jobs.pop_front() {
+                match queue.pop_front() {
                     Some(next) => next,
                     None => {
                         queue.running = false;
@@ -250,13 +276,16 @@ impl RoomEventLane {
             // Isolate each job so a panic cannot strand the lane or later
             // events. Dropping the caller's completion future also cannot
             // cancel the already-enqueued job.
-            let result = tokio::spawn(async move { (next.job)().await })
-                .await
-                .map_err(|error| {
-                    let context = format!("room event job failed: {error}");
-                    anyhow::Error::new(error).context(context)
-                })
-                .and_then(std::convert::identity);
+            let result = tokio::spawn(async move {
+                let _mutation_guard = next.mutation_guard;
+                (next.job)().await
+            })
+            .await
+            .map_err(|error| {
+                let context = format!("room event job failed: {error}");
+                anyhow::Error::new(error).context(context)
+            })
+            .and_then(std::convert::identity);
             #[cfg(test)]
             let post_job_pause = self
                 .post_job_pause
@@ -340,12 +369,7 @@ impl RoomEventSequencer {
         job: RoomEventJob,
     ) -> RoomEventCompletion {
         let lane = Arc::clone(&mutation_guard.lease._lane);
-        lane.enqueue(Box::new(move || {
-            Box::pin(async move {
-                let _mutation_guard = mutation_guard;
-                job().await
-            })
-        }))
+        lane.enqueue(mutation_guard, job)
     }
 }
 
@@ -2827,6 +2851,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cloned_lease_burst_preserves_fifo_after_failures_and_canceled_completions() {
+        let sequencer = Arc::new(RoomEventSequencer::default());
+        let room_id = RoomId::new_v4();
+        let lease = sequencer.lock(room_id).await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let final_started = Arc::new(tokio::sync::Notify::new());
+        let release_final = Arc::new(tokio::sync::Notify::new());
+        let mut completions = Vec::new();
+        for index in 0..6 {
+            let order = Arc::clone(&order);
+            let final_started = Arc::clone(&final_started);
+            let release_final = Arc::clone(&release_final);
+            let completion = sequencer.enqueue(
+                lease.clone(),
+                Box::new(move || {
+                    if index == 2 {
+                        panic!("room event constructor panic");
+                    }
+                    Box::pin(async move {
+                        order.lock().await.push(index);
+                        match index {
+                            1 => anyhow::bail!("room event refusal"),
+                            3 => panic!("room event future panic"),
+                            5 => {
+                                final_started.notify_one();
+                                release_final.notified().await;
+                            }
+                            _ => {}
+                        }
+                        Ok(true)
+                    })
+                }),
+            );
+            if index == 4 {
+                drop(completion);
+            } else {
+                completions.push((index, completion));
+            }
+        }
+        drop(lease);
+        tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, final_started.notified())
+            .await
+            .expect("the overflow tail must run after both panic kinds");
+        let mut next_lock = Box::pin(sequencer.lock(room_id));
+        assert_future_pending_once(next_lock.as_mut(), "the mutation after the queued tail");
+        assert_eq!(*order.lock().await, vec![0, 1, 3, 4, 5]);
+        release_final.notify_one();
+        for (index, completion) in completions {
+            let result = tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, completion)
+                .await
+                .expect("every observed completion must resolve");
+            match index {
+                1 => assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("room event refusal")),
+                2 | 3 => assert!(result
+                    .unwrap_err()
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<tokio::task::JoinError>())
+                    .is_some_and(tokio::task::JoinError::is_panic)),
+                _ => assert!(result.unwrap()),
+            }
+        }
+        drop(
+            tokio::time::timeout(ROOM_EVENT_PROGRESS_TIMEOUT, next_lock)
+                .await
+                .expect("the final queued event must release its mutation guard"),
+        );
+    }
+
+    #[tokio::test]
     async fn separate_room_lanes_progress_independently() {
         let sequencer = Arc::new(RoomEventSequencer::default());
         let blocked_room = RoomId::from_u128(0x5104A1F1_54D5_44E5_9E57_C0A5E17E5706);
@@ -2939,7 +3035,7 @@ mod tests {
                 "enqueue must observe and reuse the existing drain"
             );
             assert_eq!(
-                queue.jobs.len(),
+                usize::from(queue.first.is_some()) + queue.overflow.len(),
                 1,
                 "the paused existing drain must own the newly queued job"
             );

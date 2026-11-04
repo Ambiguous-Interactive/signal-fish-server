@@ -860,3 +860,67 @@ async fn session_lifecycle_snapshot_is_atomic_and_preserves_storage_semantics() 
         None
     );
 }
+
+#[tokio::test]
+async fn direct_endpoint_read_matches_validated_member_without_roster_projection() {
+    let db = InMemoryDatabase::new();
+    let room = create_test_room(&db, "endpoint-read", "EPREAD")
+        .await
+        .unwrap();
+    let member = *room.players.keys().next().unwrap();
+    assert_eq!(
+        db.get_player_direct_endpoint(&room.id, &member)
+            .await
+            .unwrap(),
+        None
+    );
+    for info in [
+        ConnectionInfo::Direct {
+            host: "192.0.2.17".into(),
+            port: 7777,
+        },
+        ConnectionInfo::Direct {
+            host: "0.0.0.0".into(),
+            port: 7777,
+        },
+        ConnectionInfo::Custom {
+            data: serde_json::json!({"endpoint": "not direct"}),
+        },
+    ] {
+        db.update_player_connection_info(&room.id, &member, info.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_player_direct_endpoint(&room.id, &member)
+                .await
+                .unwrap(),
+            crate::protocol::DirectEndpoint::from_connection_info(&info)
+        );
+    }
+    assert_eq!(
+        db.get_player_direct_endpoint(&room.id, &Uuid::new_v4())
+            .await
+            .unwrap(),
+        None
+    );
+    let held = db.rooms.write().await;
+    let mut read = Box::pin(db.get_player_direct_endpoint(&room.id, &member));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    drop(read);
+    drop(held);
+    db.fail_get_room_by_id
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(db
+        .get_player_direct_endpoint(&room.id, &member)
+        .await
+        .is_err());
+    db.fail_get_room_by_id
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(db.delete_room(&room.id).await.unwrap());
+    assert_eq!(
+        db.get_player_direct_endpoint(&room.id, &member)
+            .await
+            .unwrap(),
+        None
+    );
+}

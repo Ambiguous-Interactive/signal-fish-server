@@ -607,6 +607,25 @@ pub trait GameDatabase: Send + Sync {
         }))
     }
 
+    /// Read one member's validated Direct endpoint, including pending rooms.
+    /// Missing rooms, members, and unusable metadata return `None`.
+    /// Storage errors match [`Self::get_room_session_selection_snapshot`].
+    async fn get_player_direct_endpoint(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<crate::protocol::DirectEndpoint>> {
+        Ok(self
+            .get_room_session_selection_snapshot(room_id)
+            .await?
+            .and_then(|room| {
+                room.players
+                    .into_iter()
+                    .find(|player| player.id == *player_id)
+            })
+            .and_then(|player| player.direct_endpoint))
+    }
+
     /// Read the spectator roster and code atomically, including pending rooms.
     /// The default preserves complete-snapshot visibility and storage errors.
     async fn get_room_spectator_snapshot(
@@ -2457,6 +2476,23 @@ impl GameDatabase for InMemoryDatabase {
                 authority_player: room.authority_player,
                 lobby_state: room.lobby_state.clone(),
             }))
+    }
+
+    async fn get_player_direct_endpoint(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<crate::protocol::DirectEndpoint>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .and_then(|room| room.players.get(player_id))
+            .and_then(|player| player.connection_info.as_ref())
+            .and_then(crate::protocol::DirectEndpoint::from_connection_info))
     }
 
     /// Copy the spectator roster and code without player or session metadata.

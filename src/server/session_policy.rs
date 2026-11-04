@@ -1278,6 +1278,24 @@ impl EnhancedGameServer {
         stored: ActiveSessionPlan,
         room_event_guard: RoomEventMutationGuard,
     ) -> bool {
+        let replacement = DirectEndpoint::from_connection_info(&connection_info);
+        if let Some(endpoint) = replacement.as_ref() {
+            match self
+                .database
+                .get_player_direct_endpoint(room_id, player_id)
+                .await
+            {
+                Ok(Some(previous)) if previous == *endpoint => {
+                    return self
+                        .database
+                        .update_player_connection_info(room_id, player_id, connection_info)
+                        .await
+                        .unwrap_or(false);
+                }
+                Err(_) => return false,
+                _ => {}
+            }
+        }
         let mut room = match self
             .database
             .get_room_session_selection_snapshot(room_id)
@@ -1300,15 +1318,6 @@ impl EnhancedGameServer {
         else {
             return false;
         };
-        let previous = host.direct_endpoint.take();
-        let replacement = DirectEndpoint::from_connection_info(&connection_info);
-        if previous == replacement && replacement.is_some() {
-            return self
-                .database
-                .update_player_connection_info(room_id, player_id, connection_info)
-                .await
-                .unwrap_or(false);
-        }
         host.direct_endpoint = replacement;
         let routed = match self.message_coordinator.routed_player_ids(room_id).await {
             Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),

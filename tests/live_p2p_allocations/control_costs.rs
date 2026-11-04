@@ -1,0 +1,217 @@
+//! Complete room-event and repeated Direct endpoint publication costs.
+use super::*;
+use signal_fish_server::coordination::{MessageCoordinator, RoomEventJob};
+use signal_fish_server::server::InMemoryMessageCoordinator;
+
+pub(crate) fn room_event_admission_cost() {
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = Uuid::from_u128(733);
+        let native_lock = std::sync::Mutex::new(());
+        let lock_region = stats_alloc::Region::new(ALLOCATOR);
+        drop(native_lock.lock().unwrap());
+        let native_lock_initialization = lock_region.change();
+        println!("ROOM_EVENT_NATIVE_LOCK_INITIALIZATION {native_lock_initialization:?}");
+        // Exclude lane registration and lease creation from both samples.
+        let lease = coordinator.lock_room_event_mutation(&room).await;
+        for attempt in 0..2 {
+            let job: RoomEventJob = Box::new(|| Box::pin(async { Ok(true) }));
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            let completion = coordinator.enqueue_room_event(lease.clone(), job);
+            let admitted = region.change();
+            assert!(completion.await.unwrap());
+            let complete = region.change();
+            println!(
+                "ROOM_EVENT_COST attempt={attempt} admitted={admitted:?} complete={complete:?}"
+            );
+            let lock_allocations = if attempt == 0 {
+                native_lock_initialization.allocations
+            } else {
+                0
+            };
+            assert!(
+                admitted.allocations <= 3 + lock_allocations,
+                "room event admission allocated queue storage or a wrapper: {admitted:?}"
+            );
+            assert!(
+                complete.allocations <= 5 + lock_allocations,
+                "room event completion retained a wrapper: {complete:?}"
+            );
+            tokio::task::yield_now().await;
+        }
+        for count in [2, 16] {
+            let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let jobs: Vec<RoomEventJob> = (0..count)
+                .map(|index| {
+                    let next = next.clone();
+                    let job: RoomEventJob = Box::new(move || {
+                        Box::pin(async move {
+                            assert_eq!(
+                                next.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                index
+                            );
+                            Ok(true)
+                        })
+                    });
+                    job
+                })
+                .collect();
+            let mut completions = Vec::with_capacity(count);
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            for job in jobs {
+                completions.push(coordinator.enqueue_room_event(lease.clone(), job));
+            }
+            let admitted = region.change();
+            assert_eq!(next.load(std::sync::atomic::Ordering::Relaxed), 0);
+            for completion in completions {
+                assert!(completion.await.unwrap());
+            }
+            let complete = region.change();
+            println!("ROOM_EVENT_BURST count={count} admitted={admitted:?} complete={complete:?}");
+            assert_eq!(next.load(std::sync::atomic::Ordering::Relaxed), count);
+            tokio::task::yield_now().await;
+        }
+    });
+}
+
+pub(crate) fn direct_repeat_cost_does_not_copy_other_members() {
+    let mut profiles = Vec::new();
+    for count in [2_u128, 16, 255] {
+        allocation_harness::block_on(async {
+            allocation_harness::warm_current_thread_runtime().await;
+            let server = EnhancedGameServer::new(
+                ServerConfig {
+                    max_connections_per_ip: 512,
+                    ..Default::default()
+                },
+                ProtocolConfig {
+                    max_players_limit: 255,
+                    ..Default::default()
+                },
+                RelayTypeConfig::default(),
+                SessionConfig {
+                    default_topology: Topology::Host,
+                    enable_direct: true,
+                    ..Default::default()
+                },
+                TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                TransportSecurityConfig::default(),
+                vec![],
+            )
+            .await
+            .unwrap();
+            let host = Uuid::from_u128(1);
+            let mut receivers = Vec::new();
+            for index in 1..=count {
+                let player = Uuid::from_u128(index);
+                let (sender, receiver) = tokio::sync::mpsc::channel(1024);
+                receivers.push(receiver);
+                server.connect_client(player, sender).await;
+                signal_fish_server::server::allocation_benchmark::negotiate_direct_for_measurement(
+                    &server, &player,
+                );
+                server
+                    .handle_join_room(
+                        &player,
+                        "direct-repeat".into(),
+                        Some("REPEAT".into()),
+                        format!("member-{index:03}-{}", "x".repeat(16)),
+                        Some(255),
+                        Some(true),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                server.handle_player_ready(&player).await;
+            }
+            let endpoint = ConnectionInfo::Direct {
+                host: "192.0.2.1".into(),
+                port: 7777,
+            };
+            server
+                .handle_provide_connection_info(&host, endpoint.clone())
+                .await;
+            server.handle_start_game(&host).await;
+            let mut generation = None;
+            for (index, receiver) in receivers.iter_mut().enumerate() {
+                let mut found_plan = false;
+                loop {
+                    match receiver.try_recv() {
+                        Ok(message) => match message.as_ref() {
+                            ServerMessage::SessionPlan(plan) => {
+                                assert_eq!(plan.topology, Topology::Host);
+                                assert_eq!(plan.transport, Transport::Direct);
+                                assert_eq!(plan.host, Some(host));
+                                assert_eq!(plan.direct_endpoint.as_ref().unwrap().port, 7777);
+                                if index == 0 {
+                                    assert_eq!(
+                                        plan.peers.len(),
+                                        usize::try_from(count - 1).unwrap()
+                                    );
+                                    assert!(plan
+                                        .peers
+                                        .iter()
+                                        .all(|peer| !peer.initiate && peer.player_id != host));
+                                } else {
+                                    assert_eq!(plan.peers.len(), 1);
+                                    assert_eq!(plan.peers[0].player_id, host);
+                                    assert!(plan.peers[0].initiate);
+                                }
+                                if let Some(expected) = generation {
+                                    assert_eq!(plan.generation, expected);
+                                }
+                                generation = Some(plan.generation);
+                                found_plan = true;
+                            }
+                            ServerMessage::RoomJoined(_)
+                            | ServerMessage::PlayerJoined { .. }
+                            | ServerMessage::LobbyStateChanged { .. }
+                            | ServerMessage::AuthorityChanged { .. }
+                            | ServerMessage::GameStarting { .. } => {}
+                            other => panic!("unexpected setup message: {other:?}"),
+                        },
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(error) => panic!("setup receiver closed: {error}"),
+                    }
+                }
+                assert!(found_plan);
+            }
+            let room = server.get_client_room(&host).await.unwrap();
+            let endpoint = endpoint.clone();
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            server.handle_provide_connection_info(&host, endpoint).await;
+            let stats = region.change();
+            println!("DIRECT_REPEAT_COST members={count} stats={stats:?}");
+            profiles.push(stats);
+            for receiver in &mut receivers {
+                assert_membership_queue_empty(receiver);
+            }
+            assert_eq!(
+                server
+                    .database()
+                    .get_room_by_id(&room)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .players[&host]
+                    .connection_info,
+                Some(ConnectionInfo::Direct {
+                    host: "192.0.2.1".into(),
+                    port: 7777
+                })
+            );
+        });
+    }
+    for profile in &profiles {
+        assert!(
+            profile.allocations <= profiles[0].allocations + 2
+                && profile.bytes_allocated <= profiles[0].bytes_allocated + 256,
+            "an unchanged endpoint copied other members: {profiles:?}"
+        );
+    }
+}
