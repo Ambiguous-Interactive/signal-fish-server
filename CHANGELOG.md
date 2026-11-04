@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server memory use for live P2P game starts, joins, reconnects, and ready-state updates (#1450, #1451, #1452).
 - Reduce memory used for live P2P plan publications, ready toggles, lobby entry, and status reports from custom
   coordinators (#1446, #1447, #1448).
 - Reduce roster lookup costs for live P2P starts and updates, and reduce readiness costs for large room snapshots

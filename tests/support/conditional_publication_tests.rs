@@ -272,7 +272,7 @@ fn conditional_publication_validation_bounds_room_lookup_work() {
         let mut production_reads = 0;
         assert!(InMemoryMessageCoordinator::reservations_cover_recipients(
             &reservations,
-            &recipients,
+            recipients.iter().map(|(id, handle)| (*id, handle)),
             |reservation| {
                 production_reads += 1;
                 reservation.routed_player()
