@@ -4,7 +4,6 @@ use crate::protocol::{
 };
 use crate::reconnection::{ClaimedReconnection, DisconnectedPlayer, ReconnectionManager};
 use futures_util::FutureExt;
-use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -13,6 +12,7 @@ use crate::coordination::{
 };
 
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
+use super::signaling::sorted_routed_player_ids;
 use super::{ClientLifecycle, EnhancedGameServer, PendingApplicationClaimRollback};
 
 struct ReconnectPublicationSnapshot {
@@ -1611,8 +1611,7 @@ impl EnhancedGameServer {
                 Some(self.shutdown_drain_receiver()),
                 Box::new(move |routed_player_ids| {
                     Box::pin(async move {
-                        let routed_player_ids: HashSet<PlayerId> =
-                            routed_player_ids.into_iter().collect();
+                        let routed_player_ids = sorted_routed_player_ids(routed_player_ids);
                         let current_room = Arc::new(
                             server
                                 .database
@@ -1634,7 +1633,8 @@ impl EnhancedGameServer {
                                     "failed to fetch reconnect baseline players: {error}"
                                 )
                             })?;
-                        response_players.retain(|player| routed_player_ids.contains(&player.id));
+                        response_players
+                            .retain(|player| routed_player_ids.binary_search(&player.id).is_ok());
                         if !response_players
                             .iter()
                             .any(|player| player.id == response_player_id)
@@ -1648,8 +1648,11 @@ impl EnhancedGameServer {
                             server.room_coordinator.as_ref(),
                         )
                         .await;
+                        super::ready_state::apply_snapshot_readiness(
+                            &mut response_players,
+                            &ready_players,
+                        );
                         for player in &mut response_players {
-                            player.is_ready = ready_players.contains(&player.id);
                             player.epoch = None;
                             player.seq = None;
                         }
@@ -2320,7 +2323,7 @@ impl EnhancedGameServer {
                             .routed_player_ids(&room_id_for_publication)
                             .await
                         {
-                            Ok(Some(routed)) => routed.into_iter().collect::<HashSet<_>>(),
+                            Ok(Some(routed)) => routed,
                             Ok(None) => live_members
                                 .iter()
                                 .filter(|player| {
@@ -2355,11 +2358,12 @@ impl EnhancedGameServer {
                                     .collect()
                             }
                         };
-                        live_members.retain(|player| routed.contains(&player.player_id));
+                        let routed = sorted_routed_player_ids(routed);
+                        live_members.retain(|player| routed.binary_search(&player.player_id).is_ok());
                         for member in &mut live_members {
                             member.refresh_protocol(server_for_publication.session_capabilities(&member.player_id));
                         }
-                        let actor_is_routed = routed.contains(&reconnect_player_for_publication);
+                        let actor_is_routed = routed.binary_search(&reconnect_player_for_publication).is_ok();
                         if attempts_remaining == 0 && actor_is_routed {
                             if let Some(player_info) = reconnect_player_snapshot.cloned() {
                                 server_for_publication

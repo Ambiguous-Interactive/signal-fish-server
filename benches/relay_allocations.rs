@@ -919,8 +919,38 @@ fn assert_full_replay_rings_reuse_storage() {
     );
 }
 
+/// Routed membership lookup must reuse the coordinator's owned roster.
+fn assert_routed_rosters_reuse_storage() {
+    use signal_fish_server::server::allocation_benchmark::sorted_routed_player_ids_for_measurement;
+    for count in [0_u128, 2, 16, 64, 255] {
+        let mut members: Vec<_> = (1..=count)
+            .rev()
+            .map(|id| PlayerId::from_u128(id.wrapping_mul(0xfeed123456789abc123456789abcdef1)))
+            .collect();
+        if let Some(duplicate) = members.first().copied() {
+            members.push(duplicate);
+        }
+        let expected = members.clone();
+        let pointer = members.as_ptr();
+        let region = stats_alloc::Region::new(GLOBAL);
+        let routed = sorted_routed_player_ids_for_measurement(members);
+        for id in &expected {
+            assert!(routed.binary_search(id).is_ok());
+        }
+        assert!(routed.binary_search(&PlayerId::nil()).is_err());
+        let stats = region.change();
+        eprintln!("ROUTED_MEMBERSHIP count={count} stats={stats:?}");
+        assert_eq!(routed.as_ptr(), pointer);
+        assert_eq!(routed.len(), expected.len());
+        assert_eq!(stats.allocations, 0);
+        assert_eq!(stats.reallocations, 0);
+        assert_eq!(stats.bytes_allocated, 0);
+    }
+}
+
 /// Enforce component allocation ceilings and report repeated relay measurements.
 fn main() {
+    assert_routed_rosters_reuse_storage();
     assert_full_replay_rings_reuse_storage();
     assert_readiness_snapshots_reuse_their_id_storage();
     assert_session_peer_lists_do_not_grow();

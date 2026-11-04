@@ -6393,3 +6393,77 @@ fn shared_projection_preserves_star_order_endpoints_and_missing_recipients() {
         }
     }
 }
+
+/// Preserve exact peer storage, edge order, and capability filtering (#1443).
+#[test]
+fn shared_mesh_projection_preserves_filtered_edges_for_every_roster_shape() {
+    for count in [0, 1, 2, 16, 64, 255] {
+        for mixed in [false, true] {
+            let members = (1..=count)
+                .map(|index| {
+                    let mut member =
+                        v3_full(PlayerId::from_u128(index), &format!("Player雪{index}"));
+                    member.is_authority = index == 1;
+                    if mixed && index % 3 == 0 {
+                        member.capabilities.webrtc_transport = false;
+                    }
+                    member
+                })
+                .collect();
+            let decision = SessionPlanDecision {
+                generation: crate::protocol::SessionGeneration::new_v4(),
+                topology: Topology::Mesh,
+                transport: Transport::WebRtc,
+                host: None,
+                members,
+            };
+            let projection = decision.projection();
+            for member in &decision.members {
+                let plan = projection.plan_for_member(member, vec![]);
+                let expected: Vec<_> = decision
+                    .members
+                    .iter()
+                    .filter(|peer| {
+                        member.capabilities.webrtc_transport
+                            && peer.capabilities.webrtc_transport
+                            && peer.player_id != member.player_id
+                    })
+                    .map(|peer| {
+                        (
+                            peer.player_id,
+                            peer.player_name.as_str(),
+                            peer.is_authority,
+                            member.player_id < peer.player_id,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    plan.peers.capacity(),
+                    expected.len(),
+                    "mesh peer storage must fit exactly: count={count}, mixed={mixed}",
+                );
+                assert_eq!(
+                    plan.peers
+                        .iter()
+                        .map(|peer| (
+                            peer.player_id,
+                            peer.player_name.as_str(),
+                            peer.is_authority,
+                            peer.initiate,
+                        ))
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "count={count}, mixed={mixed}, recipient={}",
+                    member.player_id,
+                );
+                assert_eq!(plan.generation, decision.generation);
+                assert_eq!(plan.topology, Topology::Mesh);
+                assert_eq!(plan.transport, Transport::WebRtc);
+                assert_eq!(plan.fallback, Transport::Relay);
+                assert!(plan.host.is_none());
+                assert!(plan.direct_endpoint.is_none());
+            }
+            assert!(decision.plan_for(PlayerId::nil(), vec![]).peers.is_empty());
+        }
+    }
+}

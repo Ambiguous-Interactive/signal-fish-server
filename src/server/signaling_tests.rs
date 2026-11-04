@@ -7903,3 +7903,38 @@ async fn signal_sizing_preserves_opaque_payloads_at_the_exact_boundary() {
         }
     }
 }
+
+/// Keep membership and filter order while reusing the routed roster (#1442).
+#[test]
+fn routed_roster_reuses_storage_and_preserves_membership() {
+    use super::signaling::sorted_routed_player_ids;
+    for values in [vec![], vec![3], vec![4, 1, 3, 1, 2], vec![1, 2, 3, 4]] {
+        let mut routed: Vec<_> = values.iter().copied().map(PlayerId::from_u128).collect();
+        routed.reserve(8);
+        let pointer = routed.as_ptr();
+        let capacity = routed.capacity();
+        let sorted = sorted_routed_player_ids(routed);
+        assert_eq!(sorted.as_ptr(), pointer);
+        assert_eq!(sorted.capacity(), capacity);
+        assert_eq!(sorted.len(), values.len());
+        for id in 0..=5 {
+            assert_eq!(
+                sorted.binary_search(&PlayerId::from_u128(id)).is_ok(),
+                values.contains(&id)
+            );
+        }
+        let candidates: Vec<_> = [5_u128, 3, 1, 4, 0, 2].map(PlayerId::from_u128).into();
+        let old: std::collections::HashSet<_> = sorted.iter().copied().collect();
+        let expected: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|id| old.contains(id))
+            .collect();
+        let actual: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|id| sorted.binary_search(id).is_ok())
+            .collect();
+        assert_eq!(actual, expected);
+    }
+}

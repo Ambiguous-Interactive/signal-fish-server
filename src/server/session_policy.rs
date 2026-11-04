@@ -37,7 +37,6 @@
 //! `RoomJoined` / `Reconnected` so v3 WebRTC-capable clients can gather
 //! candidates during the lobby wait. The `SessionPlan` ICE list supersedes it.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::config::SessionConfig;
@@ -53,7 +52,7 @@ use crate::protocol::{
     ServerMessage, SessionGeneration, SessionPeer, SessionPlanPayload, Topology, Transport,
 };
 
-use super::signaling::local_initiates;
+use super::signaling::{local_initiates, sorted_routed_player_ids};
 use super::{EnhancedGameServer, NegotiatedProtocol};
 
 /// The sticky per-room session decision recorded when a room finalizes to a
@@ -696,10 +695,19 @@ impl SessionPlanDecision {
         )
     }
 
-    /// Resolve the shared host once for a complete recipient publication.
+    /// Resolve the host and mesh peer capacity once for a complete publication.
     pub(super) fn projection(&self) -> SessionPlanProjection<'_> {
         SessionPlanProjection {
             decision: self,
+            mesh_peer_capacity: if self.topology == Topology::Mesh {
+                self.members
+                    .iter()
+                    .filter(|member| self.pairable(member))
+                    .count()
+                    .saturating_sub(1)
+            } else {
+                0
+            },
             host: self
                 .host
                 .and_then(|host| self.members.iter().find(|member| member.player_id == host)),
@@ -707,9 +715,10 @@ impl SessionPlanDecision {
     }
 }
 
-/// Borrow the shared host once while preparing a complete publication.
+/// Reuse the host and exact mesh peer capacity for a complete publication.
 pub(super) struct SessionPlanProjection<'a> {
     decision: &'a SessionPlanDecision,
+    mesh_peer_capacity: usize,
     host: Option<&'a SessionMember>,
 }
 
@@ -739,7 +748,7 @@ impl SessionPlanProjection<'_> {
                     let members = decision.members.iter().filter(|member| {
                         member.player_id != recipient && decision.pairable(member)
                     });
-                    let mut peers = Vec::with_capacity(members.clone().count());
+                    let mut peers = Vec::with_capacity(self.mesh_peer_capacity);
                     peers.extend(members.map(|member| SessionPeer {
                         player_id: member.player_id,
                         player_name: member.player_name.clone(),
@@ -1217,7 +1226,7 @@ impl EnhancedGameServer {
         }
 
         let routed_player_ids = match self.message_coordinator.routed_player_ids(room_id).await {
-            Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
+            Ok(ids) => ids.map(sorted_routed_player_ids),
             Err(error) => {
                 tracing::warn!(
                     %room_id,
@@ -1233,7 +1242,7 @@ impl EnhancedGameServer {
             self.session_members_from_selection(room.players.into_iter().filter(|member| {
                 routed_player_ids
                     .as_ref()
-                    .is_none_or(|routed| routed.contains(&member.id))
+                    .is_none_or(|routed| routed.binary_search(&member.id).is_ok())
             }));
 
         // Last published member left. Storage may still hold an admitted
@@ -1376,17 +1385,21 @@ impl EnhancedGameServer {
         };
         host.direct_endpoint = replacement;
         let routed = match self.message_coordinator.routed_player_ids(room_id).await {
-            Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
+            Ok(ids) => ids.map(sorted_routed_player_ids),
             Err(_) => return false,
         };
-        if routed.as_ref().is_some_and(|ids| !ids.contains(player_id)) {
+        if routed
+            .as_ref()
+            .is_some_and(|ids| ids.binary_search(player_id).is_err())
+        {
             return false;
         }
-        let members = self.session_members_from_selection(
-            room.players
-                .into_iter()
-                .filter(|member| routed.as_ref().is_none_or(|ids| ids.contains(&member.id))),
-        );
+        let members =
+            self.session_members_from_selection(room.players.into_iter().filter(|member| {
+                routed
+                    .as_ref()
+                    .is_none_or(|ids| ids.binary_search(&member.id).is_ok())
+            }));
         self.publish_host_session(
             room_id,
             stored,

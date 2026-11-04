@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use super::signaling::sorted_routed_player_ids;
+use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -715,18 +716,15 @@ impl SpectatorService {
                         Some(drain),
                         Box::new(move |routed_player_ids| {
                             Box::pin(async move {
-                                let routed_player_ids: HashSet<_> =
-                                    routed_player_ids.into_iter().collect();
-                                let current_players: Vec<PlayerInfo> = current_room
+                                let routed_player_ids = sorted_routed_player_ids(routed_player_ids);
+                                let mut current_players: Vec<PlayerInfo> = current_room
                                     .players
                                     .into_values()
                                     .filter_map(|mut player| {
-                                        // Same derivation as `RoomJoined` / `Reconnected`: the
-                                        // stored flag is only written at finalize.
-                                        player.is_ready = ready_players.contains(&player.id);
                                         let relay_stamp = connection_manager
                                             .current_relay_stamp_in_room(&player.id, &room.id);
-                                        let is_published = routed_player_ids.contains(&player.id);
+                                        let is_published =
+                                            routed_player_ids.binary_search(&player.id).is_ok();
                                         if !is_published {
                                             return None;
                                         }
@@ -741,6 +739,10 @@ impl SpectatorService {
                                         Some(player)
                                     })
                                     .collect();
+                                super::ready_state::apply_snapshot_readiness(
+                                    &mut current_players,
+                                    &ready_players,
+                                );
                                 Ok(Arc::new(
                                     (ServerMessage::SpectatorJoined(Box::new(
                                         SpectatorJoinedPayload {
