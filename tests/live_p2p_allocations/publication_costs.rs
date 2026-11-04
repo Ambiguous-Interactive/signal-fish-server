@@ -61,6 +61,17 @@ pub(crate) fn transaction_reuses_owned_batches() {
                 let stats = region.change();
                 assert_eq!(outcome, RoomMessageTransactionOutcome::Committed);
                 if measured {
+                    if count == 255 {
+                        let trace_storage = if cfg!(feature = "trace-validation") {
+                            9_000
+                        } else {
+                            0
+                        };
+                        assert!(
+                            stats.bytes_allocated <= 565_000 + trace_storage,
+                            "publication rebuilt owned batch storage: {stats:?}"
+                        );
+                    }
                     println!("PUBLICATION_COST members={count} stats={stats:?}");
                     profiles.push((count, stats));
                 }

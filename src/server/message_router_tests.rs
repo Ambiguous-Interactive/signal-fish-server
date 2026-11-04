@@ -1748,3 +1748,173 @@ async fn router_refuses_correlated_reconnect_operations_with_an_echoed_id() {
         "router dispatch must never swap the routing identity to the reconnect target"
     );
 }
+
+/// #1448: unknown routing uses stored IDs and the same report delivery contract.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_unknown_routing_preserves_filtered_delivery_and_errors() {
+    use crate::database::GameDatabase;
+    use crate::distributed::InMemoryDistributedLock;
+    use crate::protocol::PlayerInfo;
+
+    let database = Arc::new(InMemoryDatabase::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        super::room_service_tests::coordinator_without_routing_snapshot(),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let reporter = PlayerId::from_u128(1);
+    let room = database
+        .create_room(
+            "status-fallback".into(),
+            None,
+            4,
+            false,
+            reporter,
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut receivers = Vec::new();
+    for index in 1..=4 {
+        let id = PlayerId::from_u128(index);
+        let (sender, receiver) = mpsc::channel(8);
+        server.connect_client(id, sender).await;
+        if index != 3 {
+            server.set_client_protocol(
+                &id,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::WebRtc],
+                    topologies: vec![Topology::Mesh],
+                },
+            );
+        }
+        if index <= 3 {
+            if index > 1 {
+                assert!(database
+                    .add_player_to_room(
+                        &room.id,
+                        PlayerInfo {
+                            id,
+                            name: format!("player-{index}"),
+                            is_authority: false,
+                            is_ready: false,
+                            connected_at: None,
+                            connection_info: None,
+                            epoch: None,
+                            seq: None,
+                            region_id: "test".into(),
+                        }
+                    )
+                    .await
+                    .unwrap());
+            }
+            server
+                .connection_manager
+                .assign_client_to_room(&id, room.id)
+                .await;
+        }
+        receivers.push(receiver);
+    }
+    assert!(server
+        .message_coordinator
+        .routed_player_ids(&room.id)
+        .await
+        .unwrap()
+        .is_none());
+    let report = |connected| ClientMessage::TransportStatus {
+        transport: Transport::WebRtc,
+        connected,
+    };
+    server.handle_client_message(&reporter, report(true)).await;
+    let received = receivers[1].try_recv().unwrap();
+    assert!(
+        matches!(received.as_ref(), ServerMessage::PeerTransportStatus {
+        peer_id, transport: Transport::WebRtc, connected: true,
+    } if *peer_id == reporter)
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1
+    );
+    for receiver in &mut receivers {
+        let trailing = receiver.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+    }
+
+    // A failed snapshot updates local truth without sending or charging a fan-out.
+    database.fail_get_room_players_for_test(true);
+    server.handle_client_message(&reporter, report(false)).await;
+    assert_eq!(
+        server.client_transport_status(&reporter),
+        Some((Transport::WebRtc, false))
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        server
+            .rate_limiter
+            .get_player_stats(&reporter)
+            .await
+            .unwrap()
+            .signals,
+        1
+    );
+    database.fail_get_room_players_for_test(false);
+    server.handle_client_message(&reporter, report(true)).await;
+    let recovered = receivers[1].try_recv().unwrap();
+    assert!(matches!(
+        recovered.as_ref(),
+        ServerMessage::PeerTransportStatus {
+            connected: true,
+            ..
+        }
+    ));
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        2
+    );
+
+    // With only a v2 peer left, there is no eligible recipient.
+    database
+        .remove_player_from_room(&room.id, &PlayerId::from_u128(2))
+        .await
+        .unwrap();
+    server.handle_client_message(&reporter, report(false)).await;
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        server
+            .rate_limiter
+            .get_player_stats(&reporter)
+            .await
+            .unwrap()
+            .signals,
+        2
+    );
+    for receiver in &mut receivers {
+        let trailing = receiver.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+    }
+}

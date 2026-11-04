@@ -244,20 +244,18 @@ pub struct InMemoryRoomOperationCoordinator {
     reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
 }
 
-fn effective_room_members(
+/// Reuse the stored roster for unique, sorted effective-membership lookup.
+pub(crate) fn effective_room_members(
     mut stored: Vec<PlayerId>,
     routed: Option<Vec<PlayerId>>,
-) -> HashSet<PlayerId> {
-    match routed {
-        Some(routed) => {
-            let mut current: HashSet<PlayerId> = routed.into_iter().collect();
-            stored.retain(|id| current.contains(id));
-            current.clear();
-            current.extend(stored);
-            current
-        }
-        None => stored.into_iter().collect(),
+) -> Vec<PlayerId> {
+    stored.sort_unstable();
+    stored.dedup();
+    if let Some(mut routed) = routed {
+        routed.sort_unstable();
+        stored.retain(|id| routed.binary_search(id).is_ok());
     }
+    stored
 }
 
 impl InMemoryRoomOperationCoordinator {
@@ -428,7 +426,7 @@ impl InMemoryRoomOperationCoordinator {
             // lookup and the membership read above) is refused exactly like any
             // other unknown membership. Toggling anyway would mint an empty
             // ready entry for a live room and publish a stale lobby snapshot.
-            if !current_ids.contains(player_id) {
+            if current_ids.binary_search(player_id).is_err() {
                 return Err(PlayerReadyError::RoomNotFound);
             }
 
@@ -449,7 +447,7 @@ impl InMemoryRoomOperationCoordinator {
                 room_ready_players.insert(*player_id);
             }
             // Drop any ids that are no longer current members (departed players).
-            room_ready_players.retain(|id| current_ids.contains(id));
+            room_ready_players.retain(|id| current_ids.binary_search(id).is_ok());
 
             let ready_players_vec: Vec<PlayerId> = room_ready_players.iter().copied().collect();
 
@@ -543,7 +541,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             let ready_set = ready_map.get(room_id);
             let ready_players: Vec<PlayerId> = ready_set
                 .into_iter()
-                .flat_map(|ready| ready.intersection(&current_ids).copied())
+                .flat_map(|ready| ready.iter().copied())
+                .filter(|id| current_ids.binary_search(id).is_ok())
                 .collect();
             let all_ready = current_ids
                 .iter()
@@ -1116,11 +1115,36 @@ mod tests {
                 vec![first, second],
             ),
         ] {
-            assert_eq!(
-                effective_room_members(stored, routed),
-                expected.into_iter().collect(),
-                "{name}"
-            );
+            assert_eq!(effective_room_members(stored, routed), expected, "{name}");
+        }
+    }
+
+    /// #1447: preserve set semantics while retaining the caller's roster allocation.
+    #[test]
+    fn effective_membership_reuses_storage_and_matches_set_intersection() {
+        for count in [0, 1, 2, 16, 255, 1024] {
+            for routed in [
+                None,
+                Some(Vec::new()),
+                Some((0..count * 2).step_by(3).map(PlayerId::from_u128).collect()),
+            ] {
+                let stored: Vec<_> = (0..count)
+                    .rev()
+                    .flat_map(|index| [PlayerId::from_u128(index); 2])
+                    .collect();
+                let pointer = stored.as_ptr();
+                let capacity = stored.capacity();
+                let expected: HashSet<_> = stored
+                    .iter()
+                    .copied()
+                    .filter(|id| routed.as_ref().is_none_or(|ids| ids.contains(id)))
+                    .collect();
+                let effective = effective_room_members(stored, routed);
+                assert_eq!(effective.as_ptr(), pointer);
+                assert_eq!(effective.capacity(), capacity);
+                assert!(effective.windows(2).all(|pair| pair[0] < pair[1]));
+                assert_eq!(effective.into_iter().collect::<HashSet<_>>(), expected);
+            }
         }
     }
 

@@ -139,6 +139,17 @@ impl TransportStatusFanOut {
 }
 
 impl EnhancedGameServer {
+    /// Resolve status peers for coordinators that do not expose routed membership.
+    pub(super) async fn transport_status_fallback_recipients(
+        &self,
+        player_id: &PlayerId,
+        room_id: &crate::protocol::RoomId,
+    ) -> anyhow::Result<Vec<PlayerId>> {
+        let mut members = self.database.get_room_player_ids(room_id).await?;
+        members.retain(|member| member != player_id && self.client_supports_v3(member));
+        Ok(members)
+    }
+
     /// Handle incoming client message with enhanced coordination.
     pub async fn handle_client_message(
         self: &Arc<Self>,
@@ -749,12 +760,11 @@ impl EnhancedGameServer {
                     })
                     .collect()
             }
-            Ok(None) => match self.database.get_room_players(&room_id).await {
-                Ok(members) => members
-                    .into_iter()
-                    .filter(|member| member.id != *player_id && self.client_supports_v3(&member.id))
-                    .map(|member| member.id)
-                    .collect(),
+            Ok(None) => match self
+                .transport_status_fallback_recipients(player_id, &room_id)
+                .await
+            {
+                Ok(members) => members,
                 Err(err) => {
                     tracing::warn!(
                         %player_id,

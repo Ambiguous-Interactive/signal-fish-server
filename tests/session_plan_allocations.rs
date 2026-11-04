@@ -16,6 +16,8 @@ mod publication_costs;
 mod readiness_costs;
 #[path = "live_p2p_allocations/setup_costs.rs"]
 mod setup_costs;
+#[path = "live_p2p_allocations/status_costs.rs"]
+mod status_costs;
 
 use signal_fish_server::config::*;
 use signal_fish_server::database::DatabaseConfig;
@@ -412,6 +414,10 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "transport_status_fallback_skips_player_metadata",
+            status_costs::transport_status_fallback_skips_player_metadata,
+        ),
         allocation_harness::trial(
             "mesh_departure_skips_survivor_selection",
             departure_costs::mesh_departure_skips_survivor_selection,

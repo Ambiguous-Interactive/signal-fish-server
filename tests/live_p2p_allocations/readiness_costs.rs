@@ -84,7 +84,7 @@ pub(crate) fn readiness_reuses_membership(lobby: bool) {
                 } else {
                     0
                 };
-                let budget = if lobby { 458_000 } else { 455_000 } + trace_storage;
+                let budget = 447_000 + trace_storage;
                 assert!(stats.bytes_allocated <= budget,
                     "readiness rebuilt effective membership: lobby={lobby} budget={budget} stats={stats:?}");
             }
