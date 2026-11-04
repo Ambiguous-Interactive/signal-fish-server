@@ -238,3 +238,103 @@ pub(crate) fn game_start_shares_configuration() {
         );
     }
 }
+
+/// Compare full delivery against fixed plus per-peer costs after warm-up.
+pub(crate) fn transport_report_delivery_cost() {
+    let mut profiles = Vec::new();
+    for count in [2_u128, 3, 4, 16, 64] {
+        allocation_harness::block_on(async {
+            allocation_harness::warm_current_thread_runtime().await;
+            let server = EnhancedGameServer::new(
+                ServerConfig::default(),
+                ProtocolConfig::default(),
+                RelayTypeConfig::default(),
+                SessionConfig::default(),
+                TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                TransportSecurityConfig::default(),
+                vec![],
+            )
+            .await
+            .unwrap();
+            let mut receivers = Vec::new();
+            for index in 1..=count {
+                let player = Uuid::from_u128(index);
+                let (sender, receiver) = tokio::sync::mpsc::channel(512);
+                receivers.push(receiver);
+                server.connect_client(player, sender).await;
+                negotiate_webrtc_for_measurement(&server, &player);
+                server
+                    .handle_join_room(
+                        &player,
+                        "status-profile".into(),
+                        Some("STAT01".into()),
+                        format!("Player{index}"),
+                        Some(64),
+                        Some(false),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+            }
+            for receiver in &mut receivers {
+                drain_membership_setup(receiver, false);
+            }
+            let reporter = Uuid::from_u128(1);
+            for connected in [false, true] {
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                server
+                    .handle_client_message(
+                        &reporter,
+                        signal_fish_server::protocol::ClientMessage::TransportStatus {
+                            transport: Transport::WebRtc,
+                            connected,
+                        },
+                    )
+                    .await;
+                let stats = region.change();
+                if connected {
+                    println!("TRANSPORT_REPORT_PROFILE count={count} stats={stats:?}");
+                    profiles.push(stats);
+                }
+                if connected && count == 2 {
+                    let duplicate_region = stats_alloc::Region::new(ALLOCATOR);
+                    server
+                        .handle_client_message(
+                            &reporter,
+                            signal_fish_server::protocol::ClientMessage::TransportStatus {
+                                transport: Transport::WebRtc,
+                                connected,
+                            },
+                        )
+                        .await;
+                    let duplicate = duplicate_region.change();
+                    println!("TRANSPORT_REPORT_DUPLICATE_PROFILE stats={duplicate:?}");
+                }
+                for (index, receiver) in receivers.iter_mut().enumerate() {
+                    if index != 0 {
+                        let message = receiver.try_recv().unwrap();
+                        assert!(
+                            matches!(message.as_ref(), ServerMessage::PeerTransportStatus {
+                            peer_id, transport: Transport::WebRtc, connected: actual,
+                        } if *peer_id == reporter && *actual == connected)
+                        );
+                    }
+                    assert_membership_queue_empty(receiver);
+                }
+            }
+        });
+    }
+    let generic_single_recipient = profiles[1]
+        .allocations
+        .checked_mul(2)
+        .and_then(|twice| twice.checked_sub(profiles[2].allocations))
+        .expect("full-delivery cohorts have a common fixed cost");
+    assert!(
+        profiles[0].allocations + 2 <= generic_single_recipient,
+        "single-recipient delivery builds fan-out collections: {profiles:?}"
+    );
+}

@@ -2139,6 +2139,72 @@ async fn signal_dispatch_waits_for_room_plan_publication_gate() {
     assert_silent(&mut alice_rx).await;
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_signal_caller_preserves_admitted_offer() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client_with_queue_capacity(&server, 1).await;
+    for player in [alice, bob] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "Bob"))
+        .await
+        .unwrap();
+    for player in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    server
+        .message_coordinator
+        .send_to_player(&bob, Arc::new(ServerMessage::Pong))
+        .await
+        .unwrap();
+    let sending_server = Arc::clone(&server);
+    let generation = uuid::Uuid::new_v4();
+    let offer = json!({"Offer": "accepted-offer"});
+    let expected = offer.clone();
+    let caller = tokio::spawn(async move {
+        sending_server
+            .handle_signal_in_generation(&alice, bob, generation, offer)
+            .await;
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("offer reaches actual target backpressure");
+    assert_eq!(server.metrics.signals_relayed.load(Ordering::Relaxed), 1);
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        recv(&mut bob_rx).await.as_ref(),
+        ServerMessage::Pong
+    ));
+    assert!(matches!(recv(&mut bob_rx).await.as_ref(),
+        ServerMessage::Signal { from, generation: actual_generation, signal }
+        if *from == alice && *actual_generation == generation && *signal == expected));
+    let bob_rx_tail = bob_rx.try_recv();
+    assert!(matches!(bob_rx_tail, Err(mpsc::error::TryRecvError::Empty)));
+    server
+        .handle_signal_in_generation(&alice, bob, generation, json!({"candidate": "next"}))
+        .await;
+    assert!(matches!(recv(&mut bob_rx).await.as_ref(),
+        ServerMessage::Signal { signal, .. } if *signal == json!({"candidate": "next"})));
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn backpressured_signal_finishes_before_target_leave_and_rejoin() {
@@ -2178,6 +2244,18 @@ async fn backpressured_signal_finishes_before_target_leave_and_rejoin() {
     let signal = server.handle_signal(&alice, bob, json!({"Offer": "before-leave"}));
     tokio::pin!(signal);
     assert!(futures_util::poll!(&mut signal).is_pending());
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned signal reaches target backpressure");
     assert_eq!(
         server
             .metrics

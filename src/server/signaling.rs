@@ -95,6 +95,7 @@ impl EnhancedGameServer {
     }
 
     /// Relay one generation-fenced opaque WebRTC signal.
+    /// Once admitted, delivery continues if the caller is canceled.
     ///
     /// The server deliberately does not interpret or topology-gate the
     /// generation: it preserves the same room-ordered dumb-plumbing contract
@@ -125,7 +126,7 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let _lifecycle_guard = lifecycle.lock().await;
+        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         if lifecycle.player_id() != *from
             || !self.connection_manager.lifecycle_matches(from, &lifecycle)
         {
@@ -272,7 +273,7 @@ impl EnhancedGameServer {
         // `Signal` ahead of that recipient's plan. Holding the room mutation
         // gate through dispatch makes plan-before-signal a server guarantee for
         // finalize, re-plan, join, and reconnect publications alike.
-        let _signal_publication_guard = self
+        let signal_publication_guard = self
             .message_coordinator
             .lock_room_event_mutation(&from_room)
             .await;
@@ -346,23 +347,30 @@ impl EnhancedGameServer {
         // never a silent drop — a backpressured recipient stalls this send for
         // up to the slow-consumer grace window and is then loudly disconnected
         // (metrics + close), abandoning its queue only with the connection.
-        // The Result is still ignored deliberately: `send_to_player` returns
-        // `Ok(())` regardless of the per-recipient outcome, and the SENDER has
-        // no corrective action for a recipient's disconnect (the recipient's
-        // teardown broadcasts `PlayerLeft`, and the relay floor remains the
-        // fallback transport for its trickle-ICE).
-        let _ = self
-            .message_coordinator
-            .send_to_player_in_room(
-                &to,
-                &from_room,
-                Arc::new(ServerMessage::Signal {
-                    from: *from,
-                    generation,
-                    signal,
-                }),
-            )
-            .await;
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let from = *from;
+        let completion = self.message_coordinator.enqueue_room_event(
+            signal_publication_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    let _lifecycle_guard = lifecycle_guard;
+                    coordinator
+                        .send_to_player_in_room(
+                            &to,
+                            &from_room,
+                            Arc::new(ServerMessage::Signal {
+                                from,
+                                generation,
+                                signal,
+                            }),
+                        )
+                        .await
+                })
+            }),
+        );
+        if let Err(error) = completion.await {
+            tracing::warn!(%from, %to, %error, "Signal delivery transaction failed");
+        }
     }
 
     pub(crate) async fn publish_join_lifecycle_fallback(
