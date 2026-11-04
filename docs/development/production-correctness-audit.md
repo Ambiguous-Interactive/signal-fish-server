@@ -14659,3 +14659,61 @@ cannot count the same permit twice. The later aggregate guard is removed.
 This also covers completed futures still held inside `join_all`. No wire or
 client change is required: Rust, .NET and Godot clients receive the same frames
 and use the same cancellation and reconnection contracts.
+
+### F271–F273 — Conditional room publications
+
+Issues: #1421, #1422 and #1423. Base: `be57808a`. These findings concern
+single-frame conditional publications. The batch repairs in F267–F270 do not
+cover these paths.
+
+**F271 / #1421.** A conditional room broadcast acquires a healthy peer's permit
+while another peer waits for capacity. The old code arms its aggregate guard
+only after all reservations finish. Dropping the future before that point
+releases the acquired permit without a terminal delivery count. The two-peer
+red control reports two attempts, zero cancellations and one parked-attempt
+drop. It requires one cancellation. The replay hook does not run.
+
+Each completed reservation now owns an accounting guard inside its future's
+output. This includes outputs retained by either `join_all` strategy. A
+synchronous transfer puts the reservation under the aggregate guard before
+it disarms the individual guard. No await separates those operations.
+The cancellation control covers 2, 32 and 64 peers. It checks all acquired
+permits, the separate parked-attempt drop, the exact retained queue prefix,
+no replay, no partial delivery and reuse of every queue slot.
+
+**F272 / #1422.** Targeted conditional room sends acquire a permit before
+awaiting the routing gate and shared maps. Their old code has no guard at
+those waits. The red P2P status delivery control reports one attempt and zero
+cancellations after the acquired permit is dropped. It requires one
+cancellation. Both targeted variants now keep a guard through all three
+revalidation waits. Explicit commit or refusal disarms it before terminal
+accounting. Controls cover predicate-scoped and exact-membership sends with
+legacy and classified queues. Classified setup commits and drains a real
+room-entry transition before filling the room-scoped queue. Acquired-permit
+terminal controls also check successful send, refusal and receiver closure
+without double counting.
+
+**F273 / #1423.** Conditional broadcast validation scans the full reservation
+vector for each routed recipient. Its original comparison count is
+`N * (N + 1) / 2`. The red control reaches 136 comparisons at 16 peers,
+exceeding its unchanged logarithmic bound. The repair sorts the owned
+reservations once before routing revalidation and uses binary search. It
+retains recipient cardinality, physical-channel identity and closed-channel
+matching. Controls compare the original and repaired results at 0, 1, 2, 16
+and 255 peers. They bound both sorting and lookup work. At 255 peers, the original scan uses
+32,640 comparisons. The repaired lookup uses 2,295 comparisons; the control
+reads 508 sort keys. These counts do not establish end-to-end latency.
+Complete publications
+check every exact frame, one replay hook and terminal counters at 2, 16 and
+255 peers. Existing stale-route, retry and hook-panic controls cover the
+unchanged commit boundary.
+
+These are delivery-accounting and lookup-work findings. They do not establish
+lost gameplay frames or a network throughput limit. Wire payloads, per-peer
+ordering, membership rules and replay boundaries remain the same.
+
+External-client assessment: Rust protocol-versioning docs at `da8f2d16`, .NET
+protocol-versioning docs at `e467c871`, and Godot event docs at `09a5b1a2`
+retain the same status, session and lifecycle surfaces. No client consumes the
+server's internal permit accounting or reservation lookup. All three clients
+need no change or migration.

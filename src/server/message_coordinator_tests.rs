@@ -5610,3 +5610,6 @@ async fn dropping_room_transaction_accounts_completed_and_partial_reservations()
         }
     }
 }
+
+#[path = "../../tests/support/conditional_publication_tests.rs"]
+mod conditional_publication_tests;
