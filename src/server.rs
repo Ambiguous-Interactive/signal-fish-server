@@ -806,6 +806,14 @@ pub mod allocation_benchmark {
         super::signaling::canonical_json_len(value)
     }
 
+    /// Measure effective ready/lobby membership with caller-owned rosters.
+    pub fn effective_room_members(
+        stored: Vec<crate::protocol::PlayerId>,
+        routed: Option<Vec<crate::protocol::PlayerId>>,
+    ) -> Vec<crate::protocol::PlayerId> {
+        crate::coordination::room_coordinator::effective_room_members(stored, routed)
+    }
+
     /// Resolve the production unknown-routing status recipient fallback.
     pub async fn transport_status_fallback_recipients_for_measurement(
         server: &super::EnhancedGameServer,

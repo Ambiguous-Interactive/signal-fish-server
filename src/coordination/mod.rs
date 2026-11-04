@@ -17,14 +17,6 @@ pub mod room_coordinator;
 #[cfg(feature = "allocation-tracking")]
 #[doc(hidden)]
 pub mod allocation_benchmark {
-    /// Measure effective ready/lobby membership with caller-owned rosters.
-    pub fn effective_room_members(
-        stored: Vec<crate::protocol::PlayerId>,
-        routed: Option<Vec<crate::protocol::PlayerId>>,
-    ) -> Vec<crate::protocol::PlayerId> {
-        super::room_coordinator::effective_room_members(stored, routed)
-    }
-
     pub use super::outbound_queue::{
         channel_with_metrics, DataDeliveryMetadata, DeliveryMessage, OutboundData, OutboundPayload,
         OutboundReceiver, OutboundSender,

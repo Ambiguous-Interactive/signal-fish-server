@@ -254,8 +254,8 @@ fn readiness_projection(criterion: &mut Criterion) {
 
 /// Compare complete membership construction and lookup with the hash-table baseline.
 fn effective_membership(criterion: &mut Criterion) {
-    use signal_fish_server::coordination::allocation_benchmark::effective_room_members;
     use signal_fish_server::protocol::PlayerId;
+    use signal_fish_server::server::allocation_benchmark::effective_room_members;
     use std::collections::HashSet;
     let mut group = criterion.benchmark_group("effective_membership");
     group.sample_size(20);
