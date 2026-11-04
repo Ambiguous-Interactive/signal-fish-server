@@ -829,7 +829,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             room_players.retain(|player| {
                 routed
                     .as_ref()
-                    .is_none_or(|routed| routed.contains(&player.id))
+                    .is_none_or(|routed| routed.binary_search(&player.id).is_ok())
             });
             member_ids.sort_unstable();
             if room_players.len() != member_ids.len()

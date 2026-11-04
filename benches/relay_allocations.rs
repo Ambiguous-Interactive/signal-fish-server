@@ -939,7 +939,7 @@ fn assert_routed_rosters_reuse_storage() {
         }
         assert!(routed.binary_search(&PlayerId::nil()).is_err());
         let stats = region.change();
-        println!("ROUTED_MEMBERSHIP count={count} stats={stats:?}");
+        eprintln!("ROUTED_MEMBERSHIP count={count} stats={stats:?}");
         assert_eq!(routed.as_ptr(), pointer);
         assert_eq!(routed.len(), expected.len());
         assert_eq!(stats.allocations, 0);
