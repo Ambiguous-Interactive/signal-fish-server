@@ -2693,3 +2693,57 @@ async fn concurrent_direct_endpoint_and_start_publish_consistent_generations() {
         assert_eq!(active.host, Some(host));
     }
 }
+
+/// Keep readiness flags and snapshot records exact across lookup boundaries (#1444).
+#[test]
+fn snapshot_readiness_preserves_identity_metadata_and_ready_order() {
+    for count in [0, 2, 16, 31, 32, 33, 63, 64, 65, 255] {
+        for ready_count in [0, 1, 31, 32, 33, 63, 64, 65, 255] {
+            let mut players: Vec<_> = (0..count)
+                .map(|index| {
+                    let mut player = player_info(PlayerId::from_u128(index + 1), "雪");
+                    player.is_ready = index % 2 == 0;
+                    player.is_authority = index % 2 == 1;
+                    player.region_id = format!("region-{index}");
+                    player.epoch = Some(7);
+                    player.seq = Some(11);
+                    player
+                })
+                .collect();
+            players.reverse();
+            if players.len() > 2 {
+                players.rotate_left(2);
+            }
+            let ready: Vec<_> = (0..ready_count)
+                .rev()
+                .map(|index| match index {
+                    1 => PlayerId::from_u128(1),
+                    2 => PlayerId::from_u128(999),
+                    _ => PlayerId::from_u128(index + 1),
+                })
+                .collect();
+            let unchanged_ready = ready.clone();
+            let mut expected = players.clone();
+            for player in &mut expected {
+                player.is_ready = ready.contains(&player.id);
+            }
+            super::ready_state::apply_snapshot_readiness(&mut players, &ready);
+            assert_eq!(
+                serde_json::to_value(&players).expect("actual players"),
+                serde_json::to_value(&expected).expect("expected players"),
+                "members={count}, ready={ready_count}"
+            );
+            assert_eq!(
+                players
+                    .iter()
+                    .map(|player| &player.region_id)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|player| &player.region_id)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(ready, unchanged_ready);
+        }
+    }
+}

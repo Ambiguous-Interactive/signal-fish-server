@@ -155,11 +155,114 @@ fn host_plan_projection(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Measure complete mesh publications with every member paired.
+fn mesh_plan_projection(criterion: &mut Criterion) {
+    use signal_fish_server::server::allocation_benchmark::HostElectionFixture;
+    let mut group = criterion.benchmark_group("mesh_plan_projection");
+    for count in [2, 16, 64, 255] {
+        let mut fixture = HostElectionFixture::new(count, false);
+        let plans = fixture.mesh_plans_for_members();
+        assert_eq!(plans.len(), count as usize);
+        assert_eq!(
+            plans.iter().map(|plan| plan.peers.len()).sum::<usize>(),
+            count as usize * (count as usize - 1)
+        );
+        group.bench_function(count.to_string(), |bencher| {
+            bencher.iter(|| black_box(fixture.mesh_plans_for_members()));
+        });
+    }
+    group.finish();
+}
+
+/// Compare room readiness projections with exact nested-scan and sort references.
+fn readiness_projection(criterion: &mut Criterion) {
+    use signal_fish_server::protocol::{PlayerId, PlayerInfo};
+    use signal_fish_server::server::allocation_benchmark::apply_snapshot_readiness;
+    let mut group = criterion.benchmark_group("readiness_projection");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(700));
+    let identity = |index: u128| {
+        PlayerId::from_u128(
+            index
+                .wrapping_mul(0x9e3779b97f4a7c15_d1b54a32d192ed03)
+                .rotate_left(37),
+        )
+    };
+    for (count, ready_count) in [
+        (2_u128, 2_u128),
+        (16, 16),
+        (32, 32),
+        (64, 64),
+        (128, 128),
+        (255, 255),
+        (2, 255),
+        (255, 2),
+        (32, 255),
+        (255, 32),
+        (63, 32),
+        (64, 31),
+        (64, 32),
+        (64, 33),
+        (65, 32),
+        (63, 64),
+        (64, 63),
+        (64, 65),
+        (65, 64),
+    ] {
+        for (shape, step, offset) in [("full", 1, 0), ("sparse", 2, 0), ("disjoint", 1, 1000)] {
+            let mut players: Vec<_> = (0..count)
+                .map(|index| PlayerInfo {
+                    id: identity(index + 1),
+                    name: String::new(),
+                    is_authority: false,
+                    is_ready: false,
+                    connected_at: None,
+                    connection_info: None,
+                    epoch: None,
+                    seq: None,
+                    region_id: String::new(),
+                })
+                .collect();
+            let ready: Vec<_> = (0..ready_count)
+                .rev()
+                .map(|index| identity(index * step + offset + 1))
+                .collect();
+            apply_snapshot_readiness(&mut players, &ready);
+            assert!(players
+                .iter()
+                .all(|player| player.is_ready == ready.contains(&player.id)));
+            let case = format!("{shape}/{count}/{ready_count}");
+            group.bench_function(format!("production/{case}"), |bencher| {
+                bencher
+                    .iter(|| apply_snapshot_readiness(black_box(&mut players), black_box(&ready)));
+            });
+            group.bench_function(format!("sorted_copy/{case}"), |bencher| {
+                bencher.iter(|| {
+                    let mut sorted = black_box(&ready).clone();
+                    sorted.sort_unstable();
+                    for player in black_box(&mut players) {
+                        player.is_ready = sorted.binary_search(&player.id).is_ok();
+                    }
+                });
+            });
+            group.bench_function(format!("nested_scan/{case}"), |bencher| {
+                bencher.iter(|| {
+                    for player in black_box(&mut players) {
+                        player.is_ready = black_box(&ready).contains(&player.id);
+                    }
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3));
-    targets = relay_serialization_runtime, payload_sizing_runtime, host_plan_projection, signal_payload_sizing
+    targets = readiness_projection, relay_serialization_runtime, payload_sizing_runtime, host_plan_projection, mesh_plan_projection, signal_payload_sizing
 }
 criterion_main!(benches);

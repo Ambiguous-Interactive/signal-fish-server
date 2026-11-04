@@ -1,5 +1,5 @@
 use crate::coordination::{PlayerReadyError, RoomOperationCoordinatorTrait, StartGameOutcome};
-use crate::protocol::{ErrorCode, LobbyState, PlayerId, Room};
+use crate::protocol::{ErrorCode, LobbyState, PlayerId, PlayerInfo, Room};
 use std::sync::Arc;
 
 use super::{ClientLifecycle, EnhancedGameServer};
@@ -20,6 +20,22 @@ pub(crate) async fn snapshot_ready_players(
         return room.ready_players.clone();
     }
     room_coordinator.current_ready_players(&room.id).await
+}
+
+/// Set snapshot flags without changing player or ready-list order.
+/// Keep the allocation-free scan for smaller player or ready lists.
+pub(crate) fn apply_snapshot_readiness(players: &mut [PlayerInfo], ready_players: &[PlayerId]) {
+    if players.len() >= 64 && ready_players.len() >= 64 {
+        let mut ready = ready_players.to_vec();
+        ready.sort_unstable();
+        for player in players {
+            player.is_ready = ready.binary_search(&player.id).is_ok();
+        }
+    } else {
+        for player in players {
+            player.is_ready = ready_players.contains(&player.id);
+        }
+    }
 }
 
 impl EnhancedGameServer {

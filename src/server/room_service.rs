@@ -12,7 +12,6 @@ use crate::protocol::{
     RoomPasswordCredential, ServerMessage,
 };
 use futures_util::FutureExt;
-use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -811,8 +810,8 @@ impl EnhancedGameServer {
                         created_room.then(|| self.shutdown_drain_receiver()),
                         Box::new(move |routed_player_ids| {
                             Box::pin(async move {
-                                let routed_player_ids: HashSet<PlayerId> =
-                                    routed_player_ids.into_iter().collect();
+                                let routed_player_ids =
+                                    super::signaling::sorted_routed_player_ids(routed_player_ids);
                                 let current_room = Arc::new(
                                     server
                                         .database
@@ -836,8 +835,9 @@ impl EnhancedGameServer {
                                             "failed to fetch joined player baseline: {error}"
                                         )
                                     })?;
-                                current_players
-                                    .retain(|player| routed_player_ids.contains(&player.id));
+                                current_players.retain(|player| {
+                                    routed_player_ids.binary_search(&player.id).is_ok()
+                                });
                                 if !current_players
                                     .iter()
                                     .any(|player| player.id == response_player_id)
@@ -852,8 +852,11 @@ impl EnhancedGameServer {
                                     server.room_coordinator.as_ref(),
                                 )
                                 .await;
+                                super::ready_state::apply_snapshot_readiness(
+                                    &mut current_players,
+                                    &ready_players,
+                                );
                                 for player in &mut current_players {
-                                    player.is_ready = ready_players.contains(&player.id);
                                     player.epoch = None;
                                     player.seq = None;
                                 }

@@ -16,7 +16,6 @@
 //! Every code path is gated on negotiated v3 (plus the WebRTC transport for
 //! `Signal`) so v2 clients never observe `Signal` or `SessionPlan` (the v3 gate).
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -30,6 +29,13 @@ use crate::protocol::{
 
 use super::session_policy::membership_session_decision;
 use super::{ClientLifecycle, EnhancedGameServer};
+
+/// Reuse a routed roster for membership lookup without allocating a second set.
+/// Custom coordinators may return unordered or duplicate player ids.
+pub(super) fn sorted_routed_player_ids(mut players: Vec<PlayerId>) -> Vec<PlayerId> {
+    players.sort_unstable();
+    players
+}
 
 /// Glare-avoidance offerer designation (the deterministic mesh rule).
 ///
@@ -553,7 +559,7 @@ impl EnhancedGameServer {
                             .await
                         {
                             Ok(players) => {
-                                players.map(|players| players.into_iter().collect::<HashSet<_>>())
+                                players.map(sorted_routed_player_ids)
                             }
                             Err(error) => {
                                 tracing::warn!(%room_id, %joiner, %error, "Failed to refresh joined-room routing; deriving the local route from generation-fenced connections");
@@ -563,7 +569,7 @@ impl EnhancedGameServer {
                         let is_routed = |player_id: &PlayerId| {
                             routed.as_ref().map_or_else(
                                 || server.connection_manager.current_relay_stamp_in_room(player_id, &room_id).is_some(),
-                                |routed| routed.contains(player_id),
+                                |routed| routed.binary_search(player_id).is_ok(),
                             )
                         };
                         let (authority_player, members) = match refreshed_room {

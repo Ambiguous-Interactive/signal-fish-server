@@ -796,10 +796,17 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 .coordinator
                 .routed_player_ids(room_id)
                 .await?
-                .map(|ids| ids.into_iter().collect::<HashSet<PlayerId>>());
+                .map(|mut ids| {
+                    ids.sort_unstable();
+                    ids
+                });
             let mut member_ids: Vec<_> = member_ids
                 .into_iter()
-                .filter(|id| routed.as_ref().is_none_or(|routed| routed.contains(id)))
+                .filter(|id| {
+                    routed
+                        .as_ref()
+                        .is_none_or(|routed| routed.binary_search(id).is_ok())
+                })
                 .collect();
 
             let ready_map = self.ready_players.read().await;

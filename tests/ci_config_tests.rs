@@ -34254,10 +34254,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // 478 (was 473): inline room events and the Direct endpoint fast path add five sites (#1432–#1434).
 // With 48 shards, ceil(478/48) * 29s remains 290s.
 /*
-    484 (was 478): shared session-plan projection adds six sites (#1438).
-    With 49 shards, ceil(484/49) * 29s remains 290s.
+    486 (was 484): routed roster normalization and shared mesh capacity add two sites (#1442, #1443).
+    With 49 shards, ceil(486/49) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 484;
+const MUTATION_TOTAL_MUTANTS: u32 = 486;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

@@ -498,6 +498,14 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    /// Measure the production readiness projection without socket tasks.
+    pub fn apply_snapshot_readiness(
+        players: &mut [crate::protocol::PlayerInfo],
+        ready_players: &[crate::protocol::PlayerId],
+    ) {
+        super::ready_state::apply_snapshot_readiness(players, ready_players);
+    }
+
     static SPECTATOR_ALLOCATION_OBSERVER: std::sync::OnceLock<fn(&'static str)> =
         std::sync::OnceLock::new();
 
@@ -666,7 +674,7 @@ pub mod allocation_benchmark {
                                     Transport::WebRtc,
                                     Transport::Direct,
                                 ],
-                                topologies: vec![Topology::Relay, Topology::Host],
+                                topologies: vec![Topology::Relay, Topology::Host, Topology::Mesh],
                             },
                         ),
                     })
@@ -711,17 +719,32 @@ pub mod allocation_benchmark {
 
         /// Build every host plan with the production peer projection.
         pub fn plans_for_members(&mut self) -> Vec<crate::protocol::SessionPlanPayload> {
+            self.plans_for_topology(crate::protocol::Topology::Host)
+        }
+
+        /// Build every mesh plan with the production peer projection.
+        pub fn mesh_plans_for_members(&mut self) -> Vec<crate::protocol::SessionPlanPayload> {
+            self.plans_for_topology(crate::protocol::Topology::Mesh)
+        }
+
+        /// Reuse inputs while projecting each member on the selected topology.
+        fn plans_for_topology(
+            &mut self,
+            topology: crate::protocol::Topology,
+        ) -> Vec<crate::protocol::SessionPlanPayload> {
             use super::session_policy::SessionPlanDecision;
-            use crate::protocol::{SessionGeneration, Topology, Transport};
+            use crate::protocol::{SessionGeneration, Transport};
             let decision = SessionPlanDecision {
                 generation: SessionGeneration::nil(),
-                topology: Topology::Host,
+                topology,
                 transport: if self.config.enable_webrtc {
                     Transport::WebRtc
                 } else {
                     Transport::Direct
                 },
-                host: self.members.last().map(|member| member.player_id),
+                host: (topology == crate::protocol::Topology::Host)
+                    .then(|| self.members.last().map(|member| member.player_id))
+                    .flatten(),
                 members: std::mem::take(&mut self.members),
             };
             let projection = decision.projection();
@@ -781,6 +804,13 @@ pub mod allocation_benchmark {
     /// Measure generic canonical JSON sizing without starting a server.
     pub fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
         super::signaling::canonical_json_len(value)
+    }
+
+    /// Measure routed membership normalization without starting a server.
+    pub fn sorted_routed_player_ids_for_measurement(
+        players: Vec<crate::protocol::PlayerId>,
+    ) -> Vec<crate::protocol::PlayerId> {
+        super::signaling::sorted_routed_player_ids(players)
     }
 }
 
