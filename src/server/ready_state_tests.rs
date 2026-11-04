@@ -2697,8 +2697,8 @@ async fn concurrent_direct_endpoint_and_start_publish_consistent_generations() {
 /// Keep readiness flags and snapshot records exact across lookup boundaries (#1444).
 #[test]
 fn snapshot_readiness_preserves_identity_metadata_and_ready_order() {
-    for count in [0, 2, 16, 31, 32, 33, 63, 64, 65, 255] {
-        for ready_count in [0, 1, 31, 32, 33, 63, 64, 65, 255] {
+    for count in [0, 2, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255] {
+        for ready_count in [0, 1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255] {
             let mut players: Vec<_> = (0..count)
                 .map(|index| {
                     let mut player = player_info(PlayerId::from_u128(index + 1), "雪");

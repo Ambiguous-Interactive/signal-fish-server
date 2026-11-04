@@ -25,7 +25,7 @@ pub(crate) async fn snapshot_ready_players(
 /// Set snapshot flags without changing player or ready-list order.
 /// Keep the allocation-free scan for smaller player or ready lists.
 pub(crate) fn apply_snapshot_readiness(players: &mut [PlayerInfo], ready_players: &[PlayerId]) {
-    if players.len() >= 64 && ready_players.len() >= 64 {
+    if players.len() >= 128 && ready_players.len() >= 128 {
         let mut ready = ready_players.to_vec();
         ready.sort_unstable();
         for player in players {
