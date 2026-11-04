@@ -35,6 +35,23 @@ async fn paused_departure() -> (
     (server, player, receiver, gate)
 }
 
+#[derive(Clone)]
+struct DepartureSpanEntries(Arc<AtomicBool>);
+
+impl<S> tracing_subscriber::Layer<S> for DepartureSpanEntries
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_enter(&self, id: &tracing::span::Id, context: tracing_subscriber::layer::Context<'_, S>) {
+        if context
+            .span(id)
+            .is_some_and(|span| span.name() == "room.leave")
+        {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 fn subscriber() -> tracing::Dispatch {
     tracing::Dispatch::new(
         tracing_subscriber::registry().with(
@@ -48,13 +65,26 @@ fn subscriber() -> tracing::Dispatch {
 #[tokio::test]
 async fn pending_room_leave_does_not_enter_unrelated_task_context() {
     let (server, player, _receiver, gate) = paused_departure().await;
-    let dispatch = subscriber();
+    let entries = Arc::new(AtomicBool::new(false));
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::registry()
+            .with(DepartureSpanEntries(entries.clone()))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(std::io::sink),
+            ),
+    );
     let mut leave = Box::pin(
         server
             .leave_room_locked(&player, false)
             .with_subscriber(dispatch.clone()),
     );
     assert!(futures_util::poll!(tokio::task::unconstrained(leave.as_mut())).is_pending());
+    assert!(
+        entries.load(Ordering::Relaxed),
+        "the pending departure must enter room.leave while being polled"
+    );
     let current = tracing::dispatcher::with_default(&dispatch, || {
         tracing::Span::current()
             .metadata()

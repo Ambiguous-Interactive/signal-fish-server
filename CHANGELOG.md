@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep room-leave trace context within its own task (#1425).
+- Stop unrelated connection logs from inheriting room-departure fields (#1425).
 - Count each reserved control frame once when room publication or P2P status delivery is canceled
   (#1421, #1422).
 - Count canceled P2P publication frames when cancellation interrupts queue reservations (#1419).
