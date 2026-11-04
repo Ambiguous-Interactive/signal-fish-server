@@ -4482,6 +4482,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .store(times, std::sync::atomic::Ordering::Release);
     }
 
+    /// Start a targeted reply from its borrowed route; retain state only for failed or pending sends.
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
@@ -4504,6 +4505,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(())
     }
 
+    /// Start a room-scoped send under routing reads, then release the guards before any capacity wait.
     async fn send_to_player_in_room(
         &self,
         player_id: &PlayerId,

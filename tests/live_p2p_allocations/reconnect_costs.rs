@@ -1,6 +1,7 @@
 //! Complete reconnect baselines retain their owned player roster (#1454).
 use super::*;
 
+/// Compare complete v2/v3 reconnects with exact rosters, readiness, and ordered watermarks.
 pub(crate) fn reconnect_baseline_reuses_player_roster() {
     allocation_harness::block_on(async {
         let mut profiles = Vec::new();

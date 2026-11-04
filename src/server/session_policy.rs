@@ -188,6 +188,7 @@ pub(crate) struct SessionMember {
 }
 
 impl SessionMember {
+    /// Copy selection fields and include validated endpoints only when the caller needs Direct.
     fn from_player(
         player: &PlayerInfo,
         capabilities: SessionCapabilities,
