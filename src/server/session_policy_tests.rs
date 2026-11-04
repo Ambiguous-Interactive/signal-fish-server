@@ -3404,6 +3404,48 @@ async fn running_direct_host_endpoint_refresh_is_atomic_serialized_and_cancellat
         host: "192.0.2.20".into(),
         port: 8888,
     };
+    // A failed narrow endpoint lookup must leave both storage and publication intact.
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let original_metadata = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .players[&host]
+        .connection_info
+        .clone();
+    let original_plan = server.active_session_plan(&room_id);
+    database.fail_get_room_by_id_for_test(true);
+    server
+        .handle_provide_connection_info(&host, replacement.clone())
+        .await;
+    database.fail_get_room_by_id_for_test(false);
+    assert!(matches!(
+        recv(&mut host_rx).await.as_ref(),
+        ServerMessage::Error {
+            error_code: Some(crate::protocol::ErrorCode::InternalError),
+            ..
+        }
+    ));
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .players[&host]
+            .connection_info,
+        original_metadata
+    );
+    assert_eq!(server.active_session_plan(&room_id), original_plan);
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut peer_rx).await;
     server
         .handle_provide_connection_info(&host, replacement.clone())
         .await;

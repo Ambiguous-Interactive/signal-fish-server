@@ -3,6 +3,8 @@
 #[path = "live_p2p_allocations/admission_costs.rs"]
 mod admission_costs;
 mod allocation_harness;
+#[path = "live_p2p_allocations/control_costs.rs"]
+mod control_costs;
 #[path = "live_p2p_allocations/departure_costs.rs"]
 mod departure_costs;
 mod live_p2p_allocations;
@@ -467,6 +469,14 @@ fn main() {
         allocation_harness::trial(
             "app_identity_lookup_does_not_copy_text",
             lobby_costs::app_identity_lookup_does_not_copy_text,
+        ),
+        allocation_harness::trial(
+            "room_event_admission_cost",
+            control_costs::room_event_admission_cost,
+        ),
+        allocation_harness::trial(
+            "direct_repeat_cost_does_not_copy_other_members",
+            control_costs::direct_repeat_cost_does_not_copy_other_members,
         ),
         allocation_harness::trial(
             "transport_report_delivery_cost",

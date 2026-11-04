@@ -14830,3 +14830,63 @@ tracked separately in Rust client
 and Godot client
 [#548](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/548).
 These issues remain open until client validation is complete.
+
+### F278–F280 — Live P2P event and unchanged endpoint costs
+
+Issues: #1432, #1433, #1434. Baseline: `6bc78093`.
+Campaigns #636 and #826 remain open.
+
+The room event sequencer added a second boxed closure and future around each
+caller-owned job. Its `VecDeque` also allocated storage for a single pending
+event. A retained-lane control measured 8 allocations for its first complete
+event and 7 for a warm event. Keeping the mutation guard in the queued record
+removes both wrappers. An inline slot for the first pending event removes the
+queue allocation. Overflow still uses the FIFO deque for cloned-lease bursts.
+The same control now measures 5 allocations for either complete event, including
+admission, worker start, child execution and completion. It excludes construction
+of the caller's job and the retained mutation lease. Complete targeted Signal
+controls fall from 19 allocations and 3,896 bytes to 16 allocations and 3,752
+bytes at 2, 16 and 64 members, with exact signal body and generation checks.
+
+The burst regression enqueues six jobs under one cloned lease before yielding.
+It includes a refused job, closure-construction panic, future panic, dropped
+completion, and a blocked final job. The tail runs in FIFO order after both
+panics. The next mutation remains blocked until the tail releases its guard.
+Panic results retain their typed child `JoinError`. Existing controls retain
+caller cancellation, independent rooms, idle-worker handoff and registry cleanup.
+This validates these histories, not universal scheduler or publication correctness.
+
+A complete unchanged Direct host endpoint report copied the full selection
+roster before comparing one endpoint. Finalized rooms with 2, 16 and 255 players
+measured 12, 26 and 265 allocations (2,512, 3,946 and 31,431 bytes). A narrow
+storage read now compares only the reporting member's validated endpoint before
+the existing metadata write. The same controls measure 9 allocations and 2,146
+bytes at all three sizes. Every initial plan retains the exact host, Direct
+endpoint and shared generation. The repeated report persists exact metadata and
+emits no new plan. Missing and invalid endpoints remain distinct from storage
+errors. Changed and lost endpoints retain the exact-membership publication path.
+The new database trait method has a default for existing storage implementers.
+
+Restoring the old sequencer and endpoint path fails the new allocation bounds.
+Restoring only the job wrappers also fails admission on the inline queue. The
+wrapper-only intermediate repair fails the cold singleton bound. No assertion
+is relaxed for these controls.
+
+These are measured allocation reductions. They do not establish a latency or
+remote-network capacity increase. Rust, .NET and Godot wire messages, generations,
+plan contents and endpoint update rules do not change. No client migration is
+required. Hosted platform qualification remains part of the session PR.
+
+The Direct refresh history also injects a failed narrow endpoint read before a
+usable replacement. It checks `InternalError`, exact unchanged metadata and
+active session plan, and no plan publication before a successful retry.
+
+Hosted macOS qualification exposed a first-use allocation difference in the
+existing transport-report control (#1436). Matched Ready/Yield setup records
+20/21 allocations for the first connected two-member report, then 20 for both
+subsequent states. The retained difference is 64 bytes; its source remains
+unattributed. The fixture keeps first-use diagnostics and compares steady reports
+after both states, with the original two-allocation saving checked separately
+for both setups. Restoring generic fan-out fails this bound locally (12 versus
+10 allocations for the two-member report). Every report still checks exact
+recipient frames, and all five room sizes remain. Issue #1436 stays open.
