@@ -255,6 +255,12 @@ fn conditional_publication_validation_bounds_room_lookup_work() {
         println!("CONDITIONAL_LOOKUP count={count} original={original_comparisons} comparisons={comparisons} sort_reads={sort_reads}");
         let bound =
             usize::try_from(count).unwrap() * (usize::try_from(count.max(1).ilog2()).unwrap() + 2);
+        if count >= 16 {
+            assert!(
+                original_comparisons > bound,
+                "count={count}: linear scan {original_comparisons} no longer exceeds {bound}"
+            );
+        }
         assert!(
             sort_reads <= 4 * bound,
             "sort_reads={sort_reads} bound={bound}"
