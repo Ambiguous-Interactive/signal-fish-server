@@ -14659,3 +14659,93 @@ cannot count the same permit twice. The later aggregate guard is removed.
 This also covers completed futures still held inside `join_all`. No wire or
 client change is required: Rust, .NET and Godot clients receive the same frames
 and use the same cancellation and reconnection contracts.
+
+### F271–F273 — Conditional room publications
+
+Issues: #1421, #1422 and #1423. Base: `be57808a`. These findings concern
+single-frame conditional publications. The batch repairs in F267–F270 do not
+cover these paths.
+
+**F271 / #1421.** A conditional room broadcast acquires a healthy peer's permit
+while another peer waits for capacity. The old code arms its aggregate guard
+only after all reservations finish. Dropping the future before that point
+releases the acquired permit without a terminal delivery count. The two-peer
+red control reports two attempts, zero cancellations and one parked-attempt
+drop. It requires one cancellation. The replay hook does not run.
+
+Each acquired reservation now owns its accounting guard as a field. This
+includes outputs retained by either `join_all` strategy and targeted sends
+waiting for route revalidation. Commit disarms the guard once. A batch
+transfer stores the permit under its existing guard before disarming the
+conditional guard. No await separates those operations.
+
+An earlier repair kept separate accounting outputs and an aggregate vector.
+Complete 255-player lobby entry then allocated 506,972 bytes in both hosted
+Linux lanes, exceeding the unchanged 467,000-byte all-feature ceiling. The
+owned-field repair removes that duplicate storage. The same all-feature
+control allocates 459,932 bytes. The allocation-tracking-only control falls
+from 498,772 to 451,748 bytes against its unchanged 458,000-byte ceiling.
+Both controls keep the complete operation and every exact lobby frame.
+The cancellation control covers 2, 32 and 64 peers. It checks all acquired
+permits, the separate parked-attempt drop, the exact retained queue prefix,
+no replay, no partial delivery and reuse of every queue slot.
+
+**F272 / #1422.** Targeted conditional room sends acquire a permit before
+awaiting the routing gate and shared maps. Their old code has no guard at
+those waits. The red P2P status delivery control reports one attempt and zero
+cancellations after the acquired permit is dropped. It requires one
+cancellation. Both targeted variants now keep a guard through all three
+revalidation waits. Explicit commit or refusal disarms it before terminal
+accounting. Controls cover predicate-scoped and exact-membership sends with
+legacy and classified queues. Classified setup commits and drains a real
+room-entry transition before filling the room-scoped queue. Acquired-permit
+terminal controls also check successful send, refusal and receiver closure
+without double counting.
+
+**F273 / #1423.** Conditional broadcast validation scans the full reservation
+vector for each routed recipient. Its original comparison count is
+`N * (N + 1) / 2`. The red control reaches 136 comparisons at 16 peers,
+exceeding its unchanged logarithmic bound. The repair sorts the owned
+reservations once before routing revalidation and uses binary search. It
+retains recipient cardinality, physical-channel identity and closed-channel
+matching. Controls compare the original and repaired results at 0, 1, 2, 16
+and 255 peers. They bound both sorting and lookup work. At 255 peers, the original scan uses
+32,640 comparisons. The repaired lookup uses 2,295 comparisons; the control
+reads 508 sort keys. These counts do not establish end-to-end latency.
+Complete publications
+check every exact frame, one replay hook and terminal counters at 2, 16 and
+255 peers. Existing stale-route, retry and hook-panic controls cover the
+unchanged commit boundary.
+
+These are delivery-accounting and lookup-work findings. They do not establish
+lost gameplay frames or a network throughput limit. Wire payloads, per-peer
+ordering, membership rules and replay boundaries remain the same.
+
+External-client assessment: Rust protocol-versioning docs at `da8f2d16`, .NET
+protocol-versioning docs at `e467c871`, and Godot event docs at `09a5b1a2`
+retain the same status, session and lifecycle surfaces. No client consumes the
+server's internal permit accounting or reservation lookup. All three clients
+need no change or migration.
+
+### F274 — Room departure spans leak across future suspension
+
+Issue: #1425. Source: `4a6a0b5a`. The room-leave operation holds a synchronous
+`Span::enter` guard across awaits. Holding its room-event gate and polling the
+actual departure to Pending leaves `room.leave` as the current span for
+unrelated work on that worker. The red production-path control observes
+`Some("room.leave")` where it requires `None`.
+
+The async operation now uses `tracing::instrument`. The span is entered only
+while that future is polled. Its current-span handle still records the same
+player, room, code and instance fields. The pending-context control passes.
+A separate control transfers the pending departure to another worker for
+cancellation and then emits an unrelated JSON log event on the origin worker.
+That control passes on both old and repaired sources; it is a preservation
+control, not proof of the historical panic cause. The production source sweep
+found no other raw entered-span guard across an await.
+
+Windows job 126327787655 in full CI 41754426614 reports missing current-span
+data in tracing-subscriber before a connection completes its handshake. Its
+full decoded log is retained with the source and runner identity. The trace
+leak is confirmed independently, but the Windows panic remains unattributed
+in #1426. A passing qualification must not close that investigation by itself.

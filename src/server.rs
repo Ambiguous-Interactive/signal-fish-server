@@ -2570,6 +2570,7 @@ enum ConditionalDeliveryReservation {
         permit: DeliveryPermit,
         stats: Option<Arc<ConnectionDeliveryStats>>,
         backpressured: bool,
+        accounting: ConditionalPermitAccounting,
     },
     ChannelClosed {
         player_id: PlayerId,
@@ -2580,6 +2581,17 @@ enum ConditionalDeliveryReservation {
         sender: DeliverySender,
     },
     Canceled,
+}
+
+impl ConditionalDeliveryReservation {
+    fn routed_player(&self) -> Option<PlayerId> {
+        match self {
+            Self::Reserved { player_id, .. } | Self::ChannelClosed { player_id, .. } => {
+                Some(*player_id)
+            }
+            Self::SlowConsumer { .. } | Self::Canceled => None,
+        }
+    }
 }
 
 enum RoomBatchReservation {
@@ -2627,79 +2639,51 @@ impl Drop for RoomBatchReservation {
     }
 }
 
-/// Drop accounting for a conditional broadcast's reserved-but-undelivered
-/// frames.
-///
-/// Armed while the broadcast owns its reservations and defused by
-/// [`Self::release`] when the commit loop takes ownership. Any other exit —
-/// drain flip, routing change, or an unwind inside the replay hook — releases
-/// the permits through this guard, so no reserved frame is released without
-/// its cancellation accounting.
-struct ConditionalReservationGuard {
-    metrics: Arc<ServerMetrics>,
-    reservations: Vec<ConditionalDeliveryReservation>,
-    armed: bool,
+/// Own a conditional permit's terminal accounting until transfer or commit.
+struct ConditionalPermitAccounting {
+    metrics: Option<Arc<ServerMetrics>>,
 }
 
-impl ConditionalReservationGuard {
-    fn arm(
-        metrics: &Arc<ServerMetrics>,
-        reservations: Vec<ConditionalDeliveryReservation>,
-    ) -> Self {
+impl ConditionalPermitAccounting {
+    fn new(metrics: &Arc<ServerMetrics>) -> Self {
         Self {
-            metrics: Arc::clone(metrics),
-            reservations,
-            armed: true,
+            metrics: Some(Arc::clone(metrics)),
         }
     }
 
-    fn get(&self) -> &[ConditionalDeliveryReservation] {
-        &self.reservations
-    }
-
-    fn release(mut self) -> Vec<ConditionalDeliveryReservation> {
-        self.armed = false;
-        std::mem::take(&mut self.reservations)
+    fn defuse(&mut self) {
+        self.metrics = None;
     }
 }
 
-impl Drop for ConditionalReservationGuard {
+impl Drop for ConditionalPermitAccounting {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        for reservation in &self.reservations {
-            if let ConditionalDeliveryReservation::Reserved { player_id, .. } = reservation {
-                self.metrics.increment_websocket_deliveries_canceled();
-                tracing::debug!(
-                    %player_id,
-                    "Conditional broadcast reservation released without delivery"
-                );
-            }
+        if let Some(metrics) = &self.metrics {
+            metrics.increment_websocket_deliveries_canceled();
         }
     }
 }
 
-/// Drop accounting for one reserved initial-transition frame.
+/// Drop accounting for one acquired control-frame permit.
 ///
 /// Armed the moment the reservation yields its permit and defused when the
 /// commit resolves the attempt. Every other exit — baseline build error,
 /// drain-gated commit refusal, or an unwind between the two — releases the
-/// permit through this guard, so no reserved initial frame is released
+/// permit through this guard, so no acquired frame is released
 /// without its cancellation accounting.
-struct InitialTransitionReservationGuard<'a> {
+struct ReservedDeliveryAccounting<'a> {
     metrics: &'a ServerMetrics,
     player_id: PlayerId,
     armed: bool,
 }
 
-impl InitialTransitionReservationGuard<'_> {
+impl ReservedDeliveryAccounting<'_> {
     fn defuse(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for InitialTransitionReservationGuard<'_> {
+impl Drop for ReservedDeliveryAccounting<'_> {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -2707,7 +2691,7 @@ impl Drop for InitialTransitionReservationGuard<'_> {
         self.metrics.increment_websocket_deliveries_canceled();
         tracing::debug!(
             %self.player_id,
-            "Initial transition reservation released without delivery"
+            "Control reservation released without delivery"
         );
     }
 }
@@ -3803,6 +3787,7 @@ impl InMemoryMessageCoordinator {
                 permit,
                 stats,
                 backpressured: false,
+                accounting: ConditionalPermitAccounting::new(&self.metrics),
             },
             Err(DeliveryReserveError::Closed) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
@@ -3878,6 +3863,7 @@ impl InMemoryMessageCoordinator {
                                     permit,
                                     stats,
                                     backpressured: true,
+                                    accounting: ConditionalPermitAccounting::new(&self.metrics),
                                 };
                             }
                             Err(DeliveryReserveError::Canceled) => {
@@ -3928,6 +3914,7 @@ impl InMemoryMessageCoordinator {
                                     permit,
                                     stats,
                                     backpressured: true,
+                                    accounting: ConditionalPermitAccounting::new(&self.metrics),
                                 }
                             }
                         }
@@ -3984,10 +3971,12 @@ impl InMemoryMessageCoordinator {
                     ConditionalDeliveryReservation::Reserved {
                         permit,
                         stats: reservation_stats,
+                        mut accounting,
                         ..
                     } => {
                         *stats = reservation_stats;
                         *slot = Some(permit);
+                        accounting.defuse();
                     }
                     ConditionalDeliveryReservation::ChannelClosed { player_id, sender } => {
                         return RoomBatchReservation::ChannelClosed { player_id, sender };
@@ -4060,8 +4049,7 @@ impl InMemoryMessageCoordinator {
 
             let recipients = self.collect_room_recipients(room_id, except_player).await;
 
-            let guard = ConditionalReservationGuard::arm(
-                &self.metrics,
+            let mut reservations =
                 futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
                     self.reserve_one_if(
                         *player_id,
@@ -4072,8 +4060,8 @@ impl InMemoryMessageCoordinator {
                         None,
                     )
                 }))
-                .await,
-            );
+                .await;
+            reservations.sort_unstable_by_key(ConditionalDeliveryReservation::routed_player);
 
             if *drain.borrow() || !should_send() {
                 tracing::debug!(%room_id, ?except_player, "Conditional room broadcast canceled before replay record");
@@ -4085,8 +4073,7 @@ impl InMemoryMessageCoordinator {
             // snapshot, not the room event itself. Cancel permits already held
             // for stable peers and retry resolution; aborting here would drop a
             // valid event for every stable recipient.
-            if guard
-                .get()
+            if reservations
                 .iter()
                 .any(|reservation| matches!(reservation, ConditionalDeliveryReservation::Canceled))
             {
@@ -4094,8 +4081,7 @@ impl InMemoryMessageCoordinator {
                 continue;
             }
 
-            let slow_consumers: Vec<(PlayerId, DeliverySender)> = guard
-                .get()
+            let slow_consumers: Vec<(PlayerId, DeliverySender)> = reservations
                 .iter()
                 .filter_map(|reservation| match reservation {
                     ConditionalDeliveryReservation::SlowConsumer { player_id, sender } => {
@@ -4147,7 +4133,11 @@ impl InMemoryMessageCoordinator {
                 }
             }
 
-            if !Self::reservations_cover_recipients(guard.get(), &current_recipients) {
+            if !Self::reservations_cover_recipients(
+                &reservations,
+                &current_recipients,
+                ConditionalDeliveryReservation::routed_player,
+            ) {
                 drop(clients);
                 drop(room_players);
                 continue;
@@ -4170,7 +4160,6 @@ impl InMemoryMessageCoordinator {
                 return Ok(false);
             };
             before_send().await;
-            let reservations = guard.release();
 
             let mut delivered = false;
             for reservation in reservations {
@@ -4179,10 +4168,13 @@ impl InMemoryMessageCoordinator {
                         player_id,
                         permit,
                         stats,
+                        mut accounting,
                         ..
                     } => {
                         let recipient_message = room_message_for_recipient(&message, &player_id);
-                        match permit.send(recipient_message) {
+                        let result = permit.send(recipient_message);
+                        accounting.defuse();
+                        match result {
                             Ok(outcome) if outcome.enqueued => {
                                 delivered = true;
                                 self.metrics.increment_websocket_deliveries_enqueued();
@@ -4229,22 +4221,36 @@ impl InMemoryMessageCoordinator {
     fn reservations_cover_recipients(
         reservations: &[ConditionalDeliveryReservation],
         recipients: &[(PlayerId, ClientDeliveryHandle)],
+        mut reserved_player: impl FnMut(&ConditionalDeliveryReservation) -> Option<PlayerId>,
     ) -> bool {
         reservations.len() == recipients.len()
             && recipients.iter().all(|(player_id, handle)| {
-                reservations.iter().any(|reservation| match reservation {
-                    ConditionalDeliveryReservation::Reserved {
-                        player_id: reserved_player,
-                        sender,
-                        ..
-                    }
-                    | ConditionalDeliveryReservation::ChannelClosed {
-                        player_id: reserved_player,
-                        sender,
-                    } => *reserved_player == *player_id && sender.same_channel(&handle.sender),
-                    ConditionalDeliveryReservation::SlowConsumer { .. }
-                    | ConditionalDeliveryReservation::Canceled => false,
-                })
+                Self::conditional_reservation_covers_recipient(
+                    reservations,
+                    *player_id,
+                    handle,
+                    &mut reserved_player,
+                )
+            })
+    }
+
+    fn conditional_reservation_covers_recipient(
+        reservations: &[ConditionalDeliveryReservation],
+        player_id: PlayerId,
+        handle: &ClientDeliveryHandle,
+        mut reserved_player: impl FnMut(&ConditionalDeliveryReservation) -> Option<PlayerId>,
+    ) -> bool {
+        reservations
+            .binary_search_by_key(&Some(player_id), &mut reserved_player)
+            .ok()
+            .and_then(|index| reservations.get(index))
+            .is_some_and(|reservation| match reservation {
+                ConditionalDeliveryReservation::Reserved { sender, .. }
+                | ConditionalDeliveryReservation::ChannelClosed { sender, .. } => {
+                    sender.same_channel(&handle.sender)
+                }
+                ConditionalDeliveryReservation::SlowConsumer { .. }
+                | ConditionalDeliveryReservation::Canceled => false,
             })
     }
 }
@@ -4280,7 +4286,7 @@ impl InMemoryMessageCoordinator {
         drain: Option<tokio::sync::watch::Receiver<bool>>,
         build_message: crate::coordination::RoomSnapshotBuilder<'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let mut reservation_guard = InitialTransitionReservationGuard {
+        let mut reservation_guard = ReservedDeliveryAccounting {
             metrics: &self.metrics,
             player_id,
             armed: false,
@@ -4483,14 +4489,15 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 on_full,
             )
             .await;
-        let (sender, permit, stats, backpressured) = match reservation {
+        let (sender, permit, stats, backpressured, mut accounting) = match reservation {
             ConditionalDeliveryReservation::Reserved {
                 sender,
                 permit,
                 stats,
                 backpressured,
+                accounting,
                 ..
-            } => (sender, permit, stats, backpressured),
+            } => (sender, permit, stats, backpressured, accounting),
             ConditionalDeliveryReservation::SlowConsumer { sender, .. } => {
                 #[cfg(feature = "trace-validation")]
                 trace_close.record_trace(
@@ -4523,6 +4530,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .get(player_id)
                 .is_some_and(|current| current.sender.same_channel(&sender));
         if !recipient_matches || !should_send() {
+            accounting.defuse();
             self.record_canceled_delivery(*player_id);
             #[cfg(feature = "trace-validation")]
             trace_close.record_trace(
@@ -4533,6 +4541,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             return Ok(false);
         }
 
+        accounting.defuse();
         let delivered = match permit.send(message) {
             Ok(outcome) if outcome.enqueued => {
                 self.metrics.increment_websocket_deliveries_enqueued();
@@ -4645,6 +4654,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             sender,
             permit,
             stats,
+            mut accounting,
             ..
         } = reservation
         else {
@@ -4669,10 +4679,12 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .get(player_id)
             .is_some_and(|current| current.sender.same_channel(&sender));
         if current_members != expected_members || !recipient_matches {
+            accounting.defuse();
             self.record_canceled_delivery(*player_id);
             return Ok(false);
         }
 
+        accounting.defuse();
         let delivered = match permit.send(message) {
             Ok(outcome) if outcome.enqueued => {
                 self.metrics.increment_websocket_deliveries_enqueued();
