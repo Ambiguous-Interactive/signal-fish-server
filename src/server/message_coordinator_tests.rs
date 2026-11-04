@@ -5694,7 +5694,11 @@ async fn uniform_publication_clones_only_its_initial_routes() {
                     1,
                 )
                 .unwrap();
-            receiver.try_recv().unwrap();
+            let transition = receiver.try_recv().unwrap();
+            assert!(matches!(transition.payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(received)
+                if matches!(received.as_ref(), ServerMessage::SpectatorJoined(payload)
+                    if payload.room_id == room && payload.spectator_id == player)));
             coordinator
                 .register_local_client(
                     player,
@@ -5740,8 +5744,9 @@ async fn uniform_publication_clones_only_its_initial_routes() {
             assert!(matches!(queued.payload,
                 crate::coordination::outbound_queue::OutboundPayload::Message(received)
                 if Arc::ptr_eq(&received, &message)));
+            let trailing = receiver.try_recv();
             assert!(matches!(
-                receiver.try_recv(),
+                trailing,
                 Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
             ));
         }
