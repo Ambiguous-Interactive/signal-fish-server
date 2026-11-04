@@ -284,7 +284,7 @@ pub(crate) fn transport_report_delivery_cost() {
                 drain_membership_setup(receiver, false);
             }
             let reporter = Uuid::from_u128(1);
-            for connected in [false, true] {
+            for (phase, connected) in [false, true, false, true].into_iter().enumerate() {
                 let region = stats_alloc::Region::new(ALLOCATOR);
                 server
                     .handle_client_message(
@@ -296,11 +296,12 @@ pub(crate) fn transport_report_delivery_cost() {
                     )
                     .await;
                 let stats = region.change();
-                if connected {
+                println!("TRANSPORT_REPORT_PHASE count={count} phase={phase} connected={connected} stats={stats:?}");
+                if phase == 1 {
                     println!("TRANSPORT_REPORT_PROFILE count={count} stats={stats:?}");
                     profiles.push(stats);
                 }
-                if connected && count == 2 {
+                if phase == 1 && count == 2 {
                     let duplicate_region = stats_alloc::Region::new(ALLOCATOR);
                     server
                         .handle_client_message(

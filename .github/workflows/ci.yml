@@ -389,6 +389,12 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Profile transport-report allocation cohorts
+        if: matrix.os == 'macos-latest'
+        continue-on-error: true
+        run: >-
+          cargo nextest run --locked --test session_plan_allocations --all-features
+          -E 'test(transport_report_delivery_cost)' --no-capture
       - name: Record root CPU budget before tests
         if: runner.os == 'Linux'
         shell: bash
