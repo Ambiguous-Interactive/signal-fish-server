@@ -14876,3 +14876,17 @@ These are measured allocation reductions. They do not establish a latency or
 remote-network capacity increase. Rust, .NET and Godot wire messages, generations,
 plan contents and endpoint update rules do not change. No client migration is
 required. Hosted platform qualification remains part of the session PR.
+
+The Direct refresh history also injects a failed narrow endpoint read before a
+usable replacement. It checks `InternalError`, exact unchanged metadata and
+active generation, and no plan publication before a successful retry.
+
+Hosted macOS qualification exposed a first-use allocation difference in the
+existing transport-report control (#1436). Matched Ready/Yield setup records
+20/21 allocations for the first connected two-member report, then 20 for both
+subsequent states. The retained difference is 64 bytes; its source remains
+unattributed. The fixture keeps first-use diagnostics and compares steady reports
+after both states, with the original two-allocation saving checked separately
+for both setups. Restoring generic fan-out fails this bound locally (12 versus
+10 allocations for the two-member report). Every report still checks exact
+recipient frames, and all five room sizes remain. Issue #1436 stays open.

@@ -239,7 +239,8 @@ pub(crate) fn game_start_shares_configuration() {
     }
 }
 
-/// Compare full delivery against fixed plus per-peer costs after warm-up.
+/// Compare complete steady-state delivery after exercising both report states.
+/// Retain first-use profiles: macOS can add one retained allocation on first use.
 pub(crate) fn transport_report_delivery_cost() {
     let mut profiles = Vec::new();
     for warm_owned_scheduler in [false, true] {
@@ -310,11 +311,9 @@ pub(crate) fn transport_report_delivery_cost() {
                         .await;
                     let stats = region.change();
                     println!("TRANSPORT_REPORT_PHASE owned_yield={warm_owned_scheduler} count={count} phase={phase} connected={connected} stats={stats:?}");
-                    if phase == 1 {
+                    if phase == 3 {
                         println!("TRANSPORT_REPORT_PROFILE count={count} stats={stats:?}");
-                        if !warm_owned_scheduler {
-                            profiles.push(stats);
-                        }
+                        profiles.push(stats);
                     }
                     if phase == 1 && count == 2 {
                         let duplicate_region = stats_alloc::Region::new(ALLOCATOR);
@@ -345,13 +344,15 @@ pub(crate) fn transport_report_delivery_cost() {
             });
         }
     }
-    let generic_single_recipient = profiles[1]
-        .allocations
-        .checked_mul(2)
-        .and_then(|twice| twice.checked_sub(profiles[2].allocations))
-        .expect("full-delivery cohorts have a common fixed cost");
-    assert!(
-        profiles[0].allocations + 2 <= generic_single_recipient,
-        "single-recipient delivery builds fan-out collections: {profiles:?}"
-    );
+    for profiles in profiles.chunks_exact(5) {
+        let generic_single_recipient = profiles[1]
+            .allocations
+            .checked_mul(2)
+            .and_then(|twice| twice.checked_sub(profiles[2].allocations))
+            .expect("full-delivery cohorts have a common fixed cost");
+        assert!(
+            profiles[0].allocations + 2 <= generic_single_recipient,
+            "single-recipient delivery builds fan-out collections: {profiles:?}"
+        );
+    }
 }
