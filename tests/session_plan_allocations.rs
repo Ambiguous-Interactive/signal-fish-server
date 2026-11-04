@@ -469,6 +469,10 @@ fn main() {
             lobby_costs::app_identity_lookup_does_not_copy_text,
         ),
         allocation_harness::trial(
+            "transport_report_delivery_cost",
+            live_p2p_allocations::transport_report_delivery_cost,
+        ),
+        allocation_harness::trial(
             "signaling_cost_is_independent_of_room_size",
             live_p2p_allocations::signaling_cost_is_independent_of_room_size,
         ),

@@ -86,44 +86,55 @@ impl TransportStatusFanOut {
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
         // filtering is v3-only but deliberately transport-agnostic: a
         // relay-only client still needs to know that a peer fell back.
-        let outcomes =
-            futures_util::future::join_all(self.recipients.iter().map(|recipient| async move {
-                if !server.client_supports_v3(recipient) {
-                    return false;
-                }
-                #[cfg(test)]
-                #[cfg(signal_fish_repository_tests)]
-                if let Some(pause) = TRANSPORT_STATUS_DELIVERY_PAUSES
-                    .get(&self.sender)
-                    .map(|entry| Arc::clone(entry.value()))
-                {
-                    pause.reached.notify_one();
-                    pause.release.notified().await;
-                }
-                let delivery_is_current = || {
-                    server.client_supports_v3(recipient)
-                        && server
-                            .connection_manager
-                            .membership_generation_in_room(&self.sender, &self.room_id)
-                            == Some(self.membership_generation)
-                };
-                server
-                    .message_coordinator
-                    .send_to_player_in_room_if(
-                        recipient,
-                        &self.room_id,
-                        Arc::clone(&self.message),
-                        &delivery_is_current,
-                    )
-                    .await
-                    .unwrap_or(false)
-            }))
-            .await;
+        let delivered = if let [recipient] = self.recipients.as_slice() {
+            self.deliver_to(server, recipient).await
+        } else {
+            futures_util::future::join_all(
+                self.recipients
+                    .iter()
+                    .map(|recipient| self.deliver_to(server, recipient)),
+            )
+            .await
+            .into_iter()
+            .any(std::convert::identity)
+        };
 
         // Count one event only when at least one peer received the status.
-        if outcomes.into_iter().any(std::convert::identity) {
+        if delivered {
             server.metrics.record_transport_status_fanout();
         }
+    }
+
+    async fn deliver_to(&self, server: &EnhancedGameServer, recipient: &PlayerId) -> bool {
+        if !server.client_supports_v3(recipient) {
+            return false;
+        }
+        #[cfg(test)]
+        #[cfg(signal_fish_repository_tests)]
+        if let Some(pause) = TRANSPORT_STATUS_DELIVERY_PAUSES
+            .get(&self.sender)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+        let delivery_is_current = || {
+            server.client_supports_v3(recipient)
+                && server
+                    .connection_manager
+                    .membership_generation_in_room(&self.sender, &self.room_id)
+                    == Some(self.membership_generation)
+        };
+        server
+            .message_coordinator
+            .send_to_player_in_room_if(
+                recipient,
+                &self.room_id,
+                Arc::clone(&self.message),
+                &delivery_is_current,
+            )
+            .await
+            .unwrap_or(false)
     }
 }
 
@@ -531,7 +542,7 @@ impl EnhancedGameServer {
     ///   counter — only the current generation's stored state is updated.
     ///   (Documented here and in `docs/architecture/transport-fallback.md`.)
     async fn handle_transport_status(
-        &self,
+        self: &Arc<Self>,
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
@@ -542,6 +553,25 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let server = Arc::clone(self);
+        let player_id = *player_id;
+        let transaction = tokio::spawn(async move {
+            server
+                .transport_status_owned(&player_id, transport, connected, lifecycle)
+                .await;
+        });
+        if let Err(error) = transaction.await {
+            tracing::error!(%player_id, %error, "Transport report transaction failed");
+        }
+    }
+
+    async fn transport_status_owned(
+        &self,
+        player_id: &PlayerId,
+        transport: crate::protocol::Transport,
+        connected: bool,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
         let _report_guard = lifecycle.lock_transport_reports().await;
         let lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *player_id

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce allocations for P2P transport reports in two-player rooms (#1430).
 - Reduce peer lookup work during conditional room publications (#1423).
 - Reduce temporary memory use and peer lookup work for live P2P starts, joins, and session-plan updates
   and mesh departures (#1412, #1413, #1414, #1416, #1417, #1418).
@@ -41,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve accepted P2P transport reports and WebRTC signals after caller cancellation (#1428, #1429).
 - Stop unrelated connection logs from inheriting room-departure fields (#1425).
 - Count each reserved control frame once when room publication or P2P status delivery is canceled
   (#1421, #1422).

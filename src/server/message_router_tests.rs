@@ -861,13 +861,134 @@ async fn transport_status_rechecks_recipient_protocol_after_reconnect() {
     }
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_transport_report_finishes_partial_fanout() {
+    let server = create_test_server().await;
+    let mut peers = Vec::new();
+    let mut room_code = None;
+    for name in ["healthy", "slow", "reporter"] {
+        let (player, mut receiver) = register_router_test_client(&server).await;
+        server.set_client_protocol(
+            &player,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+        server
+            .handle_client_message(
+                &player,
+                ClientMessage::JoinRoom {
+                    game_name: "partial-status".into(),
+                    room_code: room_code.clone(),
+                    player_name: name.into(),
+                    max_players: Some(3),
+                    supports_authority: Some(false),
+                    relay_transport: None,
+                    password: None,
+                    join_only: None,
+                },
+            )
+            .await;
+        let joined = next_routed_test_message(&mut receiver, "RoomJoined").await;
+        let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+            panic!("expected RoomJoined: {joined:?}");
+        };
+        room_code = Some(payload.room_code.clone());
+        peers.push((player, receiver));
+    }
+    let (reporter, _reporter_rx) = peers.pop().unwrap();
+    let (slow, mut slow_rx) = peers.pop().unwrap();
+    let (_, mut healthy_rx) = peers.pop().unwrap();
+    for receiver in [&mut healthy_rx, &mut slow_rx] {
+        drain_until_routed_player_joined(receiver, reporter, "reporter join").await;
+    }
+    for _ in 0..slow_rx.max_capacity() {
+        server
+            .message_coordinator
+            .send_to_player(&slow, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let report_server = Arc::clone(&server);
+    let caller = tokio::spawn(async move {
+        report_server
+            .handle_client_message(
+                &reporter,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected: false,
+                },
+            )
+            .await;
+    });
+    assert!(
+        matches!(next_routed_test_message(&mut healthy_rx, "healthy status").await.as_ref(),
+        ServerMessage::PeerTransportStatus { peer_id, connected: false, .. } if *peer_id == reporter)
+    );
+    assert_eq!(
+        server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed),
+        1
+    );
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    for _ in 0..slow_rx.max_capacity() {
+        assert!(matches!(
+            next_routed_test_message(&mut slow_rx, "queue filler")
+                .await
+                .as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    assert!(
+        matches!(next_routed_test_message(&mut slow_rx, "retained slow status").await.as_ref(),
+        ServerMessage::PeerTransportStatus { peer_id, connected: false, .. } if *peer_id == reporter)
+    );
+    server
+        .handle_client_message(
+            &reporter,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: false,
+            },
+        )
+        .await;
+    let healthy_rx_tail = healthy_rx.try_recv();
+    assert!(matches!(
+        healthy_rx_tail,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let slow_rx_tail = slow_rx.try_recv();
+    assert!(matches!(
+        slow_rx_tail,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
 // Issue #826: concurrent public-library calls must preserve transport transitions.
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn concurrent_transport_reports_publish_in_acceptance_order() {
-    for (first_connected, cancel_first) in
-        [(true, false), (false, false), (true, true), (false, true)]
-    {
+    for (first_connected, cancel_first, duplicate) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+        (false, true, false),
+        (true, true, true),
+        (false, true, true),
+    ] {
         let server = create_test_server().await;
         let mut peers = Vec::new();
         let mut room_code = None;
@@ -935,11 +1056,16 @@ async fn concurrent_transport_reports_publish_in_acceptance_order() {
             .unwrap();
         /* The serial socket reader cannot exercise concurrent library dispatch. */
         super::message_router::disarm_transport_status_delivery_pause(&reporter);
+        let second_connected = if duplicate {
+            first_connected
+        } else {
+            !first_connected
+        };
         let second = server.handle_client_message(
             &reporter,
             ClientMessage::TransportStatus {
                 transport: Transport::WebRtc,
-                connected: !first_connected,
+                connected: second_connected,
             },
         );
         tokio::pin!(second);
@@ -947,6 +1073,7 @@ async fn concurrent_transport_reports_publish_in_acceptance_order() {
         if cancel_first {
             first.abort();
             assert!(first.await.unwrap_err().is_cancelled());
+            pause.release.notify_one();
         } else {
             pause.release.notify_one();
             first.await.unwrap();
@@ -954,10 +1081,10 @@ async fn concurrent_transport_reports_publish_in_acceptance_order() {
         if !second_finished {
             second.await;
         }
-        let expected_reports = if cancel_first {
-            vec![!first_connected]
+        let expected_reports = if duplicate {
+            vec![first_connected]
         } else {
-            vec![first_connected, !first_connected]
+            vec![first_connected, second_connected]
         };
         for expected in expected_reports {
             let message =
@@ -971,14 +1098,14 @@ async fn concurrent_transport_reports_publish_in_acceptance_order() {
         }
         assert_eq!(
             server.client_transport_status(&reporter),
-            Some((Transport::WebRtc, !first_connected))
+            Some((Transport::WebRtc, second_connected))
         );
         server
             .handle_client_message(
                 &reporter,
                 ClientMessage::TransportStatus {
                     transport: Transport::WebRtc,
-                    connected: !first_connected,
+                    connected: second_connected,
                 },
             )
             .await;
@@ -992,7 +1119,7 @@ async fn concurrent_transport_reports_publish_in_acceptance_order() {
                 .metrics
                 .transport_status_fanout
                 .load(Ordering::Relaxed),
-            if cancel_first { 1 } else { 2 }
+            if duplicate { 1 } else { 2 }
         );
     }
 }

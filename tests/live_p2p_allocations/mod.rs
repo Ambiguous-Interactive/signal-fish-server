@@ -3,7 +3,7 @@
 mod routing;
 pub(super) use routing::{
     game_start_shares_configuration, roster_snapshot_reserves_once,
-    signaling_cost_is_independent_of_room_size,
+    signaling_cost_is_independent_of_room_size, transport_report_delivery_cost,
 };
 
 use super::*;

@@ -14749,3 +14749,71 @@ data in tracing-subscriber before a connection completes its handshake. Its
 full decoded log is retained with the source and runner identity. The trace
 leak is confirmed independently, but the Windows panic remains unattributed
 in #1426. A passing qualification must not close that investigation by itself.
+
+### F275–F277 — Accepted P2P control delivery after cancellation
+
+Session 621 starts at `b933597d`. New issues
+[#1428](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1428),
+[#1429](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1429), and
+[#1430](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1430)
+cover live player traffic under A11/A12 and campaigns #826/#636.
+
+F275: the transport handler stored status before asynchronous room resolution
+and delivery. Canceling the caller lost the event; an identical retry was
+suppressed. Nextest `39f11ad4` fails the strengthened acceptance-order history:
+an observer receives the second `false` report where the accepted first `true`
+report was required. An owned task now retains report serialization through
+resolution and delivery. It releases the lifecycle guard before delivery so
+leave and reconnect can invalidate a delayed report without waiting for it.
+The regression covers both boolean values, opposite transitions, identical
+retries, cancellation, and duplicate silence.
+
+F276: a valid Signal consumed its budget and dispatch count before awaiting a
+full target queue. Canceling the caller lost an admitted offer while both
+connections remained live. Nextest `ffa5029b` fails the new one-slot-queue
+history at the exact-offer receive. The repair transfers the source lifecycle
+and room guards into the existing owned room job before awaiting completion.
+The history requires the exact source, session generation, and opaque payload,
+no duplicate, and a later candidate. The existing departure/rejoin history
+still requires Signal before RoomLeft and PlayerLeft; it now waits for the
+owned job to reach the same measured backpressure boundary.
+
+F277: one eligible recipient used both a join-all future collection and an
+outcome vector. Direct delivery now shares the same capability and generation
+checks without either collection. Full-handler warmed profiles after F275:
+two players fall from 12 allocations / 3,657 bytes to 10 / 3,576; 16 players
+remain 40 / 34,807; 64 remain 202 / 147,160. These are temporary allocation
+measurements, not throughput or latency claims. The regression compares the
+changed report with a same-runtime duplicate and retains exact delivery to
+every eligible peer. Disabling only the one-recipient branch fails the nine
+additional-allocation bound in `status-allocation-negative.log` under the local
+ignored progress directory. Multi-peer delivery remains concurrent. The first duplicate-relative probe
+used an eight-allocation bound and failed at the observed nine-allocation
+difference (`a247e2ab`); the final bound records the measured envelope.
+The final baseline-feature allocation run `43d2199d` passes both status and
+room-size-independent targeted signaling profiles. Owned Signal delivery costs
+19 allocations / 3,896 bytes in each 2-, 16-, and 64-player cohort; this repair
+adds ownership overhead and makes no net signaling-memory reduction claim.
+All-feature run `d352c839` also passes both profiles; its additional trace fields
+raise byte totals without changing these allocation counts.
+
+Nextest `10fc9833` first passes the new Signal cancellation and expanded status
+histories but exposes the old departure fixture's immediate-poll assumption.
+The fixture now observes actual worker backpressure with its existing bounded
+wait. The subsequent scoped run passes all 111 signaling/status histories.
+The final all-feature run `c74a9bb8` passes 112 histories, including cancellation
+after one healthy recipient receives its report while another queue is full.
+The slow peer receives the original report after capacity returns; an identical
+retry remains silent and the event counter increments once.
+These controls prove in-process queue admission, not receipt after socket loss
+or all task-panic schedules. Existing slow-consumer closure remains the terminal
+outcome when capacity never returns. The broader campaigns remain open.
+
+The wire messages and client APIs do not change. External qualification is
+tracked separately in Rust client
+[#299](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/299),
+.NET client
+[#152](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/152),
+and Godot client
+[#548](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/548).
+These issues remain open until client validation is complete.
