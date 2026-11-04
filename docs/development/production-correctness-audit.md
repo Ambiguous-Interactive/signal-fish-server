@@ -14879,7 +14879,7 @@ required. Hosted platform qualification remains part of the session PR.
 
 The Direct refresh history also injects a failed narrow endpoint read before a
 usable replacement. It checks `InternalError`, exact unchanged metadata and
-active generation, and no plan publication before a successful retry.
+active session plan, and no plan publication before a successful retry.
 
 Hosted macOS qualification exposed a first-use allocation difference in the
 existing transport-report control (#1436). Matched Ready/Yield setup records
