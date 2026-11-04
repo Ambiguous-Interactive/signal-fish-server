@@ -41,7 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Count acquired control frames canceled during room publication and P2P status delivery (#1421, #1422).
+- Count each reserved control frame once when room publication or P2P status delivery is canceled
+  (#1421, #1422).
 - Count canceled P2P publication frames when cancellation interrupts queue reservations (#1419).
 - Keep active and completed session lists consistent when rooms close during a metrics request (#1353).
 - Keep room counts and occupancy percentiles consistent in each in-memory dashboard sample (#1349).

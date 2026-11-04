@@ -14673,10 +14673,19 @@ releases the acquired permit without a terminal delivery count. The two-peer
 red control reports two attempts, zero cancellations and one parked-attempt
 drop. It requires one cancellation. The replay hook does not run.
 
-Each completed reservation now owns an accounting guard inside its future's
-output. This includes outputs retained by either `join_all` strategy. A
-synchronous transfer puts the reservation under the aggregate guard before
-it disarms the individual guard. No await separates those operations.
+Each acquired reservation now owns its accounting guard as a field. This
+includes outputs retained by either `join_all` strategy and targeted sends
+waiting for route revalidation. Commit disarms the guard once. A batch
+transfer stores the permit under its existing guard before disarming the
+conditional guard. No await separates those operations.
+
+An earlier repair kept separate accounting outputs and an aggregate vector.
+Complete 255-player lobby entry then allocated 506,972 bytes in both hosted
+Linux lanes, exceeding the unchanged 467,000-byte all-feature ceiling. The
+owned-field repair removes that duplicate storage. The same all-feature
+control allocates 459,932 bytes. The allocation-tracking-only control falls
+from 498,772 to 451,748 bytes against its unchanged 458,000-byte ceiling.
+Both controls keep the complete operation and every exact lobby frame.
 The cancellation control covers 2, 32 and 64 peers. It checks all acquired
 permits, the separate parked-attempt drop, the exact retained queue prefix,
 no replay, no partial delivery and reuse of every queue slot.
