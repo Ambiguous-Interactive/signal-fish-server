@@ -2506,6 +2506,7 @@ impl GameDatabase for InMemoryDatabase {
             }))
     }
 
+    /// Copy one host and lifecycle under the same room read lock.
     async fn get_room_session_host_snapshot(
         &self,
         room_id: &RoomId,

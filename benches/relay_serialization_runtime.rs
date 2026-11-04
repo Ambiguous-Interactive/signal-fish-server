@@ -91,6 +91,7 @@ fn payload_sizing_runtime(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Compare exact offer, ICE and opaque payload sizing against serialization.
 fn signal_payload_sizing(criterion: &mut Criterion) {
     use signal_fish_server::server::allocation_benchmark::{
         canonical_json_len, game_data_json_len,
@@ -133,6 +134,7 @@ fn signal_payload_sizing(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Measure complete star publications with the host last in the roster.
 fn host_plan_projection(criterion: &mut Criterion) {
     use signal_fish_server::server::allocation_benchmark::HostElectionFixture;
     let mut group = criterion.benchmark_group("host_plan_projection");

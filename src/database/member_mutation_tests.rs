@@ -925,6 +925,7 @@ async fn direct_endpoint_read_matches_validated_member_without_roster_projection
     );
 }
 
+/// Pin host-snapshot visibility, missing members, lock waits and read failures.
 #[tokio::test]
 async fn session_host_snapshot_preserves_pending_membership_and_read_failures() {
     let database = InMemoryDatabase::new();

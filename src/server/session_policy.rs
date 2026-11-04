@@ -696,6 +696,7 @@ impl SessionPlanDecision {
         )
     }
 
+    /// Resolve the shared host once for a complete recipient publication.
     pub(super) fn projection(&self) -> SessionPlanProjection<'_> {
         SessionPlanProjection {
             decision: self,
@@ -713,6 +714,7 @@ pub(super) struct SessionPlanProjection<'a> {
 }
 
 impl SessionPlanProjection<'_> {
+    /// Build a plan for a member borrowed from this decision's roster.
     pub(super) fn plan_for_member(
         &self,
         recipient: &SessionMember,
@@ -721,6 +723,7 @@ impl SessionPlanProjection<'_> {
         self.plan_for_recipient(recipient.player_id, Some(recipient), ice_servers)
     }
 
+    /// Shape peer edges and preserve endpoint and ICE fields for one recipient.
     fn plan_for_recipient(
         &self,
         recipient: PlayerId,
@@ -763,6 +766,7 @@ impl SessionPlanProjection<'_> {
         }
     }
 
+    /// Build star edges with the already-resolved host.
     fn host_peers_for(&self, recipient: PlayerId) -> Vec<SessionPeer> {
         let decision = self.decision;
         let Some(host) = decision.host else {
@@ -1626,6 +1630,7 @@ impl EnhancedGameServer {
         self.build_session_plan_message_for_member(&decision.projection(), member, now_unix)
     }
 
+    /// Build a v3 plan for a resolved member and count its minted TURN entries.
     pub(super) fn build_session_plan_message_for_member(
         &self,
         projection: &SessionPlanProjection<'_>,

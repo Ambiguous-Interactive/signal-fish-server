@@ -9,11 +9,13 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
     departure_skips_survivor_selection(Topology::Mesh, false);
 }
 
+/// #1437: both host transports avoid copying unaffected survivors.
 pub(crate) fn host_guest_departure_skips_survivor_selection() {
     departure_skips_survivor_selection(Topology::Host, false);
     departure_skips_survivor_selection(Topology::Host, true);
 }
 
+/// Compare the same no-publication departure at increasing seated room sizes.
 fn departure_skips_survivor_selection(topology: Topology, direct: bool) {
     let mut profiles = Vec::new();
     for count in [2_u128, 16, 64] {

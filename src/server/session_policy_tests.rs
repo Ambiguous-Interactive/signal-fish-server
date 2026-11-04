@@ -6273,6 +6273,7 @@ async fn mesh_departure_from_empty_non_finalized_room_keeps_sticky_state() {
     assert_silent(&mut receiver).await;
 }
 
+/// A seated but unrouted host must not suppress guest-triggered failover.
 #[tokio::test(start_paused = true)]
 async fn guest_departure_replaces_a_stored_host_that_is_no_longer_routed() {
     let server = create_server_with_session(host_config()).await;
@@ -6314,6 +6315,7 @@ async fn guest_departure_replaces_a_stored_host_that_is_no_longer_routed() {
     assert_silent(&mut departing_rx).await;
 }
 
+/// Pin exact star fields and order for cached hosts and missing identities.
 #[test]
 fn shared_projection_preserves_star_order_endpoints_and_missing_recipients() {
     let host = PlayerId::from_u128(3);

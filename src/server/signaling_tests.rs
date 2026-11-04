@@ -7863,6 +7863,7 @@ async fn reconnect_routing_retry_applies_changed_survivor_capabilities() {
     }
 }
 
+/// Preserve complete opaque signals and generations at the canonical byte boundary.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_sizing_preserves_opaque_payloads_at_the_exact_boundary() {
