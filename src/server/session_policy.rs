@@ -188,8 +188,26 @@ pub(crate) struct SessionMember {
 }
 
 impl SessionMember {
-    fn from_player(player: &PlayerInfo, capabilities: SessionCapabilities) -> Self {
-        Self::from_session_player(crate::database::SessionPlayer::from(player), capabilities)
+    fn from_player(
+        player: &PlayerInfo,
+        capabilities: SessionCapabilities,
+        include_direct_endpoint: bool,
+    ) -> Self {
+        Self {
+            player_id: player.id,
+            player_name: player.name.clone(),
+            is_authority: player.is_authority,
+            joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
+            direct_endpoint: include_direct_endpoint
+                .then(|| {
+                    player
+                        .connection_info
+                        .as_ref()
+                        .and_then(DirectEndpoint::from_connection_info)
+                })
+                .flatten(),
+            capabilities,
+        }
     }
 
     fn from_session_player(
@@ -833,7 +851,9 @@ impl EnhancedGameServer {
     ) -> Vec<SessionMember> {
         players
             .into_iter()
-            .map(|player| SessionMember::from_player(player, self.session_capabilities(&player.id)))
+            .map(|player| {
+                SessionMember::from_player(player, self.session_capabilities(&player.id), true)
+            })
             .collect()
     }
 
@@ -886,6 +906,9 @@ impl EnhancedGameServer {
                                 SessionCapabilities::from(protocol)
                             })
                             .unwrap_or_default(),
+                        // A disabled transport can never be selected. Keep its
+                        // legacy metadata only in the shared GameStarting frame.
+                        session_config.enable_direct,
                     )
                 })
                 .collect();
