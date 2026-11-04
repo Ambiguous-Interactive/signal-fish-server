@@ -1686,34 +1686,30 @@ impl EnhancedGameServer {
                         // both the snapshot epoch and watermark, so concurrent
                         // leave/unregister can only filter a player, never create
                         // an epoch-less or incomplete v3 baseline.
-                        let (response_players, sender_watermarks) = if recipient_is_v3 {
-                            let projected: Vec<_> = response_players
-                                .into_iter()
-                                .filter_map(|mut player| {
-                                    let stamp =
-                                        server.connection_manager.current_relay_stamp_in_room(
-                                            &player.id,
-                                            &response_room_id,
-                                        )?;
-                                    player.epoch = Some(stamp.epoch);
-                                    player.seq = Some(stamp.seq);
-                                    Some((player, stamp))
-                                })
-                                .collect();
-                            let watermarks = projected
-                                .iter()
-                                .map(|(player, stamp)| SenderWatermark {
+                        let sender_watermarks = if recipient_is_v3 {
+                            // Keep the owned roster allocation while removing
+                            // unrouted members. Each retained player's fields
+                            // and watermark share the same stamp read (#1454).
+                            let mut watermarks = Vec::with_capacity(response_players.len());
+                            response_players.retain_mut(|player| {
+                                let Some(stamp) = server
+                                    .connection_manager
+                                    .current_relay_stamp_in_room(&player.id, &response_room_id)
+                                else {
+                                    return false;
+                                };
+                                player.epoch = Some(stamp.epoch);
+                                player.seq = Some(stamp.seq);
+                                watermarks.push(SenderWatermark {
                                     player_id: player.id,
                                     epoch: stamp.epoch,
                                     seq: stamp.seq,
-                                })
-                                .collect();
-                            (
-                                projected.into_iter().map(|(player, _)| player).collect(),
-                                watermarks,
-                            )
+                                });
+                                true
+                            });
+                            watermarks
                         } else {
-                            (response_players, Vec::new())
+                            Vec::new()
                         };
                         let mut response_ready_players = ready_players;
                         response_ready_players.retain(|player_id| {

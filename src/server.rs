@@ -779,6 +779,14 @@ pub mod allocation_benchmark {
         }
     }
 
+    /// Prepare the production game-start publication from caller-owned snapshots.
+    pub fn start_game_builder_for_measurement(
+        server: &super::EnhancedGameServer,
+        room: crate::protocol::RoomId,
+    ) -> crate::coordination::StartGamePublicationBuilder {
+        server.start_game_publication_builder(room)
+    }
+
     /// Exercise the production session-member projection without publishing frames.
     pub fn session_members_for_measurement(
         server: &super::EnhancedGameServer,
@@ -4474,53 +4482,80 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .store(times, std::sync::atomic::Ordering::Release);
     }
 
+    /// Start a targeted reply from its borrowed route; retain state only for failed or pending sends.
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
-        let handle = { self.local_clients.read().await.get(player_id).cloned() };
-        if let Some(handle) = handle {
-            self.deliver_to_all(vec![(*player_id, handle)], message, None)
-                .await;
-        } else {
-            // Normal during disconnect races (e.g. a room notification issued
-            // while the target is unregistering); nothing to deliver to.
-            tracing::debug!(%player_id, "Player not registered with coordinator; message unroutable");
-        }
+        let started = {
+            let clients = self.local_clients.read().await;
+            let Some(handle) = clients.get(player_id) else {
+                // Normal during disconnect races; nothing to deliver to.
+                tracing::debug!(%player_id, "Player not registered with coordinator; message unroutable");
+                return Ok(());
+            };
+            self.start_deliveries(std::iter::once((*player_id, handle)), None, |recipient| {
+                crate::coordination::outbound_queue::DeliveryMessage::new(
+                    room_message_for_recipient(&message, recipient),
+                )
+            })
+        };
+        self.finish_deliveries(started).await;
         Ok(())
     }
 
+    /// Start a room-scoped send under routing reads, then release the guards before any capacity wait.
     async fn send_to_player_in_room(
         &self,
         player_id: &PlayerId,
         room_id: &RoomId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<bool> {
-        let handle = {
+        let (started, failed_sender) = {
             let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
-            room_players
+            let Some(handle) = room_players
                 .get(room_id)
                 .filter(|players| players.contains(player_id))
-                .and_then(|_| clients.get(player_id).cloned())
+                .and_then(|_| clients.get(player_id))
+            else {
+                return Ok(false);
+            };
+            let started = crate::coordination::start_message_delivery_in_room(
+                &self.metrics,
+                self.slow_consumer_timeout,
+                player_id,
+                handle,
+                crate::coordination::outbound_queue::DeliveryMessage::new(message),
+                Some(*room_id),
+            );
+            let failed_sender = matches!(
+                started,
+                crate::coordination::DeliveryStart::Complete(DeliveryOutcome::SlowConsumer)
+            )
+            .then(|| handle.sender.clone());
+            (started, failed_sender)
         };
-        let Some(handle) = handle else {
-            return Ok(false);
+        // Only a full queue owns its routing handle past the synchronous
+        // attempt. Release every routing guard before waiting for capacity.
+        let (outcome, failed_sender) = match started {
+            crate::coordination::DeliveryStart::Complete(outcome) => (outcome, failed_sender),
+            crate::coordination::DeliveryStart::Backpressured(pending) => {
+                let (_, sender, outcome) =
+                    crate::coordination::finish_backpressured_delivery_in_room(
+                        &self.metrics,
+                        pending,
+                    )
+                    .await;
+                (outcome, Some(sender))
+            }
         };
-        let outcome = crate::coordination::deliver_or_disconnect_in_room(
-            &self.metrics,
-            self.slow_consumer_timeout,
-            player_id,
-            &handle,
-            message,
-            Some(*room_id),
-        )
-        .await;
         if outcome == DeliveryOutcome::SlowConsumer {
-            self.remove_client_if_same_sender(*player_id, &handle.sender)
-                .await;
+            if let Some(sender) = failed_sender {
+                self.remove_client_if_same_sender(*player_id, &sender).await;
+            }
         }
         Ok(outcome == DeliveryOutcome::Delivered)
     }

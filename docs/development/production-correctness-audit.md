@@ -14890,3 +14890,50 @@ after both states, with the original two-allocation saving checked separately
 for both setups. Restoring generic fan-out fails this bound locally (12 versus
 10 allocations for the two-member report). Every report still checks exact
 recipient frames, and all five room sizes remain. Issue #1436 stays open.
+
+### F281–F284 — Targeted live P2P sends and recovery preparation
+
+Issues: #1454, #1455, #1456 and #1457. Baseline: `2f65901c`.
+Campaigns #636 and #826 remain open.
+
+Healthy targeted replies copied their delivery handle and allocated a
+one-recipient vector. A complete warm classified Pong send used two allocations,
+856 bytes and one sender clone. Room-scoped Signal sends copied the handle
+before entering the scalar delivery future; a complete warm send used one
+allocation, 1,392 bytes and one sender clone. Both paths now start delivery
+through a borrowed registered handle. Only pending or failed sends keep owned
+sender state. Every routing guard ends before a capacity wait. Generic replies
+retain recipient-specific authority flags; room sends retain exact Signal body,
+generation, room checks and delivery outcomes. Replies now use one allocation
+and 680 bytes with zero sender clones. Room-scoped signals retain one allocation
+but use 1,216 bytes with zero sender clones.
+
+The v3 reconnect baseline built a temporary vector of players and relay stamps,
+then collected watermarks and rebuilt the roster. It now filters the owned
+roster in place and reserves the watermark vector once. One room-bound stamp
+read still supplies both the player's epoch/sequence and its watermark. Roster
+order and ready-player filtering stay unchanged. Matched complete reconnect
+controls cover 2, 16 and 255 players with both v2 and v3 recipients. The paired
+controls save 800, 3,200 and 51,200 allocated bytes and one allocation. At 255
+players, the v3 path also removes seven reallocations.
+
+Game-start preparation copied usable legacy Direct hostnames even when Direct
+was disabled. With 253-byte valid hostnames, the original 255-member preparation
+used 2,041 allocations and 218,279 bytes, compared with 1,786 allocations and
+153,764 bytes without endpoints. Skipping disabled endpoint projection removes
+255 allocations and 64,515 bytes in this control. The original shared
+`GameStarting` frame still carries exact legacy metadata. Direct-enabled
+selection still requires a usable host endpoint and emits the same endpoint
+and peer plans. Absent and unusable endpoints retain their Relay fallback.
+
+The original implementations fail the new allocation or sender-clone bounds.
+The focused controls also retain v2 replay omission, baseline-before-data
+ordering, missed game-data exclusion, and finalized-room readiness. Full-queue
+controls cover caller cancellation and an old timeout racing a replacement
+connection for both targeted entrypoints. Cancellation counts one dropped
+attempt and leaves the replacement route usable.
+
+These are allocation and sender-ownership measurements. They do not prove a
+latency or remote-network capacity increase. Wire schemas, message ordering,
+plan selection, generation rules and reconnect contracts stay unchanged.
+Rust, .NET and Godot clients need no migration for these internal changes.

@@ -7,6 +7,8 @@ mod allocation_harness;
 mod control_costs;
 #[path = "live_p2p_allocations/departure_costs.rs"]
 mod departure_costs;
+#[path = "live_p2p_allocations/endpoint_costs.rs"]
+mod endpoint_costs;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
@@ -14,10 +16,14 @@ mod lobby_costs;
 mod publication_costs;
 #[path = "live_p2p_allocations/readiness_costs.rs"]
 mod readiness_costs;
+#[path = "live_p2p_allocations/reconnect_costs.rs"]
+mod reconnect_costs;
 #[path = "live_p2p_allocations/setup_costs.rs"]
 mod setup_costs;
 #[path = "live_p2p_allocations/status_costs.rs"]
 mod status_costs;
+#[path = "live_p2p_allocations/targeted_costs.rs"]
+mod targeted_costs;
 
 use signal_fish_server::config::*;
 use signal_fish_server::database::DatabaseConfig;
@@ -414,6 +420,22 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "disabled_direct_start_skips_endpoints",
+            endpoint_costs::disabled_direct_start_skips_endpoints,
+        ),
+        allocation_harness::trial(
+            "reconnect_baseline_reuses_player_roster",
+            reconnect_costs::reconnect_baseline_reuses_player_roster,
+        ),
+        allocation_harness::trial(
+            "targeted_reply_avoids_recipient_storage",
+            targeted_costs::targeted_reply_avoids_recipient_storage,
+        ),
+        allocation_harness::trial(
+            "targeted_room_delivery_borrows_healthy_sender",
+            targeted_costs::targeted_room_delivery_borrows_healthy_sender,
+        ),
         allocation_harness::trial(
             "uniform_publication_borrows_commit_routes",
             publication_costs::uniform_publication_borrows_commit_routes,

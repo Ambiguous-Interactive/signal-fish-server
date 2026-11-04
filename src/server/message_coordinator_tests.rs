@@ -2057,72 +2057,96 @@ async fn canceled_and_failed_initial_builders_release_the_room_gate() {
 }
 
 #[tokio::test(start_paused = true)]
+/// #1455/#1456: a timed-out old send must not prune a replacement route.
 async fn slow_consumer_timeout_does_not_remove_a_replacement_connection() {
-    let metrics = Arc::new(ServerMetrics::new());
-    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
-        Duration::from_secs(5),
-        Arc::clone(&metrics),
-    ));
-    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0023);
+    for room_scoped in [false, true] {
+        let room_id = RoomId::from_u128(77);
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(5),
+            Arc::clone(&metrics),
+        ));
+        let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0023);
 
-    let (old_sender, _old_receiver) = mpsc::channel(1);
-    old_sender
-        .try_send(Arc::new(ServerMessage::Pong))
-        .expect("pre-fill replaced connection");
-    let (old_close, mut old_close_listener) = ConnectionCloseSignal::channel();
-    coordinator
-        .register_local_client(
-            player_id,
-            None,
-            ClientDeliveryHandle::new(old_sender, old_close),
-        )
-        .await
-        .expect("register old connection");
+        let (old_sender, _old_receiver) = mpsc::channel(1);
+        old_sender
+            .try_send(Arc::new(ServerMessage::Pong))
+            .expect("pre-fill replaced connection");
+        let (old_close, mut old_close_listener) = ConnectionCloseSignal::channel();
+        coordinator
+            .register_local_client(
+                player_id,
+                Some(room_id),
+                ClientDeliveryHandle::new(old_sender, old_close),
+            )
+            .await
+            .expect("register old connection");
 
-    let timed_out_send = {
-        let coordinator = Arc::clone(&coordinator);
-        tokio::spawn(async move {
+        let timed_out_send = {
+            let coordinator = Arc::clone(&coordinator);
+            tokio::spawn(async move {
+                if room_scoped {
+                    assert!(
+                        !coordinator
+                            .send_to_player_in_room(
+                                &player_id,
+                                &room_id,
+                                Arc::new(ServerMessage::Pong)
+                            )
+                            .await?
+                    );
+                    Ok(())
+                } else {
+                    coordinator
+                        .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+                        .await
+                }
+            })
+        };
+        wait_for_counter("old connection reached backpressure", 10_000, || {
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 1
+        })
+        .await;
+
+        let (replacement_sender, mut replacement_receiver) = mpsc::channel(2);
+        coordinator
+            .register_local_client(
+                player_id,
+                Some(room_id),
+                ClientDeliveryHandle::new(replacement_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .expect("register replacement connection");
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        timed_out_send
+            .await
+            .expect("timed-out send task should not panic")
+            .expect("timed-out send should finish cleanly");
+        assert_eq!(
+            old_close_listener.closed().await,
+            Some(crate::coordination::CloseReason::SlowConsumer)
+        );
+
+        if room_scoped {
+            assert!(coordinator
+                .send_to_player_in_room(&player_id, &room_id, Arc::new(ServerMessage::Pong))
+                .await
+                .expect("send through replacement room route"));
+        } else {
             coordinator
                 .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
                 .await
-        })
-    };
-    wait_for_counter("old connection reached backpressure", 10_000, || {
-        metrics
-            .websocket_backpressure_events
-            .load(Ordering::Relaxed)
-            == 1
-    })
-    .await;
-
-    let (replacement_sender, mut replacement_receiver) = mpsc::channel(2);
-    coordinator
-        .register_local_client(
-            player_id,
-            None,
-            ClientDeliveryHandle::new(replacement_sender, ConnectionCloseSignal::detached()),
-        )
-        .await
-        .expect("register replacement connection");
-
-    tokio::time::advance(Duration::from_secs(6)).await;
-    timed_out_send
-        .await
-        .expect("timed-out send task should not panic")
-        .expect("timed-out send should finish cleanly");
-    assert_eq!(
-        old_close_listener.closed().await,
-        Some(crate::coordination::CloseReason::SlowConsumer)
-    );
-
-    coordinator
-        .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
-        .await
-        .expect("send through replacement connection");
-    assert!(matches!(
-        replacement_receiver.recv().await.as_deref(),
-        Some(ServerMessage::Pong)
-    ));
+                .expect("send through replacement connection");
+        }
+        assert!(matches!(
+            replacement_receiver.recv().await.as_deref(),
+            Some(ServerMessage::Pong)
+        ));
+    }
 }
 
 #[tokio::test]
@@ -5813,5 +5837,81 @@ async fn uniform_publication_requires_the_exact_unique_member_set() {
                 receiver.assert_empty("no unexpected event");
             }
         }
+    }
+}
+
+/// #1455/#1456: cancellation resolves one attempt after routing locks are released.
+#[tokio::test(start_paused = true)]
+async fn canceled_targeted_delivery_releases_routes_and_accounts_once() {
+    for room_scoped in [false, true] {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+            Duration::from_secs(5),
+            Arc::clone(&metrics),
+        );
+        let player = PlayerId::from_u128(91);
+        let room = RoomId::from_u128(92);
+        let (sender, mut receiver) = mpsc::channel(1);
+        let filler = Arc::new(ServerMessage::Pong);
+        sender.try_send(filler.clone()).unwrap();
+        let (close, listener) = ConnectionCloseSignal::channel();
+        coordinator
+            .register_local_client(player, Some(room), ClientDeliveryHandle::new(sender, close))
+            .await
+            .unwrap();
+        let mut send = Box::pin(async {
+            if room_scoped {
+                let _ = coordinator
+                    .send_to_player_in_room(&player, &room, Arc::new(ServerMessage::Pong))
+                    .await?;
+                Ok(())
+            } else {
+                coordinator
+                    .send_to_player(&player, Arc::new(ServerMessage::Pong))
+                    .await
+            }
+        });
+        assert!(futures_util::poll!(send.as_mut()).is_pending());
+        assert_eq!(
+            metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed),
+            1
+        );
+        // Registration must finish while the original capacity wait remains pending.
+        let (replacement_sender, mut replacement_receiver) = mpsc::channel(1);
+        coordinator
+            .register_local_client(
+                player,
+                Some(room),
+                ClientDeliveryHandle::new(replacement_sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        drop(send);
+        assert_eq!(listener.requested_reason(), None);
+        assert_eq!(
+            metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .websocket_deliveries_enqueued
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &filler));
+        coordinator
+            .send_to_player(&player, filler.clone())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &replacement_receiver.try_recv().unwrap(),
+            &filler
+        ));
     }
 }
