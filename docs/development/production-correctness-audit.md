@@ -14840,8 +14840,8 @@ The room event sequencer added a second boxed closure and future around each
 caller-owned job. Its `VecDeque` also allocated storage for a single pending
 event. A retained-lane control measured 8 allocations for its first complete
 event and 7 for a warm event. Keeping the mutation guard in the queued record
-removes both wrappers. An inline first pending slot removes the singleton queue
-allocation. Overflow still uses the FIFO deque for cloned-lease bursts.
+removes both wrappers. An inline slot for the first pending event removes the
+queue allocation. Overflow still uses the FIFO deque for cloned-lease bursts.
 The same control now measures 5 allocations for either complete event, including
 admission, worker start, child execution and completion. It excludes construction
 of the caller's job and the retained mutation lease. Complete targeted Signal
