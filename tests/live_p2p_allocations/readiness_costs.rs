@@ -9,6 +9,7 @@ use signal_fish_server::protocol::PlayerInfo;
 use signal_fish_server::server::InMemoryMessageCoordinator;
 use std::sync::Arc;
 
+/// Measure complete lobby or ready publications while checking every recipient snapshot.
 pub(crate) fn readiness_reuses_membership(lobby: bool) {
     for members in [2_u128, 16, 255] {
         allocation_harness::block_on(async {

@@ -187,6 +187,7 @@ fn sorted_reservation_validation_matches_original_large_roster() {
     }
 }
 
+/// Keep observer lifecycle batches ahead of seated plans after a role change.
 #[test]
 fn observer_batch_preserves_precedence_for_reservation_and_commit() {
     use crate::coordination::RoomRecipientMessages;

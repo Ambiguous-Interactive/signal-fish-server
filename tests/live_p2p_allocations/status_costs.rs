@@ -3,9 +3,11 @@ use super::*;
 use signal_fish_server::protocol::PlayerInfo;
 use signal_fish_server::server::allocation_benchmark::transport_status_fallback_recipients_for_measurement;
 
+/// Compare status recipient selection with the previous full-player snapshot on identical rooms.
 pub(crate) fn transport_status_fallback_skips_player_metadata() {
     for members in [2_u128, 16, 255] {
         let mut profiles = Vec::new();
+        let mut reference_profiles = Vec::new();
         for bytes in [0, 1024, 64 * 1024] {
             allocation_harness::block_on(async {
                 let server = EnhancedGameServer::new(
@@ -84,6 +86,20 @@ pub(crate) fn transport_status_fallback_skips_player_metadata() {
                             .unwrap());
                     }
                 }
+                let reference_region = stats_alloc::Region::new(ALLOCATOR);
+                let mut reference: Vec<_> = server
+                    .database()
+                    .get_room_players(&room.id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|member| member.id != reporter && server.client_supports_v3(&member.id))
+                    .map(|member| member.id)
+                    .collect();
+                let reference_stats = reference_region.change();
+                println!("STATUS_FALLBACK_REFERENCE members={members} bytes={bytes} stats={reference_stats:?}");
+                reference_profiles.push(reference_stats);
+                reference.sort_unstable();
                 let region = stats_alloc::Region::new(ALLOCATOR);
                 let mut recipients = transport_status_fallback_recipients_for_measurement(
                     &server, &reporter, &room.id,
@@ -94,6 +110,7 @@ pub(crate) fn transport_status_fallback_skips_player_metadata() {
                 println!("STATUS_FALLBACK members={members} bytes={bytes} stats={stats:?}");
                 profiles.push(stats);
                 recipients.sort_unstable();
+                assert_eq!(recipients, reference);
                 assert_eq!(
                     recipients,
                     (3..=members).map(Uuid::from_u128).collect::<Vec<_>>()
@@ -123,6 +140,9 @@ pub(crate) fn transport_status_fallback_skips_player_metadata() {
                 .is_empty());
             });
         }
+        assert!(reference_profiles[2].bytes_allocated >= reference_profiles[0].bytes_allocated
+            + usize::try_from(members).unwrap() * 64 * 1024,
+            "the previous snapshot control did not copy every stored member's metadata: {reference_profiles:?}");
         for profile in &profiles {
             assert!(
                 profile.bytes_allocated <= profiles[0].bytes_allocated + 128,

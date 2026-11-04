@@ -1086,6 +1086,7 @@ mod tests {
 
     use crate::protocol::ErrorCode;
 
+    /// Keep stored membership authoritative when routes contain ghosts or duplicates.
     #[test]
     fn effective_membership_intersects_routes_without_adding_ghosts() {
         let first = PlayerId::from_u128(1);

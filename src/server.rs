@@ -4951,6 +4951,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         .await
     }
 
+    /// Reserve complete room batches and commit their ordered phases after exact route validation.
     async fn commit_room_messages_if_members_with_hook<'a>(
         &'a self,
         room_id: &RoomId,
