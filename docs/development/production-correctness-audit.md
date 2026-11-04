@@ -14783,13 +14783,26 @@ outcome vector. Direct delivery now shares the same capability and generation
 checks without either collection. Full-handler warmed profiles after F275:
 two players fall from 12 allocations / 3,657 bytes to 10 / 3,576; 16 players
 remain 40 / 34,807; 64 remain 202 / 147,160. These are temporary allocation
-measurements, not throughput or latency claims. The regression compares the
-changed report with a same-runtime duplicate and retains exact delivery to
-every eligible peer. Disabling only the one-recipient branch fails the nine
-additional-allocation bound in `status-allocation-negative.log` under the local
-ignored progress directory. Multi-peer delivery remains concurrent. The first duplicate-relative probe
-used an eight-allocation bound and failed at the observed nine-allocation
-difference (`a247e2ab`); the final bound records the measured envelope.
+measurements, not throughput or latency claims. The initial regression compared a changed report with an early-return duplicate.
+An eight-allocation probe failed at the Linux nine-allocation difference
+(`a247e2ab`), and a local +9 negative control rejected restored collections.
+That control was invalidated by full CI `41772574368`, macOS job
+`126386188646`, at head `095a2639`: changed delivery measured 20 allocations /
+4,408 bytes while the duplicate remained one allocation. Their different paths
+do not isolate the collections. The full failed log is retained under the local
+ignored progress directory. No historical allocation site is established.
+
+The replacement control measures complete changed reports in rooms with two,
+three, and four players. The generic two- and three-recipient cohorts establish
+fixed plus per-recipient cost; one-recipient delivery must save at least two
+allocations against that full-delivery projection. The 16- and 64-player
+histories, exact recipients, duplicate silence, and concurrent delivery remain.
+All-feature Linux run `00d7e34c` records 10, 14, and 16 allocations in the first
+three cohorts. Restoring only the one-recipient collection path raises the
+first to 12 and fails the unchanged two-allocation saving requirement in
+`allocation-paired-negative.log`. This replaces the invalid duplicate-relative
+envelope; it does not raise a platform ceiling or reduce the workload.
+
 The final baseline-feature allocation run `43d2199d` passes both status and
 room-size-independent targeted signaling profiles. Owned Signal delivery costs
 19 allocations / 3,896 bytes in each 2-, 16-, and 64-player cohort; this repair

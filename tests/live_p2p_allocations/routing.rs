@@ -239,9 +239,10 @@ pub(crate) fn game_start_shares_configuration() {
     }
 }
 
-/// Measure full report acceptance and exact peer delivery after warm-up.
+/// Compare full delivery against fixed plus per-peer costs after warm-up.
 pub(crate) fn transport_report_delivery_cost() {
-    for count in [2_u128, 16, 64] {
+    let mut profiles = Vec::new();
+    for count in [2_u128, 3, 4, 16, 64] {
         allocation_harness::block_on(async {
             allocation_harness::warm_current_thread_runtime().await;
             let server = EnhancedGameServer::new(
@@ -297,6 +298,7 @@ pub(crate) fn transport_report_delivery_cost() {
                 let stats = region.change();
                 if connected {
                     println!("TRANSPORT_REPORT_PROFILE count={count} stats={stats:?}");
+                    profiles.push(stats);
                 }
                 if connected && count == 2 {
                     let duplicate_region = stats_alloc::Region::new(ALLOCATOR);
@@ -311,8 +313,6 @@ pub(crate) fn transport_report_delivery_cost() {
                         .await;
                     let duplicate = duplicate_region.change();
                     println!("TRANSPORT_REPORT_DUPLICATE_PROFILE stats={duplicate:?}");
-                    assert!(stats.allocations <= duplicate.allocations + 9,
-                        "single-recipient delivery builds fan-out collections: changed={stats:?}, duplicate={duplicate:?}");
                 }
                 for (index, receiver) in receivers.iter_mut().enumerate() {
                     if index != 0 {
@@ -328,4 +328,13 @@ pub(crate) fn transport_report_delivery_cost() {
             }
         });
     }
+    let generic_single_recipient = profiles[1]
+        .allocations
+        .checked_mul(2)
+        .and_then(|twice| twice.checked_sub(profiles[2].allocations))
+        .expect("full-delivery cohorts have a common fixed cost");
+    assert!(
+        profiles[0].allocations + 2 <= generic_single_recipient,
+        "single-recipient delivery builds fan-out collections: {profiles:?}"
+    );
 }
