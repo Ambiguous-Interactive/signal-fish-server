@@ -1835,8 +1835,14 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 }
 
+/// Model an embedded coordinator that leaves recipient discovery to the database.
+pub(super) fn coordinator_without_routing_snapshot() -> Arc<dyn MessageCoordinator> {
+    Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DrainTrigger {
+    UnknownRouting,
     SpectatorLeftSend,
     RoomlessRegister,
     UnregisterLocal,
@@ -2314,7 +2320,11 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         })
     }
 
+    /// Return unknown routing for the fallback fixture, or its current seated roster.
     async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
+        if self.trigger == DrainTrigger::UnknownRouting {
+            return Ok(None);
+        }
         if self.trigger == DrainTrigger::SpectatorRoutingLookupFailure {
             self.triggered.store(true, Ordering::Release);
             anyhow::bail!("injected spectator routing lookup failure");

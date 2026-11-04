@@ -806,6 +806,25 @@ pub mod allocation_benchmark {
         super::signaling::canonical_json_len(value)
     }
 
+    /// Measure effective ready/lobby membership with caller-owned rosters.
+    pub fn effective_room_members(
+        stored: Vec<crate::protocol::PlayerId>,
+        routed: Option<Vec<crate::protocol::PlayerId>>,
+    ) -> Vec<crate::protocol::PlayerId> {
+        crate::coordination::room_coordinator::effective_room_members(stored, routed)
+    }
+
+    /// Resolve the production unknown-routing status recipient fallback.
+    pub async fn transport_status_fallback_recipients_for_measurement(
+        server: &super::EnhancedGameServer,
+        player: &crate::protocol::PlayerId,
+        room: &crate::protocol::RoomId,
+    ) -> anyhow::Result<Vec<crate::protocol::PlayerId>> {
+        server
+            .transport_status_fallback_recipients(player, room)
+            .await
+    }
+
     /// Measure routed membership normalization without starting a server.
     pub fn sorted_routed_player_ids_for_measurement(
         players: Vec<crate::protocol::PlayerId>,
@@ -4051,12 +4070,15 @@ impl InMemoryMessageCoordinator {
     /// Preserve observer precedence when a role changes during reservation.
     fn room_recipient_batch<'a>(
         player_id: &PlayerId,
-        seated_messages: &'a HashMap<PlayerId, RoomRecipientMessages>,
+        seated_messages: &'a [RoomRecipientMessages],
         observer_messages: &'a HashMap<PlayerId, RoomRecipientMessages>,
     ) -> Option<&'a RoomRecipientMessages> {
-        observer_messages
-            .get(player_id)
-            .or_else(|| seated_messages.get(player_id))
+        observer_messages.get(player_id).or_else(|| {
+            seated_messages
+                .binary_search_by_key(player_id, |batch| batch.player_id)
+                .ok()
+                .and_then(|index| seated_messages.get(index))
+        })
     }
 
     /// Match one routed channel against unique sorted reservations.
@@ -4929,6 +4951,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         .await
     }
 
+    /// Reserve complete room batches and commit their ordered phases after exact route validation.
     async fn commit_room_messages_if_members_with_hook<'a>(
         &'a self,
         room_id: &RoomId,
@@ -4977,35 +5000,33 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             anyhow::bail!("room message transaction requires unique non-empty membership");
         }
 
-        let mut batch_members: Vec<PlayerId> = recipient_messages
-            .iter()
-            .map(|batch| batch.player_id)
-            .collect();
-        batch_members.sort_unstable();
-        if batch_members != expected {
+        let mut seated_messages = recipient_messages;
+        seated_messages.sort_unstable_by_key(|batch| batch.player_id);
+        if seated_messages.len() != expected.len()
+            || seated_messages
+                .iter()
+                .zip(&expected)
+                .any(|(batch, id)| batch.player_id != *id)
+        {
             anyhow::bail!("room message batches must cover every expected member exactly once");
         }
         if spectator_messages.is_empty()
-            && recipient_messages
+            && seated_messages
                 .iter()
                 .all(|batch| batch.messages.is_empty())
         {
             anyhow::bail!("room message transaction requires at least one frame");
         }
         if spectator_messages.len() > 2
-            || recipient_messages
+            || seated_messages
                 .iter()
                 .any(|batch| batch.first_phase > 1 || batch.phase_count() > 2)
         {
             anyhow::bail!("room message transactions support exactly two ordered phases");
         }
 
-        let seated_messages: HashMap<PlayerId, RoomRecipientMessages> = recipient_messages
-            .into_iter()
-            .map(|batch| (batch.player_id, batch))
-            .collect();
         let max_phases = seated_messages
-            .values()
+            .iter()
             .map(RoomRecipientMessages::phase_count)
             .max()
             .unwrap_or(0)

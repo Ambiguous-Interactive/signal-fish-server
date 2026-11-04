@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory used for live P2P plan publications, ready toggles, lobby entry, and status reports from custom
+  coordinators (#1446, #1447, #1448).
 - Reduce roster lookup costs for live P2P starts and updates, and reduce readiness costs for large room snapshots
   (#1442, #1443, #1444).
 - Reduce CPU and memory use during live P2P host plan updates, guest departures, and WebRTC signaling (#1437, #1438, #1439).

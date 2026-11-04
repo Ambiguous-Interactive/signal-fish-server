@@ -9,6 +9,7 @@ use signal_fish_server::protocol::PlayerInfo;
 use signal_fish_server::server::InMemoryMessageCoordinator;
 use std::sync::Arc;
 
+/// Measure complete lobby or ready publications while checking every recipient snapshot.
 pub(crate) fn readiness_reuses_membership(lobby: bool) {
     for members in [2_u128, 16, 255] {
         allocation_harness::block_on(async {
@@ -84,7 +85,7 @@ pub(crate) fn readiness_reuses_membership(lobby: bool) {
                 } else {
                     0
                 };
-                let budget = if lobby { 458_000 } else { 455_000 } + trace_storage;
+                let budget = 447_000 + trace_storage;
                 assert!(stats.bytes_allocated <= budget,
                     "readiness rebuilt effective membership: lobby={lobby} budget={budget} stats={stats:?}");
             }

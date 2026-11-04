@@ -187,6 +187,7 @@ fn sorted_reservation_validation_matches_original_large_roster() {
     }
 }
 
+/// Keep observer lifecycle batches ahead of seated plans after a role change.
 #[test]
 fn observer_batch_preserves_precedence_for_reservation_and_commit() {
     use crate::coordination::RoomRecipientMessages;
@@ -198,10 +199,10 @@ fn observer_batch_preserves_precedence_for_reservation_and_commit() {
         message: "observer lifecycle".into(),
         error_code: None,
     });
-    let seated = HashMap::from([(
+    let seated = vec![RoomRecipientMessages::in_order(
         id,
-        RoomRecipientMessages::in_order(id, vec![seated_frame.clone(), seated_frame.clone()]),
-    )]);
+        vec![seated_frame.clone(), seated_frame.clone()],
+    )];
     let mut observers = HashMap::new();
     let batch = InMemoryMessageCoordinator::room_recipient_batch(&id, &seated, &observers).unwrap();
     assert_eq!(batch.messages.len(), 2);
@@ -218,4 +219,78 @@ fn observer_batch_preserves_precedence_for_reservation_and_commit() {
         &observers
     )
     .is_none());
+}
+
+/// #1446: sorted owned batches must still reject malformed coverage before hooks.
+#[tokio::test]
+async fn owned_publication_batches_reject_duplicate_missing_and_foreign_members() {
+    use crate::coordination::{
+        ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator, RoomRecipientMessages,
+    };
+    use crate::protocol::{RoomId, ServerMessage};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::new_v4();
+    let first = PlayerId::from_u128(1);
+    let second = PlayerId::from_u128(2);
+    let foreign = PlayerId::from_u128(3);
+    let mut receivers = Vec::new();
+    for id in [first, second] {
+        let (sender, receiver) = mpsc::channel(4);
+        receivers.push(receiver);
+        coordinator
+            .register_local_client(
+                id,
+                Some(room),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+    }
+    for (name, expected, batches) in [
+        ("empty expected", vec![], vec![first, second]),
+        ("duplicate expected", vec![first, first], vec![first, first]),
+        ("duplicate batch", vec![first, second], vec![second, second]),
+        ("missing batch", vec![first, second], vec![first]),
+        (
+            "extra batch",
+            vec![first, second],
+            vec![first, second, foreign],
+        ),
+        ("foreign batch", vec![first, second], vec![first, foreign]),
+    ] {
+        let hooks = AtomicUsize::new(0);
+        let result = coordinator
+            .commit_room_messages_if_members_with_hook(
+                &room,
+                &expected,
+                batches
+                    .into_iter()
+                    .map(|id| {
+                        RoomRecipientMessages::in_order(id, vec![Arc::new(ServerMessage::Pong)])
+                    })
+                    .collect(),
+                vec![],
+                Box::new(|| {
+                    Box::pin(async {
+                        hooks.fetch_add(1, Ordering::Relaxed);
+                        Ok(true)
+                    })
+                }),
+                Box::new(|_| panic!("invalid membership reached phase callback")),
+            )
+            .await;
+        assert!(result.is_err(), "{name}");
+        assert_eq!(hooks.load(Ordering::Relaxed), 0, "{name}");
+        for receiver in &mut receivers {
+            let trailing = receiver.try_recv();
+            assert!(
+                matches!(trailing, Err(mpsc::error::TryRecvError::Empty)),
+                "{name}"
+            );
+        }
+    }
 }

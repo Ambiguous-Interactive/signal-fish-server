@@ -252,11 +252,82 @@ fn readiness_projection(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Compare complete membership construction and lookup with the hash-table baseline.
+fn effective_membership(criterion: &mut Criterion) {
+    use signal_fish_server::protocol::PlayerId;
+    use signal_fish_server::server::allocation_benchmark::effective_room_members;
+    use std::collections::HashSet;
+    let mut group = criterion.benchmark_group("effective_membership");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_millis(100));
+    group.measurement_time(Duration::from_millis(400));
+    for count in [2_u128, 16, 255, 1024] {
+        let identity = |index: u128| {
+            PlayerId::from_u128(
+                index
+                    .wrapping_mul(0x9e3779b97f4a7c15_d1b54a32d192ed03)
+                    .rotate_left(37),
+            )
+        };
+        let stored: Vec<_> = (0..count).map(identity).collect();
+        for (shape, routed) in [
+            (
+                "full",
+                Some(stored.iter().rev().copied().collect::<Vec<_>>()),
+            ),
+            (
+                "partial",
+                Some((0..count * 2).step_by(3).map(identity).collect()),
+            ),
+            ("unknown", None),
+        ] {
+            let old =
+                |mut stored: Vec<PlayerId>, routed: Option<Vec<PlayerId>>| -> HashSet<PlayerId> {
+                    match routed {
+                        Some(routed) => {
+                            let mut current: HashSet<_> = routed.into_iter().collect();
+                            stored.retain(|id| current.contains(id));
+                            current.clear();
+                            current.extend(stored);
+                            current
+                        }
+                        None => stored.into_iter().collect(),
+                    }
+                };
+            let expected = old(stored.clone(), routed.clone());
+            let effective = effective_room_members(stored.clone(), routed.clone());
+            assert_eq!(effective.iter().copied().collect::<HashSet<_>>(), expected);
+            for original in [false, true] {
+                group.bench_function(format!("{original}/{shape}/{count}"), |bencher| {
+                    bencher.iter_batched(
+                        || (stored.clone(), routed.clone()),
+                        |(stored, routed)| {
+                            let found = if original {
+                                let effective = old(stored, routed);
+                                expected.iter().filter(|id| effective.contains(id)).count()
+                            } else {
+                                let effective = effective_room_members(stored, routed);
+                                expected
+                                    .iter()
+                                    .filter(|id| effective.binary_search(id).is_ok())
+                                    .count()
+                            };
+                            assert_eq!(black_box(found), expected.len());
+                        },
+                        criterion::BatchSize::SmallInput,
+                    );
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3));
-    targets = readiness_projection, relay_serialization_runtime, payload_sizing_runtime, host_plan_projection, mesh_plan_projection, signal_payload_sizing
+    targets = effective_membership, readiness_projection, relay_serialization_runtime, payload_sizing_runtime, host_plan_projection, mesh_plan_projection, signal_payload_sizing
 }
 criterion_main!(benches);
