@@ -7862,3 +7862,44 @@ async fn reconnect_routing_retry_applies_changed_survivor_capabilities() {
         assert_silent(&mut survivor_rx).await;
     }
 }
+
+/// Preserve complete opaque signals and generations at the canonical byte boundary.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn signal_sizing_preserves_opaque_payloads_at_the_exact_boundary() {
+    for payload in [
+        json!({"Offer": format!("v=0\r\n{}", "a=candidate:1 1 UDP 2122260223 192.0.2.1 5000 typ host\r\n".repeat(64))}),
+        json!({"opaque雪": ["\n\t\u{0000}\"\\😀".repeat(64), i64::MIN, u64::MAX, -0.0, 1e200, null, false]}),
+    ] {
+        let bytes = payload_len(&payload);
+        for cap in [bytes, bytes - 1] {
+            let server = create_test_server_with_signal_policy(600, 60, cap).await;
+            let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+            let generation = crate::protocol::SessionGeneration::new_v4();
+            server
+                .handle_signal_in_generation(&alice, bob, generation, payload.clone())
+                .await;
+            if cap == bytes {
+                let message = recv(&mut bob_rx).await;
+                let ServerMessage::Signal {
+                    from,
+                    generation: actual_generation,
+                    signal,
+                } = message.as_ref()
+                else {
+                    panic!("expected signal: {message:?}");
+                };
+                assert_eq!(*from, alice);
+                assert_eq!(*actual_generation, generation);
+                assert_eq!(signal, &payload);
+                assert_silent(&mut alice_rx).await;
+            } else {
+                assert_eq!(
+                    error_code(recv(&mut alice_rx).await.as_ref()),
+                    Some(ErrorCode::SignalTooLarge)
+                );
+                assert_silent(&mut bob_rx).await;
+            }
+        }
+    }
+}

@@ -709,6 +709,31 @@ pub mod allocation_benchmark {
             decision.host
         }
 
+        /// Build every host plan with the production peer projection.
+        pub fn plans_for_members(&mut self) -> Vec<crate::protocol::SessionPlanPayload> {
+            use super::session_policy::SessionPlanDecision;
+            use crate::protocol::{SessionGeneration, Topology, Transport};
+            let decision = SessionPlanDecision {
+                generation: SessionGeneration::nil(),
+                topology: Topology::Host,
+                transport: if self.config.enable_webrtc {
+                    Transport::WebRtc
+                } else {
+                    Transport::Direct
+                },
+                host: self.members.last().map(|member| member.player_id),
+                members: std::mem::take(&mut self.members),
+            };
+            let projection = decision.projection();
+            let plans = decision
+                .members
+                .iter()
+                .map(|member| projection.plan_for_member(member, Vec::new()))
+                .collect();
+            self.members = decision.members;
+            plans
+        }
+
         /// Build a host or mesh peer list using the production publication path.
         pub fn plan_for(&mut self, mesh: bool) -> crate::protocol::SessionPlanPayload {
             use super::session_policy::SessionPlanDecision;

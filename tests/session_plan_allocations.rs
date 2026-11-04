@@ -471,6 +471,10 @@ fn main() {
             lobby_costs::app_identity_lookup_does_not_copy_text,
         ),
         allocation_harness::trial(
+            "host_guest_departure_skips_survivor_selection",
+            departure_costs::host_guest_departure_skips_survivor_selection,
+        ),
+        allocation_harness::trial(
             "room_event_admission_cost",
             control_costs::room_event_admission_cost,
         ),

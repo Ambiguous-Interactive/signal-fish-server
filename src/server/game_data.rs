@@ -735,7 +735,7 @@ where
     }
 }
 
-/// Count canonical JSON game-data bytes without formatting string escapes or integers.
+/// Count canonical JSON value bytes without formatting string escapes or integers.
 pub(super) fn game_data_json_len(value: &serde_json::Value) -> usize {
     match value {
         serde_json::Value::String(value) => json_string_len(value),

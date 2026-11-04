@@ -139,7 +139,7 @@ impl EnhancedGameServer {
         //    maximally cheap. Size is the canonical serialized JSON byte
         //    length of the opaque `signal` value — the same bytes the relay
         //    would otherwise fan out.
-        let payload_bytes = canonical_json_len(&signal);
+        let payload_bytes = super::game_data::game_data_json_len(&signal);
         let max_signal_bytes = self.config.max_signal_bytes;
         if payload_bytes > max_signal_bytes {
             self.reject_signal(
@@ -618,6 +618,7 @@ impl EnhancedGameServer {
                             .iter()
                             .map(|member| member.player_id)
                             .collect();
+                        let projection = resolved.decision.projection();
                         let mut turn_credentials_issued = 0_u64;
                         let mut joiner_has_plan = false;
                         let recipient_messages: Vec<RoomRecipientMessages> = resolved
@@ -626,9 +627,9 @@ impl EnhancedGameServer {
                             .iter()
                             .map(|member| {
                                 let plan = server
-                                    .build_session_plan_message(
-                                        &resolved.decision,
-                                        member.player_id,
+                                    .build_session_plan_message_for_member(
+                                        &projection,
+                                        member,
                                         now_unix,
                                     )
                                     .map(|(message, minted)| {

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce CPU and memory use during live P2P host plan updates, guest departures, and WebRTC signaling (#1437, #1438, #1439).
 - Reduce memory used by live P2P room events and repeated Direct host endpoint reports (#1432, #1433, #1434).
 - Reduce allocations for P2P transport reports in two-player rooms (#1430).
 - Reduce peer lookup work during conditional room publications (#1423).

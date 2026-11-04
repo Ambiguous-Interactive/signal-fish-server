@@ -6,6 +6,17 @@ use signal_fish_server::server::allocation_benchmark::{
 
 /// #1418: room size must not change a mesh departure policy read cost.
 pub(crate) fn mesh_departure_skips_survivor_selection() {
+    departure_skips_survivor_selection(Topology::Mesh, false);
+}
+
+/// #1437: both host transports avoid copying unaffected survivors.
+pub(crate) fn host_guest_departure_skips_survivor_selection() {
+    departure_skips_survivor_selection(Topology::Host, false);
+    departure_skips_survivor_selection(Topology::Host, true);
+}
+
+/// Compare the same no-publication departure at increasing seated room sizes.
+fn departure_skips_survivor_selection(topology: Topology, direct: bool) {
     let mut profiles = Vec::new();
     for count in [2_u128, 16, 64] {
         allocation_harness::block_on(async {
@@ -15,8 +26,9 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
                 ProtocolConfig::default(),
                 RelayTypeConfig::default(),
                 SessionConfig {
-                    default_topology: Topology::Mesh,
-                    enable_webrtc: true,
+                    default_topology: topology,
+                    enable_webrtc: !direct,
+                    enable_direct: direct,
                     ..Default::default()
                 },
                 TurnConfig::default(),
@@ -34,7 +46,11 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
                 let (sender, receiver) = tokio::sync::mpsc::channel(512);
                 receivers.push(receiver);
                 server.connect_client(id, sender).await;
-                negotiate_webrtc_for_measurement(&server, &id);
+                if direct {
+                    signal_fish_server::server::allocation_benchmark::negotiate_direct_for_measurement(&server, &id);
+                } else {
+                    negotiate_webrtc_for_measurement(&server, &id);
+                }
                 server
                     .handle_join_room(
                         &id,
@@ -55,9 +71,20 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
             for receiver in &mut receivers {
                 drain_membership_setup(receiver, false);
             }
+            if direct {
+                server
+                    .handle_provide_connection_info(
+                        &owner,
+                        ConnectionInfo::Direct {
+                            host: "192.0.2.1".into(),
+                            port: 7777,
+                        },
+                    )
+                    .await;
+            }
             server.handle_start_game(&owner).await;
             let mut generation = None;
-            for receiver in &mut receivers {
+            for (index, receiver) in receivers.iter_mut().enumerate() {
                 let starting = receiver.try_recv().unwrap();
                 assert!(matches!(
                     starting.as_ref(),
@@ -68,8 +95,15 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
                 else {
                     panic!("missing plan");
                 };
-                assert_eq!(plan.topology, Topology::Mesh);
-                assert_eq!(plan.peers.len(), usize::try_from(count - 1).unwrap());
+                assert_eq!(plan.topology, topology);
+                assert_eq!(
+                    plan.peers.len(),
+                    if topology == Topology::Mesh || index == 0 {
+                        usize::try_from(count - 1).unwrap()
+                    } else {
+                        1
+                    }
+                );
                 if let Some(expected) = generation {
                     assert_eq!(plan.generation, expected);
                 }
@@ -86,7 +120,9 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
                 let stats = region.change();
                 assert!(unchanged);
                 if measured {
-                    println!("MESH_DEPARTURE members={count} stats={stats:?}");
+                    println!(
+                        "SESSION_DEPARTURE topology={topology:?} direct={direct} members={count} stats={stats:?}"
+                    );
                     profiles.push(stats);
                 }
                 for receiver in &mut receivers {
@@ -108,6 +144,6 @@ pub(crate) fn mesh_departure_skips_survivor_selection() {
         profiles
             .iter()
             .all(|stats| stats.bytes_allocated <= profiles[0].bytes_allocated + 128),
-        "mesh departure copied survivor selection fields: {profiles:?}"
+        "{topology:?} departure copied survivor selection fields: {profiles:?}"
     );
 }

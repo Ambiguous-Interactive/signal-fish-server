@@ -5183,6 +5183,7 @@ mod properties {
         decision: &SessionPlanDecision,
         members: &[SessionMember],
     ) -> Result<(), TestCaseError> {
+        let projection = decision.projection();
         for recipient in members {
             let r = recipient.player_id;
             let ice = vec![IceServer {
@@ -5190,7 +5191,8 @@ mod properties {
                 username: None,
                 credential: None,
             }];
-            let plan = decision.plan_for(r, ice.clone());
+            let plan = projection.plan_for_member(recipient, ice.clone());
+            prop_assert_eq!(plan.generation, decision.generation);
 
             // Envelope: the decision's pair/host, the floor fallback, and the
             // caller's ICE list passed through verbatim (per-recipient TURN
@@ -5218,6 +5220,7 @@ mod properties {
                     .iter()
                     .find(|m| m.player_id == peer.player_id)
                     .expect("every listed peer is a member");
+                prop_assert_eq!(&peer.player_name, &peer_member.player_name);
                 prop_assert!(
                     member_supports(peer_member, decision.topology, decision.transport),
                     "peer list names a member that cannot run the session"
@@ -6268,4 +6271,125 @@ async fn mesh_departure_from_empty_non_finalized_room_keeps_sticky_state() {
         .await;
     assert_eq!(server.active_session_plan(&room.id), Some(stored));
     assert_silent(&mut receiver).await;
+}
+
+/// A seated but unrouted host must not suppress guest-triggered failover.
+#[tokio::test(start_paused = true)]
+async fn guest_departure_replaces_a_stored_host_that_is_no_longer_routed() {
+    let server = create_server_with_session(host_config()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (successor, mut successor_rx) = register_client(&server).await;
+    let (departing, mut departing_rx) = register_client(&server).await;
+    for player in [host, successor, departing] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room =
+        finalized_db_room_with(&server, host, &[(successor, "Next"), (departing, "Guest")]).await;
+    publish_room_members(&server, &room, &[host, successor, departing]).await;
+    server.active_session_plans.insert(
+        room,
+        ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(host),
+        },
+    );
+    server
+        .database
+        .remove_player_from_room(&room, &departing)
+        .await
+        .unwrap();
+    unpublish_room_member(&server, &departing).await;
+    unpublish_room_member(&server, &host).await;
+    server
+        .handle_session_member_departure(&room, &departing)
+        .await;
+    let plan = expect_plan(&mut successor_rx, "routed successor").await;
+    assert_eq!(plan.host, Some(successor));
+    assert!(plan.peers.is_empty());
+    assert_eq!(
+        server.active_session_plan(&room).unwrap().host,
+        Some(successor)
+    );
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut departing_rx).await;
+}
+
+/// Pin exact star fields and order for cached hosts and missing identities.
+#[test]
+fn shared_projection_preserves_star_order_endpoints_and_missing_recipients() {
+    let host = PlayerId::from_u128(3);
+    let guest = PlayerId::from_u128(1);
+    let other = PlayerId::from_u128(2);
+    for transport in [Transport::Direct, Transport::WebRtc] {
+        for missing_host in [false, true] {
+            let mut members = vec![
+                v3_full(guest, "Guest雪"),
+                v3_full(other, "Other😀"),
+                v3_full(host, "Host"),
+            ];
+            if missing_host {
+                members.pop();
+            }
+            let decision = SessionPlanDecision {
+                generation: crate::protocol::SessionGeneration::new_v4(),
+                topology: Topology::Host,
+                transport,
+                host: Some(host),
+                members,
+            };
+            let projection = decision.projection();
+            for member in &decision.members {
+                let ice = vec![IceServer {
+                    urls: vec![format!("stun:{}.example", member.player_id)],
+                    username: None,
+                    credential: None,
+                }];
+                let plan = projection.plan_for_member(member, ice.clone());
+                assert_eq!(plan.generation, decision.generation);
+                assert_eq!(plan.host, Some(host));
+                assert_eq!(
+                    serde_json::to_value(&plan.ice_servers).unwrap(),
+                    serde_json::to_value(&ice).unwrap()
+                );
+                assert_eq!(
+                    plan.direct_endpoint,
+                    if transport == Transport::Direct && !missing_host {
+                        Some(crate::protocol::DirectEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: 7777,
+                        })
+                    } else {
+                        None
+                    }
+                );
+                let expected: Vec<_> = if missing_host {
+                    vec![]
+                } else if member.player_id == host {
+                    vec![
+                        (guest, "Guest雪", false, false),
+                        (other, "Other😀", false, false),
+                    ]
+                } else {
+                    vec![(host, "Host", true, true)]
+                };
+                assert_eq!(
+                    plan.peers
+                        .iter()
+                        .map(|peer| (
+                            peer.player_id,
+                            peer.player_name.as_str(),
+                            peer.is_authority,
+                            peer.initiate
+                        ))
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            assert!(decision
+                .plan_for(PlayerId::from_u128(99), vec![])
+                .peers
+                .is_empty());
+        }
+    }
 }

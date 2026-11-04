@@ -91,11 +91,75 @@ fn payload_sizing_runtime(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Compare exact offer, ICE and opaque payload sizing against serialization.
+fn signal_payload_sizing(criterion: &mut Criterion) {
+    use signal_fish_server::server::allocation_benchmark::{
+        canonical_json_len, game_data_json_len,
+    };
+    let mut group = criterion.benchmark_group("signal_payload_sizing");
+    for (name, payload) in [
+        (
+            "offer",
+            serde_json::json!({"Offer": format!("v=0\r\n{}", "a=candidate:1 1 UDP 2122260223 192.0.2.1 5000 typ host\r\n".repeat(64))}),
+        ),
+        (
+            "ice",
+            serde_json::json!({"IceCandidate": {"candidate": "candidate:1 1 UDP 2122260223 192.0.2.1 5000 typ host", "sdpMid": "0", "sdpMLineIndex": 0}}),
+        ),
+        (
+            "opaque",
+            serde_json::json!({"nested": ["雪\n\t\u{0000}\"\\".repeat(128), -1, 0.25, null]}),
+        ),
+    ] {
+        let expected = serde_json::to_vec(&payload)
+            .expect("signal serialization")
+            .len();
+        assert_eq!(game_data_json_len(&payload), expected);
+        assert_eq!(canonical_json_len(&payload), expected);
+        for (implementation, count) in [
+            (
+                "value",
+                game_data_json_len as fn(&serde_json::Value) -> usize,
+            ),
+            (
+                "serde",
+                canonical_json_len::<serde_json::Value> as fn(&serde_json::Value) -> usize,
+            ),
+        ] {
+            group.bench_function(format!("{name}/{implementation}"), |bencher| {
+                bencher.iter(|| black_box(count(black_box(&payload))));
+            });
+        }
+    }
+    group.finish();
+}
+
+/// Measure complete star publications with the host last in the roster.
+fn host_plan_projection(criterion: &mut Criterion) {
+    use signal_fish_server::server::allocation_benchmark::HostElectionFixture;
+    let mut group = criterion.benchmark_group("host_plan_projection");
+    for direct in [false, true] {
+        for count in [2, 16, 64, 255] {
+            let mut fixture = HostElectionFixture::new(count, direct);
+            let plans = fixture.plans_for_members();
+            assert_eq!(plans.len(), count as usize);
+            assert_eq!(
+                plans.iter().map(|plan| plan.peers.len()).sum::<usize>(),
+                2 * (count as usize - 1)
+            );
+            group.bench_function(format!("{direct}/{count}"), |bencher| {
+                bencher.iter(|| black_box(fixture.plans_for_members()));
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3));
-    targets = relay_serialization_runtime, payload_sizing_runtime
+    targets = relay_serialization_runtime, payload_sizing_runtime, host_plan_projection, signal_payload_sizing
 }
 criterion_main!(benches);

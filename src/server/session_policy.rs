@@ -24,7 +24,7 @@
 //! migration would disrupt gameplay for zero correctness gain.
 //!
 //! The selection core ([`choose_session_plan`], [`elect_host`],
-//! [`SessionPlanDecision::plan_for`]) is pure and unit-testable; the thin
+//! `SessionPlanDecision::plan_for`) is pure and unit-testable; the thin
 //! [`EnhancedGameServer::emit_session_plan`] method gathers per-member
 //! capabilities, runs the core, and best-effort delivers the result — gated on
 //! v3 so a v2 client never observes a `SessionPlan` (the per-recipient v3 gate).
@@ -230,7 +230,7 @@ impl SessionMember {
     /// the given (topology, transport) pair: protocol v3 plus both axes.
     ///
     /// The capability predicate shared by plan selection ([`all_support`]) and
-    /// per-recipient peer-list filtering ([`SessionPlanDecision::plan_for`]).
+    /// per-recipient peer-list filtering (`SessionPlanDecision::plan_for`).
     /// Host validity and election wrap this with [`Self::can_host`], which adds
     /// Direct endpoint readiness.
     fn supports_session(&self, topology: Topology, transport: Transport) -> bool {
@@ -253,11 +253,11 @@ impl SessionMember {
 
 /// The room-wide selection result (not yet specialized per recipient).
 ///
-/// Carries the canonical member list so [`SessionPlanDecision::plan_for`] can
+/// Carries the canonical member list so `SessionPlanDecision::plan_for` can
 /// build each recipient's tailored peer list. The ICE servers are intentionally
 /// **not** stored here: they are per-recipient (each WebRTC member receives its
 /// own freshly minted TURN credentials), so the emit site builds them and passes
-/// them into [`SessionPlanDecision::plan_for`].
+/// them into `SessionPlanDecision::plan_for`.
 pub(crate) struct SessionPlanDecision {
     pub generation: SessionGeneration,
     pub topology: Topology,
@@ -350,7 +350,7 @@ fn all_support(members: &[SessionMember], topology: Topology, transport: Transpo
 /// finalize-time member negotiated (`all_support`). Admitting a joiner that
 /// cannot run that pair would silently split the room's data path: the
 /// joiner's WebSocket-relayed `GameData` reaches everyone, but the capable
-/// members' peer-to-peer traffic never reaches it ([`SessionPlanDecision::plan_for`]
+/// members' peer-to-peer traffic never reaches it (`SessionPlanDecision::plan_for`
 /// filters both sides), so it would play on permanently divergent state. The
 /// admission gate therefore applies the same membership predicate selection
 /// used at finalize: protocol v3 plus both axes. Direct endpoints are NOT part
@@ -636,7 +636,7 @@ impl SessionPlanDecision {
     /// capabilities — a reconnect owns its seat and is never rejected. A
     /// WebRTC pair is doomed unless BOTH sides negotiated the transport —
     /// `handle_signal` rejects either direction and the wasted offers burn
-    /// signal rate-limit budget — so [`Self::plan_for`] still filters the peer
+    /// signal rate-limit budget — so `plan_for` still filters the peer
     /// list on both sides using the shared capability predicate.
     pub(crate) fn pairable(&self, member: &SessionMember) -> bool {
         member.supports_session(self.topology, self.transport)
@@ -644,6 +644,7 @@ impl SessionPlanDecision {
 
     /// Whether the recipient (looked up by id in `members`) is [`Self::pairable`].
     /// An id absent from `members` is defensively non-pairable.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn recipient_pairable(&self, recipient: PlayerId) -> bool {
         self.members
             .iter()
@@ -680,24 +681,64 @@ impl SessionPlanDecision {
     /// when [`all_support`] holds, i.e. every member already satisfies the
     /// predicate.
     #[must_use]
+    #[cfg(any(test, feature = "allocation-tracking"))]
     pub(crate) fn plan_for(
         &self,
         recipient: PlayerId,
         ice_servers: Vec<IceServer>,
     ) -> SessionPlanPayload {
-        let peers = if !self.recipient_pairable(recipient) {
-            // The recipient never negotiated this session's (topology,
-            // transport): it must not be told to attempt P2P pairs that
-            // `handle_signal` would reject. Empty is truthful — it has no P2P
-            // peers; `fallback: relay` below is its data path.
+        self.projection().plan_for_recipient(
+            recipient,
+            self.members
+                .iter()
+                .find(|member| member.player_id == recipient),
+            ice_servers,
+        )
+    }
+
+    /// Resolve the shared host once for a complete recipient publication.
+    pub(super) fn projection(&self) -> SessionPlanProjection<'_> {
+        SessionPlanProjection {
+            decision: self,
+            host: self
+                .host
+                .and_then(|host| self.members.iter().find(|member| member.player_id == host)),
+        }
+    }
+}
+
+/// Borrow the shared host once while preparing a complete publication.
+pub(super) struct SessionPlanProjection<'a> {
+    decision: &'a SessionPlanDecision,
+    host: Option<&'a SessionMember>,
+}
+
+impl SessionPlanProjection<'_> {
+    /// Build a plan for a member borrowed from this decision's roster.
+    pub(super) fn plan_for_member(
+        &self,
+        recipient: &SessionMember,
+        ice_servers: Vec<IceServer>,
+    ) -> SessionPlanPayload {
+        self.plan_for_recipient(recipient.player_id, Some(recipient), ice_servers)
+    }
+
+    /// Shape peer edges and preserve endpoint and ICE fields for one recipient.
+    fn plan_for_recipient(
+        &self,
+        recipient: PlayerId,
+        member: Option<&SessionMember>,
+        ice_servers: Vec<IceServer>,
+    ) -> SessionPlanPayload {
+        let decision = self.decision;
+        let peers = if !member.is_some_and(|member| decision.pairable(member)) {
             Vec::new()
         } else {
-            match self.topology {
+            match decision.topology {
                 Topology::Mesh => {
-                    let members = self
-                        .members
-                        .iter()
-                        .filter(|member| member.player_id != recipient && self.pairable(member));
+                    let members = decision.members.iter().filter(|member| {
+                        member.player_id != recipient && decision.pairable(member)
+                    });
                     let mut peers = Vec::with_capacity(members.clone().count());
                     peers.extend(members.map(|member| SessionPeer {
                         player_id: member.player_id,
@@ -711,49 +752,31 @@ impl SessionPlanDecision {
                 Topology::Relay => Vec::new(),
             }
         };
-
         SessionPlanPayload {
-            generation: self.generation,
-            topology: self.topology,
-            transport: self.transport,
-            host: self.host,
-            direct_endpoint: self.direct_endpoint(),
+            generation: decision.generation,
+            topology: decision.topology,
+            transport: decision.transport,
+            host: decision.host,
+            direct_endpoint: (decision.transport == Transport::Direct)
+                .then(|| self.host.and_then(SessionMember::direct_endpoint))
+                .flatten(),
             peers,
             ice_servers,
             fallback: Transport::Relay,
         }
     }
 
-    /// The elected host's validated connect target for `host + direct`.
-    fn direct_endpoint(&self) -> Option<DirectEndpoint> {
-        if self.transport != Transport::Direct {
-            return None;
-        }
-
-        let host = self.host?;
-        self.members
-            .iter()
-            .find(|member| member.player_id == host)?
-            .direct_endpoint()
-    }
-
-    /// Build the per-recipient peer list for `host` topology. Only reached for
-    /// a [`Self::pairable`] recipient ([`Self::plan_for`] gates first).
+    /// Build star edges with the already-resolved host.
     fn host_peers_for(&self, recipient: PlayerId) -> Vec<SessionPeer> {
-        let Some(host) = self.host else {
-            // A host plan with no elected host is degenerate; emit no peers
-            // rather than fabricate connections.
+        let decision = self.decision;
+        let Some(host) = decision.host else {
             return Vec::new();
         };
-
         if recipient == host {
-            // The host answers every pairable client and initiates to none.
-            // Non-pairable members (e.g. relay-only seat-fillers) stay off the
-            // star: they participate via the relay floor.
-            let members = self
+            let members = decision
                 .members
                 .iter()
-                .filter(|member| member.player_id != host && self.pairable(member));
+                .filter(|member| member.player_id != host && decision.pairable(member));
             let mut peers = Vec::with_capacity(members.clone().count());
             peers.extend(members.map(|member| SessionPeer {
                 player_id: member.player_id,
@@ -763,14 +786,12 @@ impl SessionPlanDecision {
             }));
             peers
         } else {
-            // Each pairable client connects only to the host and offers to it.
-            self.members
-                .iter()
-                .find(|member| member.player_id == host && self.pairable(member))
-                .map(|host_member| {
+            self.host
+                .filter(|host| decision.pairable(host))
+                .map(|host| {
                     vec![SessionPeer {
-                        player_id: host_member.player_id,
-                        player_name: host_member.player_name.clone(),
+                        player_id: host.player_id,
+                        player_name: host.player_name.clone(),
                         is_authority: true,
                         initiate: true,
                     }]
@@ -872,14 +893,13 @@ impl EnhancedGameServer {
             let now_unix = decision
                 .uses_webrtc_signaling()
                 .then(|| chrono::Utc::now().timestamp());
+            let projection = decision.projection();
             let mut turn_credentials_issued = 0u64;
-            let recipient_messages = finalized
+            let recipient_messages = decision
                 .members
                 .iter()
                 .map(|member| {
-                    let supports_v3 = decision.members.iter().any(|candidate| {
-                        candidate.player_id == member.id && candidate.supports_v3()
-                    });
+                    let supports_v3 = member.supports_v3();
                     let followup = if supports_v3 {
                         let (ice_servers, minted) = now_unix.map_or_else(
                             || (Vec::new(), 0),
@@ -887,20 +907,20 @@ impl EnhancedGameServer {
                                 compose_ice_servers_for(
                                     &session_config,
                                     &turn_config,
-                                    member.id,
+                                    member.player_id,
                                     now,
                                 )
                             },
                         );
                         turn_credentials_issued = turn_credentials_issued.saturating_add(minted);
                         Some(Arc::new(ServerMessage::SessionPlan(Box::new(
-                            decision.plan_for(member.id, ice_servers),
+                            projection.plan_for_member(member, ice_servers),
                         ))))
                     } else {
                         None
                     };
                     RoomRecipientMessages::with_followup(
-                        member.id,
+                        member.player_id,
                         Arc::clone(&game_starting),
                         followup,
                     )
@@ -1132,6 +1152,42 @@ impl EnhancedGameServer {
             return;
         }
 
+        if let Some(host_id) = stored.host.filter(|host| host != departed) {
+            match self
+                .database
+                .get_room_session_host_snapshot(room_id, &host_id)
+                .await
+            {
+                Ok(Some(snapshot)) if snapshot.lobby_state == LobbyState::Finalized => {
+                    if let Some(host) = snapshot.host {
+                        let host = SessionMember::from_session_player(
+                            host,
+                            self.session_capabilities(&host_id),
+                        );
+                        if stored.supported_by(&host) {
+                            match self
+                                .message_coordinator
+                                .routed_player_pair(room_id, &host_id, &host_id)
+                                .await
+                            {
+                                Ok(None | Some([true, true])) => return,
+                                Ok(Some(_)) => {}
+                                Err(error) => {
+                                    tracing::warn!(%room_id, %departed, %error, "Failed to resolve host routing for departure re-planning");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%room_id, %departed, %error, "Failed to fetch host for departure re-planning");
+                    return;
+                }
+            }
+        }
+
         let room = match self
             .database
             .get_room_session_selection_snapshot(room_id)
@@ -1253,7 +1309,7 @@ impl EnhancedGameServer {
     /// best-effort delivered its tailored plan — v3-gated per recipient, so a
     /// v3 relay-only member still receives the plan describing the session
     /// while v2 members receive nothing. Peer lists are capability-filtered on
-    /// both sides in [`SessionPlanDecision::plan_for`]: a member that did not
+    /// both sides in `SessionPlanDecision::plan_for`: a member that did not
     /// negotiate the sticky pair gets an **empty** `peers` list (`fallback:
     /// relay` is its data path) and is never listed in capable members' plans
     /// on both sides. A re-elected host of a 1-member room is fine (a star of one with
@@ -1369,13 +1425,14 @@ impl EnhancedGameServer {
         let now_unix = decision
             .uses_webrtc_signaling()
             .then(|| chrono::Utc::now().timestamp());
+        let projection = decision.projection();
         let mut turn_credentials_issued = 0_u64;
         let recipient_messages: Vec<_> = decision
             .members
             .iter()
             .map(|member| {
                 let messages = self
-                    .build_session_plan_message(&decision, member.player_id, now_unix)
+                    .build_session_plan_message_for_member(&projection, member, now_unix)
                     .map(|(message, minted)| {
                         turn_credentials_issued = turn_credentials_issued.saturating_add(minted);
                         vec![message]
@@ -1559,33 +1616,37 @@ impl EnhancedGameServer {
     /// Build one v3-gated tailored plan without performing delivery. Reserved
     /// room publications use this to prepare every recipient before atomically
     /// reserving the complete phase set.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) fn build_session_plan_message(
         &self,
         decision: &SessionPlanDecision,
         recipient: PlayerId,
         now_unix: Option<i64>,
     ) -> Option<(Arc<ServerMessage>, u64)> {
-        if !self.client_supports_v3(&recipient) {
+        let member = decision
+            .members
+            .iter()
+            .find(|member| member.player_id == recipient)?;
+        self.build_session_plan_message_for_member(&decision.projection(), member, now_unix)
+    }
+
+    /// Build a v3 plan for a resolved member and count its minted TURN entries.
+    pub(super) fn build_session_plan_message_for_member(
+        &self,
+        projection: &SessionPlanProjection<'_>,
+        member: &SessionMember,
+        now_unix: Option<i64>,
+    ) -> Option<(Arc<ServerMessage>, u64)> {
+        if !self.client_supports_v3(&member.player_id) {
             return None;
         }
-
-        // A recipient that never negotiated this session's (topology,
-        // transport) receives an empty peer list and the relay fallback, so it
-        // can never run ICE for this session: it gets no ICE list at all, TURN
-        // or STUN, because there is nothing for it to gather against.
-        // `ice_pregather_eligible` applies the same reasoning one step earlier
-        // and with the only information available then — the GAME'S DESIRED
-        // topology, because no session exists during the lobby. A member
-        // eligible there can still end up non-pairable here if the ladder
-        // settles below its negotiated rung, so pre-gather can hand out a
-        // credential this seam later withholds.
         let (ice_servers, minted) = match now_unix {
-            Some(now_unix) if decision.recipient_pairable(recipient) => {
-                self.composed_ice_servers_for(recipient, now_unix)
+            Some(now_unix) if projection.decision.pairable(member) => {
+                self.composed_ice_servers_for(member.player_id, now_unix)
             }
             _ => (Vec::new(), 0),
         };
-        let plan = decision.plan_for(recipient, ice_servers);
+        let plan = projection.plan_for_member(member, ice_servers);
         Some((Arc::new(ServerMessage::SessionPlan(Box::new(plan))), minted))
     }
 
