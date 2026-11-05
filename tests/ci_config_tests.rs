@@ -34255,9 +34255,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 48 shards, ceil(478/48) * 29s remains 290s.
 /*
     486 (was 484): routed roster normalization and shared mesh capacity add two sites (#1442, #1443).
-    With 49 shards, ceil(486/49) * 29s remains 290s.
+    488 (was 486): transport-specific session snapshots add two comparison sites (#1461).
+    With 49 shards, ceil(488/49) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 486;
+const MUTATION_TOTAL_MUTANTS: u32 = 488;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
