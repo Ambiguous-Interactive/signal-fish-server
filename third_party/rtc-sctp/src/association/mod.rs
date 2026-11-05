@@ -1,6 +1,6 @@
 use crate::association::{
     state::{AckMode, AckState, AssociationState},
-    stats::{AssociationStats, OutboundMessageInfo},
+    stats::{AssociationFlowControl, AssociationStats, OutboundMessageInfo},
 };
 use crate::chunk::chunk_header::CHUNK_HEADER_SIZE;
 use crate::chunk::{
@@ -698,6 +698,26 @@ impl Association {
     /// Returns Association statistics
     pub fn stats(&self) -> AssociationStats {
         self.stats
+    }
+
+    /// Snapshot flow-control ownership at this association observation, without advancing it.
+    pub fn flow_control(&self) -> AssociationFlowControl {
+        AssociationFlowControl {
+            receive_window: self.get_my_receiver_window_credit(),
+            receive_buffer_limit: self.max_receive_buffer_size,
+            peer_receive_window: self.rwnd,
+            congestion_window: self.cwnd,
+            inflight_bytes: self.inflight_queue.get_num_bytes(),
+            inflight_chunks: self.inflight_queue.len(),
+            pending_bytes: self.pending_queue.get_num_bytes(),
+            pending_chunks: self.pending_queue.data_len(),
+            received_gap_chunks: self.payload_queue.len(),
+            cumulative_ack: self.cumulative_tsn_ack_point,
+            next_tsn: self.my_next_tsn,
+            receive_cumulative_tsn: self.peer_last_tsn,
+            earliest_outstanding_tsn: self.earliest_outstanding_tsn(),
+            has_complete_queued_data: self.has_complete_queued_data(),
+        }
     }
 
     /// Whether the Association is in the process of being established

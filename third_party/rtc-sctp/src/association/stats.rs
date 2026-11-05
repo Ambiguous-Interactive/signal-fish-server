@@ -1,3 +1,36 @@
+/// Scalar flow-control state sampled without retaining payloads or changing protocol state.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct AssociationFlowControl {
+    /// Current local receive credit, in bytes; sent in the next SACK.
+    pub receive_window: u32,
+    /// Configured local reassembly receive limit, in bytes.
+    pub receive_buffer_limit: u32,
+    /// Peer receive credit available to new DATA, after outstanding bytes.
+    pub peer_receive_window: u32,
+    /// Local congestion window, in bytes.
+    pub congestion_window: u32,
+    /// Payload bytes retained in the outbound flight queue.
+    pub inflight_bytes: usize,
+    /// Chunks retained in the outbound flight queue, including gap-acked entries.
+    pub inflight_chunks: usize,
+    /// Payload bytes waiting for first transmission selection.
+    pub pending_bytes: usize,
+    /// DATA chunks waiting for first transmission selection.
+    pub pending_chunks: usize,
+    /// Received TSNs retained above the cumulative receive point.
+    pub received_gap_chunks: usize,
+    /// Peer cumulative acknowledgment of local outbound TSNs.
+    pub cumulative_ack: u32,
+    /// Next local outbound transmission sequence number.
+    pub next_tsn: u32,
+    /// Local cumulative receive TSN.
+    pub receive_cumulative_tsn: u32,
+    /// First sent TSN that still requires peer acknowledgment.
+    pub earliest_outstanding_tsn: Option<u32>,
+    /// At least one stream retains a complete reassembled message.
+    pub has_complete_queued_data: bool,
+}
+
 /// Identity and policy of a locally queued message. IDs belong to one association.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct OutboundMessageInfo {

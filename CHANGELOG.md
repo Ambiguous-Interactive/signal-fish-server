@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Report SCTP credit, send windows, queued DATA, and TSN ownership to diagnose stalled native P2P transfers (#1319).
 - Report session metrics scan and capture times in trace logs.
 
 ### Changed
 
+- Reduce room-change scans on busy servers and allocations during live WebRTC signaling (#1465, #1466, #1467).
 - Reduce server heap allocations during large P2P readiness snapshots, conditional room replies, and WebRTC room and
   host checks (#1459, #1460, #1461).
 - Reduce server memory use during P2P reconnects, replies, signaling, and game starts

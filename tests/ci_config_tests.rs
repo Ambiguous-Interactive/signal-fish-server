@@ -34257,8 +34257,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     486 (was 484): routed roster normalization and shared mesh capacity add two sites (#1442, #1443).
     489 (was 486): transport-specific selection and host snapshots add three comparison sites (#1461).
     With 49 shards, ceil(489/49) * 29s remains 290s.
+    491 (was 489): active room event lane retention adds two sites (#1467).
+    With 50 shards, ceil(491/50) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 489;
+const MUTATION_TOTAL_MUTANTS: u32 = 491;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -34526,12 +34528,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/49"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/50"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/49` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/50` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -34682,7 +34684,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/49 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/50 --print-cmd",
         violations.join("\n")
     );
 }

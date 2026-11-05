@@ -173,6 +173,7 @@ pub(crate) struct PendingQueue {
     unordered_queue: VecDeque<PendingEntry>,
     ordered_queue: VecDeque<PendingEntry>,
     queue_len: usize,
+    reset_markers: usize,
     n_bytes: usize,
     selected: bool,
     unordered_is_selected: bool,
@@ -202,6 +203,7 @@ impl PendingQueue {
     pub(crate) fn push_reset(&mut self, reset: ResetMarker) {
         self.ordered_queue.push_back(PendingEntry::Reset(reset));
         self.queue_len += 1;
+        self.reset_markers = self.reset_markers.saturating_add(1);
     }
 
     fn front_queue(&self) -> &VecDeque<PendingEntry> {
@@ -238,6 +240,7 @@ impl PendingQueue {
             return None;
         };
         self.queue_len = queue_len;
+        self.reset_markers = self.reset_markers.saturating_sub(1);
         Some(reset)
     }
 
@@ -338,6 +341,11 @@ impl PendingQueue {
 
     pub(crate) fn len(&self) -> usize {
         self.queue_len
+    }
+
+    /// Count pending DATA chunks without scanning messages or counting control markers.
+    pub(crate) fn data_len(&self) -> usize {
+        self.queue_len.saturating_sub(self.reset_markers)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -504,6 +512,7 @@ mod tests {
         assert_eq!(0, queue.get_num_bytes());
     }
 
+    /// Count zero-byte DATA separately from reset control markers.
     #[test]
     fn zero_size_data_is_not_a_reset_marker() {
         for id in [None, MessageId::new(1)] {
@@ -513,14 +522,17 @@ mod tests {
             data.user_data = Bytes::new();
             queue.push_message(vec![data]);
             assert_eq!(1, queue.len());
+            assert_eq!(1, queue.data_len());
             assert_eq!(0, queue.get_num_bytes());
             assert!(queue.pop_ready_reset().is_none());
             assert_eq!(id, queue.peek().unwrap().message_id);
             queue.pop(true, false).unwrap();
             assert!(queue.is_empty());
+            assert_eq!(0, queue.data_len());
         }
     }
 
+    /// Preserve DATA-only counts as ordered and unordered tails send or retire around a reset.
     #[test]
     fn sending_or_abandoning_a_tail_preserves_the_reset_boundary() -> Result<()> {
         for unordered in [false, true] {
@@ -538,9 +550,11 @@ mod tests {
                 later.stream_generation += 1;
                 queue.push_message(vec![later]);
 
+                assert_eq!(3, queue.data_len());
                 let id = queue.pop(true, unordered).unwrap().message_id.unwrap();
                 assert!(queue.pop_ready_reset().is_none());
                 assert_eq!(3, queue.len());
+                assert_eq!(2, queue.data_len());
                 assert_eq!(8, queue.get_num_bytes());
                 if abandon {
                     assert_eq!(1, queue.drain_message(id)?.len());
@@ -548,18 +562,21 @@ mod tests {
                 } else {
                     assert!(queue.pop(false, unordered).unwrap().ending_fragment);
                 }
+                assert_eq!(1, queue.data_len());
                 // Neither DATA operation can consume a control marker.
                 assert!(queue.peek().is_none());
                 assert!(queue.pop(true, false).is_none());
                 assert_eq!(0, queue.pop_ready_reset().unwrap().stream_identifier);
                 assert!(queue.pop_ready_reset().is_none());
                 assert_eq!(1, queue.len());
+                assert_eq!(1, queue.data_len());
                 assert_eq!(4, queue.get_num_bytes());
                 assert!(queue.drain_message(id)?.is_empty());
                 let later = queue.pop(true, false).unwrap();
                 assert_eq!(MessageId::new(1), later.message_id);
                 assert_eq!(1, later.stream_generation);
                 assert!(queue.is_empty());
+                assert_eq!(0, queue.data_len());
                 assert_eq!(0, queue.get_num_bytes());
             }
         }

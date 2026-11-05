@@ -1046,6 +1046,9 @@ struct HeldRefusalProgressPoint {
     acknowledgement_timeouts: Option<u64>,
     reliable_messages: Option<u64>,
     reliable_bytes: Option<u64>,
+    receive_window: Option<u64>,
+    received_gap_chunks: Option<u64>,
+    receive_cumulative_tsn: Option<u64>,
 }
 
 #[derive(Default, Debug, serde::Serialize)]
@@ -1059,6 +1062,7 @@ struct HeldRefusalProgress {
 impl HeldRefusalProgress {
     const CHECKPOINTS_MS: [u64; 8] = [0, 100, 500, 1000, 2000, 4000, 8000, 12000];
 
+    /// Retain eight scheduled scalar samples and the latest observation without extra queries.
     fn observe(&mut self, elapsed: Duration, snapshot: &serde_json::Value) {
         let reliable = snapshot["transport_channels"]
             .as_array()
@@ -1075,6 +1079,10 @@ impl HeldRefusalProgress {
             acknowledgement_timeouts: snapshot["sctp"]["acknowledgement_timeouts"].as_u64(),
             reliable_messages: reliable.and_then(|channel| channel["messages_received"].as_u64()),
             reliable_bytes: reliable.and_then(|channel| channel["bytes_received"].as_u64()),
+            receive_window: snapshot["sctp"]["flow_control"]["receive_window"].as_u64(),
+            received_gap_chunks: snapshot["sctp"]["flow_control"]["received_gap_chunks"].as_u64(),
+            receive_cumulative_tsn: snapshot["sctp"]["flow_control"]["receive_cumulative_tsn"]
+                .as_u64(),
         };
         self.latest = Some(point);
         while let Some(&checkpoint_ms) = Self::CHECKPOINTS_MS.get(self.next_checkpoint) {
@@ -1090,12 +1098,14 @@ impl HeldRefusalProgress {
     }
 }
 
+/// Keep missing flow evidence distinct from zero across bounded and delayed checkpoints.
 #[test]
 fn held_refusal_progress_retains_bounded_partial_and_late_observations() {
     let mut progress = HeldRefusalProgress::default();
     progress.observe(Duration::ZERO, &serde_json::Value::Null);
     let snapshot = serde_json::json!({"sctp": {"data_chunks_accepted":3112,
-        "data_chunks_refused":0, "acknowledgement_timeouts":68},
+        "data_chunks_refused":0, "acknowledgement_timeouts":68,
+        "flow_control":{"receive_window":0,"received_gap_chunks":3,"receive_cumulative_tsn":4294967295u32}},
         "transport_channels":[{"label":"ordered", "messages_received":99},
             {"label":"reliable", "messages_received":526,"bytes_received":2154496}]});
     for millis in 1..=16000 {
@@ -1110,6 +1120,9 @@ fn held_refusal_progress_retains_bounded_partial_and_late_observations() {
     assert_eq!(first.accepted_chunks, None);
     assert_eq!(first.refused_chunks, None);
     assert_eq!(first.reliable_messages, None);
+    assert_eq!(first.receive_window, None);
+    assert_eq!(first.received_gap_chunks, None);
+    assert_eq!(first.receive_cumulative_tsn, None);
     for (point, expected_ms) in progress
         .checkpoints
         .iter()
@@ -1123,6 +1136,9 @@ fn held_refusal_progress_retains_bounded_partial_and_late_observations() {
         assert_eq!(point.acknowledgement_timeouts, Some(68));
         assert_eq!(point.reliable_messages, Some(526));
         assert_eq!(point.reliable_bytes, Some(2154496));
+        assert_eq!(point.receive_window, Some(0));
+        assert_eq!(point.received_gap_chunks, Some(3));
+        assert_eq!(point.receive_cumulative_tsn, Some(u64::from(u32::MAX)));
     }
     assert_eq!(progress.latest.unwrap().observed_after_us, 16_000_000);
     progress.observe(
@@ -1131,6 +1147,9 @@ fn held_refusal_progress_retains_bounded_partial_and_late_observations() {
     );
     assert_eq!(progress.checkpoints.len(), 8);
     assert_eq!(progress.latest.unwrap().accepted_chunks, None);
+    assert_eq!(progress.latest.unwrap().receive_window, None);
+    assert_eq!(progress.latest.unwrap().received_gap_chunks, None);
+    assert_eq!(progress.latest.unwrap().receive_cumulative_tsn, None);
     let mut delayed = HeldRefusalProgress::default();
     delayed.observe(Duration::from_secs(20), &snapshot);
     assert_eq!(delayed.checkpoints.len(), 8);
@@ -1963,6 +1982,7 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
     }
 }
 
+/// Preserve live channel contracts and scalar flow observations in both channel profiles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_snapshot_preserves_actual_channel_contracts_in_both_profiles() {
     for godot in [false, true] {
@@ -1976,6 +1996,13 @@ async fn transport_snapshot_preserves_actual_channel_contracts_in_both_profiles(
             (&pair.receiver, pair.sender_id),
         ] {
             let snapshot = engine.transport_diagnostic_snapshot(peer).await;
+            let flow = &snapshot["sctp"]["flow_control"];
+            assert_eq!(flow["receive_buffer_limit"], 1024 * 1024);
+            assert!(flow["receive_window"].as_u64().unwrap() <= 1024 * 1024);
+            assert!(flow["congestion_window"].as_u64().unwrap() > 0);
+            assert!(flow["pending_chunks"].as_u64().is_some());
+            assert!(flow["inflight_chunks"].as_u64().is_some());
+            assert!(flow["has_complete_queued_data"].is_boolean());
             let properties = snapshot["channel_properties"]
                 .as_object()
                 .expect("retain actual registered channel properties");

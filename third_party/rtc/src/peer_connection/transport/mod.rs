@@ -419,11 +419,68 @@ impl From<::sctp::OutboundMessageInfo> for RTCSctpOutboundMessageInfo {
     }
 }
 
+/// Scalar local SCTP flow state from the same association observation as its counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RTCSctpFlowControl {
+    /// Current local receive credit, in bytes; sent in the next SACK.
+    pub receive_window: u32,
+    /// Configured local reassembly receive limit, in bytes.
+    pub receive_buffer_limit: u32,
+    /// Peer receive credit available to new DATA, after outstanding bytes.
+    pub peer_receive_window: u32,
+    /// Local congestion window, in bytes.
+    pub congestion_window: u32,
+    /// Payload bytes retained in the outbound flight queue.
+    pub inflight_bytes: usize,
+    /// Chunks retained in the outbound flight queue, including gap-acked entries.
+    pub inflight_chunks: usize,
+    /// Payload bytes waiting for first transmission selection.
+    pub pending_bytes: usize,
+    /// DATA chunks waiting for first transmission selection.
+    pub pending_chunks: usize,
+    /// Received TSNs retained above the cumulative receive point.
+    pub received_gap_chunks: usize,
+    /// Peer cumulative acknowledgment of local outbound TSNs.
+    pub cumulative_ack: u32,
+    /// Next local outbound transmission sequence number.
+    pub next_tsn: u32,
+    /// Local cumulative receive TSN.
+    pub receive_cumulative_tsn: u32,
+    /// First sent TSN that still requires peer acknowledgment.
+    pub earliest_outstanding_tsn: Option<u32>,
+    /// At least one stream retains a complete reassembled message.
+    pub has_complete_queued_data: bool,
+}
+
+impl From<::sctp::AssociationFlowControl> for RTCSctpFlowControl {
+    /// Preserve the association observation in the JSON diagnostic projection.
+    fn from(flow: ::sctp::AssociationFlowControl) -> Self {
+        Self {
+            receive_window: flow.receive_window,
+            receive_buffer_limit: flow.receive_buffer_limit,
+            peer_receive_window: flow.peer_receive_window,
+            congestion_window: flow.congestion_window,
+            inflight_bytes: flow.inflight_bytes,
+            inflight_chunks: flow.inflight_chunks,
+            pending_bytes: flow.pending_bytes,
+            pending_chunks: flow.pending_chunks,
+            received_gap_chunks: flow.received_gap_chunks,
+            cumulative_ack: flow.cumulative_ack,
+            next_tsn: flow.next_tsn,
+            receive_cumulative_tsn: flow.receive_cumulative_tsn,
+            earliest_outstanding_tsn: flow.earliest_outstanding_tsn,
+            has_complete_queued_data: flow.has_complete_queued_data,
+        }
+    }
+}
+
 /// Local SCTP association counters, before data-channel message reassembly.
 /// Received chunks split into accepted, redundant, and refused attempts.
 /// These counters do not identify streams or count delivered application messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct RTCSctpAssociationStats {
+    /// Flow state when sampled from an association; absent for standalone counter conversions.
+    pub flow_control: Option<RTCSctpFlowControl>,
     /// DATA chunks received, including duplicates and refused chunks.
     pub data_chunks_received: u64,
     /// DATA chunks serialized into SCTP output, including retries; not UDP receipt proof.
@@ -456,8 +513,10 @@ pub struct RTCSctpAssociationStats {
 }
 
 impl From<::sctp::AssociationStats> for RTCSctpAssociationStats {
+    /// Project counters without inventing an unsampled flow observation.
     fn from(mut stats: ::sctp::AssociationStats) -> Self {
         Self {
+            flow_control: None,
             data_chunks_received: stats.get_num_datas(),
             data_chunks_emitted: stats.get_num_emitted_datas(),
             data_chunks_retransmitted: stats.get_num_emitted_retransmissions(),
@@ -481,14 +540,15 @@ impl<'a> RTCSctpTransport<'a> {
     /// Returns `None` before an association exists or after it is removed.
     /// Counters belong to this physical transport, not a logical peer identity.
     pub fn association_stats(&self) -> Option<RTCSctpAssociationStats> {
-        let stats = self
+        let association = self
             .peer_connection
             .sctp_transport()
             .sctp_associations
             .values()
-            .next()?
-            .stats();
-        Some(stats.into())
+            .next()?;
+        let mut stats = RTCSctpAssociationStats::from(association.stats());
+        stats.flow_control = Some(association.flow_control().into());
+        Some(stats)
     }
 
     /// This transport's identity. See [`RTCTransportId`].

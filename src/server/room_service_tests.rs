@@ -5377,6 +5377,118 @@ async fn correlated_join_baseline_failure_rolls_back_and_returns_terminal_failur
     );
 }
 
+/// A seated connection cannot prepare a foreign assignment before baseline admission.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn seated_connection_rejects_foreign_transitions_and_preserves_its_route() {
+    for fail_baseline in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let server = &fixture.server;
+        let player = fixture.leaver;
+        let foreign_room = RoomId::new_v4();
+        let stamp = server
+            .connection_manager
+            .current_relay_stamp_in_room(&player, &fixture.room_id);
+        let generation = server
+            .connection_manager
+            .membership_generation_in_room(&player, &fixture.room_id);
+        fixture
+            .database
+            .fail_get_room_players_for_test(fail_baseline);
+
+        server
+            .handle_join_room(
+                &player,
+                "foreign-transition".into(),
+                Some("FTR001".into()),
+                "already seated".into(),
+                Some(4),
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_next_message_matches(&mut fixture.leaver_rx, "seated join rejection", |message| {
+            matches!(
+                message,
+                ServerMessage::RoomJoinFailed {
+                    error_code: Some(ErrorCode::AlreadyInRoom),
+                    ..
+                }
+            )
+        });
+        assert!(
+            !server
+                .handle_reconnect(&player, &PlayerId::new_v4(), &foreign_room, "unused")
+                .await
+        );
+        assert_next_message_matches(
+            &mut fixture.leaver_rx,
+            "seated reconnect rejection",
+            |message| {
+                matches!(message, ServerMessage::ReconnectionFailed { reason, .. }
+                if reason == "Reconnect must be attempted from a fresh connection")
+            },
+        );
+        fixture.database.fail_get_room_players_for_test(false);
+        assert!(fixture
+            .database
+            .get_room("foreign-transition", "FTR001")
+            .await
+            .unwrap()
+            .is_none());
+
+        let manager = Arc::clone(&server.connection_manager);
+        let tail = server
+            .message_coordinator
+            .unroute_local_client_with_tail(
+                player,
+                foreign_room,
+                Box::new(move || {
+                    manager
+                        .clear_room_assignment_with_tail(&player, &foreign_room)
+                        .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tail, None);
+        assert_eq!(server.get_client_room(&player).await, Some(fixture.room_id));
+        assert_eq!(
+            server
+                .connection_manager
+                .current_relay_stamp_in_room(&player, &fixture.room_id),
+            stamp
+        );
+        assert_eq!(
+            server
+                .connection_manager
+                .membership_generation_in_room(&player, &fixture.room_id),
+            generation
+        );
+        let routed = server
+            .message_coordinator
+            .routed_player_ids(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(routed.len(), 2);
+        assert!(routed.contains(&player) && routed.contains(&fixture.survivor));
+        server
+            .message_coordinator
+            .broadcast_to_room(&fixture.room_id, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+        for receiver in [&mut fixture.leaver_rx, &mut fixture.survivor_rx] {
+            assert_next_message_matches(receiver, "original route remains live", |message| {
+                matches!(message, ServerMessage::Pong)
+            });
+            assert!(drain_queued_messages(receiver).is_empty());
+        }
+    }
+}
+
 async fn expect_correlated_internal_operation_failure(
     receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
     operation_id: crate::protocol::RoomOperationId,

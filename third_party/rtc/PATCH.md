@@ -7,6 +7,12 @@ reassembly and include duplicates and refusals. An absent association returns
 The transport controls preserve distinct counters, repeatable reads, and absence.
 Replacement qualification in #912 must retain this diagnostic API or migrate it.
 
+The optional `flow_control` snapshot adds receive credit, peer credit, congestion
+credit, queue sizes, and TSN ownership for #1319. The transport samples it from
+the same association as the counters. Standalone counter conversions leave it
+`None`. Sampling does not advance timers, consume messages, or change credit.
+Replacement qualification must preserve these fields or migrate their consumers.
+
 Source: published `rtc` 0.21.1, MIT/Apache-2.0.
 Upstream commit: `2a732df55ca4bcf26b80914fa0f570cfaf74cfcb`.
 Crates.io package checksum:

@@ -1282,6 +1282,8 @@ impl Engine {
     /// Outbound SCTP emission counts serialized DATA, not UDP transmission or
     /// remote receipt. Enqueue and first/last abandonment identities retain no
     /// payload and use constant space; unordered SSNs are not unique identities.
+    /// SCTP `flow_control` keeps scalar receive credit, send windows and TSN queue
+    /// ownership from the same core observation as the association counters.
     /// Missing associations return null; sampling failures also set `sctp_error`.
     /// All transport queries share a 250 ms cooperative timeout. A timeout keeps
     /// completed samples and the current local observations, adds
