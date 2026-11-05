@@ -55,7 +55,9 @@ for the host platform, with `~/.elan/bin` on `PATH`. The scenario
 tools when first used. Kani 0.68.0 supplies its own compiler toolchain.
 
 The `--prepare` step fetches the pinned Lean dependencies and the Mathlib cache
-modules used by Aeneas and hax. It avoids fetching the entire Mathlib cache.
+modules used by Aeneas and hax. Both proof projects share those prepared
+dependencies after the runner checks their pins. It avoids fetching the entire
+Mathlib cache.
 
 The root Rust toolchain remains unchanged. Proof packages are unpublished,
 isolated Cargo workspaces. Local proof-tool installation is opt-in; CI uses

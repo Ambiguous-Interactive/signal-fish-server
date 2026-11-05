@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 
 VERSION = "0.4.2"
 HERE = Path(__file__).resolve().parent
@@ -95,6 +96,7 @@ def verify_body(crate, scenario="negotiation"):
     extract(crate, scenario)
     project = crate / f"proofs/{scenario}/lean"
     if scenario == "capability":
+        share_prepared_dependencies(crate, project)
         check_iterator_alias(project, crate)
     # Check that extraction remains deterministic before accepting a proof.
     generated = project / ("Negotiation" if scenario == "negotiation" else "Capability") / "Extraction"
@@ -117,6 +119,38 @@ def verify(crate, scenario="negotiation"):
         status = "proofs accepted; axioms audited; regeneration identical"
     finally:
         retain_proof_evidence(crate.parents[2], crate, scenario, first_run, status)
+
+
+def share_prepared_dependencies(crate, project):
+    """Share prepared packages only for the exact same pinned dependency graph.
+
+    Preserve unrelated local directories and links. A conflicting cache needs
+    an explicit local decision; the runner must never replace or delete it.
+    """
+    prepared = crate / "proofs/negotiation/lean"
+    manifests = []
+    for candidate in (prepared, project):
+        manifest = json.loads((candidate / "lake-manifest.json").read_text())
+        manifest.pop("name", None)
+        manifests.append(manifest)
+    if manifests[0] != manifests[1] or manifests[0].get("packagesDir") != ".lake/packages":
+        raise RuntimeError("Cannot share Lean packages: pinned dependency manifests differ")
+    requirements = [tomllib.loads((candidate / "lakefile.toml").read_text()).get("require")
+                    for candidate in (prepared, project)]
+    if not requirements[0] or requirements[0] != requirements[1]:
+        raise RuntimeError("Cannot share Lean packages: pinned Lake requirements differ")
+    if (prepared / "lean-toolchain").read_bytes() != (project / "lean-toolchain").read_bytes():
+        raise RuntimeError("Cannot share Lean packages: pinned Lean toolchains differ")
+    packages = prepared / ".lake/packages"
+    if not packages.is_dir():
+        raise RuntimeError("Prepared Lean packages are missing; run with --prepare first")
+    destination = project / ".lake/packages"
+    if destination.exists() or destination.is_symlink():
+        if not destination.is_symlink() or destination.resolve() != packages.resolve():
+            raise RuntimeError(f"Preserving conflicting Lean package directory or link: {destination}")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.symlink_to(packages.resolve(), target_is_directory=True)
 
 
 def check_iterator_alias(project, crate):
