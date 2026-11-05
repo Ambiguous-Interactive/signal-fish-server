@@ -138,6 +138,7 @@ jobs:
         with:
           name: source-linked-lean
           path: formal/source-linked/lean/target/verification-logs/
+          include-hidden-files: true
           if-no-files-found: warn
 
   kani:

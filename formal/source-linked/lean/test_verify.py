@@ -12,13 +12,17 @@ import verify
 
 
 class AxiomAudit(unittest.TestCase):
+    """Reject tool drift, missing reports, and unapproved proof assumptions."""
+
     def test_exact_tool_version_required(self):
+        """Similar version strings must not satisfy the pinned-version check."""
         verify.check_version("hax\nversion=0.4.2\ncommit=example")
         for output in ("version=0.4.20", "version=0.4.2-dev", "prefix version=0.4.2", ""):
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 verify.check_version(output)
 
     def test_capability_probe_rejects_unrelated_failures(self):
+        """Only the known extraction defect permits the compatibility retry."""
         output = f"error: Capability/Extraction/Funs.lean:42:6: {verify.CAPABILITY_LIMIT}\n"
         self.assertIn("unsupported", verify.classify_capability(1, output))
         self.assertIn("no aggregation theorem", verify.classify_capability(0, ""))
@@ -29,6 +33,7 @@ class AxiomAudit(unittest.TestCase):
             verify.classify_capability(1, "download failed")
 
     def report(self, axioms="propext, Quot.sound, Classical.choice"):
+        """Build complete named theorem reports with controlled axiom lists."""
         return "\n".join(
             f"'{name}' depends on axioms: [{axioms}]"
             for name in verify.THEOREMS["negotiation"]
@@ -36,6 +41,7 @@ class AxiomAudit(unittest.TestCase):
 
     @patch("builtins.print")
     def test_standard_axioms_and_closed_proofs_pass(self, _print):
+        """Accept approved axioms and reports of proofs with no axioms."""
         verify.check_axioms(self.report(), "negotiation")
         verify.check_axioms("\n".join(
             f"'{name}' does not depend on any axioms"
@@ -43,20 +49,25 @@ class AxiomAudit(unittest.TestCase):
         ), "negotiation")
 
     def test_missing_or_wrong_theorem_report_fails(self):
+        """Reject empty, partial, or unrelated theorem evidence."""
         for output in ("", self.report().splitlines()[0],
                        self.report().replace("explicit_client_contract", "unrelated")):
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 verify.check_axioms(output, "negotiation")
 
     def test_placeholder_or_unreviewed_axiom_fails(self):
+        """Proof holes and unapproved assumptions must fail the audit."""
         for axiom in ("sorryAx", "unchecked_model", "Lean.ofReduceBool"):
             with self.subTest(axiom=axiom), self.assertRaises(RuntimeError):
                 verify.check_axioms(self.report(axiom), "negotiation")
 
 
 class CapabilityEvidence(unittest.TestCase):
+    """Keep failed and accepted extraction evidence separate from proof claims."""
+
     @patch("builtins.print")
     def test_probe_retry_and_deterministic_regeneration(self, _print):
+        """Check retry boundaries, stable bodies, and honest failure snapshots."""
         missing = f"error: Capability/Extraction/Funs.lean:42:6: {verify.CAPABILITY_LIMIT}\n"
         for name, responses, drift, error, shim, extractions in (
             ("supported", [(0, ""), (0, "")], False, None, False, 2),
@@ -89,7 +100,10 @@ class CapabilityEvidence(unittest.TestCase):
                 logs = root / "logs"
                 calls = []
 
+                # The probe calls both mocks within this subtest. No callback
+                # call is deferred to the next loop iteration.
                 def extract(copied, scenario):
+                    """Emit stable source, a changed body, or a repeat-extraction fault."""
                     self.assertEqual(scenario, "capability")
                     calls.append(copied)
                     if len(calls) == 2 and isinstance(drift, Exception):
@@ -106,6 +120,7 @@ class CapabilityEvidence(unittest.TestCase):
                 responses_iter = iter(responses)
 
                 def run(command, project, *, expect_success=True):
+                    """Return this subtest's scripted build results in call order."""
                     self.assertEqual(command, ["lake", "build", "Capability.Extraction"])
                     result = next(responses_iter)
                     if isinstance(result, Exception):
@@ -151,6 +166,7 @@ class CapabilityEvidence(unittest.TestCase):
 
     @patch("builtins.print")
     def test_partial_extraction_is_retained_when_probe_raises(self, _print):
+        """Retain partial generated source even when extraction raises."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src").mkdir()
@@ -161,6 +177,7 @@ class CapabilityEvidence(unittest.TestCase):
             logs = root / "logs"
 
             def failed_extract(copied, _scenario):
+                """Write a partial output before simulating an extractor failure."""
                 generated = copied / "proofs/capability/lean/Capability/Extraction/Funs.lean"
                 generated.parent.mkdir(parents=True)
                 generated.write_text("partial generated source\n")
@@ -179,6 +196,7 @@ class CapabilityEvidence(unittest.TestCase):
                           report["files_sha256"])
 
     def test_snapshots_retain_inputs_outputs_and_logs_without_caches(self):
+        """Keep distinct hashed archives without build caches or symlink targets."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             tree = root / "reproducer"

@@ -31952,6 +31952,12 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
                 .and_then(Yaml::as_str)
                 .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
                 && step.as_mapping_get("if").and_then(Yaml::as_str) == Some("always()")
+                && (backend != "lean"
+                    || step
+                        .as_mapping_get("with")
+                        .and_then(|settings| settings.as_mapping_get("include-hidden-files"))
+                        .and_then(Yaml::as_bool)
+                        == Some(true))
         }));
     }
 }

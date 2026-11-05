@@ -28,6 +28,7 @@ RUNS = []
 
 
 def run(command, cwd, *, expect_success=True):
+    """Record command output and timing; reject unexpected nonzero exits."""
     global COMMAND_COUNT
     started = time.monotonic()
     env = dict(os.environ, RUST_LOG="error")
@@ -50,11 +51,13 @@ def run(command, cwd, *, expect_success=True):
 
 
 def check_version(output):
+    """Require the exact cargo-hax version before extracting source."""
     if f"version={VERSION}" not in output.splitlines():
         raise RuntimeError(f"Expected cargo-hax {VERSION}")
 
 
 def check_axioms(output, scenario):
+    """Require each named theorem's report and reject unapproved axioms."""
     for theorem in THEOREMS[scenario]:
         empty = f"'{theorem}' does not depend on any axioms"
         if empty in output:
@@ -70,6 +73,7 @@ def check_axioms(output, scenario):
 
 
 def extract(crate, scenario="negotiation"):
+    """Extract the selected production helper with a stable trailing newline."""
     run(["cargo", "hax", "extract", scenario, "--locked"], crate)
     project = crate / f"proofs/{scenario}/lean"
     for source in project.glob("*/Extraction/*.lean"):
@@ -77,6 +81,7 @@ def extract(crate, scenario="negotiation"):
 
 
 def verify(crate, scenario="negotiation"):
+    """Regenerate the helper, build its proofs, and audit their axioms."""
     extract(crate, scenario)
     project = crate / f"proofs/{scenario}/lean"
     run(["lake", "build"], project)
@@ -85,6 +90,7 @@ def verify(crate, scenario="negotiation"):
 
 
 def mutants(crate):
+    """Reject isolated source faults, check their wrong results, then restore green."""
     source = ROOT / "src/protocol_core.rs"
     original = source.read_text()
     changes = {
@@ -126,6 +132,7 @@ def mutants(crate):
 
 
 def classify_capability(returncode, output):
+    """Accept a typecheck or the known alias defect; reject unrelated failures."""
     if returncode == 0:
         return "extraction_typechecked; no aggregation theorem proved"
     errors = re.findall(r"^error: (.+)$", output, re.MULTILINE)
@@ -183,6 +190,11 @@ def retain_capability_evidence(tree, crate, first_run, status):
 
 
 def probe_capability(crate):
+    """Check aggregation extraction and regeneration without claiming a theorem.
+
+    Retry only the known alias defect with the upstream backport. Retain both
+    baseline and retry evidence before deleting the isolated source copy.
+    """
     with tempfile.TemporaryDirectory(prefix="signal-fish-lean-capability-") as tmp:
         tree = Path(tmp)
         (tree / "src").mkdir()
@@ -238,6 +250,7 @@ def install_iterator_alias(project, crate):
 
 
 def prepare():
+    """Fetch the pinned dependencies and only their required Mathlib cache modules."""
     project = HERE / "proofs/negotiation/lean"
     run(["lake", "env", "true"], project)
     packages = project / ".lake/packages"
@@ -254,6 +267,7 @@ def prepare():
 
 
 def main():
+    """Run selected checks and record results while guarding source and tool pins."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mutations", action="store_true")
     parser.add_argument("--probe-capability", action="store_true",
