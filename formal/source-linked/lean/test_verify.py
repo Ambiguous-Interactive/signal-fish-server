@@ -62,6 +62,221 @@ class AxiomAudit(unittest.TestCase):
                 verify.check_axioms(self.report(axiom), "negotiation")
 
 
+class RequiredAggregation(unittest.TestCase):
+    """Require aggregation contracts, exact external mapping, and real faults."""
+
+    @patch("builtins.print")
+    def test_every_required_scenario_needs_complete_approved_axiom_reports(self, _print):
+        """Reject omitted aggregation contracts and proof holes in every scenario."""
+        for scenario, theorems in verify.THEOREMS.items():
+            self.assertTrue(theorems)
+            report = "\n".join(f"'{name}' depends on axioms: [propext, Quot.sound]"
+                               for name in theorems)
+            with self.subTest(scenario=scenario):
+                verify.check_axioms(report, scenario)
+                for output in ("", "\n".join(report.splitlines()[:-1]),
+                               report.replace("Quot.sound", "sorryAx")):
+                    with self.assertRaises(RuntimeError):
+                        verify.check_axioms(output, scenario)
+        self.assertIn("capability", verify.THEOREMS)
+
+    def test_required_mapping_and_import_must_match_reviewed_alias(self):
+        """Reject a changed external iterator model or missing import."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            canonical = crate / "compatibility/IteratorAll.lean"
+            canonical.parent.mkdir()
+            canonical.write_text("upstream alias\n")
+            project = crate / "proofs/capability/lean"
+            target = project / "Capability/Compatibility.lean"
+            target.parent.mkdir(parents=True)
+            assumptions = project / "Capability/Assumptions/FunsExternal.lean"
+            assumptions.parent.mkdir()
+            target.write_text(canonical.read_text())
+            assumptions.write_text("import Capability.Compatibility\nimport CoreModels\n")
+            verify.check_iterator_alias(project, crate)
+            target.write_text("independent replacement\n")
+            with self.assertRaisesRegex(RuntimeError, "differs"):
+                verify.check_iterator_alias(project, crate)
+            target.write_text(canonical.read_text())
+            for imports in ("import CoreModels\n", "import Capability.Compatibility\n" * 2):
+                assumptions.write_text(imports)
+                with self.assertRaisesRegex(RuntimeError, "missing or duplicated"):
+                    verify.check_iterator_alias(project, crate)
+
+    def test_only_contract_failures_count_as_rejected_mutations(self):
+        """Distinguish contract rejections from extraction and compiler failures."""
+        good = "error: Capability/Verification/ProofObligations.lean:42:6: unsolved goals\n"
+        verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=good),
+                                     "capability", "empty-room")
+        for code, output in (
+            (0, good), (1, "dependency failed"),
+            (1, good + "error: Capability/Extraction/Funs.lean:5:1: Type mismatch\n"),
+            (1, good.replace("unsolved goals", "unknown identifier")),
+            (1, good.replace("Capability/", "Negotiation/")),
+        ):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                             "capability", "empty-room")
+
+    def test_evidence_walk_never_descends_into_caches(self):
+        """Prevent large dependency cache scans before collecting proof evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            excluded = [project / name for name in (".lake", ".lake-host", "llbc")]
+            for cache in excluded:
+                cache.mkdir()
+                (cache / "large-cache").write_text("not evidence")
+            (project / "Proof.lean").write_text("contract")
+            (project / "linked-cache").symlink_to(excluded[0], target_is_directory=True)
+            (project / "linked-file").symlink_to(project / "Proof.lean")
+            scandir = verify.os.scandir
+
+            def guarded_scandir(path):
+                """Fail if the walker opens any excluded directory."""
+                self.assertNotIn(Path(path), excluded + [project / "linked-cache"])
+                return scandir(path)
+
+            with patch.object(verify.os, "scandir", guarded_scandir):
+                self.assertEqual(verify.project_evidence_inputs(project), [project / "Proof.lean"])
+
+    def test_required_verification_rejects_nondeterministic_extraction(self):
+        """Reject unstable generated definitions before building any theorem."""
+        for drift in (False, True):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                crate = Path(tmp)
+                generated = crate / "proofs/capability/lean/Capability/Extraction/Funs.lean"
+                generated.parent.mkdir(parents=True)
+                calls = []
+
+                def extract(_crate, scenario):
+                    """Emit stable generated text or a deliberate second-run change."""
+                    self.assertEqual(scenario, "capability")
+                    calls.append(scenario)
+                    generated.write_text(str(len(calls)) if drift else "stable")
+
+                with patch.object(verify, "extract", extract), \
+                        patch.object(verify, "check_iterator_alias"), \
+                        patch.object(verify, "share_prepared_dependencies"), \
+                        patch.object(verify, "run") as run, \
+                        patch.object(verify, "check_axioms") as audit:
+                    if drift:
+                        with self.assertRaisesRegex(RuntimeError, "Nondeterministic"):
+                            verify.verify_body(crate, "capability")
+                        run.assert_not_called()
+                        audit.assert_not_called()
+                    else:
+                        verify.verify_body(crate, "capability")
+                        self.assertEqual(run.call_count, 2)
+                        audit.assert_called_once()
+                self.assertEqual(len(calls), 2)
+
+
+class PreparedDependencies(unittest.TestCase):
+    """Share exact prepared pins on fresh checkouts without replacing local data."""
+
+    def scaffold(self, root):
+        """Create compatible project pins and one prepared dependency package."""
+        crate = root / "formal/source-linked/lean"
+        prepared = crate / "proofs/negotiation/lean"
+        project = crate / "proofs/capability/lean"
+        manifest = {"name": "Negotiation", "packagesDir": ".lake/packages",
+                    "version": "1.2.0", "packages": [{"name": "hax", "rev": "pinned"}]}
+        for directory, name in ((prepared, "Negotiation"), (project, "Capability")):
+            directory.mkdir(parents=True)
+            (directory / "lake-manifest.json").write_text(json.dumps(dict(manifest, name=name)))
+            (directory / "lean-toolchain").write_text("leanprover/lean4:v4.31.0\n")
+            (directory / "lakefile.toml").write_text(
+                f'name = "{name}"\n[[require]]\nname = "hax"\nrev = "pinned"\n')
+        packages = prepared / ".lake/packages"
+        packages.mkdir(parents=True)
+        (packages / "prepared-model").write_text("cached library")
+        return crate, prepared, project
+
+    def test_clean_project_shares_packages_idempotently_and_preserves_pins(self):
+        """A fresh capability project must reuse cached models without editing pins."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate, prepared, project = self.scaffold(Path(tmp))
+            pins = {directory / name: (directory / name).read_bytes()
+                    for directory in (prepared, project)
+                    for name in ("lake-manifest.json", "lakefile.toml", "lean-toolchain")}
+            self.assertFalse((project / ".lake").exists())
+            verify.share_prepared_dependencies(crate, project)
+            verify.share_prepared_dependencies(crate, project)
+            shared = project / ".lake/packages"
+            self.assertTrue(shared.is_symlink())
+            self.assertEqual(shared.resolve(), (prepared / ".lake/packages").resolve())
+            self.assertEqual((shared / "prepared-model").read_text(), "cached library")
+            self.assertEqual({path: path.read_bytes() for path in pins}, pins)
+
+    def test_incompatible_graph_toolchain_or_requirements_fail_before_linking(self):
+        """Never share models when manifest, dependency requirement, or Lean pins differ."""
+        for change in ("manifest", "packagesDir", "toolchain", "requirements", "missing-cache"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                crate, prepared, project = self.scaffold(Path(tmp))
+                if change in ("manifest", "packagesDir"):
+                    path = project / "lake-manifest.json"
+                    manifest = json.loads(path.read_text())
+                    if change == "manifest":
+                        manifest["packages"][0]["rev"] = "different"
+                    else:
+                        manifest["packagesDir"] = "elsewhere"
+                    path.write_text(json.dumps(manifest))
+                elif change == "toolchain":
+                    (project / "lean-toolchain").write_text("leanprover/lean4:other")
+                elif change == "requirements":
+                    path = project / "lakefile.toml"
+                    path.write_text(path.read_text().replace('rev = "pinned"', 'rev = "other"'))
+                else:
+                    (prepared / ".lake/packages/prepared-model").unlink()
+                    (prepared / ".lake/packages").rmdir()
+                with self.assertRaises(RuntimeError):
+                    verify.share_prepared_dependencies(crate, project)
+                self.assertFalse((project / ".lake").exists())
+
+    def test_existing_unrelated_directory_and_links_are_preserved(self):
+        """Refuse conflicting local caches, including broken links, without deleting them."""
+        for kind in ("directory", "different-link", "broken-link"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                crate, _prepared, project = self.scaffold(root)
+                destination = project / ".lake/packages"
+                destination.parent.mkdir()
+                if kind == "directory":
+                    destination.mkdir()
+                    (destination / "user-data").write_text("preserve")
+                else:
+                    other = root / "other"
+                    if kind == "different-link":
+                        other.mkdir()
+                    destination.symlink_to(other, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "Preserving conflicting"):
+                    verify.share_prepared_dependencies(crate, project)
+                if kind == "directory":
+                    self.assertEqual((destination / "user-data").read_text(), "preserve")
+                else:
+                    self.assertEqual(destination.readlink(), root / "other")
+
+    def test_required_capability_build_uses_prepared_packages_on_clean_checkout(self):
+        """The normal required proof path must link cached dependencies before lake runs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate, prepared, project = self.scaffold(Path(tmp))
+            generated = project / "Capability/Extraction/Funs.lean"
+            generated.parent.mkdir(parents=True)
+            generated.write_text("stable extracted production definition")
+
+            def run(_command, _project):
+                """Observe the real dependency link before each mocked Lean command."""
+                self.assertEqual((project / ".lake/packages").resolve(),
+                                 (prepared / ".lake/packages").resolve())
+                self.assertTrue((project / ".lake/packages").is_symlink())
+                return SimpleNamespace(stdout="")
+
+            with patch.object(verify, "extract"), patch.object(verify, "check_iterator_alias"), \
+                    patch.object(verify, "run", run), patch.object(verify, "check_axioms"):
+                verify.verify_body(crate, "capability")
+
+
 class CapabilityEvidence(unittest.TestCase):
     """Keep failed and accepted extraction evidence separate from proof claims."""
 

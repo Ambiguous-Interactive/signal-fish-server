@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 
 VERSION = "0.4.2"
 HERE = Path(__file__).resolve().parent
@@ -19,6 +20,11 @@ THEOREMS = {"negotiation": (
     "Negotiation.explicit_client_contract",
     "Negotiation.omitted_client_contract",
     "Negotiation.below_floor_preserved",
+), "capability": (
+    "Capability.empty_contract",
+    "Capability.all_members_contract",
+    "Capability.boolean_identity_contract",
+    "Capability.nonempty_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
@@ -58,7 +64,12 @@ def check_version(output):
 
 def check_axioms(output, scenario):
     """Require each named theorem's report and reject unapproved axioms."""
-    for theorem in THEOREMS[scenario]:
+    check_axiom_reports(output, THEOREMS[scenario])
+
+
+def check_axiom_reports(output, theorems):
+    """Audit named contracts and concrete fault witnesses with the same policy."""
+    for theorem in theorems:
         empty = f"'{theorem}' does not depend on any axioms"
         if empty in output:
             continue
@@ -80,13 +91,150 @@ def extract(crate, scenario="negotiation"):
         source.write_text(source.read_text().rstrip() + "\n")
 
 
-def verify(crate, scenario="negotiation"):
+def verify_body(crate, scenario="negotiation"):
     """Regenerate the helper, build its proofs, and audit their axioms."""
     extract(crate, scenario)
     project = crate / f"proofs/{scenario}/lean"
+    if scenario == "capability":
+        share_prepared_dependencies(crate, project)
+        check_iterator_alias(project, crate)
+    # Check that extraction remains deterministic before accepting a proof.
+    generated = project / ("Negotiation" if scenario == "negotiation" else "Capability") / "Extraction"
+    before = {path.relative_to(generated): path.read_bytes() for path in generated.rglob("*.lean")}
+    extract(crate, scenario)
+    after = {path.relative_to(generated): path.read_bytes() for path in generated.rglob("*.lean")}
+    if not before or before != after:
+        raise RuntimeError(f"Nondeterministic {scenario} extraction")
     run(["lake", "build"], project)
     report = run(["lake", "env", "lean", "Audit.lean"], project)
     check_axioms(report.stdout, scenario)
+
+
+def verify(crate, scenario="negotiation"):
+    """Keep complete evidence for successful and failed required checks."""
+    first_run = len(RUNS)
+    status = "verification failed"
+    try:
+        verify_body(crate, scenario)
+        status = "proofs accepted; axioms audited; regeneration identical"
+    finally:
+        retain_proof_evidence(crate.parents[2], crate, scenario, first_run, status)
+
+
+def share_prepared_dependencies(crate, project):
+    """Share prepared packages only for the exact same pinned dependency graph.
+
+    Preserve unrelated local directories and links. A conflicting cache needs
+    an explicit local decision; the runner must never replace or delete it.
+    """
+    prepared = crate / "proofs/negotiation/lean"
+    manifests = []
+    for candidate in (prepared, project):
+        manifest = json.loads((candidate / "lake-manifest.json").read_text())
+        manifest.pop("name", None)
+        manifests.append(manifest)
+    if manifests[0] != manifests[1] or manifests[0].get("packagesDir") != ".lake/packages":
+        raise RuntimeError("Cannot share Lean packages: pinned dependency manifests differ")
+    requirements = [tomllib.loads((candidate / "lakefile.toml").read_text()).get("require")
+                    for candidate in (prepared, project)]
+    if not requirements[0] or requirements[0] != requirements[1]:
+        raise RuntimeError("Cannot share Lean packages: pinned Lake requirements differ")
+    if (prepared / "lean-toolchain").read_bytes() != (project / "lean-toolchain").read_bytes():
+        raise RuntimeError("Cannot share Lean packages: pinned Lean toolchains differ")
+    packages = prepared / ".lake/packages"
+    if not packages.is_dir():
+        raise RuntimeError("Prepared Lean packages are missing; run with --prepare first")
+    destination = project / ".lake/packages"
+    if destination.exists() or destination.is_symlink():
+        if not destination.is_symlink() or destination.resolve() != packages.resolve():
+            raise RuntimeError(f"Preserving conflicting Lean package directory or link: {destination}")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.symlink_to(packages.resolve(), target_is_directory=True)
+
+
+def check_iterator_alias(project, crate):
+    """Required proofs must use the exact reviewed alias and import it once."""
+    if (project / "Capability/Compatibility.lean").read_bytes() != (crate / "compatibility/IteratorAll.lean").read_bytes():
+        raise RuntimeError("Required capability alias differs from reviewed backport")
+    imports = (project / "Capability/Assumptions/FunsExternal.lean").read_text().splitlines()
+    if imports.count("import Capability.Compatibility") != 1:
+        raise RuntimeError("Required capability alias import missing or duplicated")
+
+
+def check_proof_rejection(result, scenario, name):
+    """Reject a source fault only when the extracted module compiled first.
+
+    Build failures outside the contract file are tool failures, not successful
+    negative controls. A separately checked concrete witness is also required.
+    """
+    if result.returncode == 0:
+        raise RuntimeError(f"Proof accepted source mutation: {name}")
+    module = "Negotiation" if scenario == "negotiation" else "Capability"
+    target = f"{module}/Verification/ProofObligations.lean:"
+    errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
+    locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
+    if not locations or any(not error.startswith(target) for error in locations):
+        raise RuntimeError(f"Mutation failed outside the proof: {name}\n{result.stdout}")
+    if not any(marker in result.stdout for marker in (
+            "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
+        raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
+
+
+def retain_proof_evidence(tree, crate, scenario, first_run, status):
+    """Archive source, generated definitions, contracts, pins, and raw commands."""
+    destination = LOGS / "proofs" / f"{scenario}-{time.time_ns()}"
+    destination.mkdir(parents=True)
+    project = crate / f"proofs/{scenario}/lean"
+    inputs = [tree / "src/protocol_core.rs"]
+    inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs"))
+    inputs.extend(sorted((crate / "compatibility").glob("*")))
+    inputs.extend(sorted((crate / "mutation-witnesses").glob("*.lean")))
+    if project.exists():
+        inputs.extend(project_evidence_inputs(project))
+    return retain_snapshot(tree, inputs, destination, first_run, {
+        "hax_version": VERSION, "status": status, "scenario": scenario,
+        "required_theorems": THEOREMS[scenario],
+    })
+
+
+def project_evidence_inputs(project):
+    """Prune caches before walking so evidence collection stays small and fast."""
+    result = []
+    for directory, folders, files in os.walk(project):
+        folders[:] = sorted(name for name in folders
+                            if not name.startswith(".lake") and name != "llbc"
+                            and not (Path(directory) / name).is_symlink())
+        result.extend(Path(directory) / name for name in sorted(files)
+                      if not (Path(directory) / name).is_symlink())
+    return result
+
+
+def retain_snapshot(tree, inputs, destination, first_run, metadata):
+    """Hash immutable evidence and preserve logs without build caches."""
+    hashes = {}
+    for source in inputs:
+        if not source.is_file():
+            continue
+        relative = source.relative_to(tree)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        hashes[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    records = [dict(record) for record in RUNS[first_run:]]
+    versions = [record for record in RUNS[:first_run]
+                if record["command"] == ["cargo", "hax", "--version"]]
+    if versions:
+        records.insert(0, dict(versions[-1]))
+    for record in records:
+        target = destination / "commands" / record["log"]
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(LOGS / record["log"], target)
+        record["log"] = str(target.relative_to(destination))
+    (destination / "results.json").write_text(json.dumps({
+        **metadata, "files_sha256": hashes, "runs": records,
+    }, indent=2) + "\n")
+    return destination
 
 
 def mutants(crate):
@@ -115,20 +263,60 @@ def mutants(crate):
             extract(copied)
             run(["lake", "build", "Negotiation.Extraction"], project)
             result = run(["lake", "build"], project, expect_success=False)
-            if result.returncode == 0:
-                raise RuntimeError(f"Proof accepted source mutation: {name}")
-            if "Negotiation/Verification/ProofObligations.lean:" not in result.stdout:
-                raise RuntimeError(f"Mutation failed outside the proof: {name}\n{result.stdout}")
-            if not any(marker in result.stdout for marker in (
-                "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
-                raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
+            check_proof_rejection(result, "negotiation", name)
             client, minimum, maximum = (2, 3, 3) if name == "lower-clamp" else (3, 2, 2)
             witness = "import Negotiation.Extraction\nopen CoreModels Aeneas Aeneas.Std\nopen signal_fish_proof_core\n"
             witness += f"theorem mutation_returns_wrong_value : protocol_core.negotiate_protocol_version (.Some (U16.ofNat {client})) (U16.ofNat {minimum}) (U16.ofNat {maximum}) = RustM.ok (U16.ofNat 3) := by rfl\n"
+            witness += "\n#print axioms mutation_returns_wrong_value\n"
             (project / "Counterexample.lean").write_text(witness)
-            run(["lake", "env", "lean", "Counterexample.lean"], project)
+            report = run(["lake", "env", "lean", "Counterexample.lean"], project)
+            check_axiom_reports(report.stdout, ("mutation_returns_wrong_value",))
             print(f"REJECTED {name}: proof failed and extracted result is 3 where contract requires 2", flush=True)
     verify(crate)
+
+
+def capability_mutants(crate):
+    """Reject empty-room and skipped-member faults with kernel-checked results."""
+    original = (ROOT / "src/protocol_core.rs").read_text()
+    changes = {
+        "empty-room": ("!members.is_empty() && members.iter().all(supports)",
+                       "members.iter().all(supports)"),
+        "skip-member": ("members.iter().all(supports)",
+                        "if members.len() == 1 { true } else { members.iter().all(supports) }"),
+    }
+    for name, (before, after) in changes.items():
+        if original.count(before) != 1:
+            raise RuntimeError(f"Mutation anchor changed: {name}")
+        with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
+            tree = Path(tmp)
+            (tree / "src").mkdir()
+            (tree / "src/protocol_core.rs").write_text(original.replace(before, after))
+            copied = tree / "formal/source-linked/lean"
+            shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
+                ".lake*", "target", "llbc", "__pycache__", "*.log"))
+            project = copied / "proofs/capability/lean"
+            (project / ".lake").mkdir()
+            (project / ".lake/packages").symlink_to(
+                crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+            first_run = len(RUNS)
+            status = "negative control failed"
+            try:
+                extract(copied, "capability")
+                check_iterator_alias(project, copied)
+                run(["lake", "build", "Capability.Extraction"], project)
+                result = run(["lake", "build"], project, expect_success=False)
+                check_proof_rejection(result, "capability", name)
+                run(["lake", "build", "Capability.Verification.Callbacks"], project)
+                witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
+                witness += "\n#print axioms Capability.mutation_returns_wrong_value\n"
+                (project / "Counterexample.lean").write_text(witness)
+                report = run(["lake", "env", "lean", "Counterexample.lean"], project)
+                check_axiom_reports(report.stdout, ("Capability.mutation_returns_wrong_value",))
+                status = "proof rejected; concrete wrong result kernel-checked"
+                print(f"REJECTED {name}: {status}", flush=True)
+            finally:
+                retain_proof_evidence(tree, copied, "capability", first_run, status)
+    verify(crate, "capability")
 
 
 def classify_capability(returncode, output):
@@ -159,34 +347,11 @@ def retain_capability_evidence(tree, crate, first_run, status):
         "lake-manifest.json", "lakefile.toml", "lean-toolchain"))
     project = crate / "proofs/capability/lean"
     if project.exists():
-        inputs.extend(path for path in project.rglob("*")
-                      if path.is_file() and not path.is_symlink()
-                      and not any(part.startswith(".lake") for part in path.relative_to(project).parts))
-    hashes = {}
-    for source in inputs:
-        if not source.is_file():
-            continue
-        relative = source.relative_to(tree)
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        hashes[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
-    records = [dict(record) for record in RUNS[first_run:]]
-    versions = [record for record in RUNS[:first_run]
-                if record["command"] == ["cargo", "hax", "--version"]]
-    if versions:
-        records.insert(0, dict(versions[-1]))
-    for record in records:
-        target = destination / "commands" / record["log"]
-        target.parent.mkdir(exist_ok=True)
-        shutil.copyfile(LOGS / record["log"], target)
-        record["log"] = str(target.relative_to(destination))
-    (destination / "results.json").write_text(json.dumps({
+        inputs.extend(project_evidence_inputs(project))
+    return retain_snapshot(tree, inputs, destination, first_run, {
         "hax_version": VERSION, "status": status,
         "aggregation_theorem_proved": False,
-        "files_sha256": hashes, "runs": records,
-    }, indent=2) + "\n")
-    return destination
+    })
 
 
 def probe_capability(crate):
@@ -281,6 +446,7 @@ def main():
     source_before = source.read_bytes()
     lock_paths = [HERE / "Cargo.lock", HERE / "hax.toml"]
     lock_paths.extend(sorted((HERE / "compatibility").glob("*")))
+    lock_paths.extend(sorted((HERE / "mutation-witnesses").glob("*.lean")))
     for scenario in THEOREMS:
         project = HERE / f"proofs/{scenario}/lean"
         lock_paths.extend(project / name for name in (
@@ -290,16 +456,18 @@ def main():
     print(json.dumps({"production_source_sha256": digest}), flush=True)
     completed = False
     proved_scenarios = []
-    capability_status = "not run; no aggregation theorem proved"
+    capability_probe_status = "not run; no aggregation theorem proved"
     try:
         if args.prepare:
             prepare()
-        verify(HERE)
-        proved_scenarios.append("negotiation")
+        for scenario in THEOREMS:
+            verify(HERE, scenario)
+            proved_scenarios.append(scenario)
         if args.mutations:
             mutants(HERE)
+            capability_mutants(HERE)
         if args.probe_capability:
-            capability_status = probe_capability(HERE)
+            capability_probe_status = probe_capability(HERE)
         completed = True
     finally:
         unchanged = source.read_bytes() == source_before
@@ -309,7 +477,7 @@ def main():
             "hax_version": VERSION, "source_sha256": digest,
             "completed": completed and unchanged and locks_unchanged,
             "source_unchanged": unchanged, "locks_unchanged": locks_unchanged,
-            "proved_scenarios": proved_scenarios, "capability_status": capability_status,
+            "proved_scenarios": proved_scenarios, "capability_probe_status": capability_probe_status,
             "runs": RUNS,
         }, indent=2) + "\n")
         if not unchanged:
