@@ -2497,6 +2497,8 @@ impl EnhancedGameServer {
 pub struct InMemoryMessageCoordinator {
     local_clients: Arc<RwLock<HashMap<PlayerId, ClientDeliveryHandle>>>,
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
+    // Each identity has one route. Read under its player gate; update with room_players.
+    player_rooms: StdMutex<HashMap<PlayerId, RoomId>>,
     // Broadcast recipients with no seated role. Access follows the routing
     // gate and room_players lock so publication and role are one transition.
     spectator_routes: Arc<StdMutex<HashSet<PlayerId>>>,
@@ -2978,6 +2980,7 @@ impl InMemoryMessageCoordinator {
         Self {
             local_clients: Arc::new(RwLock::new(HashMap::new())),
             room_players: Arc::new(RwLock::new(HashMap::new())),
+            player_rooms: StdMutex::new(HashMap::new()),
             spectator_routes: Arc::new(StdMutex::new(HashSet::new())),
             room_routing_gates: RoutingGateRegistry::default(),
             player_routing_gates: RoutingGateRegistry::default(),
@@ -3414,13 +3417,14 @@ impl InMemoryMessageCoordinator {
         // race where two concurrent first registrations could each lock only
         // their destination and leave the identity routed twice.
         let player = self.player_routing_gates.write(player_id).await;
-        let mut room_ids: Vec<RoomId> = {
-            let room_players = self.room_players.read().await;
-            room_players
-                .iter()
-                .filter_map(|(room_id, players)| players.contains(&player_id).then_some(*room_id))
-                .collect()
-        };
+        let mut room_ids: Vec<RoomId> = self
+            .player_rooms
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&player_id)
+            .copied()
+            .into_iter()
+            .collect();
         if let Some(room_id) = target_room {
             room_ids.push(room_id);
         }
@@ -3460,9 +3464,39 @@ impl InMemoryMessageCoordinator {
                 .is_some_and(|players| !players.is_empty())
             {
                 self.room_routing_gates.mark_active(&guard._gate);
+                self.room_event_sequencer.mark_active(room_id);
             } else {
                 self.room_routing_gates.mark_inactive(room_id);
+                self.room_event_sequencer.mark_inactive(room_id);
             }
+        }
+    }
+
+    /// Replace one route while its player and affected room gates are held.
+    fn replace_player_room(
+        &self,
+        room_players: &mut HashMap<RoomId, HashSet<PlayerId>>,
+        player_id: PlayerId,
+        target_room: Option<RoomId>,
+    ) {
+        let mut player_rooms = self
+            .player_rooms
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if player_rooms.get(&player_id).copied() == target_room {
+            return;
+        }
+        if let Some(previous_room) = player_rooms.remove(&player_id) {
+            if let Some(players) = room_players.get_mut(&previous_room) {
+                players.remove(&player_id);
+                if players.is_empty() {
+                    room_players.remove(&previous_room);
+                }
+            }
+        }
+        if let Some(room_id) = target_room {
+            room_players.entry(room_id).or_default().insert(player_id);
+            player_rooms.insert(player_id, room_id);
         }
     }
 
@@ -4439,14 +4473,7 @@ impl InMemoryMessageCoordinator {
         if outcome == DeliveryOutcome::Delivered {
             let mut room_players = self.room_players.write().await;
             let mut clients = self.local_clients.write().await;
-            room_players.retain(|_, players| {
-                players.remove(&player_id);
-                !players.is_empty()
-            });
-            room_players
-                .entry(room_id)
-                .or_insert_with(HashSet::new)
-                .insert(player_id);
+            self.replace_player_room(&mut room_players, player_id, Some(room_id));
             self.set_spectator_route(player_id, spectator);
             clients.insert(player_id, delivery.clone());
             self.sync_active_room_gates(&room_players, &routing);
@@ -5532,16 +5559,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // replaces the player's routing scope, including `None` on leave; merely
         // updating the sender map would retain a stale old-room recipient.
         let mut room_players = self.room_players.write().await;
-        room_players.retain(|_, players| {
-            players.remove(&player_id);
-            !players.is_empty()
-        });
-        if let Some(room_id) = room_id {
-            room_players
-                .entry(room_id)
-                .or_insert_with(HashSet::new)
-                .insert(player_id);
-        }
+        self.replace_player_room(&mut room_players, player_id, room_id);
         let mut clients = self.local_clients.write().await;
         self.set_spectator_route(player_id, false);
         clients.insert(player_id, delivery);
@@ -5571,10 +5589,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .get(&room_id)
             .is_some_and(|players| players.contains(&player_id));
         let terminal_tail = if let Some((delivery, epoch, final_seq)) = cleared {
-            room_players.retain(|_, players| {
-                players.remove(&player_id);
-                !players.is_empty()
-            });
+            self.replace_player_room(&mut room_players, player_id, None);
             self.set_spectator_route(player_id, false);
             clients.insert(player_id, delivery);
             Some((epoch, final_seq))
@@ -5582,11 +5597,14 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             // A stale terminal event may target an old room after this player
             // has joined another. The assignment check leaves that live room
             // untouched, so preserve its route and delivery handle too.
-            if let Some(players) = room_players.get_mut(&room_id) {
-                players.remove(&player_id);
-                if players.is_empty() {
-                    room_players.remove(&room_id);
-                }
+            let current_room = self
+                .player_rooms
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&player_id)
+                .copied();
+            if current_room == Some(room_id) {
+                self.replace_player_room(&mut room_players, player_id, None);
             }
             // No terminal tail also covers a live connection that has
             // returned to the roomless lobby. Its direct response route stays
@@ -5629,14 +5647,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         if outcome == DeliveryOutcome::Delivered {
             let mut room_players = self.room_players.write().await;
             let mut clients = self.local_clients.write().await;
-            room_players.retain(|_, players| {
-                players.remove(&player_id);
-                !players.is_empty()
-            });
-            room_players
-                .entry(room_id)
-                .or_insert_with(HashSet::new)
-                .insert(player_id);
+            self.replace_player_room(&mut room_players, player_id, Some(room_id));
             self.set_spectator_route(player_id, false);
             clients.insert(player_id, delivery.clone());
             self.sync_active_room_gates(&room_players, &routing);
@@ -5697,10 +5708,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // (consistent with broadcast_to_room / broadcast_to_room_except read paths
         //  to prevent ABBA deadlocks)
         let mut room_players = self.room_players.write().await;
-        room_players.retain(|_, players| {
-            players.remove(player_id);
-            !players.is_empty()
-        });
+        self.replace_player_room(&mut room_players, *player_id, None);
 
         let mut clients = self.local_clients.write().await;
         self.set_spectator_route(*player_id, false);

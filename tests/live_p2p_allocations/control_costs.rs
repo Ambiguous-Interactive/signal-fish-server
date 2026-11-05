@@ -215,3 +215,37 @@ pub(crate) fn direct_repeat_cost_does_not_copy_other_members() {
         );
     }
 }
+
+/// #1466: replacing a socket in the same room must reuse its membership storage.
+pub(crate) fn same_room_registration_keeps_membership_storage() {
+    use signal_fish_server::coordination::{ClientDeliveryHandle, ConnectionCloseSignal};
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = Uuid::from_u128(1);
+        let player = Uuid::from_u128(2);
+        let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+        let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+        coordinator
+            .register_local_client(player, Some(room), delivery.clone())
+            .await
+            .unwrap();
+        for attempt in 0..2 {
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            coordinator
+                .register_local_client(player, Some(room), delivery.clone())
+                .await
+                .unwrap();
+            let stats = region.change();
+            println!("SAME_ROOM_REGISTRATION attempt={attempt} stats={stats:?}");
+            assert_eq!(
+                coordinator.routed_player_ids(&room).await.unwrap(),
+                Some(vec![player])
+            );
+            assert!(
+                stats.allocations <= 5,
+                "same-room replacement rebuilt membership storage: {stats:?}"
+            );
+        }
+    });
+}

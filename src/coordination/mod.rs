@@ -321,15 +321,40 @@ impl Drop for RoomEventLane {
 }
 
 /// Shared, mutation-ordered room-event domain used by the production message
-/// coordinator. The registry stores only weak lanes; the last guard/job drops
-/// its lane and removes the matching registry entry, so idle rooms do not
-/// accumulate workers or map entries.
+/// coordinator. Published routes retain idle lanes without workers. Other lanes
+/// live only through guards/jobs; their last owner removes the matching entry.
 #[derive(Default)]
 pub(crate) struct RoomEventSequencer {
     lanes: Mutex<HashMap<RoomId, Weak<RoomEventLane>>>,
+    active: Mutex<HashMap<RoomId, Arc<RoomEventLane>>>,
 }
 
 impl RoomEventSequencer {
+    /// Keep an idle lane while this room has published recipients, without a worker.
+    pub(crate) fn mark_active(self: &Arc<Self>, room_id: RoomId) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        active.entry(room_id).or_insert_with(|| self.lane(room_id));
+    }
+
+    /// Existing guards and queued jobs keep their lane through final route removal.
+    pub(crate) fn mark_inactive(&self, room_id: RoomId) {
+        self.active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&room_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lane_count_for_test(&self) -> usize {
+        self.lanes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+
     fn new_lane(self: &Arc<Self>, room_id: RoomId) -> Arc<RoomEventLane> {
         Arc::new(RoomEventLane {
             room_id,

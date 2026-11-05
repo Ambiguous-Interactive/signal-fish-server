@@ -5915,3 +5915,375 @@ async fn canceled_targeted_delivery_releases_routes_and_accounts_once() {
         ));
     }
 }
+
+/// #1465: discovering one route must not wait on unrelated membership work.
+#[tokio::test]
+async fn route_gate_discovery_does_not_wait_on_the_global_membership_map() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let player = PlayerId::new_v4();
+    let old_room = RoomId::new_v4();
+    let new_room = RoomId::new_v4();
+    let (sender, _receiver) = mpsc::channel(4);
+    coordinator
+        .register_local_client(
+            player,
+            Some(old_room),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .unwrap();
+    let _membership = coordinator.room_players.write().await;
+    let mut discovery = Box::pin(coordinator.lock_player_routing_write(player, Some(new_room)));
+    let acquired = futures_util::poll!(&mut discovery);
+    assert!(
+        acquired.is_ready(),
+        "route discovery waited on the node-wide membership map"
+    );
+    let guards = match acquired {
+        std::task::Poll::Ready(guards) => guards,
+        _ => unreachable!(),
+    };
+    let mut expected = vec![old_room, new_room];
+    expected.sort_unstable();
+    assert_eq!(
+        guards
+            ._rooms
+            .iter()
+            .map(|guard| guard._gate.key)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+/// #1467: retain idle lanes only while a room has published routes.
+#[tokio::test]
+async fn published_rooms_retain_idle_event_lanes_until_the_last_route_leaves() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::new_v4();
+    let players = [PlayerId::new_v4(), PlayerId::new_v4()];
+    let mut receivers = Vec::new();
+    for player in players {
+        let (sender, receiver) = mpsc::channel(4);
+        receivers.push(receiver);
+        coordinator
+            .register_local_client(
+                player,
+                Some(room),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+    }
+    for _ in 0..3 {
+        drop(coordinator.lock_room_event_mutation(&room).await);
+        assert_eq!(
+            coordinator.room_event_sequencer.lane_count_for_test(),
+            1,
+            "an active room discarded its idle event lane"
+        );
+    }
+    coordinator
+        .unregister_local_client(&players[0])
+        .await
+        .unwrap();
+    assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 1);
+    let held = coordinator.lock_room_event_mutation(&room).await;
+    coordinator
+        .unregister_local_client(&players[1])
+        .await
+        .unwrap();
+    assert_eq!(
+        coordinator.room_event_sequencer.lane_count_for_test(),
+        1,
+        "a live guard must preserve the lane through final route removal"
+    );
+    drop(held);
+    assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 0);
+    for _ in 0..32 {
+        let (sender, _receiver) = mpsc::channel(4);
+        let next = RoomId::new_v4();
+        coordinator
+            .register_local_client(
+                players[0],
+                Some(next),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 1);
+        coordinator
+            .unregister_local_client(&players[0])
+            .await
+            .unwrap();
+        assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 0);
+    }
+}
+
+#[tokio::test]
+#[ignore = "manual routing scaling measurement"]
+async fn route_change_scaling_measurement() {
+    for count in [1_u128, 256, 4096] {
+        let coordinator = InMemoryMessageCoordinator::new();
+        let mut receivers = Vec::new();
+        for index in 0..count {
+            let (sender, receiver) = mpsc::channel(4);
+            receivers.push(receiver);
+            coordinator
+                .register_local_client(
+                    PlayerId::from_u128(index + 1),
+                    Some(RoomId::from_u128(index + 10_000)),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        }
+        let player = PlayerId::from_u128(1);
+        let room = RoomId::from_u128(10_000);
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            drop(
+                coordinator
+                    .lock_player_routing_write(player, Some(room))
+                    .await,
+            );
+        }
+        let discovery = started.elapsed();
+        let (sender, _receiver) = mpsc::channel(4);
+        let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            coordinator
+                .register_local_client(player, Some(room), delivery.clone())
+                .await
+                .unwrap();
+        }
+        println!(
+            "ROUTING_SCALING rooms={count} discovery={discovery:?} registration={:?}",
+            started.elapsed()
+        );
+    }
+}
+
+/// #1466: every baseline seam must update the same exact reverse route index.
+#[tokio::test]
+async fn route_index_matches_membership_across_baselines_and_terminal_transitions() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let player = PlayerId::new_v4();
+    let rooms = [RoomId::new_v4(), RoomId::new_v4()];
+    let (sender, mut receiver) = mpsc::channel(32);
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+    for step in 0..12 {
+        let room = rooms[step % 2];
+        match step % 4 {
+            0 => coordinator
+                .register_local_client(player, Some(room), delivery.clone())
+                .await
+                .unwrap(),
+            1 => {
+                assert_eq!(
+                    coordinator
+                        .register_local_client_with_initial_message(
+                            player,
+                            room,
+                            delivery.clone(),
+                            Box::new(|| Arc::new(ServerMessage::Pong))
+                        )
+                        .await
+                        .unwrap(),
+                    DeliveryOutcome::Delivered
+                );
+                assert!(matches!(
+                    receiver.try_recv().unwrap().as_ref(),
+                    ServerMessage::Pong
+                ));
+            }
+            2 | 3 => {
+                let result = if step % 4 == 2 {
+                    coordinator
+                        .register_local_client_with_initial_message_async(
+                            player,
+                            room,
+                            delivery.clone(),
+                            &|| true,
+                            None,
+                            None,
+                            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+                        )
+                        .await
+                } else {
+                    coordinator
+                        .register_local_spectator_with_initial_message_async(
+                            player,
+                            room,
+                            delivery.clone(),
+                            &|| true,
+                            None,
+                            None,
+                            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+                        )
+                        .await
+                };
+                assert_eq!(result.unwrap(), DeliveryOutcome::Delivered);
+                assert!(matches!(
+                    receiver.try_recv().unwrap().as_ref(),
+                    ServerMessage::Pong
+                ));
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            coordinator.player_rooms.lock().unwrap().get(&player),
+            Some(&room)
+        );
+        for candidate in rooms {
+            let membership = coordinator.room_players.read().await;
+            assert_eq!(
+                membership
+                    .get(&candidate)
+                    .is_some_and(|members| members.contains(&player)),
+                candidate == room,
+                "step={step}"
+            );
+        }
+        assert_eq!(coordinator.is_spectator_route(&player), step % 4 == 3);
+        for failed in [false, true] {
+            let outcome = coordinator
+                .register_local_client_with_initial_message_async(
+                    player,
+                    rooms[(step + 1) % 2],
+                    delivery.clone(),
+                    &|| false,
+                    None,
+                    None,
+                    Box::new(move |_| {
+                        Box::pin(async move {
+                            if failed {
+                                anyhow::bail!("baseline failed");
+                            }
+                            Ok(Arc::new(ServerMessage::Pong))
+                        })
+                    }),
+                )
+                .await;
+            if failed {
+                assert!(outcome.is_err());
+            } else {
+                assert_eq!(outcome.unwrap(), DeliveryOutcome::Canceled);
+            }
+            assert_eq!(
+                coordinator.player_rooms.lock().unwrap().get(&player),
+                Some(&room)
+            );
+            assert_eq!(coordinator.is_spectator_route(&player), step % 4 == 3);
+        }
+    }
+    let current_room = *coordinator
+        .player_rooms
+        .lock()
+        .unwrap()
+        .get(&player)
+        .unwrap();
+    let foreign_room = rooms
+        .into_iter()
+        .find(|room| *room != current_room)
+        .unwrap();
+    assert_eq!(
+        coordinator
+            .unroute_local_client_with_tail(player, foreign_room, Box::new(|| None))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        coordinator.player_rooms.lock().unwrap().get(&player),
+        Some(&current_room)
+    );
+    assert_eq!(
+        coordinator
+            .unroute_local_client_with_tail(
+                player,
+                current_room,
+                Box::new(|| Some((delivery.clone(), 7, 19)))
+            )
+            .await
+            .unwrap(),
+        Some((7, 19))
+    );
+    assert!(coordinator.player_rooms.lock().unwrap().is_empty());
+    assert!(coordinator.room_players.read().await.is_empty());
+    assert!(!coordinator.is_spectator_route(&player));
+    coordinator
+        .register_local_client(player, Some(current_room), delivery.clone())
+        .await
+        .unwrap();
+    coordinator
+        .unroute_local_client_with_tail(player, current_room, Box::new(|| None))
+        .await
+        .unwrap();
+    assert!(coordinator.player_rooms.lock().unwrap().is_empty());
+    coordinator
+        .register_local_client(player, Some(current_room), delivery.clone())
+        .await
+        .unwrap();
+    coordinator
+        .register_local_client(player, None, delivery)
+        .await
+        .unwrap();
+    assert!(coordinator.player_rooms.lock().unwrap().is_empty());
+    coordinator.unregister_local_client(&player).await.unwrap();
+    assert!(coordinator.local_clients.read().await.is_empty());
+    assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 0);
+}
+
+/// #1465/#1466: concurrent first routes for one identity must share one player gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_first_routes_publish_one_room_and_one_reverse_entry() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let player = PlayerId::new_v4();
+    let rooms = [RoomId::new_v4(), RoomId::new_v4()];
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let mut tasks = Vec::new();
+    let mut receivers = Vec::new();
+    for room in rooms {
+        let (sender, receiver) = mpsc::channel(4);
+        receivers.push(receiver);
+        let coordinator = coordinator.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            coordinator
+                .register_local_client(
+                    player,
+                    Some(room),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        }));
+    }
+    barrier.wait().await;
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let current = *coordinator
+        .player_rooms
+        .lock()
+        .unwrap()
+        .get(&player)
+        .unwrap();
+    assert_eq!(coordinator.player_rooms.lock().unwrap().len(), 1);
+    let membership = coordinator.room_players.read().await;
+    assert_eq!(membership.len(), 1);
+    assert_eq!(
+        membership[&current],
+        std::collections::HashSet::from([player])
+    );
+    drop(membership);
+    assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 1);
+    coordinator.unregister_local_client(&player).await.unwrap();
+    assert!(coordinator.player_rooms.lock().unwrap().is_empty());
+    assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 0);
+}

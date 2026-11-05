@@ -116,6 +116,7 @@ pub(crate) fn signaling_cost_is_independent_of_room_size() {
             let generation = generation.unwrap();
             let to = Uuid::from_u128(2);
             for measured in [false, true] {
+                tokio::task::yield_now().await;
                 let signal = serde_json::json!({"candidate":"candidate:exact"});
                 let region = stats_alloc::Region::new(ALLOCATOR);
                 server
@@ -140,6 +141,10 @@ pub(crate) fn signaling_cost_is_independent_of_room_size() {
         });
     }
     for stats in &profiles {
+        assert!(
+            stats.allocations <= 14,
+            "an idle active room rebuilt its Signal lane: {profiles:?}"
+        );
         assert!(
             stats.bytes_allocated <= profiles[0].bytes_allocated + 256,
             "targeted signaling allocates for unrelated room peers: {profiles:?}"

@@ -447,6 +447,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "same_room_registration_keeps_membership_storage",
+            control_costs::same_room_registration_keeps_membership_storage,
+        ),
         allocation_harness::trial("production_webrtc_refresh_skips_direct_endpoints", || {
             live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false, true)
         }),
