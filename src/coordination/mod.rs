@@ -349,6 +349,7 @@ impl RoomEventSequencer {
 
     /// Count live registry entries while checking route and guard cleanup.
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn lane_count_for_test(&self) -> usize {
         self.lanes
             .lock()
