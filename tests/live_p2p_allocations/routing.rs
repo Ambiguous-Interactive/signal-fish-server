@@ -409,13 +409,14 @@ pub(crate) fn bus_exclusions_do_not_grow_recipient_storage() {
                 for (index, receiver) in receivers.iter_mut().enumerate() {
                     let player = Uuid::from_u128(u128::try_from(index).unwrap() + 1);
                     if !excluded.contains(&player) {
-                        assert!(matches!(
-                            receiver.try_recv().unwrap().as_ref(),
-                            ServerMessage::Pong
-                        ));
+                        let received = receiver
+                            .try_recv()
+                            .expect("non-excluded peer receives Pong");
+                        assert!(matches!(received.as_ref(), ServerMessage::Pong));
                     }
+                    let remaining = receiver.try_recv();
                     assert!(matches!(
-                        receiver.try_recv(),
+                        remaining,
                         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
                     ));
                 }

@@ -6327,10 +6327,10 @@ async fn canceled_two_room_route_move_releases_fences_without_changing_membershi
             .send_to_player_in_room(&player, &old, Arc::new(ServerMessage::Pong))
             .await
             .unwrap();
-        assert!(matches!(
-            receiver.try_recv().unwrap().as_ref(),
-            ServerMessage::Pong
-        ));
+        let received = receiver
+            .try_recv()
+            .expect("old room still delivers after cancellation");
+        assert!(matches!(received.as_ref(), ServerMessage::Pong));
         assert!(!coordinator
             .send_to_player_in_room(&player, &target, Arc::new(ServerMessage::Pong))
             .await
