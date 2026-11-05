@@ -1,5 +1,10 @@
 # Formal Verification (TLA+ / TLC)
 
+The [source-linked pilot](source-linked/README.md) evaluates Lean extraction
+and Kani against private helpers compiled by the production server. Its
+contracts, assumptions, and reproduction commands are separate from the
+handwritten TLA+ and Z3 models below.
+
 This directory contains the TLA+ specification of the Protocol v3 per-room session
 lifecycle — finalize-time plan selection, authoritative per-recipient
 `SessionPlan` publication, late-join / seat-fill membership refreshes, and

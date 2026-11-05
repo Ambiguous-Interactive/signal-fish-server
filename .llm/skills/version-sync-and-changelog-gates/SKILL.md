@@ -14,7 +14,8 @@ description: >-
 1. `Cargo.toml` `[package].version` is canonical for project version references.
 2. Selected version references in docs/LLM context must match that version.
 3. `CHANGELOG.md` must remain Keep a Changelog compliant.
-4. If non-internal files change, `CHANGELOG.md` must be updated in the same change.
+4. Non-internal changes need `CHANGELOG.md`, unless an explicit internal-refactor
+   declaration binds the exact before/after blobs and records why users see no change.
 5. `[Unreleased]` entries describe user-visible change only (issue #722).
    `Tests:`/`CI:` bullets (including markup-wrapped or indented variants)
    are rejected by the checker and the pre-commit hook.
@@ -100,7 +101,12 @@ The following paths are classified as internal (no CHANGELOG entry required):
 - **VCS/Docker ignores:** `.gitignore`, `.dockerignore`
 - **Build tool configs:** `clippy.toml`, `deny.toml`, `tarpaulin.toml`, `rust-toolchain.toml`, `mkdocs.yml`, `requirements-docs.txt`
 
-Any changed file outside internal-only scope requires a `CHANGELOG.md` update.
+Any changed file outside internal-only scope requires a `CHANGELOG.md` update,
+unless its exact diff has an internal-refactor declaration. See
+[development instructions](../../../docs/development.md#internal-refactors-without-release-notes).
+The declaration must change with the source. Old declarations never exempt
+later changes; changed content, stale base, malformed records, and undeclared
+paths fail closed. Review the rationale as part of the normal PR review.
 
 The pre-commit hook mirrors this gate: `Test-ChangelogGate` in
 `scripts/hooks/pre-commit.ps1` fails a commit whose non-internal staged files

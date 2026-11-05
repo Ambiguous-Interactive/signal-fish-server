@@ -721,6 +721,20 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
         run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features check
+      - name: Run cargo-deny (Kani proof harness)
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: >-
+          cargo deny --log-level warn --manifest-path formal/source-linked/kani/Cargo.toml
+          --config deny.toml --all-features check
+      - name: Run cargo-deny (Lean extraction harness)
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: >-
+          cargo deny --log-level warn --manifest-path formal/source-linked/lean/Cargo.toml
+          --config deny.toml --all-features check
       - name: Run cargo-deny (Fortress fixture)
         if: steps.dep-relevance.outputs.relevant == 'true'
         env:
@@ -809,6 +823,12 @@ jobs:
       - name: Run cargo-audit (fuzz package)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file fuzz/Cargo.lock
+      - name: Run cargo-audit (Kani proof harness)
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
+        run: cargo audit --file formal/source-linked/kani/Cargo.lock
+      - name: Run cargo-audit (Lean extraction harness)
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
+        run: cargo audit --file formal/source-linked/lean/Cargo.lock
       - name: Run cargo-audit (Fortress fixture)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file clients/fortress/Cargo.lock

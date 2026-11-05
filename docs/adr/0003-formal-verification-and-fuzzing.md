@@ -284,6 +284,28 @@ surface and anchored to function names in `src/server/session_policy.rs` /
 See [`formal/README.md`](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/formal/README.md#z3-proofs)
 for the proof catalog and the TLA+ ⇄ Z3 division of labour.
 
+## Update: source-linked verification pilot (#1464)
+
+Add a bounded pilot for proofs that consume the production Rust source.
+The small private protocol core remains compiled by the server. Isolated,
+unpublished proof crates import that same source file; they do not copy its
+implementation or join the root dependency graph.
+
+Permit pinned extraction and verifier toolchains in these separate development
+checks. Keep the stable production compiler and all existing checks. Local
+and CI runs use the same proof runners. This narrows the original toolchain
+restriction without changing the production build requirements.
+
+Start with version negotiation and nonempty capability aggregation. Record
+the Rust-to-proof boundary, external assumptions, input bounds, source fault
+controls, and measured cost. A successful extraction alone is not a successful
+proof. A proof of the aggregation helper does not establish correctness of
+the caller's capability mapping or the async protocol lifecycle.
+
+Keep the TLA+ and Z3 models during evaluation. Do not build a new translator or
+expand to whole-server verification without evidence from this pilot. See the
+[decision record and commands](../../formal/source-linked/README.md).
+
 ## References
 
 - [Protocol v3 Two-Axis (ADR-0001)](0001-protocol-v3-two-axis.md) — the invariants this layer verifies

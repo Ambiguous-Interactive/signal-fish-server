@@ -8,6 +8,51 @@ measure disk use, run disposable experiments, and maintain host storage.
 The [production correctness audit](development/production-correctness-audit.md)
 records reviewed contracts, reproducible findings, and the remaining audit work.
 
+## Internal refactors without release notes
+
+Release notes describe changes users can observe. For a behavior-preserving
+refactor, add or update `.github/internal-refactor.json` in the same change:
+
+```json
+{
+  "base": "<full merge-base commit id>",
+  "reason": "Move unchanged decisions into a shared private module for verification.",
+  "files": [
+    {
+      "path": "src/example.rs",
+      "before": "<git blob id at base>",
+      "after": "<git blob id after refactor>"
+    }
+  ]
+}
+```
+
+Use `git merge-base origin/main HEAD` for the base and
+`git rev-parse BASE:src/example.rs` for an existing before blob. Use
+`git hash-object -- src/example.rs` for the worktree after blob, or
+`git rev-parse :src/example.rs` for the staged (index stage 0) after blob.
+Use the staged command when the index differs from the worktree. A new file has
+`"before": null`; a removed file has `"after": null`. Each entry must change
+content. The declaration accepts at most 32 regular files and no path aliases.
+
+Review the rationale and exact source diff in the PR. Hashes establish which
+change was classified; they do not establish semantic equivalence. Do not use
+this declaration for user-visible changes. Keep such changes in the changelog.
+
+The staged hook checks index blobs; its `-Worktree` preflight checks disk
+content. Hosted checks require after blobs to match the checked-out comparison
+commit. The declaration base must equal or precede the comparison merge base.
+An older base is valid only when every declared path has the same blob at both
+bases. Update the declaration after edits or rebases that change those blobs.
+An unchanged declaration is historical and never exempts a later change.
+
+Both checks use `scripts/hooks/internal-refactor.ps1`. To inspect local
+classification, run:
+
+```bash
+pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-internal-refactor.ps1 -Mode Worktree
+```
+
 ## Prerequisites
 
 - Rust 1.94.0 or later (see `rust-version` in `Cargo.toml`)

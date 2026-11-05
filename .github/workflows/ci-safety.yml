@@ -33,7 +33,7 @@
 #     measured 12m14s hosted (PR #425 evidence) with a flat long tail, so the
 #     suite is split across two lanes that each compile the library under Miri
 #     and run a filter subset:
-#       - core: `websocket coordination server protocol` (the measured heavy
+#       - core: `websocket coordination server protocol protocol_core` (the measured heavy
 #         modules)
 #       - remaining: every other module
 #     The filters are libtest name filters, so the lane union covers the whole
@@ -142,7 +142,7 @@ jobs:
             # The measured heavy modules (#425 evidence): websocket::sending,
             # upgrade admission, room/admission flows, coordination stress,
             # protocol parsing.
-            filters: "websocket coordination server protocol"
+            filters: "websocket coordination server protocol protocol_core"
           - name: remaining
             filters:
               "auth config database deadline distributed logging metrics

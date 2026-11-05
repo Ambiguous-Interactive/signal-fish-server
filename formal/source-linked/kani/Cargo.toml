@@ -1,0 +1,14 @@
+[package]
+name = "signal-fish-kani-pilot"
+version = "0.0.0"
+license = "MIT"
+authors = ["Ambiguous Interactive"]
+edition = "2021"
+rust-version = "1.94.0"
+publish = false
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

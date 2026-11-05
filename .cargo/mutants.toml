@@ -64,6 +64,7 @@ additional_cargo_args = ["--lib", "--features", "trace-validation"]
 # runs). They belong to the e2e-oracle mutation lane
 # (scripts/run-mutants.sh --profile delivery, monthly), not this config.
 examine_globs = [
+    "src/protocol_core.rs",
     "src/server/session_policy.rs",
     "src/server/signaling.rs",
     "src/server/relay_policy.rs",
@@ -86,6 +87,8 @@ exclude_globs = [
 # (not test gaps).
 #
 exclude_re = [
+    # At client_max == maximum, both negotiation branches return that same u16.
+    "^src/protocol_core\\.rs:[0-9]+:[0-9]+: replace < with <= in negotiate_protocol_version$",
     # Equal keys include the returned player ID. Choosing another tied reference
     # cannot change later comparisons or the result.
     "^src/server/session_policy\\.rs:[0-9]+:[0-9]+: replace < with <= in elect_host$",

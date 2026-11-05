@@ -31892,11 +31892,14 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
         &["pull_request"],
         &[
             "formal/**",
+            "rust-toolchain.toml",
             "scripts/run-tla-model-check.sh",
             "scripts/generate-sequenced-relay-trace.py",
             "scripts/run-sequenced-relay-trace-validation.sh",
             "scripts/run-z3-proofs.sh",
             "src/config/**",
+            "src/lib.rs",
+            "src/protocol_core.rs",
             "src/rate_limit.rs",
             "src/auth/**",
             "src/server/session_policy.rs",
@@ -31919,6 +31922,53 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             ".github/workflows/formal-verification.yml",
         ],
     );
+}
+
+#[test]
+fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/formal-verification.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("valid formal workflow");
+    let jobs = documents[0].as_mapping_get("jobs").expect("formal jobs");
+    for (backend, version, arguments) in [
+        ("kani", "0.68.0", "--mutations"),
+        ("lean", "0.4.2", "--prepare --mutations"),
+    ] {
+        let job = jobs.as_mapping_get(backend).expect("source-linked job");
+        assert!(job.as_mapping_get("continue-on-error").is_none());
+        let steps = job
+            .as_mapping_get("steps")
+            .and_then(Yaml::as_sequence)
+            .expect("proof job steps");
+        let invocation = format!("python3 formal/source-linked/{backend}/verify.py {arguments}");
+        let verification_step = steps
+            .iter()
+            .find(|step| step.as_mapping_get("run").and_then(Yaml::as_str) == Some(&invocation))
+            .expect("job must run current source with negative controls");
+        assert!(verification_step
+            .as_mapping_get("continue-on-error")
+            .is_none());
+        assert!(verification_step.as_mapping_get("if").is_none());
+        let runner =
+            read_live_file(&root.join(format!("formal/source-linked/{backend}/verify.py")));
+        assert!(runner.contains(&format!("VERSION = \"{version}\"")));
+        assert!(steps.iter().any(|step| {
+            step.as_mapping_get("run")
+                .and_then(Yaml::as_str)
+                .is_some_and(|command| command.contains(&format!("--version {version}")))
+                || step
+                    .as_mapping_get("with")
+                    .and_then(|settings| settings.as_mapping_get("tool"))
+                    .and_then(Yaml::as_str)
+                    .is_some_and(|tool| tool.ends_with(&format!("@{version}")))
+        }));
+        assert!(steps.iter().any(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
+                && step.as_mapping_get("if").and_then(Yaml::as_str) == Some("always()")
+        }));
+    }
 }
 
 #[test]
@@ -34260,7 +34310,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     491 (was 489): active room event lane retention adds two sites (#1467).
     With 50 shards, ceil(491/50) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 491;
+// 497 (was 491): retain extracted capability sites and add negotiation core sites (#1464).
+// The equality-branch negotiation mutant is equivalent and explicitly excluded.
+// With 50 shards, ceil(497/50) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 497;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
