@@ -31,6 +31,47 @@ updates:
         patterns:
           - "*"
 
+  # Proof harness graphs currently have no external Rust dependencies.
+  - package-ecosystem: "cargo"
+    directory: "/formal/source-linked/kani"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(kani)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-kani-updates:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/formal/source-linked/lean"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(lean)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-lean-updates:
+        patterns:
+          - "*"
+
   # ============================================================================
   # Rust Dependencies (Cargo) - Root Workspace
   # ============================================================================

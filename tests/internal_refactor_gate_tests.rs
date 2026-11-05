@@ -3,19 +3,25 @@
 mod common;
 
 #[test]
-fn internal_refactor_declarations_bind_exact_blobs_and_change_scope() {
+fn internal_refactor_declarations_bind_exact_blobs_and_change_scope_when_pwsh_available() {
     let root = common::repo_root();
-    let temporary = common::unique_temp_dir("internal-refactor-gate");
-    std::fs::create_dir_all(&temporary).expect("create fixture directory");
-    let output = std::process::Command::new("pwsh")
+    let result = std::process::Command::new("pwsh")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
         .arg(root.join(".github/test-fixtures/test-internal-refactor.ps1"))
         .arg("-RepositoryRoot")
         .arg(&root)
-        .current_dir(&temporary)
-        .output()
-        .expect("run PowerShell gate fixtures");
-    std::fs::remove_dir_all(&temporary).expect("remove fixture directory");
+        .current_dir(&root)
+        .output();
+    let output = match result {
+        Ok(output) => output,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && std::env::var_os("CI").is_none() =>
+        {
+            eprintln!("skipping PowerShell gate fixtures: pwsh is unavailable locally");
+            return;
+        }
+        Err(error) => panic!("run PowerShell gate fixtures: {error}"),
+    };
     assert!(
         output.status.success(),
         "internal-refactor policy failed:\n{}\n{}",

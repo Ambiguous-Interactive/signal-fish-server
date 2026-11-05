@@ -49,6 +49,7 @@ on:
     branches: [main]
     paths:
       - "formal/**"
+      - "rust-toolchain.toml"
       - "scripts/run-tla-model-check.sh"
       - "scripts/generate-sequenced-relay-trace.py"
       - "scripts/run-sequenced-relay-trace-validation.sh"

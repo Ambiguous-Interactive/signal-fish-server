@@ -29,7 +29,9 @@ refactor, add or update `.github/internal-refactor.json` in the same change:
 
 Use `git merge-base origin/main HEAD` for the base and
 `git rev-parse BASE:src/example.rs` for an existing before blob. Use
-`git hash-object -- src/example.rs` for the current after blob. A new file has
+`git hash-object -- src/example.rs` for the worktree after blob, or
+`git rev-parse :src/example.rs` for the staged (index stage 0) after blob.
+Use the staged command when the index differs from the worktree. A new file has
 `"before": null`; a removed file has `"after": null`. Each entry must change
 content. The declaration accepts at most 32 regular files and no path aliases.
 
@@ -38,10 +40,11 @@ change was classified; they do not establish semantic equivalence. Do not use
 this declaration for user-visible changes. Keep such changes in the changelog.
 
 The staged hook checks index blobs; its `-Worktree` preflight checks disk
-content. Hosted checks also require the declaration's base to equal the diff's
-merge base and its after blobs to match the checked-out comparison commit.
-Update the declaration after edits or rebases. An unchanged declaration is
-historical and never exempts a later change.
+content. Hosted checks require after blobs to match the checked-out comparison
+commit. The declaration base must equal or precede the comparison merge base.
+An older base is valid only when every declared path has the same blob at both
+bases. Update the declaration after edits or rebases that change those blobs.
+An unchanged declaration is historical and never exempts a later change.
 
 Both checks use `scripts/hooks/internal-refactor.ps1`. To inspect local
 classification, run:

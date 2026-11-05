@@ -89,7 +89,8 @@ function Get-InternalRefactorExemptions {
     $ancestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, "HEAD")
     if ($ancestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of HEAD" }
     if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
-        throw "Internal-refactor base does not match the comparison base"
+        $baseAncestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, $comparisonBase)
+        if ($baseAncestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of the comparison base" }
     }
 
     $paths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -124,6 +125,9 @@ function Get-InternalRefactorExemptions {
     }
     $treePattern = '^100(644|755) blob ([0-9a-f]{40})\t(.+)$'
     $beforeBlobs = Read-RefactorBlobs @("ls-tree", "-z", $declaration.base) $treePattern
+    $comparisonBlobs = if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
+        Read-RefactorBlobs @("ls-tree", "-z", $comparisonBase) $treePattern
+    } else { $null }
     if ($Mode -eq "Staged") {
         $afterBlobs = Read-RefactorBlobs @("ls-files", "--stage", "-z") '^100(644|755) ([0-9a-f]{40}) 0\t(.+)$'
     } else {
@@ -152,6 +156,10 @@ function Get-InternalRefactorExemptions {
         $before = if ($beforeBlobs.ContainsKey($entry.path)) { $beforeBlobs[$entry.path] } else { $null }
         $after = if ($afterBlobs.ContainsKey($entry.path)) { $afterBlobs[$entry.path] } else { $null }
         if ($before -cne $entry.before) { throw "Internal-refactor before blob mismatch: $($entry.path)" }
+        if ($null -ne $comparisonBlobs) {
+            $comparisonBefore = if ($comparisonBlobs.ContainsKey($entry.path)) { $comparisonBlobs[$entry.path] } else { $null }
+            if ($comparisonBefore -cne $before) { throw "Refactor path changed at the comparison base: $($entry.path)" }
+        }
         if ($after -cne $entry.after) { throw "Internal-refactor after blob mismatch: $($entry.path)" }
         if ($null -ne $committedBlobs) {
             $committed = if ($committedBlobs.ContainsKey($entry.path)) { $committedBlobs[$entry.path] } else { $null }

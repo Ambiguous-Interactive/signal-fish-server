@@ -1,6 +1,7 @@
 [package]
 name = "signal-fish-kani-pilot"
 version = "0.0.0"
+license = "MIT"
 authors = ["Ambiguous Interactive"]
 edition = "2021"
 rust-version = "1.94.0"

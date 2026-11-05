@@ -141,12 +141,27 @@ local container storage. They are not hosted-runner or clean-install timings.
 An initial full Mathlib cache attempt was stopped after 12 minutes 24 seconds.
 The runner now requests only the modules used by the pinned dependencies.
 The first dependency/proof build after cache preparation took about 166 seconds.
-A fresh installation still needs a separate capacity measurement.
 
 Raw command logs and timings are in
 `lean/target/verification-logs/`. CI runs the same runner, retains those logs,
 and rejects stale or untracked generated proof files. The runner checks that
 source, Cargo lockfile, Lean manifests, and tool pins remain unchanged.
+
+### Hosted Lean sample
+
+The first completed [hosted Lean job](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/42092218396/job/127473309080)
+on commit `240484e33808eb2cd06a3e36da509eea069a5290` passed on Ubuntu 24.04
+x86-64 with a dependency cache miss. The preparation, proof, mutation, and
+restored-check command took 548.94 seconds, including 386.257 seconds for the
+first dependency/proof build. The saved cache occupied 2,490,819,057 compressed
+bytes (about 2.49 GB).
+
+Within that same run, the restored extraction took 0.917 seconds, its build
+1.117 seconds, and its axiom audit 2.520 seconds. These are individual command
+times, not a measurement of a complete warm job. The
+[retained evidence](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/42092218396/artifacts/13446731301)
+records both rejected mutations and the restored proof. This is one cold
+sample, not a latency percentile or capacity guarantee.
 
 ## Decision
 

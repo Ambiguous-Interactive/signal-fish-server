@@ -31892,6 +31892,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
         &["pull_request"],
         &[
             "formal/**",
+            "rust-toolchain.toml",
             "scripts/run-tla-model-check.sh",
             "scripts/generate-sequenced-relay-trace.py",
             "scripts/run-sequenced-relay-trace-validation.sh",
