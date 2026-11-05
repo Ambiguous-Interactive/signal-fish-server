@@ -14594,6 +14594,35 @@ async fn default_session_selection_retains_custom_backend_read_semantics() {
             assert_eq!(player, wanted);
         }
     }
+    for include_direct in [false, true] {
+        for database in [
+            &adapter as &dyn crate::database::GameDatabase,
+            inner.as_ref() as &dyn crate::database::GameDatabase,
+        ] {
+            let host_id = PlayerId::from_u128(1);
+            let snapshot = database
+                .get_room_session_host_snapshot_for_transport(&room.id, &host_id, include_direct)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.lobby_state, expected.lobby_state);
+            let mut wanted = crate::database::SessionPlayer::from(&expected.players[&host_id]);
+            if !include_direct {
+                wanted.direct_endpoint = None;
+            }
+            assert_eq!(snapshot.host, Some(wanted));
+            let missing = database
+                .get_room_session_host_snapshot_for_transport(
+                    &room.id,
+                    &PlayerId::nil(),
+                    include_direct,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(missing.host.is_none());
+        }
+    }
     inner.fail_get_room_by_id_for_test(true);
     assert!(adapter
         .get_room_session_selection_snapshot(&room.id)
@@ -14605,11 +14634,32 @@ async fn default_session_selection_retains_custom_backend_read_semantics() {
             .await
             .is_err());
     }
+    for include_direct in [false, true] {
+        assert!(adapter
+            .get_room_session_host_snapshot_for_transport(
+                &room.id,
+                &PlayerId::from_u128(1),
+                include_direct
+            )
+            .await
+            .is_err());
+    }
     inner.fail_get_room_by_id_for_test(false);
     assert!(inner.delete_room(&room.id).await.unwrap());
     for include_direct in [false, true] {
         assert!(adapter
             .get_room_session_selection_snapshot_for_transport(&room.id, include_direct)
+            .await
+            .unwrap()
+            .is_none());
+    }
+    for include_direct in [false, true] {
+        assert!(adapter
+            .get_room_session_host_snapshot_for_transport(
+                &room.id,
+                &PlayerId::from_u128(1),
+                include_direct
+            )
             .await
             .unwrap()
             .is_none());

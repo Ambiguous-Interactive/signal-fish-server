@@ -665,6 +665,28 @@ pub trait GameDatabase: Send + Sync {
             }))
     }
 
+    /// Read one host for the selected transport while preserving backend read semantics.
+    /// The default delegates to the existing atomic host snapshot and propagates errors.
+    async fn get_room_session_host_snapshot_for_transport(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionHostSnapshot>> {
+        let mut snapshot = self
+            .get_room_session_host_snapshot(room_id, host_id)
+            .await?;
+        if !include_direct {
+            if let Some(host) = snapshot
+                .as_mut()
+                .and_then(|snapshot| snapshot.host.as_mut())
+            {
+                host.direct_endpoint = None;
+            }
+        }
+        Ok(snapshot)
+    }
+
     /// Read one member's validated Direct endpoint, including pending rooms.
     /// Missing rooms, members, and unusable metadata return `None`.
     /// Storage errors match [`Self::get_room_session_selection_snapshot`].
@@ -1393,6 +1415,29 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    /// Read one host and lifecycle atomically without projecting unused Direct metadata.
+    async fn read_session_host_snapshot(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionHostSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSessionHostSnapshot {
+                lobby_state: room.lobby_state.clone(),
+                host: room
+                    .players
+                    .get(host_id)
+                    .map(|player| SessionPlayer::for_transport(player, include_direct)),
+            }))
+    }
+
     /// Capture membership, authority, and lifecycle under one room read lock.
     async fn read_session_selection_snapshot(
         &self,
@@ -2566,17 +2611,19 @@ impl GameDatabase for InMemoryDatabase {
         room_id: &RoomId,
         host_id: &PlayerId,
     ) -> Result<Option<RoomSessionHostSnapshot>> {
-        #[cfg(test)]
-        self.before_room_read_for_test().await?;
-        Ok(self
-            .rooms
-            .read()
+        self.read_session_host_snapshot(room_id, host_id, true)
             .await
-            .get(room_id)
-            .map(|room| RoomSessionHostSnapshot {
-                lobby_state: room.lobby_state.clone(),
-                host: room.players.get(host_id).map(SessionPlayer::from),
-            }))
+    }
+
+    /// Omit unrequested Direct metadata before validating or copying the host.
+    async fn get_room_session_host_snapshot_for_transport(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionHostSnapshot>> {
+        self.read_session_host_snapshot(room_id, host_id, include_direct)
+            .await
     }
 
     async fn get_player_direct_endpoint(

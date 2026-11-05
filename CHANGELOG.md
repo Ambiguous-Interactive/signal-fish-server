@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce server heap allocations during large P2P readiness snapshots, conditional room replies, and WebRTC room updates
+- Reduce server heap allocations during large P2P readiness snapshots, conditional room replies, and WebRTC room and host checks
   (#1459, #1460, #1461).
 - Reduce server memory use during P2P reconnects, replies, signaling, and game starts
   (#1454, #1455, #1456, #1457).
