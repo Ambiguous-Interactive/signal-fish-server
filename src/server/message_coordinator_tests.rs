@@ -6040,7 +6040,7 @@ async fn route_change_scaling_measurement() {
         }
         let player = PlayerId::from_u128(1);
         let room = RoomId::from_u128(10_000);
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..1000 {
             drop(
                 coordinator
@@ -6051,7 +6051,7 @@ async fn route_change_scaling_measurement() {
         let discovery = started.elapsed();
         let (sender, _receiver) = mpsc::channel(4);
         let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..1000 {
             coordinator
                 .register_local_client(player, Some(room), delivery.clone())
