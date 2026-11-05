@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Report SCTP credit, send windows, and queued TSNs to diagnose stalled native P2P transfers (#1319).
+- Report SCTP credit, send windows, queued DATA, and TSN ownership to diagnose stalled native P2P transfers (#1319).
 - Report session metrics scan and capture times in trace logs.
 
 ### Changed

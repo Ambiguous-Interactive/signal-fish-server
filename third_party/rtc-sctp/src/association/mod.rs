@@ -710,7 +710,7 @@ impl Association {
             inflight_bytes: self.inflight_queue.get_num_bytes(),
             inflight_chunks: self.inflight_queue.len(),
             pending_bytes: self.pending_queue.get_num_bytes(),
-            pending_chunks: self.pending_queue.len(),
+            pending_chunks: self.pending_queue.data_len(),
             received_gap_chunks: self.payload_queue.len(),
             cumulative_ack: self.cumulative_tsn_ack_point,
             next_tsn: self.my_next_tsn,

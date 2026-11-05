@@ -1665,7 +1665,23 @@ fn outbound_evidence_flow_control_keeps_queue_and_credit_ownership() -> Result<(
     let now = Instant::now();
     let next_tsn = association.my_next_tsn;
     let ppi = PayloadProtocolIdentifier::Binary;
+    association
+        .pending_queue
+        .push_reset(crate::queue::pending_queue::ResetMarker {
+            stream_identifier: 2,
+        });
+    assert_eq!(
+        association.flow_control().pending_chunks,
+        0,
+        "a reset marker is not pending DATA"
+    );
+    assert_eq!(association.flow_control().pending_bytes, 0);
     association.open_stream(1, ppi)?.write(now, b"queued")?;
+    association
+        .pending_queue
+        .push_reset(crate::queue::pending_queue::ResetMarker {
+            stream_identifier: 3,
+        });
     let queued = association.flow_control();
     assert_eq!(queued.receive_window, 3);
     assert_eq!(queued.receive_buffer_limit, 3);
@@ -1716,5 +1732,8 @@ fn outbound_evidence_flow_control_keeps_queue_and_credit_ownership() -> Result<(
     assert_eq!(&body, b"exact!");
     assert_eq!(association.flow_control().receive_window, 3);
     assert!(!association.flow_control().has_complete_queued_data);
+    association.open_stream(4, ppi)?.write(now, b"end")?;
+    assert_eq!(association.flow_control().pending_chunks, 1);
+    assert_eq!(association.flow_control().pending_bytes, 3);
     Ok(())
 }

@@ -18,6 +18,7 @@ pending/in-flight queues, and cumulative/next/outstanding TSNs for #1319.
 The read retains no payload, advances no timers, and changes no protocol state.
 Its control preserves exact received bytes while sampling pending, sent, queued,
 and drained states. The RTC diagnostic bridge retains the same observation.
+Pending DATA counts exclude reset markers through separate marker accounting.
 
 The repair addresses stream reset and reuse in
 [#872](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/872).

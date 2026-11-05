@@ -130,6 +130,7 @@ It also retains cumulative TSNs, the next send TSN, the earliest unacknowledged
 TSN, and whether a complete receive message is queued. These scalar fields share
 the counters' association observation. They do not advance timers or drain queues.
 The local receive credit is the value for the next SACK, not proof of a sent SACK.
+Pending DATA chunk counts exclude reset control markers.
 It adds transport IDs, ICE/DTLS states, sent/received packet and byte counts,
 and RTC channel IDs, states, and message/byte counts to the local callback snapshot.
 Transport counts include control traffic and protocol overhead. They do not
