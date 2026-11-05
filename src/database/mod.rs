@@ -250,6 +250,7 @@ impl From<&PlayerInfo> for SessionPlayer {
 }
 
 impl SessionPlayer {
+    /// Copy selection fields and validate an owned endpoint only when Direct is requested.
     fn for_transport(player: &PlayerInfo, include_direct: bool) -> Self {
         Self {
             id: player.id,
@@ -1392,6 +1393,7 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    /// Capture membership, authority, and lifecycle under one room read lock.
     async fn read_session_selection_snapshot(
         &self,
         room_id: &RoomId,
@@ -2540,6 +2542,7 @@ impl GameDatabase for InMemoryDatabase {
             }))
     }
 
+    /// Read all selection fields, including validated Direct endpoints.
     async fn get_room_session_selection_snapshot(
         &self,
         room_id: &RoomId,
@@ -2547,6 +2550,7 @@ impl GameDatabase for InMemoryDatabase {
         self.read_session_selection_snapshot(room_id, true).await
     }
 
+    /// Read one coherent selection snapshot without copying unrequested Direct endpoints.
     async fn get_room_session_selection_snapshot_for_transport(
         &self,
         room_id: &RoomId,

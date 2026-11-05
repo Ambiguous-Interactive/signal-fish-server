@@ -9,6 +9,7 @@ use signal_fish_server::server::{
 };
 use std::sync::Arc;
 
+/// Bound readiness heap use while preserving order, metadata, and oversized custom inputs.
 pub(crate) fn readiness_sort_avoids_heap_storage() {
     for count in [127_u128, 128, 129, 255, 256, 512] {
         let mut players: Vec<_> = (1..=count)
@@ -50,6 +51,7 @@ pub(crate) fn readiness_sort_avoids_heap_storage() {
     }
 }
 
+/// Preserve exact replies and reject changed membership without copying current routes.
 pub(crate) fn exact_membership_reply_avoids_current_roster_copy() {
     for count in [2_u128, 16, 255] {
         allocation_harness::block_on(async {

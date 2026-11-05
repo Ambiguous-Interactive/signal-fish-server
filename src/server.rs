@@ -4735,6 +4735,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(Some([routed(first), routed(second)]))
     }
 
+    /// Reserve the target queue, then commit only while seated routes and the sender match.
     async fn send_to_player_in_room_if_members(
         &self,
         player_id: &PlayerId,
