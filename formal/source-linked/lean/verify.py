@@ -25,6 +25,10 @@ THEOREMS = {"negotiation": (
     "Capability.all_members_contract",
     "Capability.boolean_identity_contract",
     "Capability.nonempty_outcomes",
+    "Capability.callback_trace_exists",
+    "Capability.callback_trace_contract",
+    "Capability.callback_order_outcomes",
+    "Capability.callback_failure_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
@@ -171,11 +175,17 @@ def check_proof_rejection(result, scenario, name):
     if result.returncode == 0:
         raise RuntimeError(f"Proof accepted source mutation: {name}")
     module = "Negotiation" if scenario == "negotiation" else "Capability"
-    target = f"{module}/Verification/ProofObligations.lean:"
+    targets = (f"{module}/Verification/ProofObligations.lean:",)
+    if scenario == "capability":
+        targets += ("Capability/Verification/CallbackSemantics.lean:",)
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
-    if not locations or any(not error.startswith(target) for error in locations):
+    if not locations or any(not error.startswith(targets) for error in locations):
         raise RuntimeError(f"Mutation failed outside the proof: {name}\n{result.stdout}")
+    if name == "extra-callback" and not any(
+            error.startswith("Capability/Verification/CallbackSemantics.lean:")
+            for error in locations):
+        raise RuntimeError(f"Mutation did not fail the callback semantics: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -276,13 +286,16 @@ def mutants(crate):
 
 
 def capability_mutants(crate):
-    """Reject empty-room and skipped-member faults with kernel-checked results."""
+    """Reject result and callback-state faults with kernel-checked results."""
     original = (ROOT / "src/protocol_core.rs").read_text()
     changes = {
         "empty-room": ("!members.is_empty() && members.iter().all(supports)",
                        "members.iter().all(supports)"),
         "skip-member": ("members.iter().all(supports)",
                         "if members.len() == 1 { true } else { members.iter().all(supports) }"),
+        "extra-callback": ("!members.is_empty() && members.iter().all(supports)",
+                           "!members.is_empty() && { let mut supports = supports; "
+                           "supports(&members[0]) && members.iter().all(supports) }"),
     }
     for name, (before, after) in changes.items():
         if original.count(before) != 1:
@@ -304,7 +317,8 @@ def capability_mutants(crate):
                 extract(copied, "capability")
                 check_iterator_alias(project, copied)
                 run(["lake", "build", "Capability.Extraction"], project)
-                result = run(["lake", "build"], project, expect_success=False)
+                target = ["Capability.Verification.CallbackSemantics"] if name == "extra-callback" else []
+                result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
                 run(["lake", "build", "Capability.Verification.Callbacks"], project)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
