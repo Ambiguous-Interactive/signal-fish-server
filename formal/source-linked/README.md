@@ -108,6 +108,16 @@ and proof lockfile did not change. The formal workflow runs the same command and
 the evidence. This closes source drift for the selected helper contracts;
 the adapter and async boundaries above remain.
 
+### Hosted Kani sample
+
+The first [hosted Kani job](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/42091475014/job/127470333451)
+on commit `9d83c78f65da9c575f69c8fbf335440912a94202` passed on Ubuntu 24.04
+x86-64 with a backend cache miss. Installation and setup took 17.525 seconds.
+The source-check baseline took 3.271 seconds; its warm repeat took 3.921 seconds.
+The full baseline, repeat, four mutations, and restored check took 17.481 seconds.
+The job took about 55 seconds, including evidence upload and cache storage.
+This is one hosted sample, not a latency percentile or capacity guarantee.
+
 ## Measured Lean result
 
 hax `0.4.2` extracted the production negotiation helper. Lean `4.31.0` accepted

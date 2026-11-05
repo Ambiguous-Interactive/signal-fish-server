@@ -91,6 +91,7 @@ tempfile = "tempfile"
 
 # === Rust Tooling ===
 clippy = "clippy"
+hax = "hax"             # Rust-to-theorem-prover extraction tool
 rustc = "rustc"
 rustdoc = "rustdoc"
 rustfmt = "rustfmt"
