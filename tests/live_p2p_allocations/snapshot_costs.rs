@@ -75,6 +75,24 @@ pub(crate) fn exact_membership_reply_avoids_current_roster_copy() {
             let message = Arc::new(ServerMessage::Pong);
             members.reverse();
             let target = Uuid::from_u128(1);
+            let construction_region = stats_alloc::Region::new(ALLOCATOR);
+            let unpolled = coordinator.send_to_player_in_room_if_members(
+                &target,
+                &room,
+                &members,
+                message.clone(),
+            );
+            drop(unpolled);
+            let construction = construction_region.change();
+            let watch_region = stats_alloc::Region::new(ALLOCATOR);
+            let (sender, receiver) = tokio::sync::watch::channel(false);
+            assert!(!*receiver.borrow());
+            drop(receiver);
+            drop(sender);
+            let watch = watch_region.change();
+            println!(
+                "EXACT_REPLY_CONTROLS count={count} construction={construction:?} watch={watch:?}"
+            );
             for measured in [false, true] {
                 let region = stats_alloc::Region::new(ALLOCATOR);
                 assert!(coordinator
@@ -86,8 +104,11 @@ pub(crate) fn exact_membership_reply_avoids_current_roster_copy() {
                 assert!(Arc::ptr_eq(&receivers[0].try_recv().unwrap(), &message));
                 if measured {
                     assert!(
-                        stats.allocations <= 3
-                            && stats.bytes_allocated < 16 * usize::try_from(count).unwrap() + 2500,
+                        stats.allocations <= construction.allocations + watch.allocations + 1
+                            && stats.bytes_allocated
+                                <= construction.bytes_allocated
+                                    + watch.bytes_allocated
+                                    + std::mem::size_of_val(members.as_slice()),
                         "reply copied both expected and current rosters: {stats:?}"
                     );
                 }
@@ -106,9 +127,17 @@ pub(crate) fn exact_membership_reply_avoids_current_roster_copy() {
                     .send_to_player_in_room_if_members(&target, &room, &invalid, message.clone())
                     .await
                     .unwrap());
-                assert!(receivers
-                    .iter_mut()
-                    .all(|receiver| receiver.try_recv().is_err()));
+                for receiver in &mut receivers {
+                    assert!(matches!(
+                        receiver.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ));
+                }
+                assert!(coordinator
+                    .send_to_player_in_room_if_members(&target, &room, &members, message.clone(),)
+                    .await
+                    .unwrap());
+                assert!(Arc::ptr_eq(&receivers[0].try_recv().unwrap(), &message));
             }
         });
     }
