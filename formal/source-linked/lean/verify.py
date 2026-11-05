@@ -140,6 +140,48 @@ def classify_capability(returncode, output):
     raise RuntimeError(f"Unexpected capability probe failure:\n{output}")
 
 
+def retain_capability_evidence(tree, crate, first_run, status):
+    """Keep the small source reproducer and raw commands after its tempdir ends."""
+    destination = LOGS / "capability-probe" / str(time.time_ns())
+    destination.mkdir(parents=True)
+    inputs = [tree / "src/protocol_core.rs"]
+    inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs"))
+    inputs.extend(sorted((crate / "compatibility").glob("*")))
+    negotiation = crate / "proofs/negotiation/lean"
+    inputs.extend(negotiation / name for name in (
+        "lake-manifest.json", "lakefile.toml", "lean-toolchain"))
+    project = crate / "proofs/capability/lean"
+    if project.exists():
+        inputs.extend(path for path in project.rglob("*")
+                      if path.is_file() and not path.is_symlink()
+                      and not any(part.startswith(".lake") for part in path.relative_to(project).parts))
+    hashes = {}
+    for source in inputs:
+        if not source.is_file():
+            continue
+        relative = source.relative_to(tree)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        hashes[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    records = [dict(record) for record in RUNS[first_run:]]
+    versions = [record for record in RUNS[:first_run]
+                if record["command"] == ["cargo", "hax", "--version"]]
+    if versions:
+        records.insert(0, dict(versions[-1]))
+    for record in records:
+        target = destination / "commands" / record["log"]
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(LOGS / record["log"], target)
+        record["log"] = str(target.relative_to(destination))
+    (destination / "results.json").write_text(json.dumps({
+        "hax_version": VERSION, "status": status,
+        "aggregation_theorem_proved": False,
+        "files_sha256": hashes, "runs": records,
+    }, indent=2) + "\n")
+    return destination
+
+
 def probe_capability(crate):
     with tempfile.TemporaryDirectory(prefix="signal-fish-lean-capability-") as tmp:
         tree = Path(tmp)
@@ -148,18 +190,51 @@ def probe_capability(crate):
         copied = tree / "formal/source-linked/lean"
         shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
             ".lake*", "target", "llbc", "__pycache__", "*.log", "capability"))
-        extract(copied, "capability")
-        project = copied / "proofs/capability/lean"
-        manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
-        manifest["name"] = "Capability"
-        (project / "lake-manifest.json").write_text(json.dumps(manifest))
-        (project / ".lake").mkdir()
-        (project / ".lake/packages").symlink_to(
-            crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
-        result = run(["lake", "build", "Capability.Extraction"], project, expect_success=False)
-        status = classify_capability(result.returncode, result.stdout)
-        print(f"CAPABILITY PROBE: {status}", flush=True)
-        return status
+        first_run = len(RUNS)
+        status = "probe failed; no aggregation theorem proved"
+        try:
+            extract(copied, "capability")
+            project = copied / "proofs/capability/lean"
+            manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
+            manifest["name"] = "Capability"
+            (project / "lake-manifest.json").write_text(json.dumps(manifest))
+            (project / ".lake").mkdir()
+            (project / ".lake/packages").symlink_to(
+                crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+            result = run(["lake", "build", "Capability.Extraction"], project, expect_success=False)
+            status = classify_capability(result.returncode, result.stdout)
+            if result.returncode:
+                retain_capability_evidence(tree, copied, first_run, status)
+                status = "compatibility typecheck failed; no aggregation theorem proved"
+                install_iterator_alias(project, copied)
+                run(["lake", "build", "Capability.Extraction"], project)
+                status = "extraction_typechecked with upstream alias backport; no aggregation theorem proved"
+            generated = project / "Capability/Extraction"
+            accepted_status = status
+            status = "repeat extraction/typecheck failed; no aggregation theorem proved"
+            before = {path.relative_to(generated): path.read_bytes()
+                      for path in generated.rglob("*.lean")}
+            extract(copied, "capability")
+            after = {path.relative_to(generated): path.read_bytes()
+                     for path in generated.rglob("*.lean")}
+            if not before or before != after:
+                status = "nondeterministic extraction; no aggregation theorem proved"
+                raise RuntimeError(status)
+            run(["lake", "build", "Capability.Extraction"], project)
+            status = accepted_status
+            print(f"CAPABILITY PROBE: {status}", flush=True)
+            return status
+        finally:
+            evidence = retain_capability_evidence(tree, copied, first_run, status)
+            print(f"CAPABILITY EVIDENCE: {evidence.relative_to(LOGS)}", flush=True)
+
+
+def install_iterator_alias(project, crate):
+    """Import only a concrete alias of the pinned upstream iterator model."""
+    shutil.copyfile(crate / "compatibility/IteratorAll.lean",
+                    project / "Capability/Compatibility.lean")
+    assumptions = project / "Capability/Assumptions/FunsExternal.lean"
+    assumptions.write_text("import Capability.Compatibility\n" + assumptions.read_text())
 
 
 def prepare():
@@ -191,6 +266,7 @@ def main():
     source = ROOT / "src/protocol_core.rs"
     source_before = source.read_bytes()
     lock_paths = [HERE / "Cargo.lock", HERE / "hax.toml"]
+    lock_paths.extend(sorted((HERE / "compatibility").glob("*")))
     for scenario in THEOREMS:
         project = HERE / f"proofs/{scenario}/lean"
         lock_paths.extend(project / name for name in (
