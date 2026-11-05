@@ -361,3 +361,69 @@ pub(crate) fn transport_report_delivery_cost() {
         );
     }
 }
+
+/// #1470: excluded IDs must not cause recipient-vector growth under routing locks.
+pub(crate) fn bus_exclusions_do_not_grow_recipient_storage() {
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = Uuid::from_u128(1000);
+        let mut receivers = Vec::new();
+        for id in 1..=7 {
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            receivers.push(receiver);
+            coordinator
+                .register_local_client(
+                    Uuid::from_u128(id),
+                    Some(room),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        }
+        let cases = [
+            vec![],
+            vec![Uuid::from_u128(1)],
+            vec![Uuid::from_u128(1); 7],
+            vec![Uuid::from_u128(999); 7],
+            (1..=7).map(Uuid::from_u128).collect(),
+            vec![Uuid::from_u128(1), Uuid::from_u128(1), Uuid::from_u128(999)],
+        ];
+        for excluded in cases {
+            for measured in [false, true] {
+                let message = signal_fish_server::distributed::SequencedMessage {
+                    sequence_id: 1,
+                    instance_id: Uuid::from_u128(2000),
+                    timestamp: chrono::Utc::now(),
+                    message: ServerMessage::Pong,
+                    room_id: Some(room),
+                    target_player: None,
+                    excluded_players: excluded.clone(),
+                };
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                coordinator.handle_bus_message(message).await.unwrap();
+                let stats = region.change();
+                println!(
+                    "BUS_EXCLUSION_COST measured={measured} excluded={excluded:?} stats={stats:?}"
+                );
+                for (index, receiver) in receivers.iter_mut().enumerate() {
+                    let player = Uuid::from_u128(u128::try_from(index).unwrap() + 1);
+                    if !excluded.contains(&player) {
+                        let received = receiver
+                            .try_recv()
+                            .expect("non-excluded peer receives Pong");
+                        assert!(matches!(received.as_ref(), ServerMessage::Pong));
+                    }
+                    let remaining = receiver.try_recv();
+                    assert!(matches!(
+                        remaining,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ));
+                }
+                if measured {
+                    assert_eq!(stats.reallocations, 0, "recipient storage grew: {stats:?}");
+                }
+            }
+        }
+    });
+}

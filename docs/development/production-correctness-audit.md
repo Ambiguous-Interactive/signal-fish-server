@@ -14937,3 +14937,43 @@ These are allocation and sender-ownership measurements. They do not prove a
 latency or remote-network capacity increase. Wire schemas, message ordering,
 plan selection, generation rules and reconnect contracts stay unchanged.
 Rust, .NET and Godot clients need no migration for these internal changes.
+
+### F285–F286 — Bounded live room routing storage
+
+Issues: #1469 and #1470. Baseline: `634e8a99`.
+Campaigns #636 and #826 remain open.
+
+A player route change built heap vectors for at most two room IDs and their
+write guards. Same-room registration measured five allocations, 792 allocated
+bytes and one resize on Linux. Bounded inline storage now holds the room keys
+and guards. The existing
+player fence still serializes identity changes, and room fences still follow
+UUID order with duplicate rooms removed. The complete registration control
+requires at most three allocations plus independently measured native mutex
+initialization. The Linux result is three allocations, 672 allocated bytes and
+zero resizes. Direct first/second acquisition avoids retaining an array iterator
+in the suspended future. Restoring the original lists fails this bound.
+
+Broadcast exclusion reserved membership count minus exclusion-list length.
+Duplicate or absent exclusions could underestimate the recipients and resize
+the vector while both routing maps were held. The bound now counts members
+that survive exclusion without building an exclusion set. Complete bus delivery
+controls cover empty, singleton, repeated, absent, all-member and mixed lists.
+They check each exact recipient, empty excluded queues and zero resizes. The
+original repeated-exclusion case resizes once and fails the new bound.
+
+The new cancellation history polls a room move until it holds the player fence
+and first room fence while waiting for the second. It checks unchanged stored
+membership, cancels the move, and verifies both room fences and the player fence
+can be acquired again. The old room still delivers; the target does not. Final
+unregister removes the reverse route and active room fence. Both old/target
+UUID orders run. Existing controls retain opposite concurrent moves, concurrent
+first registration, baseline updates, stale terminal events and inactive cleanup.
+This is bounded coverage of routing cancellation, not a new gameplay defect or
+proof of all publication schedules.
+
+These reduce allocation count and vector growth, not measured network latency.
+Rust, .NET and Godot remain unaffected: wire payloads, recipient selection,
+ordering, generations, negotiation and reconnect rules do not change. Each
+client's current README was inspected through the connected GitHub app; no
+migration or client tracking change is needed for these private storage changes.

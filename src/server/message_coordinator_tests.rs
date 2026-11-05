@@ -1596,6 +1596,7 @@ async fn opposite_room_reroutes_use_canonical_lock_order_and_unique_routes() {
         first_order
             ._rooms
             .iter()
+            .flatten()
             .map(|guard| guard._gate.key)
             .collect::<Vec<_>>(),
         vec![room_a, room_b]
@@ -1608,6 +1609,7 @@ async fn opposite_room_reroutes_use_canonical_lock_order_and_unique_routes() {
         second_order
             ._rooms
             .iter()
+            .flatten()
             .map(|guard| guard._gate.key)
             .collect::<Vec<_>>(),
         vec![room_a, room_b]
@@ -5949,6 +5951,7 @@ async fn route_gate_discovery_does_not_wait_on_the_global_membership_map() {
         guards
             ._rooms
             .iter()
+            .flatten()
             .map(|guard| guard._gate.key)
             .collect::<Vec<_>>(),
         expected
@@ -6283,4 +6286,63 @@ async fn concurrent_first_routes_publish_one_room_and_one_reverse_entry() {
     coordinator.unregister_local_client(&player).await.unwrap();
     assert!(coordinator.player_rooms.lock().unwrap().is_empty());
     assert_eq!(coordinator.room_event_sequencer.lane_count_for_test(), 0);
+}
+
+/// #826/#1469: cancel a move after its first room fence, before its second.
+#[tokio::test]
+async fn canceled_two_room_route_move_releases_fences_without_changing_membership() {
+    for old_is_first in [false, true] {
+        let coordinator = InMemoryMessageCoordinator::new();
+        let rooms = [RoomId::from_u128(100), RoomId::from_u128(200)];
+        let old = rooms[usize::from(!old_is_first)];
+        let target = rooms[usize::from(old_is_first)];
+        let player = PlayerId::from_u128(1);
+        let (sender, mut receiver) = mpsc::channel(4);
+        let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+        coordinator
+            .register_local_client(player, Some(old), delivery.clone())
+            .await
+            .unwrap();
+        let second = coordinator.room_routing_gates.read(rooms[1]).await;
+        let mut moving =
+            Box::pin(coordinator.register_local_client(player, Some(target), delivery));
+        assert!(futures_util::poll!(&mut moving).is_pending());
+        // Establish the exact partial-acquisition point without a timed wait.
+        assert!(coordinator.room_routing_gates.try_read(rooms[0]).is_none());
+        assert!(coordinator.player_routing_gates.try_read(player).is_none());
+        assert!(coordinator
+            .room_players
+            .read()
+            .await
+            .get(&old)
+            .unwrap()
+            .contains(&player));
+        assert!(!coordinator.room_players.read().await.contains_key(&target));
+        drop(moving);
+        drop(second);
+        assert!(coordinator.room_routing_gates.try_read(rooms[0]).is_some());
+        assert!(coordinator.room_routing_gates.try_read(rooms[1]).is_some());
+        assert!(coordinator.player_routing_gates.try_read(player).is_some());
+        coordinator
+            .send_to_player_in_room(&player, &old, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+        let received = receiver
+            .try_recv()
+            .expect("old room still delivers after cancellation");
+        assert!(matches!(received.as_ref(), ServerMessage::Pong));
+        assert!(!coordinator
+            .send_to_player_in_room(&player, &target, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap());
+        coordinator.unregister_local_client(&player).await.unwrap();
+        assert!(coordinator.player_rooms.lock().unwrap().is_empty());
+        assert!(coordinator
+            .room_routing_gates
+            .inner
+            .active
+            .lock()
+            .unwrap()
+            .is_empty());
+    }
 }

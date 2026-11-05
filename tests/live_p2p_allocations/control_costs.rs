@@ -251,7 +251,7 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
                 Some(vec![player])
             );
             assert!(
-                stats.allocations <= 5 + native_lock_initialization.allocations,
+                stats.allocations <= 3 + native_lock_initialization.allocations,
                 "same-room replacement rebuilt membership storage: {stats:?}"
             );
         }

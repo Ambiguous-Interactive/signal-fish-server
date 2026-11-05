@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server heap allocations and bytes used during P2P room changes, and avoid recipient storage growth in broadcasts
+  with excluded players (#1469, #1470).
 - Reduce room-change scans on busy servers and allocations during live WebRTC signaling (#1465, #1466, #1467).
 - Reduce server heap allocations during large P2P readiness snapshots, conditional room replies, and WebRTC room and
   host checks (#1459, #1460, #1461).
