@@ -20,11 +20,15 @@ fn take_plan(
     plan.as_ref().clone()
 }
 
-pub(super) fn live_host_operation_does_not_copy_legacy_metadata(direct: bool) {
+/// Check complete host updates and departures against varied unused metadata.
+pub(super) fn live_host_operation_does_not_copy_legacy_metadata(
+    direct: bool,
+    direct_metadata: bool,
+) {
     let mut profiles = Vec::new();
     for bytes in [0, 1024, 64 * 1024] {
         allocation_harness::block_on(async {
-            tokio::task::yield_now().await;
+            allocation_harness::warm_current_thread_runtime().await;
             let server = EnhancedGameServer::new(
                 ServerConfig::default(),
                 ProtocolConfig::default(),
@@ -118,15 +122,29 @@ pub(super) fn live_host_operation_does_not_copy_legacy_metadata(direct: bool) {
             drain_membership_setup(&mut successor_rx, false);
             drain_membership_setup(&mut guest_rx, false);
             let metadata = serde_json::json!({"nested": ["x".repeat(bytes)]});
+            let connection_info = if direct_metadata {
+                let host = match bytes {
+                    0 => "127.0.0.1".to_string(),
+                    1024 => "a".repeat(63),
+                    _ => [
+                        "a".repeat(63),
+                        "b".repeat(63),
+                        "c".repeat(63),
+                        "d".repeat(61),
+                    ]
+                    .join("."),
+                };
+                let info = ConnectionInfo::Direct { host, port: 7777 };
+                assert!(DirectEndpoint::from_connection_info(&info).is_some());
+                info
+            } else {
+                ConnectionInfo::Custom {
+                    data: metadata.clone(),
+                }
+            };
             assert!(server
                 .database()
-                .update_player_connection_info(
-                    &room_id,
-                    &guest,
-                    ConnectionInfo::Custom {
-                        data: metadata.clone()
-                    }
-                )
+                .update_player_connection_info(&room_id, &guest, connection_info.clone(),)
                 .await
                 .unwrap());
             let region = stats_alloc::Region::new(ALLOCATOR);
@@ -144,7 +162,11 @@ pub(super) fn live_host_operation_does_not_copy_legacy_metadata(direct: bool) {
                 server.leave_room(&host).await;
             }
             let stats = region.change();
-            println!("LIVE_HOST_PROFILE direct={direct} bytes={bytes} stats={stats:?}");
+            let endpoint_host_bytes = match &connection_info {
+                ConnectionInfo::Direct { host, .. } => host.len(),
+                _ => 0,
+            };
+            println!("LIVE_HOST_PROFILE direct={direct} direct_metadata={direct_metadata} bytes={bytes} endpoint_host_bytes={endpoint_host_bytes} stats={stats:?}");
             profiles.push(stats);
             if !direct {
                 for receiver in [&mut successor_rx, &mut guest_rx] {
@@ -221,8 +243,9 @@ pub(super) fn live_host_operation_does_not_copy_legacy_metadata(direct: bool) {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(
-                matches!(&stored.players[&guest].connection_info, Some(ConnectionInfo::Custom { data }) if *data == metadata)
+            assert_eq!(
+                serde_json::to_value(&stored.players[&guest].connection_info).unwrap(),
+                serde_json::to_value(Some(&connection_info)).unwrap(),
             );
             if direct {
                 assert!(
@@ -234,7 +257,7 @@ pub(super) fn live_host_operation_does_not_copy_legacy_metadata(direct: bool) {
         });
     }
     for (bytes, stats) in [0, 1024, 64 * 1024].into_iter().zip(&profiles) {
-        assert!(stats.bytes_allocated <= profiles[0].bytes_allocated + 512,
+        assert!(stats.bytes_allocated <= profiles[0].bytes_allocated + if direct_metadata { 128 } else { 512 },
             "host operation copied unrelated player metadata: direct={direct} bytes={bytes} profiles={profiles:?}");
     }
 }

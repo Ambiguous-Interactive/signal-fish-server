@@ -422,6 +422,9 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial("production_webrtc_refresh_skips_direct_endpoints", || {
+            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false, true)
+        }),
         allocation_harness::trial(
             "webrtc_refresh_skips_direct_endpoints",
             endpoint_costs::webrtc_refresh_skips_direct_endpoints,
@@ -551,10 +554,10 @@ fn main() {
             finalized_membership_reuses_owned_room_snapshots(true, true)
         }),
         allocation_harness::trial("host_departure_skips_legacy_player_metadata", || {
-            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false)
+            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false, false)
         }),
         allocation_harness::trial("direct_refresh_skips_legacy_player_metadata", || {
-            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(true)
+            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(true, false)
         }),
         allocation_harness::trial(
             "session_plans_do_not_copy_custom_connection_metadata",
