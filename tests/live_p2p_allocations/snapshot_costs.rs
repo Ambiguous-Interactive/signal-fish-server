@@ -128,10 +128,11 @@ pub(crate) fn exact_membership_reply_avoids_current_roster_copy() {
                     .await
                     .unwrap());
                 for receiver in &mut receivers {
-                    assert!(matches!(
-                        receiver.try_recv(),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                    ));
+                    let received = receiver.try_recv();
+                    assert!(
+                        matches!(received, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+                        "unexpected reply after rejected membership: {received:?}"
+                    );
                 }
                 assert!(coordinator
                     .send_to_player_in_room_if_members(&target, &room, &members, message.clone(),)
