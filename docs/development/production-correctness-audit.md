@@ -14945,15 +14945,14 @@ Campaigns #636 and #826 remain open.
 
 A player route change built heap vectors for at most two room IDs and their
 write guards. Same-room registration measured five allocations, 792 allocated
-bytes and one resize on Linux. Fixed arrays now hold both lists. The existing
+bytes and one resize on Linux. Bounded inline storage now holds the room keys
+and guards. The existing
 player fence still serializes identity changes, and room fences still follow
 UUID order with duplicate rooms removed. The complete registration control
 requires at most three allocations plus independently measured native mutex
-initialization. The Linux result is three allocations, 872 allocated bytes and
-zero resizes. Inline guards enlarge the boxed operation future, so total
-allocated bytes rise by 80 while allocation count falls by two. This is an
-allocation-count improvement, not a total-byte reduction. Restoring the original
-lists fails this bound.
+initialization. The Linux result is three allocations, 672 allocated bytes and
+zero resizes. Direct first/second acquisition avoids retaining an array iterator
+in the suspended future. Restoring the original lists fails this bound.
 
 Broadcast exclusion reserved membership count minus exclusion-list length.
 Duplicate or absent exclusions could underestimate the recipients and resize

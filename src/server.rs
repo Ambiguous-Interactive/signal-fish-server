@@ -3420,20 +3420,30 @@ impl InMemoryMessageCoordinator {
             .get(&player_id)
             .copied();
         // One identity has at most its old room and its destination. Keep both
-        // keys and guards inline; sorting still prevents opposing moves from
+        // keys and guards inline; UUID order still prevents opposing moves from
         // acquiring the same pair in different orders.
-        let mut room_ids = [old_room, target_room];
-        room_ids.sort_unstable();
-        if room_ids[0] == room_ids[1] {
-            room_ids[1] = None;
-        }
-        let mut rooms = [None, None];
-        for (slot, room_id) in rooms.iter_mut().zip(room_ids.into_iter().flatten()) {
-            *slot = Some(self.room_routing_gates.write(room_id).await);
-        }
+        let (first, second) = match (old_room, target_room) {
+            (Some(old), Some(target)) if old != target => {
+                if old < target {
+                    (Some(old), Some(target))
+                } else {
+                    (Some(target), Some(old))
+                }
+            }
+            (Some(room), _) | (_, Some(room)) => (Some(room), None),
+            (None, None) => (None, None),
+        };
+        let first = match first {
+            Some(room) => Some(self.room_routing_gates.write(room).await),
+            None => None,
+        };
+        let second = match second {
+            Some(room) => Some(self.room_routing_gates.write(room).await),
+            None => None,
+        };
         PlayerRoutingWriteGuards {
             _player: player,
-            _rooms: rooms,
+            _rooms: [first, second],
         }
     }
 
