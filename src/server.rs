@@ -2554,7 +2554,7 @@ struct RoutingWriteGuard {
 
 struct PlayerRoutingWriteGuards {
     _player: RoutingWriteGuard,
-    _rooms: Vec<RoutingWriteGuard>,
+    _rooms: [Option<RoutingWriteGuard>; 2],
 }
 
 impl RoutingGateRegistry {
@@ -2602,14 +2602,6 @@ impl RoutingGateRegistry {
             _guard: guard,
             _gate: gate,
         }
-    }
-
-    async fn write_many(&self, keys: &[Uuid]) -> Vec<RoutingWriteGuard> {
-        let mut guards = Vec::with_capacity(keys.len());
-        for key in keys {
-            guards.push(self.write(*key).await);
-        }
-        guards
     }
 
     fn mark_active(&self, gate: &Arc<RoutingGate>) {
@@ -3333,9 +3325,12 @@ impl InMemoryMessageCoordinator {
         let Some(players) = room_players.get(room_id) else {
             return Vec::new();
         };
+        // Only actual members reduce the bound. Duplicate or absent exclusions
+        // must not under-reserve and grow this vector under both routing maps.
         let capacity = players
-            .len()
-            .saturating_sub(excluded_players.len().min(players.len()));
+            .iter()
+            .filter(|player_id| !excluded_players.contains(player_id))
+            .count();
         let mut recipients = Vec::with_capacity(capacity);
         recipients.extend(
             players
@@ -3418,20 +3413,24 @@ impl InMemoryMessageCoordinator {
         // race where two concurrent first registrations could each lock only
         // their destination and leave the identity routed twice.
         let player = self.player_routing_gates.write(player_id).await;
-        let mut room_ids: Vec<RoomId> = self
+        let old_room = self
             .player_rooms
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&player_id)
-            .copied()
-            .into_iter()
-            .collect();
-        if let Some(room_id) = target_room {
-            room_ids.push(room_id);
-        }
+            .copied();
+        // One identity has at most its old room and its destination. Keep both
+        // keys and guards inline; sorting still prevents opposing moves from
+        // acquiring the same pair in different orders.
+        let mut room_ids = [old_room, target_room];
         room_ids.sort_unstable();
-        room_ids.dedup();
-        let rooms = self.room_routing_gates.write_many(&room_ids).await;
+        if room_ids[0] == room_ids[1] {
+            room_ids[1] = None;
+        }
+        let mut rooms = [None, None];
+        for (slot, room_id) in rooms.iter_mut().zip(room_ids.into_iter().flatten()) {
+            *slot = Some(self.room_routing_gates.write(room_id).await);
+        }
         PlayerRoutingWriteGuards {
             _player: player,
             _rooms: rooms,
@@ -3459,7 +3458,7 @@ impl InMemoryMessageCoordinator {
         room_players: &HashMap<RoomId, HashSet<PlayerId>>,
         routing: &PlayerRoutingWriteGuards,
     ) {
-        for guard in &routing._rooms {
+        for guard in routing._rooms.iter().flatten() {
             let room_id = guard._gate.key;
             if room_players
                 .get(&room_id)
