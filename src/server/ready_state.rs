@@ -28,8 +28,7 @@ pub(crate) fn apply_snapshot_readiness(players: &mut [PlayerInfo], ready_players
     if players.len() >= 128 && ready_players.len() >= 128 {
         let mut inline = [PlayerId::nil(); u8::MAX as usize];
         let mut overflow;
-        let ready = if ready_players.len() <= inline.len() {
-            let ready = &mut inline[..ready_players.len()];
+        let ready = if let Some(ready) = inline.get_mut(..ready_players.len()) {
             ready.copy_from_slice(ready_players);
             ready
         } else {
