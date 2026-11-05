@@ -14549,6 +14549,17 @@ async fn default_session_selection_retains_custom_backend_read_semantics() {
         )
         .await
         .unwrap();
+    assert!(inner
+        .update_player_connection_info(
+            &room.id,
+            &PlayerId::from_u128(1),
+            ConnectionInfo::Direct {
+                host: "127.0.0.1".into(),
+                port: 7777
+            }
+        )
+        .await
+        .unwrap());
     let adapter = DrainAfterCreateDatabase::new(inner.clone());
     let expected = inner.get_room_by_id(&room.id).await.unwrap().unwrap();
     let actual = adapter
@@ -14565,13 +14576,44 @@ async fn default_session_selection_retains_custom_backend_read_semantics() {
             crate::database::SessionPlayer::from(&expected.players[&player.id])
         );
     }
+    for include_direct in [false, true] {
+        inner.reset_get_room_by_id_calls_for_test();
+        let projected = adapter
+            .get_room_session_selection_snapshot_for_transport(&room.id, include_direct)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inner.get_room_by_id_calls_for_test(), 1);
+        assert_eq!(projected.authority_player, expected.authority_player);
+        assert_eq!(projected.lobby_state, expected.lobby_state);
+        for player in projected.players {
+            let mut wanted = crate::database::SessionPlayer::from(&expected.players[&player.id]);
+            if !include_direct {
+                wanted.direct_endpoint = None;
+            }
+            assert_eq!(player, wanted);
+        }
+    }
     inner.fail_get_room_by_id_for_test(true);
     assert!(adapter
         .get_room_session_selection_snapshot(&room.id)
         .await
         .is_err());
+    for include_direct in [false, true] {
+        assert!(adapter
+            .get_room_session_selection_snapshot_for_transport(&room.id, include_direct)
+            .await
+            .is_err());
+    }
     inner.fail_get_room_by_id_for_test(false);
     assert!(inner.delete_room(&room.id).await.unwrap());
+    for include_direct in [false, true] {
+        assert!(adapter
+            .get_room_session_selection_snapshot_for_transport(&room.id, include_direct)
+            .await
+            .unwrap()
+            .is_none());
+    }
     assert!(adapter
         .get_room_session_selection_snapshot(&room.id)
         .await

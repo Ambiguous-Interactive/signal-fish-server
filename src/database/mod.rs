@@ -245,15 +245,25 @@ pub struct SessionPlayer {
 
 impl From<&PlayerInfo> for SessionPlayer {
     fn from(player: &PlayerInfo) -> Self {
+        Self::for_transport(player, true)
+    }
+}
+
+impl SessionPlayer {
+    fn for_transport(player: &PlayerInfo, include_direct: bool) -> Self {
         Self {
             id: player.id,
             name: player.name.clone(),
             is_authority: player.is_authority,
             connected_at: player.connected_at,
-            direct_endpoint: player
-                .connection_info
-                .as_ref()
-                .and_then(crate::protocol::DirectEndpoint::from_connection_info),
+            direct_endpoint: include_direct
+                .then(|| {
+                    player
+                        .connection_info
+                        .as_ref()
+                        .and_then(crate::protocol::DirectEndpoint::from_connection_info)
+                })
+                .flatten(),
         }
     }
 }
@@ -614,6 +624,25 @@ pub trait GameDatabase: Send + Sync {
                 lobby_state: room.lobby_state,
             }
         }))
+    }
+
+    /// Read session fields for a selected transport, omitting unused Direct endpoints.
+    /// Visibility, ordering and errors match [`Self::get_room_session_selection_snapshot`].
+    /// The default preserves custom backend behavior through that existing method.
+    async fn get_room_session_selection_snapshot_for_transport(
+        &self,
+        room_id: &RoomId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionSelectionSnapshot>> {
+        let mut snapshot = self.get_room_session_selection_snapshot(room_id).await?;
+        if !include_direct {
+            if let Some(snapshot) = &mut snapshot {
+                for player in &mut snapshot.players {
+                    player.direct_endpoint = None;
+                }
+            }
+        }
+        Ok(snapshot)
     }
 
     /// Read one host and the room lifecycle atomically, including pending rooms.
@@ -1363,6 +1392,29 @@ pub struct InMemoryDatabase {
 }
 
 impl InMemoryDatabase {
+    async fn read_session_selection_snapshot(
+        &self,
+        room_id: &RoomId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionSelectionSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomSessionSelectionSnapshot {
+                players: room
+                    .players
+                    .values()
+                    .map(|player| SessionPlayer::for_transport(player, include_direct))
+                    .collect(),
+                authority_player: room.authority_player,
+                lobby_state: room.lobby_state.clone(),
+            }))
+    }
+
     /// Isolate metrics collection from room-operation pause and observation controls.
     #[cfg(test)]
     async fn before_room_metrics_for_test(&self) -> Result<()> {
@@ -2492,18 +2544,16 @@ impl GameDatabase for InMemoryDatabase {
         &self,
         room_id: &RoomId,
     ) -> Result<Option<RoomSessionSelectionSnapshot>> {
-        #[cfg(test)]
-        self.before_room_read_for_test().await?;
-        Ok(self
-            .rooms
-            .read()
+        self.read_session_selection_snapshot(room_id, true).await
+    }
+
+    async fn get_room_session_selection_snapshot_for_transport(
+        &self,
+        room_id: &RoomId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionSelectionSnapshot>> {
+        self.read_session_selection_snapshot(room_id, include_direct)
             .await
-            .get(room_id)
-            .map(|room| RoomSessionSelectionSnapshot {
-                players: room.players.values().map(SessionPlayer::from).collect(),
-                authority_player: room.authority_player,
-                lobby_state: room.lobby_state.clone(),
-            }))
     }
 
     /// Copy one host and lifecycle under the same room read lock.

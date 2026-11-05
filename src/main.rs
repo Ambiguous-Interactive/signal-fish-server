@@ -412,11 +412,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn legacy full-mesh signaling on a separate port if enabled.
     //
-    // Shutdown semantics (deliberate, #454): `matchbox_signaling` 0.14 offers
-    // no graceful-shutdown API, and the legacy protocol has no close-code
-    // contract, so the task is left unwired and stops with the process at
-    // runtime drop. Clients see an abrupt socket close either way; wiring an
-    // abort here would add code without changing any observable behavior.
+    // The legacy listener retains its process-lifetime shutdown behavior (#454).
+    // Its protocol has no close-code contract; runtime drop closes its sockets.
     #[cfg(feature = "legacy-fullmesh")]
     {
         // A main port of 65535 saturates to itself: the "sibling" listener

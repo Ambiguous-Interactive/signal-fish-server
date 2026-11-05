@@ -85,7 +85,7 @@ jobs:
           cache: npm
           cache-dependency-path: benches/encoding/typescript/package-lock.json
       - name: Install .NET
-        uses: actions/setup-dotnet@v6.0.0
+        uses: actions/setup-dotnet@v6.1.0
         with:
           dotnet-version: "10.0.402"
       - name: Read Rust toolchain

@@ -1223,7 +1223,10 @@ impl EnhancedGameServer {
 
         let room = match self
             .database
-            .get_room_session_selection_snapshot(room_id)
+            .get_room_session_selection_snapshot_for_transport(
+                room_id,
+                stored.transport == Transport::Direct,
+            )
             .await
         {
             Ok(Some(room)) => room,

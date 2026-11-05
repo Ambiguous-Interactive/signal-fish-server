@@ -182,7 +182,7 @@ fastrand = "2.5.0"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 
 # Optional: legacy full-mesh mode
-matchbox_signaling = { version = "0.14.0", optional = true }
+matchbox_signaling = { version = "0.15.0", optional = true }
 
 # Optional: TLS support
 axum-server = { version = "0.8.0", default-features = false, features = [

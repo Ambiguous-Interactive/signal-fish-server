@@ -20,6 +20,8 @@ mod readiness_costs;
 mod reconnect_costs;
 #[path = "live_p2p_allocations/setup_costs.rs"]
 mod setup_costs;
+#[path = "live_p2p_allocations/snapshot_costs.rs"]
+mod snapshot_costs;
 #[path = "live_p2p_allocations/status_costs.rs"]
 mod status_costs;
 #[path = "live_p2p_allocations/targeted_costs.rs"]
@@ -420,6 +422,18 @@ fn finalized_membership_reuses_owned_room_snapshots(reconnect: bool, actor_name:
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "webrtc_refresh_skips_direct_endpoints",
+            endpoint_costs::webrtc_refresh_skips_direct_endpoints,
+        ),
+        allocation_harness::trial(
+            "readiness_sort_avoids_heap_storage",
+            snapshot_costs::readiness_sort_avoids_heap_storage,
+        ),
+        allocation_harness::trial(
+            "exact_membership_reply_avoids_current_roster_copy",
+            snapshot_costs::exact_membership_reply_avoids_current_roster_copy,
+        ),
         allocation_harness::trial(
             "disabled_direct_start_skips_endpoints",
             endpoint_costs::disabled_direct_start_skips_endpoints,
