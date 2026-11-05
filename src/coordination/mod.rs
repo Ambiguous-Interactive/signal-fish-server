@@ -347,6 +347,7 @@ impl RoomEventSequencer {
             .remove(&room_id);
     }
 
+    /// Count live registry entries while checking route and guard cleanup.
     #[cfg(test)]
     pub(crate) fn lane_count_for_test(&self) -> usize {
         self.lanes

@@ -1650,3 +1650,71 @@ mod stream_reset_test;
 
 #[path = "reset_packet_test.rs"]
 mod reset_packet_test;
+
+/// #1319: scalar observations preserve pending, in-flight, gap and receive ownership.
+#[test]
+fn flow_control_snapshot_distinguishes_pending_flight_and_receive_credit() -> Result<()> {
+    let mut association = timed_test_association();
+    association.max_receive_buffer_size = 3;
+    association.cwnd = 8192;
+    association.rwnd = 0;
+    association.my_next_tsn = u32::MAX;
+    association.cumulative_tsn_ack_point = u32::MAX - 1;
+    association.advanced_peer_tsn_ack_point = u32::MAX - 1;
+    association.peer_last_tsn = u32::MAX - 1;
+    let now = Instant::now();
+    let next_tsn = association.my_next_tsn;
+    let ppi = PayloadProtocolIdentifier::Binary;
+    association.open_stream(1, ppi)?.write(now, b"queued")?;
+    let queued = association.flow_control();
+    assert_eq!(queued.receive_window, 3);
+    assert_eq!(queued.receive_buffer_limit, 3);
+    assert_eq!(queued.peer_receive_window, 0);
+    assert_eq!(queued.congestion_window, 8192);
+    assert_eq!(queued.pending_bytes, 6);
+    assert_eq!(queued.pending_chunks, 1);
+    assert_eq!(queued.inflight_bytes, 0);
+    assert_eq!(queued.inflight_chunks, 0);
+    assert_eq!(queued.earliest_outstanding_tsn, None);
+    assert_eq!(queued.next_tsn, next_tsn);
+    assert_eq!(queued.cumulative_ack, u32::MAX - 1);
+    assert!(!queued.has_complete_queued_data);
+    let emitted = association.stats().get_num_emitted_datas();
+    let events = association.events.len();
+    assert_eq!(queued, association.flow_control());
+    assert_eq!(association.stats().get_num_emitted_datas(), emitted);
+    assert_eq!(association.events.len(), events);
+    let packets = association.gather_outbound(now).0;
+    assert_eq!(data_chunks(&packets), 1);
+    let flight = association.flow_control();
+    assert_eq!(flight.pending_bytes, 0);
+    assert_eq!(flight.pending_chunks, 0);
+    assert_eq!(flight.inflight_bytes, 6);
+    assert_eq!(flight.inflight_chunks, 1);
+    assert_eq!(flight.earliest_outstanding_tsn, Some(next_tsn));
+    assert_eq!(flight.next_tsn, next_tsn.wrapping_add(1));
+    let receive_point = association.peer_last_tsn;
+    association.handle_data(&ChunkPayloadData {
+        tsn: receive_point.wrapping_add(2),
+        stream_identifier: 1,
+        stream_sequence_number: 0,
+        beginning_fragment: true,
+        ending_fragment: true,
+        payload_type: ppi,
+        user_data: Bytes::from_static(b"exact!"),
+        ..Default::default()
+    })?;
+    let received = association.flow_control();
+    assert_eq!(received.receive_window, 0);
+    assert_eq!(received.received_gap_chunks, 1);
+    assert_eq!(received.receive_cumulative_tsn, receive_point);
+    assert!(received.has_complete_queued_data);
+    assert_eq!(received, association.flow_control());
+    let message = association.stream(1)?.read_sctp()?.unwrap();
+    let mut body = [0; 6];
+    assert_eq!(message.read(&mut body)?, body.len());
+    assert_eq!(&body, b"exact!");
+    assert_eq!(association.flow_control().receive_window, 3);
+    assert!(!association.flow_control().has_complete_queued_data);
+    Ok(())
+}

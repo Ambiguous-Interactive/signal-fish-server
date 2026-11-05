@@ -100,3 +100,41 @@ fn association_stats_preserve_outbound_expiry_identity_and_serialize_it() {
     );
     assert_eq!(value["last_abandoned_message"]["reliability"], "lifetime");
 }
+
+/// #1319: transport snapshots carry live flow state and leave pure counter samples explicit.
+#[test]
+fn association_stats_flow_snapshot_preserves_queues_and_serializes_credit() {
+    assert!(
+        RTCSctpAssociationStats::from(::sctp::AssociationStats::default())
+            .flow_control
+            .is_none()
+    );
+    let now = Instant::now();
+    let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+    let mut association = established_test_association(RTCDtlsRole::Client);
+    association
+        .open_stream(1, ::sctp::PayloadProtocolIdentifier::Binary)
+        .unwrap()
+        .write(now, b"queued exact bytes")
+        .unwrap();
+    let expected = RTCSctpFlowControl::from(association.flow_control());
+    assert_eq!(expected.pending_bytes, 18);
+    assert_eq!(expected.pending_chunks, 1);
+    pc.sctp_transport_mut()
+        .sctp_associations
+        .insert(::sctp::AssociationHandle(0), association);
+    let transport = RTCSctpTransport {
+        peer_connection: &pc,
+    };
+    let snapshot = transport.association_stats().unwrap();
+    assert_eq!(snapshot.flow_control, Some(expected));
+    assert_eq!(snapshot, transport.association_stats().unwrap());
+    let value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(value["flow_control"]["pending_bytes"], 18);
+    assert_eq!(value["flow_control"]["inflight_chunks"], 0);
+    assert_eq!(
+        value["flow_control"]["receive_window"],
+        expected.receive_window
+    );
+    assert!(value["flow_control"]["earliest_outstanding_tsn"].is_null());
+}

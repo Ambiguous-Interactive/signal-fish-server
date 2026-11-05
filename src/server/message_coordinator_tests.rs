@@ -6019,6 +6019,7 @@ async fn published_rooms_retain_idle_event_lanes_until_the_last_route_leaves() {
     }
 }
 
+/// Measure discovery and registration with unrelated rooms on the current thread.
 #[tokio::test]
 #[ignore = "manual routing scaling measurement"]
 async fn route_change_scaling_measurement() {
@@ -6092,10 +6093,8 @@ async fn route_index_matches_membership_across_baselines_and_terminal_transition
                         .unwrap(),
                     DeliveryOutcome::Delivered
                 );
-                assert!(matches!(
-                    receiver.try_recv().unwrap().as_ref(),
-                    ServerMessage::Pong
-                ));
+                let baseline = receiver.try_recv().unwrap();
+                assert!(matches!(baseline.as_ref(), ServerMessage::Pong));
             }
             2 | 3 => {
                 let result = if step % 4 == 2 {
@@ -6124,10 +6123,8 @@ async fn route_index_matches_membership_across_baselines_and_terminal_transition
                         .await
                 };
                 assert_eq!(result.unwrap(), DeliveryOutcome::Delivered);
-                assert!(matches!(
-                    receiver.try_recv().unwrap().as_ref(),
-                    ServerMessage::Pong
-                ));
+                let baseline = receiver.try_recv().unwrap();
+                assert!(matches!(baseline.as_ref(), ServerMessage::Pong));
             }
             _ => unreachable!(),
         }
