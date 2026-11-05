@@ -34310,7 +34310,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     491 (was 489): active room event lane retention adds two sites (#1467).
     With 50 shards, ceil(491/50) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 491;
+// 497 (was 491): retain extracted capability sites and add negotiation core sites (#1464).
+// The equality-branch negotiation mutant is equivalent and explicitly excluded.
+// With 50 shards, ceil(497/50) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 497;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

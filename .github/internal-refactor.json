@@ -1,6 +1,6 @@
 {
   "base": "9541a69c9c451b52ee3670e17da8cbf3b285aa38",
-  "reason": "Extract behavior-preserving private protocol decisions for source-linked verification; document the development-only proof boundary without changing public APIs or wire behavior.",
+  "reason": "Extract behavior-preserving private protocol decisions for source-linked verification; retain mutation coverage of the moved logic and document the development-only proof boundary without changing public APIs or wire behavior.",
   "files": [
     {
       "path": "src/lib.rs",
@@ -26,6 +26,11 @@
       "path": "docs/adr/0003-formal-verification-and-fuzzing.md",
       "before": "92636b3bba7fae85deba54ceea4d5a9c79bbb8b8",
       "after": "815ba5def287a29dc963c8acdb84933143a7330a"
+    },
+    {
+      "path": ".cargo/mutants.toml",
+      "before": "e5fb0aee44657e44ae955e8b6ad31222cefe1513",
+      "after": "b88b1a258b1ed895cd20f87ce7c046adf82c2158"
     }
   ]
 }

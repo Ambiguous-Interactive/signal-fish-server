@@ -163,6 +163,13 @@ times, not a measurement of a complete warm job. The
 records both rejected mutations and the restored proof. This is one cold
 sample, not a latency percentile or capacity guarantee.
 
+A subsequent [hosted Lean job](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/42094949991/job/127482419849)
+on commit `f57a777f714be69cecabfc4c17631615bdb9c447` passed with a cache hit.
+The complete job took 171 seconds, including 70 seconds restoring the cache
+and 79.55 seconds running preparation, proofs, mutations, and the restored
+check. This is one warm-cache sample, not a latency percentile or capacity
+guarantee.
+
 ## Decision
 
 Keep the two source-linked CI checks for the stated contracts. The measured
