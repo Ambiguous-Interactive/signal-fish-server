@@ -176,3 +176,116 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
         assert_eq!(profiles[1].allocations, profiles[0].allocations);
     }
 }
+
+/// WebRTC refreshes must preserve player fields without copying Direct hosts.
+pub(crate) fn webrtc_refresh_skips_direct_endpoints() {
+    use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
+    for count in [2_u128, 16, 255] {
+        allocation_harness::block_on(async {
+            allocation_harness::warm_current_thread_runtime().await;
+            let database = InMemoryDatabase::new();
+            let actor = Uuid::from_u128(1);
+            let room = database
+                .create_room(
+                    "refresh".into(),
+                    None,
+                    255,
+                    true,
+                    actor,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let host = [
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(61),
+            ]
+            .join(".");
+            for index in 1..=count {
+                let id = Uuid::from_u128(index);
+                if index > 1 {
+                    assert!(database
+                        .add_player_to_room(
+                            &room.id,
+                            PlayerInfo {
+                                id,
+                                name: format!("Player{index}"),
+                                is_authority: false,
+                                is_ready: false,
+                                connected_at: Some(chrono::DateTime::UNIX_EPOCH),
+                                connection_info: None,
+                                epoch: Some(1),
+                                seq: Some(0),
+                                region_id: "test".into(),
+                            }
+                        )
+                        .await
+                        .unwrap());
+                }
+                assert!(database
+                    .update_player_connection_info(
+                        &room.id,
+                        &id,
+                        ConnectionInfo::Direct {
+                            host: host.clone(),
+                            port: 7777
+                        }
+                    )
+                    .await
+                    .unwrap());
+            }
+            tokio::task::yield_now().await;
+            let baseline_region = stats_alloc::Region::new(ALLOCATOR);
+            let baseline = database
+                .get_room_session_selection_snapshot(&room.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let baseline_stats = baseline_region.change();
+            tokio::task::yield_now().await;
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            let snapshot = database
+                .get_room_session_selection_snapshot_for_transport(&room.id, false)
+                .await
+                .unwrap()
+                .unwrap();
+            let stats = region.change();
+            println!(
+                "WEBRTC_REFRESH_COST count={count} baseline={baseline_stats:?} stats={stats:?}"
+            );
+            assert_eq!(snapshot.authority_player, baseline.authority_player);
+            assert_eq!(snapshot.lobby_state, baseline.lobby_state);
+            assert_eq!(snapshot.players.len(), baseline.players.len());
+            for (actual, expected) in snapshot.players.iter().zip(&baseline.players) {
+                let mut expected = expected.clone();
+                expected.direct_endpoint = None;
+                assert_eq!(actual, &expected);
+            }
+            let direct = database
+                .get_room_session_selection_snapshot_for_transport(&room.id, true)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(direct.players, baseline.players);
+            assert!(baseline.players.iter().all(|player| player.direct_endpoint
+                == Some(DirectEndpoint {
+                    host: host.clone(),
+                    port: 7777
+                })));
+            assert!(database
+                .get_room_session_selection_snapshot_for_transport(&Uuid::nil(), false)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(
+                stats.bytes_allocated + usize::try_from(count).unwrap() * host.len()
+                    <= baseline_stats.bytes_allocated,
+                "WebRTC refresh copied unused endpoints: {stats:?}, baseline={baseline_stats:?}"
+            );
+        });
+    }
+}

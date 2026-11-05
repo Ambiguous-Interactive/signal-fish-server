@@ -119,7 +119,7 @@ jobs:
           shared-key: "mutants"
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.88.1
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-mutants@27.1.0
 
@@ -128,7 +128,7 @@ jobs:
         # .config/nextest.toml decides whether a nonterminating mutant is a
         # caught mutant or an outer-timeout; its semantics must stay stable,
         # and the baseline green-gate depends on every lib test fitting it.
-        uses: taiki-e/install-action@v2.88.1
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-nextest@0.9.149
 
@@ -168,8 +168,8 @@ jobs:
         # N=49: --in-place runs each shard's mutants SERIALLY. Measured shard 22
         # at N=42, the worst 12-mutant shard, took 310.12s (25.843s/mutant).
         # Adding ~10% headroom and rounding up gives a 29s/mutant budget.
-        # With 486 mutants (#1442 routed IDs and #1443 shared mesh capacity),
-        # ceil(486/49) = 10 mutants/shard and the modeled worst shard is
+        # With 489 mutants (including #1461 transport-specific snapshots),
+        # ceil(489/49) = 10 mutants/shard and the modeled worst shard is
         # 10 * 29s = 290s, under the 5-minute target. The feasibility of
         # {mutant-count, N, per-mutant budget, timeout} is asserted by
         # test_mutation_shard_budget_is_feasible_vs_timeout.
@@ -259,13 +259,13 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.88.1
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
         # Pinned, same reason as the baseline job above.
-        uses: taiki-e/install-action@v2.88.1
+        uses: taiki-e/install-action@v2.90.1
         with:
           tool: cargo-nextest@0.9.149
 

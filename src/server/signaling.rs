@@ -533,7 +533,10 @@ impl EnhancedGameServer {
                     // reservation retry.
                     let mut mixed_path_observed = false;
                     loop {
-                        let refreshed_room = match server.database.get_room_session_selection_snapshot(&room_id).await {
+                        let include_direct = server.active_session_plan(&room_id)
+                            .is_some_and(|plan| plan.transport == Transport::Direct);
+                        let refreshed_room = match server.database
+                            .get_room_session_selection_snapshot_for_transport(&room_id, include_direct).await {
                             Ok(Some(room))
                                 if room.lobby_state == LobbyState::Finalized
                                     && room.players.iter().any(|player| player.id == joiner) =>

@@ -110,6 +110,29 @@ fn departure_skips_survivor_selection(topology: Topology, direct: bool) {
                 generation = Some(plan.generation);
                 assert_membership_queue_empty(receiver);
             }
+            if topology == Topology::Host && !direct {
+                let host = match count {
+                    2 => "127.0.0.1".to_string(),
+                    16 => "a".repeat(63),
+                    _ => [
+                        "a".repeat(63),
+                        "b".repeat(63),
+                        "c".repeat(63),
+                        "d".repeat(61),
+                    ]
+                    .join("."),
+                };
+                let endpoint = ConnectionInfo::Direct { host, port: 7777 };
+                assert!(
+                    signal_fish_server::protocol::DirectEndpoint::from_connection_info(&endpoint)
+                        .is_some()
+                );
+                assert!(server
+                    .database()
+                    .update_player_connection_info(&room, &owner, endpoint)
+                    .await
+                    .unwrap());
+            }
             let departed = Uuid::from_u128(count);
             prepare_departure_for_measurement(&server, &room, &departed)
                 .await

@@ -1188,7 +1188,11 @@ impl EnhancedGameServer {
         if let Some(host_id) = stored.host.filter(|host| host != departed) {
             match self
                 .database
-                .get_room_session_host_snapshot(room_id, &host_id)
+                .get_room_session_host_snapshot_for_transport(
+                    room_id,
+                    &host_id,
+                    stored.transport == Transport::Direct,
+                )
                 .await
             {
                 Ok(Some(snapshot)) if snapshot.lobby_state == LobbyState::Finalized => {
@@ -1223,7 +1227,10 @@ impl EnhancedGameServer {
 
         let room = match self
             .database
-            .get_room_session_selection_snapshot(room_id)
+            .get_room_session_selection_snapshot_for_transport(
+                room_id,
+                stored.transport == Transport::Direct,
+            )
             .await
         {
             Ok(Some(room)) => room,

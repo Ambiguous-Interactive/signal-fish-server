@@ -4735,6 +4735,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(Some([routed(first), routed(second)]))
     }
 
+    /// Reserve the target queue, then commit only while seated routes and the sender match.
     async fn send_to_player_in_room_if_members(
         &self,
         player_id: &PlayerId,
@@ -4781,21 +4782,25 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-        let mut current_members: Vec<PlayerId> = room_players
+        let mut expected_members = expected_members.to_vec();
+        expected_members.sort_unstable();
+        let mut current_members = 0_usize;
+        let mut membership_matches = true;
+        for routed_player in room_players
             .get(room_id)
             .into_iter()
-            .flat_map(|players| players.iter().copied())
+            .flat_map(|players| players.iter())
             .filter(|routed_player| {
                 clients.contains_key(routed_player) && !self.is_spectator_route(routed_player)
             })
-            .collect();
-        current_members.sort_unstable();
-        let mut expected_members = expected_members.to_vec();
-        expected_members.sort_unstable();
+        {
+            current_members = current_members.saturating_add(1);
+            membership_matches &= expected_members.binary_search(routed_player).is_ok();
+        }
         let recipient_matches = clients
             .get(player_id)
             .is_some_and(|current| current.sender.same_channel(&sender));
-        if current_members != expected_members || !recipient_matches {
+        if current_members != expected_members.len() || !membership_matches || !recipient_matches {
             accounting.defuse();
             self.record_canceled_delivery(*player_id);
             return Ok(false);
