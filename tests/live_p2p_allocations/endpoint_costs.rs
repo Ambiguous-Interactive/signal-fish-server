@@ -182,6 +182,7 @@ pub(crate) fn webrtc_refresh_skips_direct_endpoints() {
     use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
     for count in [2_u128, 16, 255] {
         allocation_harness::block_on(async {
+            allocation_harness::warm_current_thread_runtime().await;
             let database = InMemoryDatabase::new();
             let actor = Uuid::from_u128(1);
             let room = database
@@ -237,6 +238,7 @@ pub(crate) fn webrtc_refresh_skips_direct_endpoints() {
                     .await
                     .unwrap());
             }
+            tokio::task::yield_now().await;
             let baseline_region = stats_alloc::Region::new(ALLOCATOR);
             let baseline = database
                 .get_room_session_selection_snapshot(&room.id)
@@ -244,6 +246,7 @@ pub(crate) fn webrtc_refresh_skips_direct_endpoints() {
                 .unwrap()
                 .unwrap();
             let baseline_stats = baseline_region.change();
+            tokio::task::yield_now().await;
             let region = stats_alloc::Region::new(ALLOCATOR);
             let snapshot = database
                 .get_room_session_selection_snapshot_for_transport(&room.id, false)
