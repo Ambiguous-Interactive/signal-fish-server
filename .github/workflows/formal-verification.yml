@@ -27,8 +27,10 @@
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the
 #     all_support relay-floor invariant, the glare/offerer rule, and host
 #     election — over unbounded inputs an explicit-state checker only samples.
+#   * Lean checks source-extracted negotiation contracts. Kani checks the same
+#     Rust core plus bounded capability aggregation and source fault controls.
 #
-# Both mirror the modeled source files action-for-action (the full
+# TLC and Z3 mirror the modeled source files action-for-action (the full
 # correspondence table in formal/README.md spans session_policy.rs,
 # signaling.rs, room_service.rs, database/mod.rs, protocol/room_state.rs,
 # reconnection.rs, reconnection_service.rs, connection_manager.rs, the top-level server capacity waits,
@@ -52,6 +54,8 @@ on:
       - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
       - "src/config/**"
+      - "src/lib.rs"
+      - "src/protocol_core.rs"
       - "src/rate_limit.rs"
       - "src/auth/**"
       - "src/server/session_policy.rs"
@@ -82,6 +86,118 @@ permissions:
   contents: read
 
 jobs:
+  lean:
+    name: Source-linked Lean Proofs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Read production Rust toolchain
+        id: toolchain
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Install pinned hax
+        uses: taiki-e/install-action@v2.90.1
+        with:
+          tool: cargo-hax@0.4.2
+
+      - name: Install pinned elan
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz \
+            -o "$RUNNER_TEMP/elan.tar.gz"
+          echo "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63  $RUNNER_TEMP/elan.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --default-toolchain none --no-modify-path
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache extraction tools and Lean dependencies
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cache/hax/tools
+            ~/.elan/toolchains
+            ~/.cache/mathlib
+            ~/.rustup/toolchains/nightly-2026-08-18-*
+            formal/source-linked/lean/proofs/negotiation/lean/.lake/packages
+          key: ${{ runner.os }}-${{ runner.arch }}-lean-${{ hashFiles('formal/source-linked/lean/hax.toml', 'formal/source-linked/lean/proofs/**/lean-toolchain', 'formal/source-linked/lean/proofs/**/lake-manifest.json') }}
+
+      - name: Check axiom report handling
+        run: python3 -m unittest discover -s formal/source-linked/lean -p 'test_*.py'
+
+      - name: Extract production source and check proofs and negative controls
+        run: python3 formal/source-linked/lean/verify.py --prepare --mutations
+
+      - name: Check generated proof files are current
+        shell: bash
+        run: |
+          git diff --exit-code -- formal/source-linked/lean/proofs
+          git ls-files --others --exclude-standard -- formal/source-linked/lean/proofs > "$RUNNER_TEMP/untracked-lean"
+          if [ -s "$RUNNER_TEMP/untracked-lean" ]; then
+            cat "$RUNNER_TEMP/untracked-lean"
+            exit 1
+          fi
+
+      - name: Upload Lean evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: source-linked-lean
+          path: formal/source-linked/lean/target/verification-logs/
+          if-no-files-found: warn
+
+  kani:
+    name: Source-linked Rust Proofs (Kani)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Read production Rust toolchain
+        id: toolchain
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Kani backend
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.kani
+            ~/.rustup/toolchains/nightly-2026-08-21-*
+          key: ${{ runner.os }}-${{ runner.arch }}-kani-${{ hashFiles('formal/source-linked/kani/verify.py') }}
+
+      - name: Install pinned Kani
+        run: |
+          cargo install --locked kani-verifier --version 0.68.0
+          cargo kani setup
+
+      - name: Check verifier result handling
+        run: python3 -m unittest discover -s formal/source-linked/kani -p 'test_*.py'
+
+      - name: Verify production source and negative controls
+        run: python3 formal/source-linked/kani/verify.py --mutations
+
+      - name: Upload Kani evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: source-linked-kani
+          path: target/source-linked/kani/
+          if-no-files-found: warn
+
   # Both the TLC model check and the Z3 SMT proofs run in this one job
   # (issue #558): the Z3 leg only needs a Python interpreter and a pip wheel,
   # so a second runner setup duplicated the checkout purely to run a script

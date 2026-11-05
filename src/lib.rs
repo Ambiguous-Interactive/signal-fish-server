@@ -42,6 +42,8 @@ pub mod metrics;
 /// WebSocket message protocol definitions
 pub mod protocol;
 
+mod protocol_core;
+
 /// Rate limiting implementation
 pub mod rate_limit;
 

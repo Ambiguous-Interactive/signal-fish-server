@@ -154,6 +154,48 @@ fn host_config() -> SessionConfig {
     }
 }
 
+#[test]
+fn source_linked_capability_adapter_requires_every_axis_and_member() {
+    let config = mesh_config();
+    let first = v3_full(PlayerId::from_u128(1), "first");
+    for version in [2, 3, u16::MAX] {
+        for supports_topology in [false, true] {
+            for supports_transport in [false, true] {
+                let candidate = member(
+                    PlayerId::from_u128(2),
+                    "candidate",
+                    version,
+                    if supports_transport {
+                        vec![Transport::WebRtc]
+                    } else {
+                        Vec::new()
+                    },
+                    if supports_topology {
+                        vec![Topology::Mesh]
+                    } else {
+                        Vec::new()
+                    },
+                );
+                let expected = if version >= 3 && supports_topology && supports_transport {
+                    (Topology::Mesh, Transport::WebRtc)
+                } else {
+                    RELAY_FLOOR
+                };
+                for members in [
+                    vec![candidate.clone()],
+                    vec![first.clone(), candidate.clone()],
+                    vec![candidate.clone(), first.clone()],
+                ] {
+                    let decision = choose_session_plan("game", None, members, &config);
+                    assert_eq!((decision.topology, decision.transport), expected);
+                }
+            }
+        }
+    }
+    let empty = choose_session_plan("game", None, Vec::new(), &config);
+    assert_eq!((empty.topology, empty.transport), RELAY_FLOOR);
+}
+
 // ---------------------------------------------------------------------------
 // Session-selection ladder.
 //

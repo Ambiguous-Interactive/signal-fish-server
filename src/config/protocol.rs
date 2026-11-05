@@ -122,9 +122,11 @@ impl ProtocolConfig {
     /// below [`Self::min_protocol_version`] rather than silently upgrading the
     /// client to a protocol it did not advertise.
     pub fn negotiate_protocol_version(&self, client_max: Option<u16>) -> u16 {
-        client_max
-            .unwrap_or(self.min_protocol_version)
-            .min(self.max_protocol_version)
+        crate::protocol_core::negotiate_protocol_version(
+            client_max,
+            self.min_protocol_version,
+            self.max_protocol_version,
+        )
     }
 
     /// Validate protocol version bounds.

@@ -1,0 +1,15 @@
+[tools]
+aeneas = "build-183e4f0"
+charon = "nightly-2026.09.02"
+
+[versions]
+lean = "leanprover/lean4:v4.31.0"
+hax-lean-lib = "v0.3.30"
+
+[scenario.negotiation]
+backend = "lean"
+include = ["signal_fish_proof_core::protocol_core::negotiate_protocol_version"]
+
+[scenario.capability]
+backend = "lean"
+include = ["signal_fish_proof_core::protocol_core::nonempty_all_support"]

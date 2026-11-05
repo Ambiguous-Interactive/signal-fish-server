@@ -1,0 +1,12 @@
+[package]
+name = "signal-fish-proof-core"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94.0"
+publish = false
+authors = ["Ambiguous Interactive"]
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"

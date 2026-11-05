@@ -1,0 +1,12 @@
+[package]
+name = "signal-fish-kani-pilot"
+version = "0.0.0"
+authors = ["Ambiguous Interactive"]
+edition = "2021"
+rust-version = "1.94.0"
+publish = false
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

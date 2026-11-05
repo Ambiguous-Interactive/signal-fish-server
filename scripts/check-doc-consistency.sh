@@ -952,6 +952,22 @@ elif [ "$CHANGED_MODE" != "none" ]; then
     done
 
     declare -a NON_INTERNAL_CHANGED=()
+    declare -a REFACTOR_PATHS=()
+    for path in "${CHANGED_FILES[@]}"; do
+        if [ "$path" = ".github/internal-refactor.json" ]; then
+            refactor_mode="Comparison"
+            [ "$CHANGED_MODE" = "staged" ] && refactor_mode="Staged"
+            if refactor_output=$(pwsh -NoLogo -NoProfile -NonInteractive -File \
+                scripts/check-internal-refactor.ps1 -Mode "$refactor_mode" -DiffBase "$DIFF_BASE"); then
+                while IFS= read -r refactor_path; do
+                    [ -z "$refactor_path" ] || REFACTOR_PATHS+=("$refactor_path")
+                done <<< "$refactor_output"
+            else
+                action_error "Invalid internal-refactor declaration"
+            fi
+            break
+        fi
+    done
     local_exempted_test_only=0
     for path in "${CHANGED_FILES[@]}"; do
         [ -z "$path" ] && continue
@@ -959,6 +975,11 @@ elif [ "$CHANGED_MODE" != "none" ]; then
         if is_internal_path "$path"; then
             continue
         fi
+        declared_refactor=0
+        for refactor_path in "${REFACTOR_PATHS[@]}"; do
+            [ "$refactor_path" != "$path" ] || declared_refactor=1
+        done
+        [ "$declared_refactor" -eq 0 ] || continue
         if file_diff_is_test_only "$path"; then
             local_exempted_test_only=$((local_exempted_test_only + 1))
             continue

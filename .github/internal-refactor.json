@@ -1,0 +1,31 @@
+{
+  "base": "9541a69c9c451b52ee3670e17da8cbf3b285aa38",
+  "reason": "Extract behavior-preserving private protocol decisions for source-linked verification; document the development-only proof boundary without changing public APIs or wire behavior.",
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "before": "e884737da432346d3f0a84bc7a6d9c443676dbfe",
+      "after": "f5824085643ef7a8dfa85d10c8231dc100cab710"
+    },
+    {
+      "path": "src/config/protocol.rs",
+      "before": "2e7b002e04c7d79336555ee830a950acaa2cc204",
+      "after": "3fbc25e4e17e5bea4c843979948af3eeffd0a687"
+    },
+    {
+      "path": "src/server/session_policy.rs",
+      "before": "3f4fc51c9a218588d1190b11d587a9958f4ca76b",
+      "after": "e6a49efb34bc4f6ac8f7c72db829c18b43f6a7fe"
+    },
+    {
+      "path": "src/protocol_core.rs",
+      "before": null,
+      "after": "1ce92afede1a1d188327ec47741c68a511655b47"
+    },
+    {
+      "path": "docs/adr/0003-formal-verification-and-fuzzing.md",
+      "before": "92636b3bba7fae85deba54ceea4d5a9c79bbb8b8",
+      "after": "815ba5def287a29dc963c8acdb84933143a7330a"
+    }
+  ]
+}

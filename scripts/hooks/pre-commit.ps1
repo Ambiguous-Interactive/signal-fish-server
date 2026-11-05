@@ -31,6 +31,8 @@ $script:HookPolicyFiles = @(
     ".githooks/pre-commit",
     ".githooks/pre-push",
     "scripts/hooks/native-process.ps1",
+    "scripts/hooks/internal-refactor.ps1",
+    "scripts/check-internal-refactor.ps1",
     "scripts/hooks/pre-commit.ps1",
     "scripts/hooks/pre-commit-rust.ps1",
     "scripts/hooks/pre-push.ps1"
@@ -94,6 +96,7 @@ $script:WorktreePolicyPathspecs = @(
     # The changelog gate must see CHANGELOG.md changes so the -Worktree
     # preflight can verify that non-internal changes carry a changelog entry.
     "CHANGELOG.md"
+    ".github/internal-refactor.json"
 ) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
 $script:PendingWorktreeStatus = $null
 $script:PendingWorktreeUntracked = $null
@@ -103,6 +106,7 @@ $script:WorktreeDiscoveryTimer = $null
 $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!)|(#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest))"
 
 . (Join-Path $PSScriptRoot "native-process.ps1")
+. (Join-Path $PSScriptRoot "internal-refactor.ps1")
 
 # Worktree discovery is dominated by refreshing the Git index on repository
 # filesystems. Start it before PowerShell registers the policy functions below,
@@ -1959,6 +1963,17 @@ function Test-ChangelogContentVisibility {
 function Test-ChangelogGate {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedFiles)
 
+    try {
+        $mode = if ($script:InspectWorktree) { "Worktree" } else { "Staged" }
+        $refactorPaths = [string[]]@()
+        if ($ChangedFiles -ccontains ".github/internal-refactor.json") {
+            $refactorPaths = Get-InternalRefactorExemptions -Mode $mode -ChangeAlreadyObserved
+        }
+    } catch {
+        Fail "Changelog gate" $_.Exception.Message
+        return
+    }
+
     # -cne and -ccontains keep the CHANGELOG.md comparisons case-sensitive
     # like the checker's [ "$path" = "CHANGELOG.md" ] tests.
     $nonInternal = @($ChangedFiles | Where-Object {
@@ -1977,7 +1992,9 @@ function Test-ChangelogGate {
 
     # Test-module-only Rust diffs are internal work, not changelog material
     # (issue #722); the checker applies the same exemption.
-    $remaining = @($nonInternal | Where-Object { -not (Test-FileDiffIsTestOnly -Path $_) })
+    $remaining = @($nonInternal | Where-Object {
+        $refactorPaths -cnotcontains $_ -and -not (Test-FileDiffIsTestOnly -Path $_)
+    })
     if ($remaining.Count -eq 0) {
         Pass "Changelog gate"
         return
