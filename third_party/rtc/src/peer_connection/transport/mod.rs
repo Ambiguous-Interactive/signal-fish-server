@@ -513,6 +513,7 @@ pub struct RTCSctpAssociationStats {
 }
 
 impl From<::sctp::AssociationStats> for RTCSctpAssociationStats {
+    /// Project counters without inventing an unsampled flow observation.
     fn from(mut stats: ::sctp::AssociationStats) -> Self {
         Self {
             flow_control: None,

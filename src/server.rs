@@ -3407,6 +3407,7 @@ impl InMemoryMessageCoordinator {
         Ok(())
     }
 
+    /// Serialize one identity, then lock its indexed old and target rooms in UUID order.
     async fn lock_player_routing_write(
         &self,
         player_id: PlayerId,
@@ -3452,6 +3453,7 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    /// Retain routing and event identities only for rooms with published recipients.
     fn sync_active_room_gates(
         &self,
         room_players: &HashMap<RoomId, HashSet<PlayerId>>,
@@ -4399,6 +4401,7 @@ impl InMemoryMessageCoordinator {
         }
     }
 
+    /// Commit a fenced baseline before replacing the recipient route and its role.
     async fn register_initial_room_recipient<'a>(
         &'a self,
         spectator: bool,
@@ -5548,6 +5551,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         }
     }
 
+    /// Replace the socket route while holding its player and affected room gates.
     async fn register_local_client(
         &self,
         player_id: PlayerId,
@@ -5567,6 +5571,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(())
     }
 
+    /// Fence the terminal relay tail and preserve any newer route in another room.
     async fn unroute_local_client_with_tail<'a>(
         &'a self,
         player_id: PlayerId,
@@ -5618,6 +5623,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(terminal_tail)
     }
 
+    /// Publish the initial frame before making the replacement socket routable.
     async fn register_local_client_with_initial_message<'a>(
         &'a self,
         player_id: PlayerId,
@@ -5702,6 +5708,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         .await
     }
 
+    /// Remove the indexed room and socket routes and release empty-room identities.
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
         let routing = self.lock_player_routing_write(*player_id, None).await;
         // Lock ordering: room_players first, then local_clients

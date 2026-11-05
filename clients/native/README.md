@@ -125,7 +125,7 @@ passed by FORWARD TSN. These counters do not prove reassembly, identify a channe
 or count delivered messages. An absent
 association returns null. Sampling errors also set `sctp_error`.
 The `sctp.flow_control` object samples current local receive credit, the receive
-limit, peer send credit, congestion credit, and pending/in-flight queue sizes.
+limit, peer receive credit, congestion credit, and pending/in-flight queue sizes.
 It also retains cumulative TSNs, the next send TSN, the earliest unacknowledged
 TSN, and whether a complete receive message is queued. These scalar fields share
 the counters' association observation. They do not advance timers or drain queues.

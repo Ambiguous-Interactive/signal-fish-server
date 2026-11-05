@@ -1062,6 +1062,7 @@ struct HeldRefusalProgress {
 impl HeldRefusalProgress {
     const CHECKPOINTS_MS: [u64; 8] = [0, 100, 500, 1000, 2000, 4000, 8000, 12000];
 
+    /// Retain eight scheduled scalar samples and the latest observation without extra queries.
     fn observe(&mut self, elapsed: Duration, snapshot: &serde_json::Value) {
         let reliable = snapshot["transport_channels"]
             .as_array()
@@ -1097,6 +1098,7 @@ impl HeldRefusalProgress {
     }
 }
 
+/// Keep missing flow evidence distinct from zero across bounded and delayed checkpoints.
 #[test]
 fn held_refusal_progress_retains_bounded_partial_and_late_observations() {
     let mut progress = HeldRefusalProgress::default();
@@ -1980,6 +1982,7 @@ async fn godot_required_close_keeps_first_observation_until_fresh_pair() {
     }
 }
 
+/// Preserve live channel contracts and scalar flow observations in both channel profiles.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_snapshot_preserves_actual_channel_contracts_in_both_profiles() {
     for godot in [false, true] {
