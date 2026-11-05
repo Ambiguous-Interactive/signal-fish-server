@@ -221,6 +221,14 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
     use signal_fish_server::coordination::{ClientDeliveryHandle, ConnectionCloseSignal};
     allocation_harness::block_on(async {
         allocation_harness::warm_current_thread_runtime().await;
+        // Each transient player gate initializes a native semaphore mutex.
+        // macOS allocates its backing storage on first use; measure that cost
+        // separately, as room_event_admission_cost does for its fresh lane.
+        let native_lock = std::sync::Mutex::new(());
+        let lock_region = stats_alloc::Region::new(ALLOCATOR);
+        drop(native_lock.lock().unwrap());
+        let native_lock_initialization = lock_region.change();
+        println!("SAME_ROOM_NATIVE_LOCK_INITIALIZATION {native_lock_initialization:?}");
         let coordinator = InMemoryMessageCoordinator::new();
         let room = Uuid::from_u128(1);
         let player = Uuid::from_u128(2);
@@ -243,7 +251,7 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
                 Some(vec![player])
             );
             assert!(
-                stats.allocations <= 5,
+                stats.allocations <= 5 + native_lock_initialization.allocations,
                 "same-room replacement rebuilt membership storage: {stats:?}"
             );
         }
