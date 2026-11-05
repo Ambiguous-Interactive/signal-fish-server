@@ -62,6 +62,115 @@ class AxiomAudit(unittest.TestCase):
                 verify.check_axioms(self.report(axiom), "negotiation")
 
 
+class RequiredAggregation(unittest.TestCase):
+    """Require aggregation contracts, exact external mapping, and real faults."""
+
+    @patch("builtins.print")
+    def test_every_required_scenario_needs_complete_approved_axiom_reports(self, _print):
+        """Reject omitted aggregation contracts and proof holes in every scenario."""
+        for scenario, theorems in verify.THEOREMS.items():
+            self.assertTrue(theorems)
+            report = "\n".join(f"'{name}' depends on axioms: [propext, Quot.sound]"
+                               for name in theorems)
+            with self.subTest(scenario=scenario):
+                verify.check_axioms(report, scenario)
+                for output in ("", "\n".join(report.splitlines()[:-1]),
+                               report.replace("Quot.sound", "sorryAx")):
+                    with self.assertRaises(RuntimeError):
+                        verify.check_axioms(output, scenario)
+        self.assertIn("capability", verify.THEOREMS)
+
+    def test_required_mapping_and_import_must_match_reviewed_alias(self):
+        """Reject a changed external iterator model or missing import."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            canonical = crate / "compatibility/IteratorAll.lean"
+            canonical.parent.mkdir()
+            canonical.write_text("upstream alias\n")
+            project = crate / "proofs/capability/lean"
+            target = project / "Capability/Compatibility.lean"
+            target.parent.mkdir(parents=True)
+            assumptions = project / "Capability/Assumptions/FunsExternal.lean"
+            assumptions.parent.mkdir()
+            target.write_text(canonical.read_text())
+            assumptions.write_text("import Capability.Compatibility\nimport CoreModels\n")
+            verify.check_iterator_alias(project, crate)
+            target.write_text("independent replacement\n")
+            with self.assertRaisesRegex(RuntimeError, "differs"):
+                verify.check_iterator_alias(project, crate)
+            target.write_text(canonical.read_text())
+            for imports in ("import CoreModels\n", "import Capability.Compatibility\n" * 2):
+                assumptions.write_text(imports)
+                with self.assertRaisesRegex(RuntimeError, "missing or duplicated"):
+                    verify.check_iterator_alias(project, crate)
+
+    def test_only_contract_failures_count_as_rejected_mutations(self):
+        """Distinguish contract rejections from extraction and compiler failures."""
+        good = "error: Capability/Verification/ProofObligations.lean:42:6: unsolved goals\n"
+        verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=good),
+                                     "capability", "empty-room")
+        for code, output in (
+            (0, good), (1, "dependency failed"),
+            (1, good + "error: Capability/Extraction/Funs.lean:5:1: Type mismatch\n"),
+            (1, good.replace("unsolved goals", "unknown identifier")),
+            (1, good.replace("Capability/", "Negotiation/")),
+        ):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                             "capability", "empty-room")
+
+    def test_evidence_walk_never_descends_into_caches(self):
+        """Prevent large dependency cache scans before collecting proof evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            excluded = [project / name for name in (".lake", ".lake-host", "llbc")]
+            for cache in excluded:
+                cache.mkdir()
+                (cache / "large-cache").write_text("not evidence")
+            (project / "Proof.lean").write_text("contract")
+            (project / "linked-cache").symlink_to(excluded[0], target_is_directory=True)
+            (project / "linked-file").symlink_to(project / "Proof.lean")
+            scandir = verify.os.scandir
+
+            def guarded_scandir(path):
+                """Fail if the walker opens any excluded directory."""
+                self.assertNotIn(Path(path), excluded + [project / "linked-cache"])
+                return scandir(path)
+
+            with patch.object(verify.os, "scandir", guarded_scandir):
+                self.assertEqual(verify.project_evidence_inputs(project), [project / "Proof.lean"])
+
+    def test_required_verification_rejects_nondeterministic_extraction(self):
+        """Reject unstable generated definitions before building any theorem."""
+        for drift in (False, True):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                crate = Path(tmp)
+                generated = crate / "proofs/capability/lean/Capability/Extraction/Funs.lean"
+                generated.parent.mkdir(parents=True)
+                calls = []
+
+                def extract(_crate, scenario):
+                    """Emit stable generated text or a deliberate second-run change."""
+                    self.assertEqual(scenario, "capability")
+                    calls.append(scenario)
+                    generated.write_text(str(len(calls)) if drift else "stable")
+
+                with patch.object(verify, "extract", extract), \
+                        patch.object(verify, "check_iterator_alias"), \
+                        patch.object(verify, "run") as run, \
+                        patch.object(verify, "check_axioms") as audit:
+                    if drift:
+                        with self.assertRaisesRegex(RuntimeError, "Nondeterministic"):
+                            verify.verify_body(crate, "capability")
+                        run.assert_not_called()
+                        audit.assert_not_called()
+                    else:
+                        verify.verify_body(crate, "capability")
+                        self.assertEqual(run.call_count, 2)
+                        audit.assert_called_once()
+                self.assertEqual(len(calls), 2)
+
+
 class CapabilityEvidence(unittest.TestCase):
     """Keep failed and accepted extraction evidence separate from proof claims."""
 

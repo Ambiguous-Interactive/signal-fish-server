@@ -14,7 +14,7 @@ The proof crates do not change the server's dependencies or public API.
 | Backend and target | Checked property | Boundary |
 | --- | --- | --- |
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
-| Lean aggregation | Generated module typechecks with an upstream alias backport; no accepted aggregation theorem | Arbitrary-length semantics and the generic callback contract remain pending |
+| Lean aggregation | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the callback contract below | Callback must terminate successfully and preserve its invariant; capability projection, caller correspondence, and observable callback effects remain pending |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -179,8 +179,8 @@ layers. Do not expand this into a translator project or a whole-server proof.
 Kani gives useful bounded aggregation coverage now. Lean establishes that
 source extraction and kernel-checked negotiation proofs can run together.
 The generic collection experiment also found a concrete tool limitation.
-Further Lean collection work needs a separate estimate after that limit is
-resolved. No server runtime dependency or wire-format change is required.
+The alias backport below resolves that extraction limit. The aggregation proof
+adds no server runtime dependency or wire-format change.
 
 ## Aggregation mapping and follow-up
 
@@ -229,11 +229,47 @@ seconds across recorded commands. The baseline capability typecheck failed in
 took 1.136 seconds and repeat typecheck took 1.736 seconds. These are single
 warm-dependency samples, not hosted CI or proof-maintenance estimates.
 
-Typechecking clears the missing-alias blocker. It proves no aggregation
-property, including the empty-list property. A full arbitrary-length theorem
-still needs an explicit callback contract and a proof over the iterator loop.
-The generic callback can mutate state, fail, or diverge in the extracted
-semantics. Keep the production adapter tests and bounded Kani checks.
+### Aggregation callback contract
+
+The aggregation theorem checks the extracted helper and the pinned iterator
+loop. Its slice domain has no testing bound of eight. It covers every finite
+slice representable by the model (`length <= Usize.max`).
+
+The named contracts are `Capability.empty_contract` and
+`Capability.all_members_contract`. `Capability.boolean_identity_contract`
+specializes the result to boolean members. `Capability.nonempty_outcomes` checks
+that both nonempty outcomes are reachable. The aggregation axiom reports contain
+only `propext`, `Classical.choice`, and `Quot.sound`; the gate rejects proof holes
+and unapproved axioms.
+
+The callback contract permits private state updates. Each callback call must
+terminate successfully, return a fixed predicate of the current member, and
+preserve a stated state invariant. The initial state must satisfy that invariant.
+The empty-slice theorem needs no callback contract because the helper does not
+call the callback.
+
+Failing or diverging callbacks and callbacks whose truth value depends on
+changing state fall outside this contract. The result theorem does not expose
+the final callback state or prove observable call order and short-circuit effects.
+The Rust callback tests cover those effects on finite examples. They remain
+separate evidence. The capability projection and production callers still need
+source-linked correspondence. Keep the bounded Kani checks and adapter tests.
+
+The required runner checks all four aggregation theorems on every run. It
+regenerates each scenario twice and rejects different output. Empty-room and
+skipped-singleton faults must first extract and typecheck, then fail only the
+contract proof. Separate axiom-audited witnesses establish each wrong result.
+The restored production source must pass again. Hashed snapshots under
+`lean/target/verification-logs/proofs/` retain source, pins, generated definitions,
+contracts, raw logs, and timings. The optional typecheck probe remains separate;
+its status does not report the required theorem results.
+
+A development run on the ARM64 host used cached dependencies. Its 40 commands
+took 199.439 seconds in total, including all four source faults, restored proofs, and the separate extraction
+probe. The initial aggregation
+extraction/repeat/build/audit took 12.907 seconds; the restored aggregation cycle
+took 12.205 seconds. These are single command-time samples, not cold installation,
+hosted CI, or whole-server proof costs.
 
 The reviewed [obligation inventory](obligations.md) tracks the production
 seams, current evidence, negative controls, and caller/state/concurrency gaps.

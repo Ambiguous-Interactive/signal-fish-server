@@ -27,8 +27,8 @@
 #     functions (formal/z3/protocol_invariants.py): the ladder selector, the
 #     all_support relay-floor invariant, the glare/offerer rule, and host
 #     election — over unbounded inputs an explicit-state checker only samples.
-#   * Lean checks source-extracted negotiation contracts. Kani checks the same
-#     Rust core plus bounded capability aggregation and source fault controls.
+#   * Lean checks source-extracted negotiation and aggregation contracts. Kani
+#     checks the same Rust core plus bounded aggregation and source fault controls.
 #
 # TLC and Z3 mirror the modeled source files action-for-action (the full
 # correspondence table in formal/README.md spans session_policy.rs,
