@@ -109,11 +109,18 @@ class RequiredAggregation(unittest.TestCase):
         good = "error: Capability/Verification/ProofObligations.lean:42:6: unsolved goals\n"
         verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=good),
                                      "capability", "empty-room")
+        semantic = good.replace("ProofObligations.lean", "CallbackSemantics.lean")
+        verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=semantic),
+                                     "capability", "extra-callback")
+        with self.assertRaisesRegex(RuntimeError, "did not fail the callback semantics"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=good),
+                                         "capability", "extra-callback")
         for code, output in (
             (0, good), (1, "dependency failed"),
             (1, good + "error: Capability/Extraction/Funs.lean:5:1: Type mismatch\n"),
             (1, good.replace("unsolved goals", "unknown identifier")),
             (1, good.replace("Capability/", "Negotiation/")),
+            (1, semantic + "error: Capability/Verification/Callbacks.lean:5:1: Type mismatch\n"),
         ):
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),

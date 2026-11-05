@@ -14,7 +14,8 @@ The proof crates do not change the server's dependencies or public API.
 | Backend and target | Checked property | Boundary |
 | --- | --- | --- |
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
-| Lean aggregation | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the callback contract below | Callback must terminate successfully and preserve its invariant; capability projection, caller correspondence, and observable callback effects remain pending |
+| Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; capability projection and caller correspondence remain pending |
+| Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and correspondence to a concrete Rust callback remain pending |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -250,14 +251,13 @@ preserve a stated state invariant. The initial state must satisfy that invariant
 The empty-slice theorem needs no callback contract because the helper does not
 call the callback.
 
-Failing or diverging callbacks and callbacks whose truth value depends on
-changing state fall outside this contract. The result theorem does not expose
-the final callback state or prove observable call order and short-circuit effects.
-The Rust callback tests cover those effects on finite examples. They remain
-separate evidence. The capability projection and production callers still need
-source-linked correspondence. Keep the bounded Kani checks and adapter tests.
+Failing or diverging callbacks and state-dependent truth values fall outside
+this total fixed-predicate contract. The operational contract below covers their
+modeled results. Neither contract exposes final callback state or external effects.
+The capability projection and production callers still need source-linked
+correspondence. Keep the bounded Kani checks and adapter tests.
 
-The required runner checks all four aggregation theorems on every run. It
+The required runner checks the result and callback-semantics theorems on every run. It
 regenerates each scenario twice and rejects different output. Empty-room and
 skipped-singleton faults must first extract and typecheck, then fail only the
 contract proof. Separate axiom-audited witnesses establish each wrong result.
@@ -272,6 +272,41 @@ probe. The initial aggregation
 extraction/repeat/build/audit took 12.907 seconds; the restored aggregation cycle
 took 12.205 seconds. These are single command-time samples, not cold installation,
 hosted CI, or whole-server proof costs.
+
+### Stateful callback semantics
+
+[`CallbackSemantics.lean`](lean/proofs/capability/lean/Capability/Verification/CallbackSemantics.lean)
+defines `CallbackTrace`, a relation for callback steps. Each step records its
+incoming state and member. A true result passes the next state to the next member.
+False stops the relation. An error or divergence stops with that modeled result.
+Exhaustion returns true for the iterator; the production helper returns false for
+empty input.
+
+`Capability.callback_trace_exists` proves that every finite list and modeled
+callback has such a specification trace. `Capability.callback_trace_contract`
+proves that the extracted production result agrees with its outcome for every
+representable finite slice. These theorems require no fixed predicate, invariant,
+or successful-termination assumption. They do not execute a second aggregation
+implementation. The proof unfolds the pinned iterator loop.
+
+`callback_order_outcomes` uses a callback that checks each member against its
+counter, then increments the counter. It accepts `[0, 1]` and rejects `[1, 0]`.
+`callback_failure_outcomes` checks errors and divergence after a true prefix,
+and checks that false shields both suffixes. The required axiom audit covers
+all four new theorems.
+
+The extra-callback source fault invokes the first member before the iterator.
+It preserves the mathematical total fixed-predicate result, but changes the
+counter callback result. The gate requires generated-module compilation, rejection
+of the callback-semantics contract, and an axiom-audited wrong-result witness,
+then restores the source.
+
+The pinned iterator model returns the boolean and remaining iterator. It drops
+final callback state. The trace is a specification, not an exported observation
+of Rust side effects. Callback errors and divergence are values in `RustM`; these
+proofs do not establish how a concrete Rust callback produces those values.
+Allocator failure, process failure, panic recovery, and external state remain
+outside this result correspondence. Production capability projection remains open.
 
 The reviewed [obligation inventory](obligations.md) tracks the production
 seams, current evidence, negative controls, and caller/state/concurrency gaps.
