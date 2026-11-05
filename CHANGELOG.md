@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce temporary heap use for P2P readiness snapshots, exact-membership replies, and WebRTC membership updates
+- Reduce heap allocations during P2P readiness snapshots, exact-membership replies, and WebRTC membership updates
   (#1459, #1460, #1461).
 - Reduce server memory use during P2P reconnects, replies, signaling, and game starts
   (#1454, #1455, #1456, #1457).

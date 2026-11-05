@@ -412,8 +412,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn legacy full-mesh signaling on a separate port if enabled.
     //
-    // The legacy listener retains its process-lifetime shutdown behavior (#454).
-    // Its protocol has no close-code contract; runtime drop closes its sockets.
+    // Keep process-lifetime shutdown: the legacy protocol has no close-code contract (#454).
     #[cfg(feature = "legacy-fullmesh")]
     {
         // A main port of 65535 saturates to itself: the "sibling" listener
