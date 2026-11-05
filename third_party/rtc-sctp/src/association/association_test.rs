@@ -1653,7 +1653,7 @@ mod reset_packet_test;
 
 /// #1319: scalar observations preserve pending, in-flight, gap and receive ownership.
 #[test]
-fn flow_control_snapshot_distinguishes_pending_flight_and_receive_credit() -> Result<()> {
+fn outbound_evidence_flow_control_keeps_queue_and_credit_ownership() -> Result<()> {
     let mut association = timed_test_association();
     association.max_receive_buffer_size = 3;
     association.cwnd = 8192;
