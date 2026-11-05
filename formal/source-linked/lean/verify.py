@@ -28,6 +28,7 @@ RUNS = []
 
 
 def run(command, cwd, *, expect_success=True):
+    """Record command output and timing; reject unexpected nonzero exits."""
     global COMMAND_COUNT
     started = time.monotonic()
     env = dict(os.environ, RUST_LOG="error")
@@ -50,11 +51,13 @@ def run(command, cwd, *, expect_success=True):
 
 
 def check_version(output):
+    """Require the exact cargo-hax version before extracting source."""
     if f"version={VERSION}" not in output.splitlines():
         raise RuntimeError(f"Expected cargo-hax {VERSION}")
 
 
 def check_axioms(output, scenario):
+    """Require each named theorem's report and reject unapproved axioms."""
     for theorem in THEOREMS[scenario]:
         empty = f"'{theorem}' does not depend on any axioms"
         if empty in output:
@@ -70,6 +73,7 @@ def check_axioms(output, scenario):
 
 
 def extract(crate, scenario="negotiation"):
+    """Extract the selected production helper with a stable trailing newline."""
     run(["cargo", "hax", "extract", scenario, "--locked"], crate)
     project = crate / f"proofs/{scenario}/lean"
     for source in project.glob("*/Extraction/*.lean"):
@@ -77,6 +81,7 @@ def extract(crate, scenario="negotiation"):
 
 
 def verify(crate, scenario="negotiation"):
+    """Regenerate the helper, build its proofs, and audit their axioms."""
     extract(crate, scenario)
     project = crate / f"proofs/{scenario}/lean"
     run(["lake", "build"], project)
@@ -85,6 +90,7 @@ def verify(crate, scenario="negotiation"):
 
 
 def mutants(crate):
+    """Reject isolated source faults, check their wrong results, then restore green."""
     source = ROOT / "src/protocol_core.rs"
     original = source.read_text()
     changes = {
@@ -126,6 +132,7 @@ def mutants(crate):
 
 
 def classify_capability(returncode, output):
+    """Accept a typecheck or the known alias defect; reject unrelated failures."""
     if returncode == 0:
         return "extraction_typechecked; no aggregation theorem proved"
     errors = re.findall(r"^error: (.+)$", output, re.MULTILINE)
@@ -140,7 +147,54 @@ def classify_capability(returncode, output):
     raise RuntimeError(f"Unexpected capability probe failure:\n{output}")
 
 
+def retain_capability_evidence(tree, crate, first_run, status):
+    """Keep the small source reproducer and raw commands after its tempdir ends."""
+    destination = LOGS / "capability-probe" / str(time.time_ns())
+    destination.mkdir(parents=True)
+    inputs = [tree / "src/protocol_core.rs"]
+    inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs"))
+    inputs.extend(sorted((crate / "compatibility").glob("*")))
+    negotiation = crate / "proofs/negotiation/lean"
+    inputs.extend(negotiation / name for name in (
+        "lake-manifest.json", "lakefile.toml", "lean-toolchain"))
+    project = crate / "proofs/capability/lean"
+    if project.exists():
+        inputs.extend(path for path in project.rglob("*")
+                      if path.is_file() and not path.is_symlink()
+                      and not any(part.startswith(".lake") for part in path.relative_to(project).parts))
+    hashes = {}
+    for source in inputs:
+        if not source.is_file():
+            continue
+        relative = source.relative_to(tree)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        hashes[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    records = [dict(record) for record in RUNS[first_run:]]
+    versions = [record for record in RUNS[:first_run]
+                if record["command"] == ["cargo", "hax", "--version"]]
+    if versions:
+        records.insert(0, dict(versions[-1]))
+    for record in records:
+        target = destination / "commands" / record["log"]
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(LOGS / record["log"], target)
+        record["log"] = str(target.relative_to(destination))
+    (destination / "results.json").write_text(json.dumps({
+        "hax_version": VERSION, "status": status,
+        "aggregation_theorem_proved": False,
+        "files_sha256": hashes, "runs": records,
+    }, indent=2) + "\n")
+    return destination
+
+
 def probe_capability(crate):
+    """Check aggregation extraction and regeneration without claiming a theorem.
+
+    Retry only the known alias defect with the upstream backport. Retain both
+    baseline and retry evidence before deleting the isolated source copy.
+    """
     with tempfile.TemporaryDirectory(prefix="signal-fish-lean-capability-") as tmp:
         tree = Path(tmp)
         (tree / "src").mkdir()
@@ -148,21 +202,55 @@ def probe_capability(crate):
         copied = tree / "formal/source-linked/lean"
         shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
             ".lake*", "target", "llbc", "__pycache__", "*.log", "capability"))
-        extract(copied, "capability")
-        project = copied / "proofs/capability/lean"
-        manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
-        manifest["name"] = "Capability"
-        (project / "lake-manifest.json").write_text(json.dumps(manifest))
-        (project / ".lake").mkdir()
-        (project / ".lake/packages").symlink_to(
-            crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
-        result = run(["lake", "build", "Capability.Extraction"], project, expect_success=False)
-        status = classify_capability(result.returncode, result.stdout)
-        print(f"CAPABILITY PROBE: {status}", flush=True)
-        return status
+        first_run = len(RUNS)
+        status = "probe failed; no aggregation theorem proved"
+        try:
+            extract(copied, "capability")
+            project = copied / "proofs/capability/lean"
+            manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
+            manifest["name"] = "Capability"
+            (project / "lake-manifest.json").write_text(json.dumps(manifest))
+            (project / ".lake").mkdir()
+            (project / ".lake/packages").symlink_to(
+                crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+            result = run(["lake", "build", "Capability.Extraction"], project, expect_success=False)
+            status = classify_capability(result.returncode, result.stdout)
+            if result.returncode:
+                retain_capability_evidence(tree, copied, first_run, status)
+                status = "compatibility typecheck failed; no aggregation theorem proved"
+                install_iterator_alias(project, copied)
+                run(["lake", "build", "Capability.Extraction"], project)
+                status = "extraction_typechecked with upstream alias backport; no aggregation theorem proved"
+            generated = project / "Capability/Extraction"
+            accepted_status = status
+            status = "repeat extraction/typecheck failed; no aggregation theorem proved"
+            before = {path.relative_to(generated): path.read_bytes()
+                      for path in generated.rglob("*.lean")}
+            extract(copied, "capability")
+            after = {path.relative_to(generated): path.read_bytes()
+                     for path in generated.rglob("*.lean")}
+            if not before or before != after:
+                status = "nondeterministic extraction; no aggregation theorem proved"
+                raise RuntimeError(status)
+            run(["lake", "build", "Capability.Extraction"], project)
+            status = accepted_status
+            print(f"CAPABILITY PROBE: {status}", flush=True)
+            return status
+        finally:
+            evidence = retain_capability_evidence(tree, copied, first_run, status)
+            print(f"CAPABILITY EVIDENCE: {evidence.relative_to(LOGS)}", flush=True)
+
+
+def install_iterator_alias(project, crate):
+    """Import only a concrete alias of the pinned upstream iterator model."""
+    shutil.copyfile(crate / "compatibility/IteratorAll.lean",
+                    project / "Capability/Compatibility.lean")
+    assumptions = project / "Capability/Assumptions/FunsExternal.lean"
+    assumptions.write_text("import Capability.Compatibility\n" + assumptions.read_text())
 
 
 def prepare():
+    """Fetch the pinned dependencies and only their required Mathlib cache modules."""
     project = HERE / "proofs/negotiation/lean"
     run(["lake", "env", "true"], project)
     packages = project / ".lake/packages"
@@ -179,6 +267,7 @@ def prepare():
 
 
 def main():
+    """Run selected checks and record results while guarding source and tool pins."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mutations", action="store_true")
     parser.add_argument("--probe-capability", action="store_true",
@@ -191,6 +280,7 @@ def main():
     source = ROOT / "src/protocol_core.rs"
     source_before = source.read_bytes()
     lock_paths = [HERE / "Cargo.lock", HERE / "hax.toml"]
+    lock_paths.extend(sorted((HERE / "compatibility").glob("*")))
     for scenario in THEOREMS:
         project = HERE / f"proofs/{scenario}/lean"
         lock_paths.extend(project / name for name in (

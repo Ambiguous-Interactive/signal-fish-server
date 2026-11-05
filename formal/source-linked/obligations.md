@@ -1,0 +1,149 @@
+# Protocol verification obligations
+
+This inventory tracks issue [#1464](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1464).
+It covers production protocol decisions and their state and delivery boundaries.
+It is a review baseline, not a claim that the protocol has been proved.
+A source symbol in a row names the production seam. It does not imply a checked
+refinement from that seam to a handwritten model.
+
+## Evidence labels and shared assumptions
+
+- **Proved**: Lean checks a theorem over extracted production definitions.
+- **Bounded**: Kani checks production Rust for the stated finite bound.
+- **Tested**: Rust regression/property tests exercise the production path.
+- **Unsupported**: the pinned backend cannot check the stated target.
+- **Pending**: the required proof or correspondence has not been established.
+
+The first two labels apply only to the named contracts. A tested caller does
+not inherit its helper's proof. Every row below still requires caller/state
+correspondence unless the row explicitly says otherwise. Existing TLA+ and Z3
+results are evidence about handwritten models. They are not source proofs.
+
+Inputs are Rust values after deserialization unless a row covers the wire.
+Pure decisions assume a stable input snapshot. State transitions require a
+consistent current membership, connection generation, and application context.
+These assumptions must be discharged at the callers; they are not global facts.
+All properties in the inventory are safety properties unless marked liveness.
+Random UUID generation, allocator failure, process failure, and external
+transport behavior are outside the current source-linked proofs.
+
+## Evidence and CI key
+
+Each row's CI key supplies its trigger and retained evidence. A key records the
+current pipeline, not a promise that every prerequisite change triggers it.
+
+| Key | Backend and trigger | Evidence artifact and limit |
+| --- | --- | --- |
+| L | `formal-verification.yml`, `lean`; PR paths include `formal/**`, `src/**`, root Cargo manifest/lockfile, Rust toolchain, and this workflow; manual dispatch also runs it | `source-linked-lean`: extraction, build, axiom audit, mutation logs, hashes, and timings; generated negotiation definitions are checked in |
+| K | Same workflow, `kani`, with the same path filter | `source-linked-kani`: raw verifier reports, named assertions/witnesses, faults, hashes, and timings |
+| M | Same workflow, `tlc`, with the same path filter | Actions step logs for TLC and Z3; models, configurations, and trace corpus under `formal/`; not an automatic proof of Rust correspondence |
+| R | `ci.yml`, nextest PR lane when the dependency-only optimization does not skip runtime checks | Actions test output for production unit and integration tests; finite test inputs, not universal proof |
+| N | `verification-nightly.yml`, scheduled/manual delivery trace and socket scenarios | Uploaded raw traces and replay evidence; informational lanes do not replace PR gates |
+
+Review the workflow itself when changing triggers. The formal PR path filter
+covers all `src/**` plus root `Cargo.toml`/`Cargo.lock`, so handler and dependency
+changes rerun L/K/M. This does not detect missing future obligations by itself.
+R is not a substitute for L/K/M.
+
+## Source-linked core and capability callers
+
+Lean theorem names below live in
+[`ProofObligations.lean`](lean/proofs/negotiation/lean/Negotiation/Verification/ProofObligations.lean).
+Kani harnesses live in [`src/lib.rs`](kani/src/lib.rs).
+
+| ID and source | Exact obligation and input domain | Status and theorem/harness | Production adapter; CI | Negative control and remaining boundary |
+| --- | --- | --- | --- | --- |
+| P01 [`protocol_core::negotiate_protocol_version`](../../src/protocol_core.rs) | For every explicit `u16` request and both `u16` bounds, return `min(request, maximum)`; result respects both ceilings | Proved: `explicit_client_contract`; Kani: `negotiation_respects_ceilings` | `ProtocolConfig::negotiate_protocol_version`; L/K/R | Lean lower-clamp and ignored-ceiling faults; Kani lower-clamp and reversed-ceiling faults. No validated-config or handshake claim |
+| P02 Same helper | With `minimum <= maximum`, `None` returns `minimum`; an explicit request below `minimum` remains unchanged | Proved: `omitted_client_contract`, `below_floor_preserved`; Kani: `negotiation_defaults_and_refusal` | Same adapter; L/K/R | P01 faults plus Kani `v2 refusal reachable` and `full range reachable` witnesses. The caller must reject the result below its floor |
+| P03 [`ProtocolConfig::validate`, `negotiate_protocol_version`](../../src/config/protocol.rs); [`handle_socket_supervised`](../../src/websocket/connection.rs) handshake | Deployment bounds stay within implemented versions and ordered; omitted versions use the appropriate route/default; below-floor negotiation is refused before the connection uses that protocol | Tested; caller proof pending. Z3 set G is a handwritten negotiation/refusal model | `websocket_handler`, `websocket_handler_v3`, authentication path; `tests/protocol_v3_negotiation.rs`, `tests/v3_negotiation_e2e.rs`; M/R | Config inverted/floor/ceiling rejection tests exist. Source fault proving the full caller/refusal boundary is pending |
+| P04 [`negotiate_capabilities`, `dedup_preserving_order`, `protocol_info_capabilities`](../../src/websocket/connection.rs) | For `u16` version and optional capability lists: sub-v3 is relay-only; v3+ includes relay, removes all duplicates, preserves first occurrence; reserved extensions require their explicit negotiation policy | Tested; source proof pending | Authentication stores `NegotiatedProtocol` and room-operation support in `ConnectionManager`; connection unit tests; R/M | Tests include advertised P2P on v2, omitted lists, duplicates, reserved capabilities. Dedicated source faults pending |
+| P05 [`SessionCapabilities::from`, `SessionMember::supports_session`](../../src/server/session_policy.rs) | Project each negotiated axis by membership; support requires version >= 3 and both requested axes, for all versions and subsets; a missing connection uses the documented v2 relay default | Tested; source proof pending | `session_capabilities`, `session_members_from`, `session_members_from_selection`; `source_linked_capability_adapter_requires_every_axis_and_member`, `compact_session_capabilities_preserve_every_negotiated_subset`; R/M | Adapter cases include absent axes, v2, v3, future versions, and both member orders. No dedicated backend fault yet |
+| P06 [`protocol_core::nonempty_all_support`](../../src/protocol_core.rs) | Boolean identity predicate: result iff slice is nonempty and every element is true, lengths 0–8 | Bounded: `capability_aggregation_through_eight_members`, unwind 10; all required assertions and three reachability witnesses | `all_support` in session policy; K/R | Kani empty-room and skipped-member faults. Arbitrary length and capability projection are excluded |
+| P07 Same helper, generic `FnMut(&T) -> bool` | For every finite slice, preserve empty/nonempty, order, short circuit, and all-member semantics under an explicit callback state/error/divergence contract | Arbitrary-length theorem pending; generated Lean typechecks with the upstream alias backport | `all_support`; required L extraction typecheck and R callback tests | Empty-list theorem is not accepted. Required: callback contract, arbitrary-length proof, independent source faults and restored-green logs |
+| P08 [`set_protocol`, `reassign_connection`, `restore_reassigned_connection`](../../src/server/connection_manager.rs) | Current socket profile replaces the old profile on reconnect; failed reassignment restores the correct generation and state; old tasks cannot change the new socket | Tested; source/concurrent correspondence pending; `SignalFishSession` models selected fresh-profile reconnects | `set_client_protocol`, reconnect transaction; connection-manager and session-policy tests; R/M | TLC downgrade/v2 reconnect expected failures. These mutate the model; source fault controls remain pending |
+
+## Session and room decisions
+
+These rows use the production [`session_policy.rs`](../../src/server/session_policy.rs)
+unless another source is linked. Input domains include empty rooms, mixed
+versions, every capability subset, all topology/transport choices, authority
+present/absent, and host endpoint present/absent. UUID and timestamp ordering
+must agree with production. Existing property tests sample these domains.
+
+| ID and source symbol | Exact obligation | Status and current backend/test | Production adapter; CI | Negative control and remaining boundary |
+| --- | --- | --- | --- | --- |
+| P09 `choose_session_plan`, `desired_topology_for`, `UPGRADE_LADDER`, `rung_is_executable` | Choose the first enabled, executable, unanimously supported rung at or below the game's ceiling; otherwise relay. Direct requires a capable member with a valid endpoint | Tested: `selection_table_resolves_each_rung_and_downgrade`, selection properties; Z3 set A and `SignalFishSession` model this decision; source proof pending | `start_game_publication_builder`, `emit_session_plan`; R/M | Z3 has a missing-endpoint mutant witness. Source faults for ordering, disabled transports, and ceiling bypass are pending |
+| P10 `elect_host`, `SessionMember::can_host` | Prefer eligible authority; otherwise least `(joined_at, player_id)`; empty candidates return `None`; Direct host has a valid endpoint | Tested: host election and direct endpoint cases; Z3 set D; source proof pending | Selector and `membership_session_decision`; R/M | Permutation/timestamp-tie tests exist. Dedicated source fault and callback/filter correspondence pending |
+| P11 `joiner_supports_sticky_plan` | A joiner to a stored non-relay plan has v3+ and both exact axes; endpoint readiness is required only of elected Direct hosts | Tested: `seat_fill_predicate_tracks_version_and_both_sticky_axes`; source proof pending | `room_service::join_room_with_coordination`, reconnect admission; R/M | Incompatible capability/version cases exist. Backend fault and admission-to-publication proof pending |
+| P12 `membership_session_decision`, `ActiveSessionPlan::host_invalid` | Preserve a valid sticky pair and host; otherwise elect a qualified host with the same pair, or remove the plan and publish relay reset; no stored plan gives relay | Tested: `membership_decision_preserves_or_replaces_host_by_session_path`; `SignalFishSession`; source proof pending | Finalized join, departure, endpoint refresh and reconnect publication; R/M | Absent/unpairable host tests and TLC reconnect negatives exist. Source fault controls pending |
+| P13 `SessionPlanProjection::plan_for_member`, `host_peers_for`; [`local_initiates`](../../src/server/signaling.rs) | Plans exclude self and incompatible peers; mesh lists all other capable members; host forms a star; smaller ID initiates mesh; host answers clients; only eligible WebRTC recipients get ICE | Tested: `plan_for_mesh_excludes_self_and_has_antisymmetric_initiate`, peer-filter/star/ICE tests; Z3 set C and session model; source proof pending | `build_session_plan_message_for_member`, `send_session_plans_to_members`; R/M | Pair direction, incapable recipient, empty ICE and v2 silence tests exist. End-to-end projection proof pending |
+| P14 `ice_pregather_eligible`, `compose_ice_servers_for` | Pre-gather requires its switch, enabled WebRTC, non-relay desired topology, non-finalized room, v3+, and matching axes; compose configured static ICE and per-recipient TURN under policy | Tested: session policy tests and `tests/v3_ice_pregather_e2e.rs`; source proof pending | Join/reconnect snapshots and session-plan builders; R/M | Disabled/config/version/topology cases and per-recipient credential tests exist. Environment/time/credential implementation remains outside helper proofs |
+| P15 [`Room::add_player`, `remove_player`, `can_join`](../../src/protocol/room_state.rs); [`handle_join_room_owned`, `join_room_with_coordination`](../../src/server/room_service.rs) | Admission respects capacity, role exclusivity, identity/name validity, access policy, application owner/quota, and sticky-plan compatibility; rejected join preserves prior membership and routing | Tested: room-state, room-service, app-admission tests; session and owner-rollback models cover selected abstractions; source/state proof pending | Public `handle_join_room`, lifecycle and RoomOperation variants; R/M | Duplicate/oversized/owner/persistence/lock-failure test cases exist. Backend proof and complete production fault controls pending |
+| P16 [`Room::set_player_ready`, `all_players_ready`, `finalize_game`](../../src/protocol/room_state.rs); [`handle_player_ready`, `handle_start_game_with_publication`](../../src/coordination/room_coordinator.rs) | Start only a non-finalized nonempty room with exactly current ready members and authorized sender; joins invalidate cached readiness; readiness and authority flags agree with membership | Tested: room-state/ready-state tests; `SignalFishSession` models finalize; source proof pending | [`handle_player_ready`, `handle_start_game`](../../src/server/ready_state.rs); R/M | `finalization_requires_exact_ready_members_and_matching_flags`, start rejection and stale-generation tests. Source proof of readiness cache/state link pending |
+| P17 [`Room::set_authority_with_change`](../../src/protocol/room_state.rs); [`handle_authority_request_from_lifecycle`](../../src/server/authority.rs); [`handle_transfer_authority_from_lifecycle`](../../src/server/moderation.rs) | Authority is absent or one current member; claim only when allowed; transfer checks actor/target and updates all flags; departure cannot leave authority on an absent member | Tested: authority/moderation/room-state tests; session model `AuthorityIsCurrentMember`; source proof pending | Router `AuthorityRequest`, RoomOperation transfer and coordinator; R/M | `authority_assignment_reconciles_all_member_flags` and unauthorized/stale-role cases. Transfer caller/state correspondence and source faults pending |
+| P18 [`moderation` handlers](../../src/server/moderation.rs); [`Room::admits_join_password`, `is_banned`](../../src/protocol/room_state.rs) | Kick, ban, unban, access change and code regeneration require current room authority; atomic eviction invalidates old routing/reconnect state; failures retain valid prior access/code state | Tested: moderation and app-admission tests; source proof pending | RoomOperation dispatch, room service and database mutation; R | Invalid actor/target, failed persistence and interleaving cases exist. Formal backend and source fault controls pending |
+| P19 [`SpectatorService::join_operation_from_lifecycle`, `detach_if`](../../src/server/spectator_service.rs); [`Room::add_spectator`](../../src/protocol/room_state.rs) | Spectator and player roles stay exclusive; enforce spectator limits, room/application/access policy; depart only the expected membership; spectators cannot start games or become P2P peers | Tested: spectator-service/room-state/ready-state tests; source proof pending | [`handle_join_as_spectator`, `handle_leave_spectator`](../../src/server/spectator_handlers.rs); R | Duplicate admission, spectator cap, stale detach and spectator start rejection tests. Formal backend and source fault controls pending |
+
+## Wire, relay, and lifecycle boundaries
+
+Every public server handler also needs the applicable preconditions below when
+called directly by a library user. WebSocket authentication alone cannot prove
+those library call paths. Direct binary GameData dispatch and socket-owned
+reconnect dispatch are separate from the JSON router.
+
+| ID and source | Exact obligation and domain | Status and current evidence | Production adapter; CI | Negative control and remaining boundary |
+| --- | --- | --- | --- | --- |
+| P20 [`handle_client_message_with_lifecycle`](../../src/server/message_router.rs) | Every `ClientMessage`/`RoomOperationRequest` arm uses current lifecycle; `Authenticate` cannot renegotiate after setup; reconnect runs only in the socket owner; operation IDs require negotiated support and correlate the response | Tested: message-router tests, `tests/room_operation_wire_golden.rs`; source proof pending | Public `handle_client_message`, WebSocket dispatch; R | `room_operation_requires_explicit_capability_negotiation`, stale-generation and reconnect-router cases. Formal backend and source fault controls pending |
+| P21 [`handle_socket_supervised`, `negotiate_capabilities`](../../src/websocket/connection.rs); [`websocket_handler_with_default`](../../src/websocket/handler.rs); [`binary`](../../src/protocol/binary.rs) | Wire decode/encode preserves the negotiated version/format, rejects malformed/oversized frames and unsupported extensions, enforces pre-auth ordering, and keeps v2 representation stable | Tested: `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, encoding corpus, frame limits, protocol fuzz tests; source proof pending | Socket reader/writer and public serializers; R/M | Malformed corpus, version and size boundary cases. Parser, codec, routing and serializer correspondence remain unproved |
+| P22 [`handle_signal_in_generation_from_lifecycle`](../../src/server/signaling.rs) | Signals target current members of the same room and valid generation; reject stale/wrong-room/unsupported messages before delivery; enforce payload budget | Tested: signaling unit tests and `tests/v3_signal_errors_e2e.rs`; source proof pending | Router Signal, public `handle_signal`/`handle_signal_in_generation`; R/M | Cross-room, stale-generation and oversized negatives. Full async recipient revalidation proof pending |
+| P23 [`handle_game_data_from_lifecycle`, `handle_game_data_binary_from_lifecycle`](../../src/server/game_data.rs); [`next_relay_stamp_in_room`](../../src/server/connection_manager.rs) | Relay only current authorized room members under payload/rate/class policy; preserve sender/room epoch and monotone sequence; sequence overflow must not silently wrap | Tested: game-data, sequencing and interop tests; Z3 set H, `SequencedRelay` and trace replay models; source proof pending | JSON/binary socket dispatch and coordinator delivery; R/M/N | Trace replay corruptions check duplicate/regressing data, silent gaps, backward epochs and late lifecycle. They are observation/model faults, not source mutations |
+| P24 [`handle_transport_status_under_lifecycle`](../../src/server/message_router.rs); [`set_transport_status`](../../src/server/connection_manager.rs) | Accept only negotiated v3 transport reports; duplicates in one membership generation do not fan out; scope fallback recipients to current room; relay remains available | Tested: message-router and `tests/v3_transport_status_e2e.rs`; source proof pending | Router TransportStatus and fallback recipients; R | Unnegotiated/v2/stale-generation cases. Reporting and routing concurrency proof pending |
+| P25 [`leave_room_locked_operation`](../../src/server/room_service.rs); [`handle_session_member_departure`](../../src/server/session_policy.rs) | Remove only expected membership; clear readiness, authority and routing; publish departure and complete current-member plan refresh in order; repair invalid host or reset relay | Tested: room-service/session-policy tests; `SignalFishSession` departure abstraction; source proof pending | Explicit leave, disconnect, moderation and drain; R/M | Host absent/unpairable/no-successor, rejected publication and canceled operation cases. Actual await/interleaving refinement remains pending |
+| P26 [`handle_reconnect_owned`](../../src/server/reconnection_service.rs); [`ReconnectionManager`](../../src/reconnection.rs) | Claim credentials once for the right identity; preserve membership priority; restore only still-valid room state; use fresh socket profile; rollback failed restore; replay/status honestly reports missing history | Tested: reconnection tests and E2E; Z3 E/F, `ReconnectionClaimLifecycle`, `ReconnectReplay`, selected session reconnect models; source proof pending | Socket-owned reconnect and public `handle_reconnect`; R/M/N | Claim lifecycle expected failures, replay gaps and duplicate/stale/expired claim tests. Credentials, replay buffers and caller state not covered by core proofs |
+| P27 [`cleanup_expired_rooms_protecting_reconnections`, `cleanup_expired_reconnections`, `cleanup_clients_in_missing_rooms`](../../src/server/maintenance.rs); [`Room::is_expired_at`](../../src/protocol/room_state.rs) | Activity and reconnection windows prevent premature removal; cleanup does not remove an active claim or a replacement membership; orphaned readiness/session/application entries are pruned | Tested: maintenance paths in room-service/reconnection tests; `RoomLifecycleGC`, `SenderPacingReaper`, claim and rollback models; source proof pending | `cleanup_task_until`, activity refresh in router/heartbeat; R/M | Timeout boundary, active claim and stale candidate tests. Eventual cleanup is a separate liveness obligation |
+| P28 [`run_drain_choreography`](../../src/server/shutdown.rs); [`ConnectionManager::remove_client_for_unregistration`](../../src/server/connection_manager.rs) | Drain stops new room creation, accounts departing clients and pending reconnects, preserves terminal delivery/close order, and releases capacity exactly once | Tested: shutdown/connection-manager/E2E tests; `ConnectionTeardown` models selected accounting; source proof pending | Server shutdown, unregister and socket task teardown; R/M | Double/stale teardown and close-order scenarios. Termination and process-failure guarantees remain pending |
+| P29 [`InMemoryMessageCoordinator`](../../src/server.rs); [`RoomEventSequencer`](../../src/coordination/mod.rs) | Serialize room mutation/publication; validate exact recipients and generation before commit; caller cancellation cannot strand committed state; panic recovery and retries preserve one ordered transaction | Tested: coordinator and conditional publication tests; `RoomMessageTransaction`, `RoomEventSequencer`, `ApplicationOwnerRollback`; source/refinement proof pending | Join/start/departure/reconnect/membership publication hooks; R/M | Model expected failures and production injected failure/panic cases exist. Cross-process atomicity, DB implementations and lock leases require separate assumptions |
+| P30 [`outbound_queue`](../../src/coordination/outbound_queue.rs); [`sending`](../../src/websocket/sending.rs) and socket writer | Reliable delivery enqueues or disconnects with honest accounting; classified loss has exact gaps; reservations release once; deadline arbitration cannot admit expired data; frozen generations cannot deliver new-room data | Tested: queue, backpressure, close and delivery property tests; delivery/permit/deadline/class models, Z3 I; source/refinement proof pending | Coordinator send/reserve paths and socket writer/finalizer; R/M/N | Seeded trace drain fault and invalid close-flush/live-drain traces; model expected failures. V2 trace replay explicitly excludes unsupported overlap/class histories |
+| P31 [`ProtocolConfig::validate`](../../src/config/protocol.rs), [`config::validation`](../../src/config/validation.rs), [`protocol::validation`](../../src/protocol/validation.rs), [`rate_limit`](../../src/rate_limit.rs) | Accepted runtime/input limits preserve wire headroom, legal names/endpoints/codes and capacities; request budgets apply to the correct current window; defaults remain reachable | Tested: configuration/protocol tests; Z3 J and `RateLimitWindow`; source proof pending | Constructor validation, admission, signal/data handlers; R/M | Z3 weakened-headroom witness; fixed-window boundary-burst expected failure; malformed/boundary input tests. Complete validation-to-use and limiter correspondence pending |
+| P32 [`handle_provide_connection_info`, `provide_connection_info_owned`](../../src/server/game_data.rs); [`prepare_direct_endpoint_refresh`](../../src/server/session_policy.rs) | For arbitrary connection metadata, reject canonical JSON above the configured byte cap before storage; require the current lifecycle and room; report missing-row/storage failure; owned updates survive caller cancellation; a running Direct host update atomically refreshes the endpoint or resolves host loss | Tested: game-data and session-policy tests; source/state correspondence pending | Router ProvideConnectionInfo and public handler; database update and room-event publication; R/M | `old_connection_info_cannot_overwrite_rejoined_seat`, `oversized_connection_info_is_rejected_and_not_stored`, Direct endpoint loss/refresh tests. Backend theorem and source fault controls pending |
+| P33 [`handle_ping_from_lifecycle`, `record_transport_activity_from_lifecycle`, `maybe_update_last_seen`](../../src/server/heartbeat.rs); [`reserve_last_seen_update`](../../src/server/connection_manager.rs) | Current inbound activity refreshes local liveness; application Ping replies under its reply budget; transport activity adds no application Pong; throttled player/room persistence includes spectators, and failed or canceled refresh permits immediate retry | Tested: heartbeat unit tests; `RoomLifecycleGC` and `SenderPacingReaper` cover related clock abstractions; source/state proof pending | Router Ping/all-message activity, binary input and socket Ping/Pong paths; R/M | `failed_heartbeat_persistence_retries_before_the_throttle_deadline`, `canceled_room_refresh_does_not_consume_the_heartbeat_window`, transport-Pong/spectator activity tests. Backend theorem, clock/refinement proof and source faults pending |
+
+## Liveness and concurrent correspondence still required
+
+These are required open obligations, not consequences of P01–P33.
+
+| ID | Claim to establish | Environment and fairness assumptions to define | Current evidence and missing artifact |
+| --- | --- | --- | --- |
+| Q01 | Each accepted room operation eventually finishes or reaches an explicit terminal failure; cleanup eventually retries abandoned state | Tokio polling, runnable-task fairness, lock acquisition, bounded external calls, recoverable storage; specify cancellation and panic behavior | Owned-job and GC model/test evidence exists. Production refinement, theorem and source fault control pending; R/M/N |
+| Q02 | A backpressured sender eventually enqueues or closes, and every reserved permit eventually releases | Queue consumer may be unfair; timeout/close tasks still run; clocks progress; specify shutdown priority and socket write cancellation | Delivery/permit TLA+ temporal properties apply to their configurations. Production scheduling/refinement proof pending; R/M/N |
+| Q03 | Every required surviving v3 member eventually observes the committed current plan or a terminal connection failure | Fair event lane, progressing transport or timeout, stable identity until commit, finite retries; no promise of packet delivery across a failed socket | Publication tests and session model are sequential abstractions. Async observation theorem, reachability/fault controls and evidence artifact pending; R/M |
+| Q04 | Composition preserves safety across tasks/processes, reconnect, GC and membership mutation | Define linearization points, shared/local locks, storage consistency, bus ordering/deduplication, lease expiry, clock model and partition behavior | Models and multiprocess tests cover selected scenarios. A checked production abstraction/refinement relation for each step remains pending; R/M/N |
+
+## Maintenance and closure
+
+The server maintainers own contracts, assumptions and tool pins. A change to a
+source symbol, callback, configuration rule, dependency, model or workflow must
+identify affected IDs and rerun the applicable backend. Reviewers must compare
+contract changes with caller behavior and review each new assumption. A failed
+proof requires a cause: production defect, changed contract, unsupported tool
+feature or runner defect. Do not weaken a contract solely to obtain green CI.
+
+Before marking a row complete, retain the exact source and pin hashes, generated
+output, named theorem/harness, domain/bound/axiom audit, positive reachability,
+intended proof/assertion rejection from a source fault, restored-green result,
+raw logs and timings. Record CI head and evidence links. Compiler/tool failures
+are not successful fault controls. A missing theorem, renamed harness, stale
+extraction or unapproved axiom must fail its gate.
+
+Review this inventory against the full message enums and public library entry
+points before using it as the issue closure checklist. New variants and direct
+library APIs need a row or an explicit mapping to an existing row. P20 covers
+the router dispatch gates; P32/P33 specify metadata and heartbeat behavior.
+P21/P26 cover socket-only binary and reconnect paths.
+The grouped rows identify further contracts to split as verification expands.
+They do not establish that every implementation path has a discharged contract.
+
+Issue closure requires all agreed source, caller, state and concurrency rows to
+have their stated evidence. Unsupported/pending rows remain open. Rust tests,
+handwritten model proofs and bounded checks must retain their labels. Tool or
+scope limits require evidence and an explicit scope decision in the issue.

@@ -14,7 +14,7 @@ The proof crates do not change the server's dependencies or public API.
 | Backend and target | Checked property | Boundary |
 | --- | --- | --- |
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
-| Lean aggregation | No accepted proof | Extraction emits a missing iterator alias in the pinned Lean library; generated code does not typecheck |
+| Lean aggregation | Generated module typechecks with an upstream alias backport; no accepted aggregation theorem | Arbitrary-length semantics and the generic callback contract remain pending |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -182,28 +182,63 @@ The generic collection experiment also found a concrete tool limitation.
 Further Lean collection work needs a separate estimate after that limit is
 resolved. No server runtime dependency or wire-format change is required.
 
-## Aggregation limitation and follow-up
+## Aggregation mapping and follow-up
 
-hax extracts the generic aggregation helper, but the generated module refers
-to a missing constant in hax-lean `v0.3.30`:
+The pinned baseline extracts the generic aggregation helper but fails to typecheck
+its reference to
 `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`.
-This is a generated-module typecheck failure. It prevents acceptance of even
-the proposed empty-list Lean theorem. The pilot records it as a tool limit,
-not as a proof result. Reproduce the optional probe after preparing the tools:
+The required Lean job now reruns this source-based capability check:
 
 ```bash
-python3 formal/source-linked/lean/verify.py --prepare --probe-capability
+python3 formal/source-linked/lean/verify.py --prepare --mutations --probe-capability
 ```
 
-The required CI job does not depend on preserving this tool failure. The probe
-also reports when a later pinned library can typecheck the extraction; that
-outcome alone still proves no aggregation theorem.
+The runner first tries the unmodified pinned library. It accepts a successful
+baseline typecheck. It retries only the known missing-alias failure, using
+[`compatibility/IteratorAll.lean`](lean/compatibility/IteratorAll.lean).
+That module backports the concrete slice alias from
+[hax-lean v0.3.41](https://github.com/cryspen/hax-lean/blob/1d84de68c03bd76457887121853779a52a09e33a/CoreModels/Core/FunsEpilogue.lean#L450).
+It delegates to the pinned library's existing `Iterator.all.default` and concrete
+slice iterator instance. It adds no loop, axiom, callback model, or replacement
+for the extracted production function. Its Apache-2.0 license is retained beside it.
 
-Fixing that library mapping is the first step. A full arbitrary-length Lean
-equivalence would then need an explicit callback contract and a proof over the
-iterator loop. The generic callback can mutate state, fail, or diverge in the
-extracted semantics. Keep the production adapter tests and the bounded Kani
-check while evaluating that additional work.
+Upstream v0.3.31 and v0.3.32 retain Lean 4.31 but lack this alias. The inspected
+v0.3.41 also moves to Lean 4.35 and a different Aeneas revision. The narrow alias
+backport leaves all pilot tool and dependency pins unchanged. Its namespace
+wrapper and fixed `Type` universe adapt the alias to the pinned model. Remove
+it only after a separately reviewed tool update typechecks without the shim.
+
+The runner imports the alias through hax's user-owned assumptions module. It
+never edits the extracted function body. It repeats extraction, compares all
+generated extraction files byte for byte, and requires a second typecheck.
+An unrelated compiler failure or a failed mapped typecheck fails CI. CI does
+not require the baseline defect to remain broken.
+
+Each probe retains small source and generated-file snapshots, pin and source
+hashes, raw command logs, results, and timings under
+`lean/target/verification-logs/capability-probe/`. A baseline failure and its
+mapped retry have separate snapshots. Temporary projects and dependency caches
+are not needed to inspect the evidence. The snapshot retains the original
+private production module imported by the isolated one-function extraction
+scenario; it does not introduce a second Rust implementation.
+
+A local ARM64 follow-up run kept the pinned production source and dependencies
+unchanged. The full negotiation/mutation/restored/probe command took 157.200
+seconds across recorded commands. The baseline capability typecheck failed in
+22.894 seconds. The mapped typecheck passed in 12.941 seconds; repeat extraction
+took 1.136 seconds and repeat typecheck took 1.736 seconds. These are single
+warm-dependency samples, not hosted CI or proof-maintenance estimates.
+
+Typechecking clears the missing-alias blocker. It proves no aggregation
+property, including the empty-list property. A full arbitrary-length theorem
+still needs an explicit callback contract and a proof over the iterator loop.
+The generic callback can mutate state, fail, or diverge in the extracted
+semantics. Keep the production adapter tests and bounded Kani checks.
+
+The reviewed [obligation inventory](obligations.md) tracks the production
+seams, current evidence, negative controls, and caller/state/concurrency gaps.
+All production source and root Cargo changes now rerun formal CI. Existing
+handwritten models and test results remain distinct from source-linked proofs.
 
 ## Tool references
 

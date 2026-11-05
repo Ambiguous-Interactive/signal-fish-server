@@ -35,8 +35,8 @@
 # signaling.rs, room_service.rs, database/mod.rs, protocol/room_state.rs,
 # reconnection.rs, reconnection_service.rs, connection_manager.rs, the top-level server capacity waits,
 # coordination, and WebSocket delivery), so this workflow triggers on those files
-# as well: a behavioral change there must keep the spec and the proofs green or
-# update them deliberately.
+# as well: all production source and root dependency changes rerun these checks.
+# A behavioral change must keep the models and proofs green or update them deliberately.
 #
 # The TLA+ tools jar is version-pinned and SHA256-verified by
 # scripts/run-tla-model-check.sh; the verified jar is cached between runs.
@@ -54,24 +54,9 @@ on:
       - "scripts/generate-sequenced-relay-trace.py"
       - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
-      - "src/config/**"
-      - "src/lib.rs"
-      - "src/protocol_core.rs"
-      - "src/rate_limit.rs"
-      - "src/auth/**"
-      - "src/server/session_policy.rs"
-      - "src/server/signaling.rs"
-      - "src/server/room_service.rs"
-      - "src/reconnection.rs"
-      - "src/server/reconnection_service.rs"
-      - "src/server/maintenance.rs"
-      - "src/server/connection_manager.rs"
-      - "src/server/game_data.rs"
-      - "src/database/mod.rs"
-      - "src/protocol/**"
-      - "src/server.rs"
-      - "src/coordination/**"
-      - "src/websocket/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "tests/delivery_trace_generator_tests.rs"
       - "tests/scenario_realworld_e2e.rs"
       - "tests/v3_game_data_sequencing_e2e.rs"
@@ -135,7 +120,7 @@ jobs:
         run: python3 -m unittest discover -s formal/source-linked/lean -p 'test_*.py'
 
       - name: Extract production source and check proofs and negative controls
-        run: python3 formal/source-linked/lean/verify.py --prepare --mutations
+        run: python3 formal/source-linked/lean/verify.py --prepare --mutations --probe-capability
 
       - name: Check generated proof files are current
         shell: bash
@@ -153,6 +138,7 @@ jobs:
         with:
           name: source-linked-lean
           path: formal/source-linked/lean/target/verification-logs/
+          include-hidden-files: true
           if-no-files-found: warn
 
   kani:

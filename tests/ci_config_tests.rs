@@ -31897,24 +31897,9 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "scripts/generate-sequenced-relay-trace.py",
             "scripts/run-sequenced-relay-trace-validation.sh",
             "scripts/run-z3-proofs.sh",
-            "src/config/**",
-            "src/lib.rs",
-            "src/protocol_core.rs",
-            "src/rate_limit.rs",
-            "src/auth/**",
-            "src/server/session_policy.rs",
-            "src/server/signaling.rs",
-            "src/server/room_service.rs",
-            "src/reconnection.rs",
-            "src/server/reconnection_service.rs",
-            "src/server/maintenance.rs",
-            "src/server/connection_manager.rs",
-            "src/server/game_data.rs",
-            "src/database/mod.rs",
-            "src/protocol/**",
-            "src/server.rs",
-            "src/coordination/**",
-            "src/websocket/**",
+            "src/**",
+            "Cargo.toml",
+            "Cargo.lock",
             "tests/delivery_trace_generator_tests.rs",
             "tests/scenario_realworld_e2e.rs",
             "tests/v3_game_data_sequencing_e2e.rs",
@@ -31932,7 +31917,7 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
     let jobs = documents[0].as_mapping_get("jobs").expect("formal jobs");
     for (backend, version, arguments) in [
         ("kani", "0.68.0", "--mutations"),
-        ("lean", "0.4.2", "--prepare --mutations"),
+        ("lean", "0.4.2", "--prepare --mutations --probe-capability"),
     ] {
         let job = jobs.as_mapping_get(backend).expect("source-linked job");
         assert!(job.as_mapping_get("continue-on-error").is_none());
@@ -31967,6 +31952,12 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
                 .and_then(Yaml::as_str)
                 .is_some_and(|action| action.starts_with("actions/upload-artifact@"))
                 && step.as_mapping_get("if").and_then(Yaml::as_str) == Some("always()")
+                && (backend != "lean"
+                    || step
+                        .as_mapping_get("with")
+                        .and_then(|settings| settings.as_mapping_get("include-hidden-files"))
+                        .and_then(Yaml::as_bool)
+                        == Some(true))
         }));
     }
 }
