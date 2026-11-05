@@ -1,7 +1,7 @@
 //! Complete reconnect baselines retain their owned player roster (#1454).
 use super::*;
 
-/// Compare complete v2/v3 reconnects with exact rosters, readiness, and ordered watermarks.
+/// Compare warmed complete reconnects with exact rosters, readiness, and ordered watermarks.
 pub(crate) fn reconnect_baseline_reuses_player_roster() {
     allocation_harness::block_on(async {
         let mut profiles = Vec::new();
@@ -68,6 +68,48 @@ pub(crate) fn reconnect_baseline_reuses_player_roster() {
                 if v3 {
                     negotiate_webrtc_for_measurement(&server, &temporary);
                 }
+                // Exercise the same identity swap before comparing roster cost.
+                // Separate fresh servers have different hash-table layouts;
+                // a first reconnect can grow a tombstone-filled connection shard.
+                let initialization = stats_alloc::Region::new(ALLOCATOR);
+                assert!(
+                    server
+                        .handle_reconnect(&temporary, &actor, &room_id, &token)
+                        .await
+                );
+                let initialization = initialization.change();
+                println!(
+                    "RECONNECT_ROSTER_INITIALIZATION members={members} v3={v3} stats={initialization:?}"
+                );
+                let baseline = receiver.try_recv().unwrap();
+                assert!(
+                    matches!(baseline.as_ref(), ServerMessage::Reconnected(payload)
+                    if payload.player_id == actor && payload.current_players.len() == usize::from(members))
+                );
+                assert_membership_queue_empty(&mut receiver);
+                for receiver in receivers.iter_mut().skip(1) {
+                    let opening = receiver.try_recv().unwrap();
+                    assert!(
+                        matches!(opening.as_ref(), ServerMessage::PlayerReconnected { player_id, .. }
+                        if *player_id == actor)
+                    );
+                    assert_membership_queue_empty(receiver);
+                }
+                let token = server
+                    .reconnection_manager()
+                    .unwrap()
+                    .pre_issue_token(actor, room_id)
+                    .await;
+                server.unregister_client(&actor).await;
+                for receiver in &mut receivers {
+                    drain_membership_setup(receiver, true);
+                }
+                let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+                server.connect_client(temporary, sender).await;
+                if v3 {
+                    negotiate_webrtc_for_measurement(&server, &temporary);
+                }
+                tokio::task::yield_now().await;
                 let region = stats_alloc::Region::new(ALLOCATOR);
                 assert!(
                     server
