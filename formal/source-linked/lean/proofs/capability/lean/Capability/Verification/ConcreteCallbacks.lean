@@ -17,7 +17,7 @@ def MemberSupport (caps : SessionCapabilities) (topology : Topology) (transport 
     | .Direct => caps.direct_transport
     | .WebRtc => caps.webrtc_transport)
 
-private theorem supports_value (caps : SessionCapabilities) (topology : Topology) (transport : Transport) :
+theorem supports_value (caps : SessionCapabilities) (topology : Topology) (transport : Transport) :
     supports_session caps topology transport = RustM.ok (MemberSupport caps topology transport) := by
   cases topology <;> cases transport <;>
     simp [supports_session, SessionCapabilities.supports_topology,

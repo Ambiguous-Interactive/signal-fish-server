@@ -95,20 +95,7 @@ impl ActiveSessionPlan {
 
 pub(crate) use crate::session_capability::SessionCapabilities;
 
-/// Per-member input to session selection: identity + negotiated capabilities +
-/// join time (for deterministic host election).
-///
-/// `Debug` is required by the proptest strategies in `session_policy_tests.rs`
-/// (generated values must be printable in failure reports).
-#[derive(Debug, Clone)]
-pub(crate) struct SessionMember {
-    pub player_id: PlayerId,
-    pub player_name: String,
-    pub is_authority: bool,
-    pub joined_at: chrono::DateTime<chrono::Utc>,
-    pub direct_endpoint: Option<DirectEndpoint>,
-    pub capabilities: SessionCapabilities,
-}
+pub(crate) use crate::session_member::{all_support, SessionMember};
 
 impl SessionMember {
     /// Copy selection fields and include validated endpoints only when the caller needs Direct.
@@ -157,28 +144,9 @@ impl SessionMember {
         self.capabilities.version >= 3
     }
 
-    /// Whether this member negotiated everything required to run a session on
-    /// the given (topology, transport) pair: protocol v3 plus both axes.
-    ///
-    /// The capability predicate shared by plan selection ([`all_support`]) and
-    /// per-recipient peer-list filtering (`SessionPlanDecision::plan_for`).
-    /// Host validity and election wrap this with [`Self::can_host`], which adds
-    /// Direct endpoint readiness.
-    fn supports_session(&self, topology: Topology, transport: Transport) -> bool {
-        crate::session_capability::supports_session(self.capabilities, topology, transport)
-    }
-
     /// Validated direct endpoint this member can expose when elected host.
     fn direct_endpoint(&self) -> Option<DirectEndpoint> {
         self.direct_endpoint.clone()
-    }
-
-    /// Whether this member can anchor the selected host transport. Direct
-    /// requires a usable endpoint in addition to negotiated capabilities;
-    /// WebRTC carries its own connection establishment through signaling.
-    fn can_host(&self, topology: Topology, transport: Transport) -> bool {
-        self.supports_session(topology, transport)
-            && (transport != Transport::Direct || self.direct_endpoint.is_some())
     }
 }
 
@@ -262,18 +230,6 @@ pub(crate) fn membership_session_decision(
             is_replan: false,
         }
     }
-}
-
-/// Whether *every* member supports v3 and the given (topology, transport) pair.
-///
-/// An empty room never supports an upgrade (there is nothing to connect).
-fn all_support(members: &[SessionMember], topology: Topology, transport: Transport) -> bool {
-    crate::session_capability::all_support(
-        members,
-        |member| member.capabilities,
-        topology,
-        transport,
-    )
 }
 
 /// Whether a capability-compatible rung has every piece needed to execute it.

@@ -4,10 +4,11 @@ Issue [#1464](https://github.com/Ambiguous-Interactive/signal-fish-server/issues
 asks whether Rust can be translated into theorem provers without maintaining a
 second implementation. The source-linked checks use production helpers in
 [`src/protocol_core.rs`](../../src/protocol_core.rs),
-[`src/session_capability.rs`](../../src/session_capability.rs), and
-[`src/session_admission.rs`](../../src/session_admission.rs).
+[`src/session_capability.rs`](../../src/session_capability.rs),
+[`src/session_admission.rs`](../../src/session_admission.rs), and
+[`src/session_member.rs`](../../src/session_member.rs).
 
-The standalone Lean crate imports all three files with `#[path]`. The Kani crate
+The standalone Lean crate imports all four files with `#[path]`. The Kani crate
 imports `protocol_core.rs`. Production version negotiation, capability projection,
 support checks, aggregation, and sticky admission call the same helpers. The proof crates do not
 change the server's dependencies or public API.
@@ -19,10 +20,10 @@ change the server's dependencies or public API.
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
 | Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; the concrete support callback is covered separately below |
 | Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and arbitrary Rust callbacks remain outside; the concrete support callback is covered below |
-| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, member getter, and room-state correspondence remain outside; lookup-result/default resolution has the separate contract below |
-| Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; production member-field getter, connection lookup, and room state remain tested boundaries |
+| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup and room-state correspondence remain outside; actual member access has the contract below; lookup-result/default resolution has the separate contract below |
+| Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; the actual production member-field getter is proved below; connection lookup and room state remain tested boundaries |
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
-| Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup, caller floor, member getter, and room state remain outside |
+| Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
@@ -264,7 +265,7 @@ this total fixed-predicate contract. The operational contract below covers their
 modeled results. Neither contract exposes final callback state or external effects.
 The capability projection and concrete aggregation callback have separate contracts
 below. The concrete callback requires a total, fixed capability getter. Production
-member-getter and caller/state correspondence remain pending. Keep the bounded Kani
+member-getter correspondence is proved below; caller/state correspondence remains pending. Keep the bounded Kani
 checks and adapter tests.
 
 The required runner checks the result and callback-semantics theorems on every run. It
@@ -352,7 +353,7 @@ Each fault must compile extraction before its contract fails. Separate audited
 witnesses establish the wrong values. The restored source must pass. Snapshots
 and the final source guard cover all production input modules. The concrete
 support callback has the separate aggregation contract below. Connection lookup,
-the actual member getter, final callback state, external effects, room decisions,
+final callback state, external effects, room decisions,
 and asynchronous correspondence remain unresolved in #1464. Lookup-result/default
 resolution has the separate source contract below.
 
@@ -389,8 +390,8 @@ version at least three and both requested capability axes. The domain includes
 all `u16` versions, all nine axis pairs, and every representable finite slice.
 It permits duplicates and any member order.
 
-The actual server getter is `|member| member.capabilities`. Its correspondence
-to stored `SessionMember` fields remains tested. The theorem does not prove
+The actual server getter is `|member| member.capabilities`. The member contracts
+below prove its correspondence to stored `SessionMember` fields. The theorem does not prove
 connection lookup, profile fallback, construction of those fields, or room-state
 transitions. `Fn` alone does not establish the getter contract: a Rust getter can
 use interior mutability. No final callback state or external effect is claimed.
@@ -451,7 +452,8 @@ and checks identical regeneration and source/pin integrity.
 
 This closes the pure lookup-result/default decision. It does not prove the
 connection manager's map lookup, locking, or selected profile identity,
-actual member-field getter, membership snapshot, or asynchronous correspondence.
+membership snapshot or asynchronous correspondence. The actual member-field
+getter has the separate contract below.
 Those obligations remain open. Kani retains its previous negotiation and
 zero-to-eight-member aggregation bounds; no new Kani claim is made.
 
@@ -497,7 +499,7 @@ All nine theorem names are required by the axiom audit and CI.
 Both live lookup callers and the compact Default use the checked fixed-floor
 resolver. Its present and absent branches are both checked.
 The map's selected identity, synchronization, `Option` callback wiring,
-member-field construction/getter, room state, and asynchronous correspondence
+member-field construction, room state, and asynchronous correspondence
 remain tested or pending. The actual `From` body and fixed default bodies are
 proved; this is not a proof of the whole lookup operation or session selector.
 Kani's existing eight-member bound is unchanged.
@@ -551,6 +553,60 @@ stored-plan consistency, transaction commit, reconnect policy, and publication
 remain open state/caller obligations. A correct pure admission decision does not
 prove that every caller selects the correct room or profile. No whole-room or
 asynchronous proof is claimed. Kani keeps its eight-member bound.
+
+### Actual production members and host eligibility
+
+[`Members.lean`](lean/proofs/capability/lean/Capability/Verification/Members.lean)
+checks six contracts over the actual `SessionMember` and `DirectEndpoint` types
+in [`session_member.rs`](../../src/session_member.rs). Former server and public
+protocol paths re-export the same types. Constructors and endpoint validation
+stay in their existing modules. No runtime, wire, allocation or API change is
+intended; Rust, .NET and Godot clients need no changes.
+
+`member_support_contract` checks the actual method's capability field access.
+`member_getter_contract` proves the actual aggregation closure satisfies the
+fixed getter contract without assumptions about a user-supplied callback.
+`member_aggregation_contract` applies the existing arbitrary-length theorem to
+every representable finite slice of actual members. It includes empty input,
+all versions, every axis assignment, duplicates and all orders. Membership
+construction, map identity and synchronization remain outside this theorem.
+
+`member_host_contract` states the exact actual `can_host` result: v3 and both
+requested axes, plus a stored endpoint only for Direct. It proves presence,
+not endpoint validation, network reachability or legal-pair selection.
+`member_host_inputs` proves independence from identity, name, authority and
+join time, and from endpoint contents when presence agrees.
+`member_host_outcomes` checks future-version acceptance, old-version rejection,
+Direct endpoint presence/absence, WebRTC without a Direct endpoint, empty-room
+rejection and ordinary Direct membership without a host endpoint. These checks
+apply for every metadata value and endpoint value, with no input assumptions.
+
+The required gate audits all six contracts and tests four isolated production
+faults: an overwritten getter version, an overwritten member-adapter version,
+a missing Direct endpoint check, and an unwanted WebRTC endpoint requirement.
+Each must compile extraction, reject a member contract and pass an independently
+kernel-checked wrong-result witness. Restored proofs, identical regeneration,
+source/pin hashes and raw command timings remain required. The WebRTC endpoint
+fault retains the original transport comparison and adds an endpoint requirement;
+removing that comparison dropped an extracted equality definition and was not
+accepted as a semantic fault control. Capability snapshots
+now retain Charon LLBC as well as the external type interpretations.
+
+The proof crate pins Chrono 0.4.45 without clocks. The backend leaves UUID and
+Chrono type references undeclared. The assumptions module supplies the existing
+16-byte UUID interpretation and a timestamp interpretation containing packed
+date, seconds, fraction and offset. The timestamp interpretation permits all
+scalar values, including invalid dates; it overapproximates the locked Chrono
+representation. These decisions never inspect either metadata type. This is
+a trusted external type interpretation with no operations or added axioms,
+not a proof of Chrono, UUID, timestamp ordering or host election.
+
+A source-copy backend probe of `ActiveSessionPlan::host_invalid` still emits
+unresolved UUID equality and slice-iterator `any` calls. That probe is not an
+accepted proof. Stored-host identity, host re-election, relay reset, transaction
+commit, publication and asynchronous correspondence remain open in P10/P12.
+The new predicates do not establish these state transitions. Kani keeps its
+existing eight-member bound and unwind ten.
 
 ## Tool references
 

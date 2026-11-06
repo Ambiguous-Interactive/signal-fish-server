@@ -56,4 +56,27 @@ structure session_capability.SessionCapabilities where
 def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 
+/-- [signal_fish_proof_core::session_member::DirectEndpoint]
+    Source: 'src/../../../../src/session_member.rs', lines 14:0-17:1
+    Visibility: public -/
+structure session_member.DirectEndpoint where
+  host : alloc.string.String
+  port : Std.U16
+
+/-- [signal_fish_proof_core::session_member::SessionMember]
+    Source: 'src/../../../../src/session_member.rs', lines 25:0-32:1 -/
+structure session_member.SessionMember where
+  player_id : uuid.Uuid
+  player_name : alloc.string.String
+  is_authority : Bool
+  joined_at : chrono.datetime.DateTime chrono.offset.utc.Utc
+    chrono.offset.utc.Utc
+  direct_endpoint : core.option.Option session_member.DirectEndpoint
+  capabilities : session_capability.SessionCapabilities
+
+/-- [signal_fish_proof_core::session_member::all_support::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+@[reducible]
+def session_member.all_support.closure := Unit
+
 end signal_fish_proof_core
