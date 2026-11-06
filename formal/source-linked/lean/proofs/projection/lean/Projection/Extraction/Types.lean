@@ -41,7 +41,7 @@ inductive session_capability.Transport where
 | WebRtc : session_capability.Transport
 
 /-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
-    Source: 'src/../../../../src/session_admission.rs', lines 24:0-28:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 25:0-29:1 -/
 structure session_admission.ActiveSessionPlan where
   topology : session_capability.Topology
   transport : session_capability.Transport

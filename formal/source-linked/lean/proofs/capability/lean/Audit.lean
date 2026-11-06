@@ -16,3 +16,8 @@ import Capability
 #print axioms Capability.member_host_contract
 #print axioms Capability.member_host_inputs
 #print axioms Capability.member_host_outcomes
+#print axioms Capability.any_iterator_contract
+#print axioms Capability.host_match_contract
+#print axioms Capability.host_validity_contract
+#print axioms Capability.host_validity_witness
+#print axioms Capability.host_validity_outcomes

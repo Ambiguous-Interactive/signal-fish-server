@@ -71,26 +71,6 @@ impl ActiveSessionPlan {
             members,
         }
     }
-
-    /// Whether a host-topology session has no usable stored host because it is
-    /// absent, lacks the negotiated capabilities, or has no usable Direct
-    /// endpoint. Membership refreshes and Direct host endpoint updates resolve
-    /// this state before publishing a new authoritative plan.
-    pub(crate) fn host_invalid(&self, members: &[SessionMember]) -> bool {
-        self.topology == Topology::Host
-            && !self.host.is_some_and(|host| {
-                members
-                    .iter()
-                    .any(|member| member.player_id == host && self.supported_by(member))
-            })
-    }
-
-    /// Whether `member` negotiated everything required to participate in — and
-    /// in particular to *host* — this stored session: protocol v3 plus the
-    /// sticky (topology, transport) pair, and a usable endpoint for Direct.
-    fn supported_by(&self, member: &SessionMember) -> bool {
-        member.can_host(self.topology, self.transport)
-    }
 }
 
 pub(crate) use crate::session_capability::SessionCapabilities;

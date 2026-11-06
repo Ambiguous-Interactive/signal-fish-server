@@ -24,6 +24,7 @@ change the server's dependencies or public API.
 | Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; the actual production member-field getter is proved below; connection lookup and room state remain tested boundaries |
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
+| Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
@@ -184,9 +185,11 @@ guarantee.
 
 ## Decision
 
-Keep the two source-linked CI checks for the stated contracts. The measured
-warm checks fit the five-minute pilot target. Keep all existing verification
-layers. Do not expand this into a translator project or a whole-server proof.
+Keep the two source-linked CI checks for the stated contracts. The original
+pilot's warm checks fit its five-minute target. Later extensions add contracts
+and source faults; the pilot timing does not estimate the expanded gate. Record
+each full-cycle measurement in issue #1464. Keep all existing verification layers.
+Do not expand this into a translator project or claim a whole-server proof.
 
 Kani gives useful bounded aggregation coverage now. Lean establishes that
 source extraction and kernel-checked negotiation proofs can run together.
@@ -208,9 +211,9 @@ python3 formal/source-linked/lean/verify.py --prepare --mutations --probe-capabi
 The runner first tries the unmodified pinned library. It accepts a successful
 baseline typecheck. It retries only the known missing-alias failure, using
 [`compatibility/IteratorAll.lean`](lean/compatibility/IteratorAll.lean).
-That module backports the concrete slice alias from
+That module backports the concrete slice aliases from
 [hax-lean v0.3.41](https://github.com/cryspen/hax-lean/blob/1d84de68c03bd76457887121853779a52a09e33a/CoreModels/Core/FunsEpilogue.lean#L450).
-It delegates to the pinned library's existing `Iterator.all.default` and concrete
+They delegate to the pinned library's existing iterator defaults and concrete
 slice iterator instance. It adds no loop, axiom, callback model, or replacement
 for the extracted production function. Its Apache-2.0 license is retained beside it.
 
@@ -597,16 +600,61 @@ Chrono type references undeclared. The assumptions module supplies the existing
 16-byte UUID interpretation and a timestamp interpretation containing packed
 date, seconds, fraction and offset. The timestamp interpretation permits all
 scalar values, including invalid dates; it overapproximates the locked Chrono
-representation. These decisions never inspect either metadata type. This is
-a trusted external type interpretation with no operations or added axioms,
-not a proof of Chrono, UUID, timestamp ordering or host election.
+representation. The member support and eligibility predicates never inspect
+either metadata type. Timestamp interpretation adds no operations or axioms.
+Host validity below adds an explicit UUID equality mapping. Neither mapping
+proves Chrono, UUID, timestamp ordering or host election.
 
-A source-copy backend probe of `ActiveSessionPlan::host_invalid` still emits
-unresolved UUID equality and slice-iterator `any` calls. That probe is not an
-accepted proof. Stored-host identity, host re-election, relay reset, transaction
-commit, publication and asynchronous correspondence remain open in P10/P12.
-The new predicates do not establish these state transitions. Kani keeps its
-existing eight-member bound and unwind ten.
+### Stored-host validity
+
+[`HostValidity.lean`](lean/proofs/capability/lean/Capability/Verification/HostValidity.lean)
+checks the actual `ActiveSessionPlan::host_invalid` method, moved unchanged to
+[`session_admission.rs`](../../src/session_admission.rs). The live membership
+resolver still calls this method. Only its pure decision is proved.
+
+`any_iterator_contract` proves the pinned search loop for total callbacks.
+`host_match_contract` connects the extracted search closure to exact saved-ID
+matching and the actual member host predicate. `host_validity_contract` covers
+every representable finite member slice, optional saved identity, version,
+capability assignment, endpoint and stored pair. A Host plan is invalid when
+no matching eligible member exists. Relay and Mesh need no host. No uniqueness
+or legal-pair assumption excludes malformed snapshots. `host_validity_witness`
+requires an actual matching eligible member for a valid Host snapshot.
+`host_validity_outcomes` checks absent identities, absent members, old versions,
+Direct endpoint readiness, WebRTC without an endpoint and both non-Host cases.
+
+The original probe failed on UUID equality and the concrete iterator `any`
+alias. The reviewed compatibility file now also backports `any` from the same
+upstream revision, lines 455–458. It delegates to the pinned iterator model;
+the proof unfolds that model's loop. No search implementation is copied.
+
+UUID equality is an explicit new trusted mapping in the capability assumptions
+module: equality of the whole sixteen-byte UUID value. The locked UUID 1.29.0
+source derives `PartialEq` on its sole `[u8; 16]` field (`src/lib.rs:445,466`).
+The mapping adds no custom axiom. This is not a source proof of UUID equality.
+The pinned hax invocation uses Aeneas `-core-models-lib`, which omits nonlocal
+definitions even when Charon includes their bodies. A direct pinned Aeneas
+probe without that mode emits UUID equality, but changes standard-library
+models and leaves other operations unresolved. It is not an accepted proof.
+The production predicate theorem therefore depends on the stated library mapping,
+as well as the pinned Rust frontend, extractor and library models.
+
+Four isolated source faults drop identity matching, drop host eligibility,
+invert the topology gate, or accept an absent saved host. Each must compile,
+reject only a host contract, and pass an axiom-audited wrong-result witness.
+Identity and eligibility faults preserve the original calls and closure captures;
+they force the boolean gate to accept. Capture/type failures do not count.
+The wrong-ID witness proves its two UUID byte values differ. The restored
+contracts and deterministic regeneration remain required. Rust tests independently
+cover versions, all capability subsets, both member orders and endpoint presence;
+a capable bystander cannot validate a missing or incapable saved host.
+
+UUID implementation correspondence, map identity/locking, member construction,
+host election, re-election, relay reset, transaction commit, publication and
+asynchronous correspondence remain open in P10/P12. These predicates do not
+establish the state transitions. No runtime behavior, wire format, public API,
+allocation or runtime dependency changes; Rust, .NET and Godot clients are
+unaffected for that reason. Kani keeps its eight-member bound and unwind ten.
 
 ## Tool references
 

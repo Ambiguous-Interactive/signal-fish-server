@@ -1,31 +1,16 @@
 {
-  "base": "e5c56dee583ecb166f06339ce4609e920c0eb6e8",
-  "reason": "Move the unchanged actual session member, DirectEndpoint type, support and host predicates, and aggregation getter into shared production source for extraction. Re-export the same server and public protocol paths. Keep constructors, validation, host election and room transactions in place. Preserve behavior, wire formats, public APIs, allocations and runtime dependencies. Retain mutation coverage for moved code.",
+  "base": "c7627dd06f9fbd109be04d5b394c9b7854e51521",
+  "reason": "Move the unchanged stored-host validity and support methods into shared private production source for extraction. Add host-validity tests. Preserve behavior, wire formats, public APIs, allocations and runtime dependencies. Keep membership resolution, election and publication in place. Existing mutation inventories already cover both files.",
   "files": [
     {
-      "path": "src/lib.rs",
-      "before": "5d33117bf36c19cf4cb963591511e9116e0901d0",
-      "after": "5ed3eebc0de1a8a269e6c9c85b84563a5501c3fb"
-    },
-    {
-      "path": "src/protocol/types.rs",
-      "before": "00db857376dc3600c80c74260446aca75e35d033",
-      "after": "d839345934ea24ea53f4d162b580b92fa1c09093"
-    },
-    {
       "path": "src/server/session_policy.rs",
-      "before": "11d3b1d4c790149355563bda768ebc4caa6abad6",
-      "after": "ccc284a76fc7dd2823016b0fcf66cc603738c0bf"
+      "before": "ccc284a76fc7dd2823016b0fcf66cc603738c0bf",
+      "after": "2eee008929190cd51a27b1b701707072f0883c26"
     },
     {
-      "path": "src/session_member.rs",
-      "before": null,
-      "after": "2b194fae6b4f9432543becdb053a26c26dc1bff9"
-    },
-    {
-      "path": ".cargo/mutants.toml",
-      "before": "700136f191159b756aa71329bca1522f6541a0f7",
-      "after": "8058df7739f28f788808944736cc95ecbb8b2d4b"
+      "path": "src/session_admission.rs",
+      "before": "05e43ff985813be46ff3ce483815e0107b13cbd2",
+      "after": "47b26c036840c2d38577a144d568aae1864ee46c"
     }
   ]
 }

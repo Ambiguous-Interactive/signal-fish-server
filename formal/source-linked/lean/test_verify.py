@@ -150,6 +150,25 @@ class RequiredAggregation(unittest.TestCase):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "projection", name)
 
+    def test_host_faults_require_only_semantic_host_contract_rejection(self):
+        """A UUID mapping/compiler error cannot count as a host-validity rejection."""
+        diagnostic = "error: Capability/Verification/HostValidity.lean:42:6: unsolved goals\n"
+        for name in ("host-identity", "host-capability", "host-topology", "host-missing"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("HostValidity.lean", "Members.lean")),
+                (1, diagnostic.replace("Verification/HostValidity", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
+
     def test_member_faults_require_only_actual_member_contract_rejection(self):
         """Reject extraction and tool failures for the concrete getter and host controls."""
         diagnostic = "error: Capability/Verification/Members.lean:42:6: unsolved goals\n"

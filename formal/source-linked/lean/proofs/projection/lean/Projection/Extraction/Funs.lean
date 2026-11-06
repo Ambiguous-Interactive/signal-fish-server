@@ -78,7 +78,7 @@ impl_def session_capability.Transport.Insts.CoreCmpPartialEqTransport :
 }
 
 /-- [signal_fish_proof_core::session_admission::joiner_supports_sticky_plan]:
-    Source: 'src/../../../../src/session_admission.rs', lines 46:0-53:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 69:0-76:1 -/
 def session_admission.joiner_supports_sticky_plan
   (protocol : session_capability.NegotiatedProtocol)
   (stored : session_admission.ActiveSessionPlan) :
