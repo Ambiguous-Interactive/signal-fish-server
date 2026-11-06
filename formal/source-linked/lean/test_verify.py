@@ -112,6 +112,25 @@ class RequiredAggregation(unittest.TestCase):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "projection", name)
 
+    def test_profile_faults_require_semantic_production_contract_failures(self):
+        """Reject bad tools, bad extraction, and unrelated diagnostics for caller faults."""
+        diagnostic = "error: Projection/Verification/Profiles.lean:42:6: unsolved goals\n"
+        for name in ("server-floor", "profile-version", "profile-transports"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "projection", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("Profiles.lean", "Defaults.lean")),
+                (1, diagnostic.replace("Verification/Profiles", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "projection", name)
+
     def test_all_production_inputs_are_copied_and_missing_input_fails(self):
         """Isolated faults and extraction need every source, with unchanged bytes."""
         with tempfile.TemporaryDirectory() as tmp:

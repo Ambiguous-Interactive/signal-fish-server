@@ -19,8 +19,7 @@ use std::collections::HashMap;
 /// the opt-in `RelayStats` frame) over the frozen v2 floor. Deployments can clamp
 /// back to 2 (pure v2) via `protocol.max_protocol_version`.
 pub const SERVER_MAX_PROTOCOL_VERSION: u16 = 3;
-/// Lowest protocol version this server build still accepts (the v2 floor).
-pub const SERVER_MIN_PROTOCOL_VERSION: u16 = 2;
+pub use crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION;
 
 /// Protocol configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -23,35 +23,12 @@ use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliverySender, MessageCoordinator,
 };
 use crate::metrics::{RateLimitRejection, ServerMetrics};
-use crate::protocol::{
-    ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage, Topology, Transport,
-};
+use crate::protocol::{ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage, Transport};
 use crate::rate_limit::ErrorReplyGate;
 
 use super::RegisterClientError;
 
-/// Protocol capabilities negotiated for a single connection during `Authenticate`.
-///
-/// The default is a pure v2 client: protocol version 2, relay-only transport and
-/// relay-only topology. v3 negotiation overwrites this via [`ConnectionManager::set_protocol`].
-#[derive(Debug, Clone)]
-pub(crate) struct NegotiatedProtocol {
-    pub version: u16,
-    pub transports: Vec<Transport>,
-    /// Session topologies the client supports; consumed by the P3 session-plan
-    /// selection path (`session_policy::choose_session_plan`).
-    pub topologies: Vec<Topology>,
-}
-
-impl Default for NegotiatedProtocol {
-    fn default() -> Self {
-        Self {
-            version: crate::config::SERVER_MIN_PROTOCOL_VERSION,
-            transports: vec![Transport::Relay],
-            topologies: vec![Topology::Relay],
-        }
-    }
-}
+pub(crate) use crate::session_capability::NegotiatedProtocol;
 
 #[derive(Debug)]
 pub(crate) struct ClientConnection {

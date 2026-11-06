@@ -1,16 +1,31 @@
 {
-  "base": "95cf896553e54eb2ec5fb56dad4b7763b5a408cd",
-  "reason": "Share the unchanged capability lookup-result and relay-only fallback decision with source-linked Lean proofs. Preserve profile borrowing, copied fields, default version, session support, public APIs, wire formats, allocation behavior, and runtime dependencies. Both production lookup adapters retain their existing synchronization and input snapshots.",
+  "base": "685bdc69012feb60acc43440299f15e1a9b71cd2",
+  "reason": "Extract the unchanged production negotiated-profile representation, From adapter, defaults, and fixed server floor for Lean contracts. Preserve public constant and internal type paths through reexports. Both live capability lookups retain their borrowed snapshot and pass copied results through the fixed-floor resolver used by Default. Preserve runtime behavior, allocations, wire formats, public APIs, runtime dependencies, and locking.",
   "files": [
     {
+      "path": "src/config/protocol.rs",
+      "before": "3fbc25e4e17e5bea4c843979948af3eeffd0a687",
+      "after": "6ea0c338f8a1c8f18913bcc164c1470d5fb53ca6"
+    },
+    {
+      "path": "src/protocol_core.rs",
+      "before": "1ce92afede1a1d188327ec47741c68a511655b47",
+      "after": "bea7c674a411c40ae51cb1d6866e960c689f091d"
+    },
+    {
+      "path": "src/server/connection_manager.rs",
+      "before": "abc2859bc38f237f10de58467a1672bea8c9e420",
+      "after": "71d4cfbb80394df25df26721c98e88b1ec525217"
+    },
+    {
       "path": "src/server/session_policy.rs",
-      "before": "e401406b94add4fe28648100243777c7f1a16837",
-      "after": "8be4a42a7a154bce0dbc64df73d41f7ceae7b1a6"
+      "before": "8be4a42a7a154bce0dbc64df73d41f7ceae7b1a6",
+      "after": "94fc5217a9aac447b373fe5ec6669b0a1927d444"
     },
     {
       "path": "src/session_capability.rs",
-      "before": "8ad7326263314d27d0b41d6163f6b4f19a6cd8ec",
-      "after": "49fe37cffa11cca72e8f535b1d31bc7920fb018d"
+      "before": "49fe37cffa11cca72e8f535b1d31bc7920fb018d",
+      "after": "38c07bd1ce8714a34fdce741492d7175f5a0828a"
     }
   ]
 }
