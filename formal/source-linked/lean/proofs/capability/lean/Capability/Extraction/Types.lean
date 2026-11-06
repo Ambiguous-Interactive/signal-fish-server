@@ -52,7 +52,7 @@ structure session_capability.SessionCapabilities where
   mesh_topology : Bool
 
 /-- [signal_fish_proof_core::session_capability::all_support::closure]
-    Source: 'src/../../../../src/session_capability.rs', lines 107:56-109:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 126:56-128:5 -/
 def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 

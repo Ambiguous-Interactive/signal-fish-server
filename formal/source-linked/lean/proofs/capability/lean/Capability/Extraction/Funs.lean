@@ -68,7 +68,7 @@ def session_capability.SessionCapabilities.supports_topology
   | session_capability.Topology.Mesh => ok self.mesh_topology
 
 /-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 73:0-81:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 92:0-100:1 -/
 def session_capability.supports_session
   (capabilities : session_capability.SessionCapabilities)
   (topology : session_capability.Topology)
@@ -88,7 +88,7 @@ def session_capability.supports_session
   else ok false
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_mut]:
-    Source: 'src/../../../../src/session_capability.rs', lines 107:56-109:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 126:56-128:5 -/
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool.call_mut
   {T : Type} {T1 : Type}
@@ -104,7 +104,7 @@ def
   ok (b, c)
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnOnce<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_once]:
-    Source: 'src/../../../../src/session_capability.rs', lines 107:56-109:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 126:56-128:5 -/
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTBool.call_once
   {T : Type} {T1 : Type}
@@ -119,7 +119,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnOnce<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}]
-    Source: 'src/../../../../src/session_capability.rs', lines 107:56-109:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 126:56-128:5 -/
 @[reducible]
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTBool
@@ -134,7 +134,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}]
-    Source: 'src/../../../../src/session_capability.rs', lines 107:56-109:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 126:56-128:5 -/
 @[reducible]
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool
@@ -152,7 +152,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_capability::all_support]:
-    Source: 'src/../../../../src/session_capability.rs', lines 101:0-110:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 120:0-129:1 -/
 def session_capability.all_support
   {T : Type} {T1 : Type}
   (coreopsfunctionFnT1TupleShared0TSessionCapabilitiesInst :

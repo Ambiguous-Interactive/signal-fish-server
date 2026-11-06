@@ -16,4 +16,4 @@ include = ["signal_fish_proof_core::protocol_core::nonempty_all_support", "signa
 
 [scenario.projection]
 backend = "lean"
-include = ["signal_fish_proof_core::session_capability::supports_session", "signal_fish_proof_core::session_capability::project_capabilities"]
+include = ["signal_fish_proof_core::session_capability::supports_session", "signal_fish_proof_core::session_capability::project_capabilities", "signal_fish_proof_core::session_capability::resolve_capabilities"]

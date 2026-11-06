@@ -1,16 +1,16 @@
 {
-  "base": "3606ab6b98608c58d3a780028a7ab9a2e3677661",
-  "reason": "Share the unchanged nonempty room capability callback with source-linked Lean proofs. Preserve member order, short circuit, version and axis checks, public APIs, wire formats, defaults, and runtime dependencies. The production getter copies the same stored capability fields without allocation.",
+  "base": "95cf896553e54eb2ec5fb56dad4b7763b5a408cd",
+  "reason": "Share the unchanged capability lookup-result and relay-only fallback decision with source-linked Lean proofs. Preserve profile borrowing, copied fields, default version, session support, public APIs, wire formats, allocation behavior, and runtime dependencies. Both production lookup adapters retain their existing synchronization and input snapshots.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "1a086422812c97b6b4caf1d469dbcd1e89545e0f",
-      "after": "e401406b94add4fe28648100243777c7f1a16837"
+      "before": "e401406b94add4fe28648100243777c7f1a16837",
+      "after": "8be4a42a7a154bce0dbc64df73d41f7ceae7b1a6"
     },
     {
       "path": "src/session_capability.rs",
-      "before": "a143e29b044a1a4e36cc49ee9f33f7c3851aa3f8",
-      "after": "8ad7326263314d27d0b41d6163f6b4f19a6cd8ec"
+      "before": "8ad7326263314d27d0b41d6163f6b4f19a6cd8ec",
+      "after": "49fe37cffa11cca72e8f535b1d31bc7920fb018d"
     }
   ]
 }
