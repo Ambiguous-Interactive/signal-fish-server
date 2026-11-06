@@ -69,6 +69,7 @@ impl SessionCapabilities {
     }
 }
 
+/// Require protocol v3 or higher and both requested capability axes.
 pub(crate) fn supports_session(
     capabilities: SessionCapabilities,
     topology: Topology,
@@ -79,6 +80,7 @@ pub(crate) fn supports_session(
         && capabilities.supports_transport(transport)
 }
 
+/// Preserve the version and project axis membership, independent of order or duplicates.
 pub(crate) fn project_capabilities(
     version: u16,
     transports: &[Transport],

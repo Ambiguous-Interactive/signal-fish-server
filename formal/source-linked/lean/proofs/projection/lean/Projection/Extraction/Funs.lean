@@ -96,7 +96,7 @@ def session_capability.SessionCapabilities.supports_topology
   | session_capability.Topology.Mesh => ok self.mesh_topology
 
 /-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 72:0-80:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 73:0-81:1 -/
 def session_capability.supports_session
   (capabilities : session_capability.SessionCapabilities)
   (topology : session_capability.Topology)
@@ -116,7 +116,7 @@ def session_capability.supports_session
   else ok false
 
 /-- [signal_fish_proof_core::session_capability::project_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 82:0-96:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 84:0-98:1 -/
 def session_capability.project_capabilities
   (version : Std.U16) (transports : Slice session_capability.Transport)
   (topologies : Slice session_capability.Topology) :
