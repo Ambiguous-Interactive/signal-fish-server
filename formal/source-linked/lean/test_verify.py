@@ -572,9 +572,9 @@ class CapabilityEvidence(unittest.TestCase):
                 (root / "src").mkdir()
                 source = root / "src/protocol_core.rs"
                 source.write_text("production source\n")
-                for name in verify.SOURCES:
-                    if name != "src/protocol_core.rs":
-                        (root / name).write_text(f"production input {name}\n")
+                for source_path in verify.SOURCES:
+                    if source_path != "src/protocol_core.rs":
+                        (root / source_path).write_text(f"production input {source_path}\n")
                 crate = root / "formal/source-linked/lean"
                 negotiation = crate / "proofs/negotiation/lean"
                 negotiation.mkdir(parents=True)
