@@ -32,6 +32,28 @@ namespace signal_fish_proof_core
 @[global_simps, irreducible]
 def protocol_core.SERVER_MIN_PROTOCOL_VERSION : Std.U16 := 2#u16
 
+/-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Topology> for signal_fish_proof_core::session_capability::Topology}::eq]:
+    Source: 'src/../../../../src/session_capability.rs', lines 31:53-31:62
+    Visibility: public -/
+def session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
+  (self : session_capability.Topology) (other : session_capability.Topology) :
+  RustM Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Topology> for signal_fish_proof_core::session_capability::Topology}]
+    Source: 'src/../../../../src/session_capability.rs', lines 31:53-31:62 -/
+@[reducible]
+impl_def session_capability.Topology.Insts.CoreCmpPartialEqTopology :
+  core.cmp.PartialEq session_capability.Topology session_capability.Topology
+  := {
+  eq := session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
+  ne := core.cmp.PartialEq.ne.default
+    session_capability.Topology.Insts.CoreCmpPartialEqTopology
+}
+
 /-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Transport> for signal_fish_proof_core::session_capability::Transport}::eq]:
     Source: 'src/../../../../src/session_capability.rs', lines 11:53-11:62
     Visibility: public -/
@@ -55,27 +77,30 @@ impl_def session_capability.Transport.Insts.CoreCmpPartialEqTransport :
     session_capability.Transport.Insts.CoreCmpPartialEqTransport
 }
 
-/-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Topology> for signal_fish_proof_core::session_capability::Topology}::eq]:
-    Source: 'src/../../../../src/session_capability.rs', lines 31:53-31:62
-    Visibility: public -/
-def session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
-  (self : session_capability.Topology) (other : session_capability.Topology) :
+/-- [signal_fish_proof_core::session_admission::joiner_supports_sticky_plan]:
+    Source: 'src/../../../../src/session_admission.rs', lines 46:0-53:1 -/
+def session_admission.joiner_supports_sticky_plan
+  (protocol : session_capability.NegotiatedProtocol)
+  (stored : session_admission.ActiveSessionPlan) :
   RustM Bool
   := do
-  let self1 := read_discriminant self
-  let other1 := read_discriminant other
-  ok (self1 = other1)
-
-/-- Trait implementation: [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Topology> for signal_fish_proof_core::session_capability::Topology}]
-    Source: 'src/../../../../src/session_capability.rs', lines 31:53-31:62 -/
-@[reducible]
-impl_def session_capability.Topology.Insts.CoreCmpPartialEqTopology :
-  core.cmp.PartialEq session_capability.Topology session_capability.Topology
-  := {
-  eq := session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
-  ne := core.cmp.PartialEq.ne.default
-    session_capability.Topology.Insts.CoreCmpPartialEqTopology
-}
+  if protocol.version >= 3#u16
+  then
+    let s ←
+      alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref protocol.topologies
+    let b ←
+      core.slice.Slice.contains
+        session_capability.Topology.Insts.CoreCmpPartialEqTopology s
+        stored.topology
+    if b
+    then
+      let s1 ←
+        alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref protocol.transports
+      core.slice.Slice.contains
+        session_capability.Transport.Insts.CoreCmpPartialEqTransport s1
+        stored.transport
+    else ok false
+  else ok false
 
 /-- [signal_fish_proof_core::session_capability::{impl core::default::Default for signal_fish_proof_core::session_capability::NegotiatedProtocol}::default]:
     Source: 'src/../../../../src/session_capability.rs', lines 56:4-62:5

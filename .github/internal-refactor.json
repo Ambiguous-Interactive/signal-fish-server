@@ -1,31 +1,26 @@
 {
-  "base": "685bdc69012feb60acc43440299f15e1a9b71cd2",
-  "reason": "Extract the unchanged production negotiated-profile representation, From adapter, defaults, and fixed server floor for Lean contracts. Preserve public constant and internal type paths through reexports. Both live capability lookups retain their borrowed snapshot and pass copied results through the fixed-floor resolver used by Default. Preserve runtime behavior, allocations, wire formats, public APIs, runtime dependencies, and locking.",
+  "base": "1577066e4fe56a4c44a63fa6a59faf8894627ce8",
+  "reason": "Move the unchanged sticky-session admission predicate and actual stored plan into a private module for source-linked contracts. Keep server paths through reexports and keep the server-specific plan methods in place. PlayerId remains the same UUID type. Preserve runtime behavior, wire formats, public APIs, allocations, dependencies, map lookup, and locking. Keep the moved admission code in the existing mutation scope.",
   "files": [
     {
-      "path": "src/config/protocol.rs",
-      "before": "3fbc25e4e17e5bea4c843979948af3eeffd0a687",
-      "after": "6ea0c338f8a1c8f18913bcc164c1470d5fb53ca6"
-    },
-    {
-      "path": "src/protocol_core.rs",
-      "before": "1ce92afede1a1d188327ec47741c68a511655b47",
-      "after": "bea7c674a411c40ae51cb1d6866e960c689f091d"
-    },
-    {
-      "path": "src/server/connection_manager.rs",
-      "before": "abc2859bc38f237f10de58467a1672bea8c9e420",
-      "after": "71d4cfbb80394df25df26721c98e88b1ec525217"
+      "path": "src/lib.rs",
+      "before": "366336a04d45147cfb79d0545ba9e9234128b180",
+      "after": "5d33117bf36c19cf4cb963591511e9116e0901d0"
     },
     {
       "path": "src/server/session_policy.rs",
-      "before": "8be4a42a7a154bce0dbc64df73d41f7ceae7b1a6",
-      "after": "94fc5217a9aac447b373fe5ec6669b0a1927d444"
+      "before": "94fc5217a9aac447b373fe5ec6669b0a1927d444",
+      "after": "11d3b1d4c790149355563bda768ebc4caa6abad6"
     },
     {
-      "path": "src/session_capability.rs",
-      "before": "49fe37cffa11cca72e8f535b1d31bc7920fb018d",
-      "after": "38c07bd1ce8714a34fdce741492d7175f5a0828a"
+      "path": "src/session_admission.rs",
+      "before": null,
+      "after": "05e43ff985813be46ff3ce483815e0107b13cbd2"
+    },
+    {
+      "path": ".cargo/mutants.toml",
+      "before": "1fb539f02e78ecab69caabdcf8d9f81c7e810158",
+      "after": "700136f191159b756aa71329bca1522f6541a0f7"
     }
   ]
 }

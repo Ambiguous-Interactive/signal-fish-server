@@ -18,3 +18,7 @@ import Projection
 #print axioms Projection.profile_outcomes
 #print axioms Projection.connection_resolution_contract
 #print axioms Projection.connection_profile_support_contract
+#print axioms Projection.admission_contract
+#print axioms Projection.admission_support_contract
+#print axioms Projection.admission_host_independent
+#print axioms Projection.admission_outcomes

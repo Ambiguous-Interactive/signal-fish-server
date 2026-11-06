@@ -3,12 +3,13 @@
 Issue [#1464](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1464)
 asks whether Rust can be translated into theorem provers without maintaining a
 second implementation. The source-linked checks use production helpers in
-[`src/protocol_core.rs`](../../src/protocol_core.rs) and
-[`src/session_capability.rs`](../../src/session_capability.rs).
+[`src/protocol_core.rs`](../../src/protocol_core.rs),
+[`src/session_capability.rs`](../../src/session_capability.rs), and
+[`src/session_admission.rs`](../../src/session_admission.rs).
 
-The standalone Lean crate imports both files with `#[path]`. The Kani crate
+The standalone Lean crate imports all three files with `#[path]`. The Kani crate
 imports `protocol_core.rs`. Production version negotiation, capability projection,
-support checks, and aggregation call the same helpers. The proof crates do not
+support checks, aggregation, and sticky admission call the same helpers. The proof crates do not
 change the server's dependencies or public API.
 
 ## Contracts and boundaries
@@ -22,6 +23,7 @@ change the server's dependencies or public API.
 | Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; production member-field getter, connection lookup, and room state remain tested boundaries |
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup, caller floor, member getter, and room state remain outside |
+| Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -348,7 +350,7 @@ The required runner regenerates this scenario twice, audits all four contracts,
 and checks isolated version-floor and wrong-transport-membership source faults.
 Each fault must compile extraction before its contract fails. Separate audited
 witnesses establish the wrong values. The restored source must pass. Snapshots
-and the final source guard cover both production input modules. The concrete
+and the final source guard cover all production input modules. The concrete
 support callback has the separate aggregation contract below. Connection lookup,
 the actual member getter, final callback state, external effects, room decisions,
 and asynchronous correspondence remain unresolved in #1464. Lookup-result/default
@@ -499,6 +501,56 @@ member-field construction/getter, room state, and asynchronous correspondence
 remain tested or pending. The actual `From` body and fixed default bodies are
 proved; this is not a proof of the whole lookup operation or session selector.
 Kani's existing eight-member bound is unchanged.
+
+The two negotiation faults also retain their isolated source and proof trees
+before cleanup. Failed extraction, proof, or witness attempts keep a failed
+status. A retained snapshot alone does not establish a successful fault control.
+
+### Sticky-session admission
+
+The actual stored `ActiveSessionPlan` and `joiner_supports_sticky_plan` now live
+in [`session_admission.rs`](../../src/session_admission.rs). The server re-exports
+their former paths. The predicate body, UUID host field, runtime dependencies,
+allocations, locking, and observable behavior stay unchanged. Rust, .NET, and
+Godot clients need no changes.
+
+[`Admission.lean`](lean/proofs/projection/lean/Projection/Verification/Admission.lean)
+checks four contracts. `admission_contract` states the exact admission result:
+version at least three and membership of both stored axes. It covers every
+`u16`, every representable vector, empty lists, duplicates, all orders, all nine
+stored pairs, and arbitrary host values. It assumes neither a legal stored pair
+nor a relay floor in the profile. `admission_support_contract` proves agreement
+with the actual production From/support path. `admission_host_independent`
+checks that host presence and identity cannot change admission. Ordinary Direct
+clients need no endpoint. `admission_outcomes` checks reachable Direct acceptance,
+v2 rejection, and rejection for either missing axis at the maximum version.
+
+Four compiled production-source faults lower the version floor, drop either
+axis check, or require a stored host. Each must compile before `Admission.lean`
+rejects it. A separate kernel-checked witness establishes its wrong result.
+The axis and host faults use relay-containing v3 mesh profiles, as production
+negotiation permits. The version fault deliberately supplies a v2 profile with
+upgrade bits. It checks the version guard on an inconsistent internal snapshot;
+it does not prove handshake normalization. The runner audits every contract and
+witness, retains fault evidence, and restores the proofs. Independent Rust subset cases check all six representative
+versions, all 64 axis subsets, all nine pairs, and three host values. Existing
+adapter and finalized-join tests remain caller evidence.
+
+The pinned extractor emits `uuid.Uuid` without a Lean declaration, even when
+Charon includes its concrete definition. The assumptions module supplies a
+16-byte structure matching the locked UUID dependency. This is a trusted external
+type interpretation, with no UUID operations or added axioms. It does not prove
+UUID layout, equality, or generation. Admission never reads UUID contents;
+future UUID operations need supported models and cannot silently use invented
+methods. Projection snapshots retain the Charon LLBC, including the concrete
+UUID type, in addition to source, generated Lean, contracts, pins and raw logs.
+
+The connection adapter fails closed when its map row is absent. Its map lookup,
+identity and lock relationship remain tested. The finalized-room join gate,
+stored-plan consistency, transaction commit, reconnect policy, and publication
+remain open state/caller obligations. A correct pure admission decision does not
+prove that every caller selects the correct room or profile. No whole-room or
+asynchronous proof is claimed. Kani keeps its eight-member bound.
 
 ## Tool references
 

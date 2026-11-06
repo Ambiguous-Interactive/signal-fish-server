@@ -142,7 +142,7 @@ jobs:
             # The measured heavy modules (#425 evidence): websocket::sending,
             # upgrade admission, room/admission flows, coordination stress,
             # protocol parsing.
-            filters: "websocket coordination server protocol protocol_core session_capability"
+            filters: "websocket coordination server protocol protocol_core session_capability session_admission"
           - name: remaining
             filters:
               "auth config database deadline distributed logging metrics

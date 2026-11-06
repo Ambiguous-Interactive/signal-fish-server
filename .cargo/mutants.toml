@@ -66,6 +66,7 @@ additional_cargo_args = ["--lib", "--features", "trace-validation"]
 examine_globs = [
     "src/protocol_core.rs",
     "src/session_capability.rs",
+    "src/session_admission.rs",
     "src/server/session_policy.rs",
     "src/server/signaling.rs",
     "src/server/relay_policy.rs",

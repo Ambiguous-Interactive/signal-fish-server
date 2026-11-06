@@ -20,3 +20,8 @@ set_option maxHeartbeats 1000000
 
 /- You can set the `maxRecDepth` value with the `-max-recdepth` CLI option -/
 set_option maxRecDepth 2048
+
+/-- External UUID type interpretation: the locked Rust crate stores 16 bytes.
+    Admission never reads these bytes. No UUID operation or identity law is modeled. -/
+structure uuid.Uuid where
+  bytes : Aeneas.Std.Array Aeneas.Std.U8 16#usize

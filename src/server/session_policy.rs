@@ -55,28 +55,7 @@ use crate::protocol::{
 use super::signaling::{local_initiates, sorted_routed_player_ids};
 use super::{EnhancedGameServer, NegotiatedProtocol};
 
-/// The sticky per-room session decision recorded when a room finalizes to a
-/// non-relay plan. Relay-floor rooms record nothing; a later reconnect derives
-/// its explicit Relay/Relay refresh from that absence rather than sticky state.
-///
-/// This is what the room is *actually running*: membership and Direct endpoint
-/// refreshes consult it rather than re-running
-/// [`choose_session_plan`] over the current member list, because the live
-/// membership can drift from the finalize-time membership (departures open
-/// seats; reconnects can re-seat an incumbent with downgraded capabilities)
-/// and a recompute could contradict the session every member already
-/// configured. New seat-fills cannot drift the membership: the admission gate
-/// ([`joiner_supports_sticky_plan`], issue #421) rejects joiners that cannot
-/// run the stored pair.
-///
-/// Topology and transport are immutable for the session lifetime; only `host`
-/// is rewritten by execution-aware host re-election.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ActiveSessionPlan {
-    pub topology: Topology,
-    pub transport: Transport,
-    pub host: Option<PlayerId>,
-}
+pub(crate) use crate::session_admission::{joiner_supports_sticky_plan, ActiveSessionPlan};
 
 impl ActiveSessionPlan {
     /// Rehydrate a full [`SessionPlanDecision`] from this sticky decision plus
@@ -295,31 +274,6 @@ fn all_support(members: &[SessionMember], topology: Topology, transport: Transpo
         topology,
         transport,
     )
-}
-
-/// Whether a joiner's negotiated capabilities satisfy a stored sticky session
-/// — the seat-fill admission predicate (issue #421).
-///
-/// A finalized non-relay session runs one (topology, transport) pair every
-/// finalize-time member negotiated (`all_support`). Admitting a joiner that
-/// cannot run that pair would silently split the room's data path: the
-/// joiner's WebSocket-relayed `GameData` reaches everyone, but the capable
-/// members' peer-to-peer traffic never reaches it (`SessionPlanDecision::plan_for`
-/// filters both sides), so it would play on permanently divergent state. The
-/// admission gate therefore applies the same membership predicate selection
-/// used at finalize: protocol v3 plus both axes. Direct endpoints are NOT part
-/// of this predicate (only an elected host needs one), matching
-/// [`SessionMember::supports_session`].
-///
-/// Relay-floored rooms store no sticky plan (`emit_session_plan` removes the
-/// entry), so they never reach this check: the universal floor admits anyone.
-pub(crate) fn joiner_supports_sticky_plan(
-    protocol: &NegotiatedProtocol,
-    stored: &ActiveSessionPlan,
-) -> bool {
-    protocol.version >= 3
-        && protocol.topologies.contains(&stored.topology)
-        && protocol.transports.contains(&stored.transport)
 }
 
 /// Whether a capability-compatible rung has every piece needed to execute it.
