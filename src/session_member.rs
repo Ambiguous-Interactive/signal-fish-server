@@ -67,3 +67,80 @@ pub(crate) fn all_support(
         transport,
     )
 }
+
+/// Whether a capability-compatible rung has every piece needed to execute it.
+/// Only `host + direct` has an additional requirement: at least one capable
+/// member must have provided a syntactically usable connect endpoint.
+pub(crate) fn rung_is_executable(
+    members: &[SessionMember],
+    topology: Topology,
+    transport: Transport,
+) -> bool {
+    transport != Transport::Direct
+        || members
+            .iter()
+            .any(|member| member.can_host(topology, transport))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1464: endpoints alone cannot make a Direct rung executable.
+    #[test]
+    fn executable_rungs_require_a_capable_direct_host_in_any_position() {
+        let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
+        let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+        let unready = SessionMember {
+            player_id: Uuid::nil(),
+            player_name: String::new(),
+            is_authority: false,
+            joined_at: chrono::DateTime::UNIX_EPOCH,
+            direct_endpoint: None,
+            capabilities: SessionCapabilities::default(),
+        };
+        let endpoint = DirectEndpoint {
+            host: "127.0.0.1".into(),
+            port: 9000,
+        };
+        for version in [0, 1, 2, 3, 4, u16::MAX] {
+            for mask in 0u8..64 {
+                for has_endpoint in [false, true] {
+                    let candidate = SessionMember {
+                        capabilities: SessionCapabilities {
+                            version,
+                            relay_transport: mask & 1 != 0,
+                            direct_transport: mask & 2 != 0,
+                            webrtc_transport: mask & 4 != 0,
+                            relay_topology: mask & 8 != 0,
+                            host_topology: mask & 16 != 0,
+                            mesh_topology: mask & 32 != 0,
+                        },
+                        direct_endpoint: has_endpoint.then(|| endpoint.clone()),
+                        ..unready.clone()
+                    };
+                    for (index, topology) in topologies.iter().copied().enumerate() {
+                        for transport in transports {
+                            let eligible = version >= 3
+                                && mask & 2 != 0
+                                && mask & (1 << (index + 3)) != 0
+                                && has_endpoint;
+                            for (members, direct_ready) in [
+                                (vec![], false),
+                                (vec![unready.clone()], false),
+                                (vec![candidate.clone()], eligible),
+                                (vec![unready.clone(), candidate.clone()], eligible),
+                                (vec![candidate.clone(), unready.clone()], eligible),
+                                (vec![candidate.clone(), candidate.clone()], eligible),
+                            ] {
+                                assert_eq!(rung_is_executable(&members, topology, transport),
+                                    transport != Transport::Direct || direct_ready,
+                                    "version={version} mask={mask} endpoint={has_endpoint} topology={topology:?} transport={transport:?} members={members:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

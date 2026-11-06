@@ -661,6 +661,43 @@ establish the state transitions. No runtime behavior, wire format, public API,
 allocation or runtime dependency changes; Rust, .NET and Godot clients are
 unaffected for that reason. Kani keeps its eight-member bound and unwind ten.
 
+### Selector executability
+
+The actual `rung_is_executable` body now lives unchanged in
+[`session_member.rs`](../../src/session_member.rs). The live selector imports it;
+no independent implementation replaces production behavior.
+[`Executability.lean`](lean/proofs/capability/lean/Capability/Verification/Executability.lean)
+checks four required contracts. `executable_callback_contract` connects the actual
+search closure to the proved member host predicate. `executability_contract`
+checks every representable finite member slice and every topology/transport pair.
+Direct needs at least one v3 member with both requested axes and a stored endpoint.
+Other transports pass this extra gate, including empty input.
+`direct_executable_witness` requires a concrete eligible member whenever Direct
+passes. `executability_outcomes` checks empty input, missing endpoints, old versions,
+future versions, and a ready member after an unready member.
+
+The contract makes no legal-pair or membership-uniqueness assumption. It checks
+endpoint presence, not endpoint validation or reachability. The extra gate alone
+does not establish unanimous support: the selector separately calls `all_support`.
+Full ladder order, configuration and ceiling selection, host election, input
+construction, state commits and asynchronous correspondence remain open in P09–P12.
+The existing member and library-model boundaries still apply. No new trusted
+mapping or axiom is introduced. Kani keeps its eight-member bound and unwind ten.
+
+Three isolated source faults invert the Direct bypass, permit an endpoint without
+capabilities, or conjoin the bypass with the member search. Each must compile,
+fail only an executability contract and pass a separate axiom-audited wrong-result
+witness. Required proofs are restored and regenerated twice. Source/pin guards,
+hashes, raw logs and timings use the existing evidence pipeline. An independent
+Rust matrix covers all capability subsets, representative versions, all pairs,
+endpoint presence, both member positions, duplicates and empty input.
+
+This is an internal source move with added verification. It changes no runtime
+behavior, wire format, public API, allocation or runtime dependency. Rust, .NET
+and Godot clients need no changes for that reason. The exact source blobs are
+recorded in `.github/internal-refactor.json`; hashes identify the reviewed diff,
+not a proof of semantic equivalence.
+
 ## Tool references
 
 - [hax Lean workflow](https://hax.cryspen.com/manual/lean/quick_start/)

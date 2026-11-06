@@ -429,6 +429,77 @@ def session_member.all_support
     session_member.all_support.closure.Insts.CoreOpsFunctionFnTupleSharedSessionMemberSessionCapabilities
     members () topology transport
 
+/-- [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}::call_mut]:
+    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+def
+  session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+  (c : session_member.rung_is_executable.closure)
+  (tupled_args : session_member.SessionMember) :
+  RustM (Bool × session_member.rung_is_executable.closure)
+  := do
+  let (t, t1) := c
+  let b ← session_member.SessionMember.can_host tupled_args t t1
+  ok (b, c)
+
+/-- [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+def
+  session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
+  (c : session_member.rung_is_executable.closure)
+  (sm : session_member.SessionMember) :
+  RustM Bool
+  := do
+  let (b, _) ←
+    session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+      c sm
+  ok b
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}]
+    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+@[reducible]
+def
+  session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
+  : core.ops.function.FnOnce session_member.rung_is_executable.closure
+  session_member.SessionMember Bool := {
+  call_once :=
+    session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
+}
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}]
+    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+@[reducible]
+def
+  session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
+  : core.ops.function.FnMut session_member.rung_is_executable.closure
+  session_member.SessionMember Bool := {
+  FnOnceInst :=
+    session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
+  call_mut :=
+    session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+}
+
+/-- [signal_fish_proof_core::session_member::rung_is_executable]:
+    Source: 'src/../../../../src/session_member.rs', lines 74:0-83:1 -/
+def session_member.rung_is_executable
+  (members : Slice session_member.SessionMember)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  let b ←
+    core.cmp.PartialEq.ne.default
+      session_capability.Transport.Insts.CoreCmpPartialEqTransport transport
+      session_capability.Transport.Direct
+  if b
+  then ok true
+  else
+    let i ← core.slice.Slice.iter members
+    let (b1, _) ←
+      core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.any
+        session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
+        i (topology, transport)
+    ok b1
+
 /-- [signal_fish_proof_core::session_member_can_host]:
     Source: 'src/lib.rs', lines 23:0-29:1 -/
 def session_member_can_host

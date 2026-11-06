@@ -1,16 +1,16 @@
 {
-  "base": "c7627dd06f9fbd109be04d5b394c9b7854e51521",
-  "reason": "Move the unchanged stored-host validity and support methods into shared private production source for extraction. Add host-validity tests. Preserve behavior, wire formats, public APIs, allocations and runtime dependencies. Keep membership resolution, election and publication in place. Existing mutation inventories already cover both files.",
+  "base": "f9854c1a685471886f80a88fc471a5353936efb6",
+  "reason": "Move the unchanged executability gate into shared private production source for extraction. Add contracts and subset tests. Preserve behavior, wire formats, public APIs, allocations and runtime dependencies. Keep selection, election and publication in place. Existing Miri and mutation inventories cover both files.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "ccc284a76fc7dd2823016b0fcf66cc603738c0bf",
-      "after": "2eee008929190cd51a27b1b701707072f0883c26"
+      "before": "2eee008929190cd51a27b1b701707072f0883c26",
+      "after": "248b11196f301ab99185cccda8dd5ecbfc84bc43"
     },
     {
-      "path": "src/session_admission.rs",
-      "before": "05e43ff985813be46ff3ce483815e0107b13cbd2",
-      "after": "47b26c036840c2d38577a144d568aae1864ee46c"
+      "path": "src/session_member.rs",
+      "before": "2b194fae6b4f9432543becdb053a26c26dc1bff9",
+      "after": "68b1e23c95e0c4429415d757dde655d55dd31a94"
     }
   ]
 }

@@ -21,3 +21,7 @@ import Capability
 #print axioms Capability.host_validity_contract
 #print axioms Capability.host_validity_witness
 #print axioms Capability.host_validity_outcomes
+#print axioms Capability.executable_callback_contract
+#print axioms Capability.executability_contract
+#print axioms Capability.direct_executable_witness
+#print axioms Capability.executability_outcomes
