@@ -22,4 +22,38 @@ set_option maxRecDepth 2048
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::session_capability::Transport]
+    Source: 'src/../../../../src/session_capability.rs', lines 13:0-24:1
+    Visibility: public -/
+@[discriminant isize]
+inductive session_capability.Transport where
+| Relay : session_capability.Transport
+| Direct : session_capability.Transport
+| WebRtc : session_capability.Transport
+
+/-- [signal_fish_proof_core::session_capability::Topology]
+    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
+    Visibility: public -/
+@[discriminant isize]
+inductive session_capability.Topology where
+| Relay : session_capability.Topology
+| Host : session_capability.Topology
+| Mesh : session_capability.Topology
+
+/-- [signal_fish_proof_core::session_capability::SessionCapabilities]
+    Source: 'src/../../../../src/session_capability.rs', lines 44:0-52:1 -/
+structure session_capability.SessionCapabilities where
+  version : Std.U16
+  relay_transport : Bool
+  direct_transport : Bool
+  webrtc_transport : Bool
+  relay_topology : Bool
+  host_topology : Bool
+  mesh_topology : Bool
+
+/-- [signal_fish_proof_core::session_capability::all_support::closure]
+    Source: 'src/../../../../src/session_capability.rs', lines 107:56-109:5 -/
+def session_capability.all_support.closure (T : Type) (T1 : Type) :=
+  T1 × session_capability.Topology × session_capability.Transport
+
 end signal_fish_proof_core

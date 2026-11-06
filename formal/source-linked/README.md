@@ -16,9 +16,10 @@ change the server's dependencies or public API.
 | Backend and target | Checked property | Boundary |
 | --- | --- | --- |
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
-| Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; concrete capability callback and caller correspondence remain pending |
-| Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and correspondence to a concrete Rust callback remain pending |
-| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, default fallback, concrete aggregation callback, and room-state correspondence remain outside |
+| Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; the concrete support callback is covered separately below |
+| Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and arbitrary Rust callbacks remain outside; the concrete support callback is covered below |
+| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, default fallback, member getter, and room-state correspondence remain outside |
+| Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; production member-field getter, connection lookup, defaults, and room state remain tested boundaries |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -59,7 +60,7 @@ for the host platform, with `~/.elan/bin` on `PATH`. The scenario
 tools when first used. Kani 0.68.0 supplies its own compiler toolchain.
 
 The `--prepare` step fetches the pinned Lean dependencies and the Mathlib cache
-modules used by Aeneas and hax. Both proof projects share those prepared
+modules used by Aeneas and hax. All three proof projects share those prepared
 dependencies after the runner checks their pins. It avoids fetching the entire
 Mathlib cache.
 
@@ -307,10 +308,10 @@ then restores the source.
 The pinned iterator model returns the boolean and remaining iterator. It drops
 final callback state. The trace is a specification, not an exported observation
 of Rust side effects. Callback errors and divergence are values in `RustM`; these
-proofs do not establish how a concrete Rust callback produces those values.
+proofs do not establish how an arbitrary concrete Rust callback produces those values.
 Allocator failure, process failure, panic recovery, and external state remain
-outside this result correspondence. The capability projection has the separate
-contract below; it is not yet linked to the generic aggregation callback.
+outside this result correspondence. The concrete support callback below has a
+separate contract with a total, fixed getter assumption.
 
 ### Production capability projection
 
@@ -343,10 +344,10 @@ The required runner regenerates this scenario twice, audits all four contracts,
 and checks isolated version-floor and wrong-transport-membership source faults.
 Each fault must compile extraction before its contract fails. Separate audited
 witnesses establish the wrong values. The restored source must pass. Snapshots
-and the final source guard cover both production input modules. No theorem
-connects the generic aggregation callback to this projection yet. Final callback
-state, external effects, room decisions, and asynchronous correspondence remain
-unresolved in #1464.
+and the final source guard cover both production input modules. The concrete
+support callback has the separate aggregation contract below. Connection lookup,
+defaults, the actual member getter, final callback state, external effects, room
+decisions, and asynchronous correspondence remain unresolved in #1464.
 
 A local ARM64 run with prepared dependencies completed 61 commands in 347.583
 seconds. All 15 contracts, seven source faults, audited wrong-result witnesses,
@@ -363,6 +364,47 @@ The reviewed [obligation inventory](obligations.md) tracks the production
 seams, current evidence, negative controls, and caller/state/concurrency gaps.
 All production source and root Cargo changes now rerun formal CI. Existing
 handwritten models and test results remain distinct from source-linked proofs.
+
+### Concrete capability aggregation
+
+Production room selection now calls `session_capability::all_support`. This
+helper passes its actual closure to `protocol_core::nonempty_all_support`.
+The closure reads capabilities through a getter, then calls `supports_session`
+with the requested topology and transport. It adds no intermediate collection.
+Lean extracts both helpers and the closure from these production definitions.
+
+`Capability.concrete_callback_contract` checks the extracted closure.
+`concrete_aggregation_contract` connects it to the extracted iterator helper.
+The contract requires a getter that returns a fixed `SessionCapabilities` value
+for each member and terminates successfully. Under this explicit assumption,
+the result is true exactly when the slice is nonempty and every member has
+version at least three and both requested capability axes. The domain includes
+all `u16` versions, all nine axis pairs, and every representable finite slice.
+It permits duplicates and any member order.
+
+The actual server getter is `|member| member.capabilities`. Its correspondence
+to stored `SessionMember` fields remains tested. The theorem does not prove
+connection lookup, profile fallback, construction of those fields, or room-state
+transitions. `Fn` alone does not establish the getter contract: a Rust getter can
+use interior mutability. No final callback state or external effect is claimed.
+`concrete_aggregation_outcomes` checks empty input, duplicate accepting future
+versions, a missing transport, and old-version rejection in both member orders.
+The wrong-callback-transport fault substitutes Relay for requested Direct.
+The runner requires extracted-module compilation, rejection in the concrete
+contract file, and a separate audited wrong-result witness, then restored proofs.
+A constant-Relay prototype removed a capture and changed the extracted closure
+type. That interface failure did not count. The accepted fault preserves the
+capture and changes only the Direct branch.
+
+A local run with prepared dependencies passed the initial capability proof,
+semantic fault, audited witness, and restored proof across 13 commands. The
+mutated extraction built in 24.188 seconds; semantic rejection took 9.461
+seconds; the witness took 3.290 seconds. Restored extraction, repeat extraction,
+build, and audit took 2.133, 1.985, 2.138, and 7.307 seconds. These are single
+local samples; hosted CI checks the full set of scenarios and source faults.
+
+The projection theorem above proves the conversion from negotiated axis lists
+separately; the server path from connection state to aggregation is not proved.
 
 ## Tool references
 

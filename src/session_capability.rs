@@ -96,3 +96,53 @@ pub(crate) fn project_capabilities(
         mesh_topology: topologies.contains(&Topology::Mesh),
     }
 }
+
+/// Require a nonempty room and support from each member's capabilities.
+pub(crate) fn all_support<T>(
+    members: &[T],
+    capabilities: impl Fn(&T) -> SessionCapabilities,
+    topology: Topology,
+    transport: Transport,
+) -> bool {
+    crate::protocol_core::nonempty_all_support(members, |member| {
+        supports_session(capabilities(member), topology, transport)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::{all_support, SessionCapabilities, Topology, Transport};
+
+    #[test]
+    fn concrete_aggregation_reads_members_once_until_first_rejection() {
+        for (members, expected, visited) in [
+            (vec![], false, vec![]),
+            (vec![3, u16::MAX], true, vec![3, u16::MAX]),
+            (vec![3, 2, u16::MAX], false, vec![3, 2]),
+            (vec![2, 3], false, vec![2]),
+        ] {
+            let reads = RefCell::new(Vec::new());
+            let actual = all_support(
+                &members,
+                |version| {
+                    reads.borrow_mut().push(*version);
+                    SessionCapabilities {
+                        version: *version,
+                        relay_transport: false,
+                        direct_transport: false,
+                        webrtc_transport: true,
+                        relay_topology: false,
+                        host_topology: false,
+                        mesh_topology: true,
+                    }
+                },
+                Topology::Mesh,
+                Transport::WebRtc,
+            );
+            assert_eq!(actual, expected, "members={members:?}");
+            assert_eq!(*reads.borrow(), visited, "members={members:?}");
+        }
+    }
+}

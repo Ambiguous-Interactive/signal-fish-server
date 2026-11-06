@@ -29,6 +29,9 @@ THEOREMS = {"negotiation": (
     "Capability.callback_trace_contract",
     "Capability.callback_order_outcomes",
     "Capability.callback_failure_outcomes",
+    "Capability.concrete_callback_contract",
+    "Capability.concrete_aggregation_contract",
+    "Capability.concrete_aggregation_outcomes",
 ), "projection": (
     "Projection.support_contract",
     "Projection.projection_contract",
@@ -184,7 +187,8 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "capability":
-        targets += ("Capability/Verification/CallbackSemantics.lean:",)
+        targets += ("Capability/Verification/CallbackSemantics.lean:",
+                    "Capability/Verification/ConcreteCallbacks.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -193,6 +197,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/CallbackSemantics.lean:")
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the callback semantics: {name}\n{result.stdout}")
+    if name == "wrong-callback-transport" and not all(
+            error.startswith("Capability/Verification/ConcreteCallbacks.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the concrete callback proof: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -343,7 +351,6 @@ def mutants(crate):
 
 def capability_mutants(crate):
     """Reject result and callback-state faults with kernel-checked results."""
-    original = (ROOT / "src/protocol_core.rs").read_text()
     changes = {
         "empty-room": ("!members.is_empty() && members.iter().all(supports)",
                        "members.iter().all(supports)"),
@@ -353,13 +360,20 @@ def capability_mutants(crate):
                            "!members.is_empty() && { let mut supports = supports; "
                            "supports(&members[0]) && members.iter().all(supports) }"),
     }
+    changes["wrong-callback-transport"] = (
+        "supports_session(capabilities(member), topology, transport)",
+        "supports_session(capabilities(member), topology, "
+        "match transport { Transport::Direct => Transport::Relay, other => other })",
+    )
     for name, (before, after) in changes.items():
+        source = "src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs"
+        original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
         with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
             tree = Path(tmp)
             copy_sources(tree)
-            (tree / "src/protocol_core.rs").write_text(original.replace(before, after))
+            (tree / source).write_text(original.replace(before, after))
             copied = tree / "formal/source-linked/lean"
             shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
                 ".lake*", "target", "llbc", "__pycache__", "*.log"))
@@ -373,7 +387,10 @@ def capability_mutants(crate):
                 extract(copied, "capability")
                 check_iterator_alias(project, copied)
                 run(["lake", "build", "Capability.Extraction"], project)
-                target = ["Capability.Verification.CallbackSemantics"] if name == "extra-callback" else []
+                target = {
+                    "extra-callback": ["Capability.Verification.CallbackSemantics"],
+                    "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
+                }.get(name, [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
                 run(["lake", "build", "Capability.Verification.Callbacks"], project)

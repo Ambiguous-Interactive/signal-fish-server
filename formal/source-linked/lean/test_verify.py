@@ -158,6 +158,26 @@ class RequiredAggregation(unittest.TestCase):
                 verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                              "capability", "empty-room")
 
+    def test_concrete_fault_requires_concrete_contract_rejection(self):
+        """Do not count another failed theorem or a callback compiler error as this control."""
+        diagnostic = "error: Capability/Verification/ConcreteCallbacks.lean:42:6: unsolved goals\n"
+        verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                     "capability", "wrong-callback-transport")
+        for code, output in (
+            (0, diagnostic),
+            (1, diagnostic.replace("ConcreteCallbacks.lean", "ProofObligations.lean")),
+            (1, diagnostic.replace("Verification/ConcreteCallbacks", "Extraction/Funs")),
+            (1, diagnostic + "error: dependency unavailable\n"),
+            (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+            (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+            (1, diagnostic + "error: Capability/Verification/ConcreteCallbacks.lean:44:8: Type mismatch\n"),
+            (1, diagnostic + "error: Capability/Verification/ConcreteCallbacks.lean:44:8: unknown identifier\n"),
+            (1, diagnostic.replace("unsolved goals", "Tactic `subst` failed")),
+        ):
+            with self.subTest(code=code, output=output), self.assertRaises(RuntimeError):
+                verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                             "capability", "wrong-callback-transport")
+
     def test_evidence_walk_never_descends_into_caches(self):
         """Prevent large dependency cache scans before collecting proof evidence."""
         with tempfile.TemporaryDirectory() as tmp:
