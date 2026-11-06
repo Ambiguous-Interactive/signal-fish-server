@@ -12,3 +12,6 @@ fn negotiated_profile_capabilities(
 ) -> session_capability::SessionCapabilities {
     session_capability::SessionCapabilities::from(protocol)
 }
+
+#[path = "../../../../src/session_admission.rs"]
+mod session_admission;

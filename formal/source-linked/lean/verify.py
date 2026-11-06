@@ -52,10 +52,14 @@ THEOREMS = {"negotiation": (
     "Projection.defaults_agree_contract",
     "Projection.default_rejects_contract",
     "Projection.profile_outcomes",
+    "Projection.admission_contract",
+    "Projection.admission_support_contract",
+    "Projection.admission_host_independent",
+    "Projection.admission_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
-SOURCES = ("src/protocol_core.rs", "src/session_capability.rs")
+SOURCES = ("src/protocol_core.rs", "src/session_capability.rs", "src/session_admission.rs")
 LOGS = HERE / "target/verification-logs"
 COMMAND_COUNT = 0
 RUNS = []
@@ -202,7 +206,7 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "projection":
-        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:",)
+        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:")
@@ -227,6 +231,10 @@ def check_proof_rejection(result, scenario, name):
             and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the production profile proof: {name}\n{result.stdout}")
+    if name.startswith("admission-") and not all(
+            error.startswith("Projection/Verification/Admission.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the admission contract: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -238,11 +246,13 @@ def retain_proof_evidence(tree, crate, scenario, first_run, status):
     destination.mkdir(parents=True)
     project = crate / f"proofs/{scenario}/lean"
     inputs = [tree / name for name in SOURCES]
-    inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs"))
+    inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs", "verify.py"))
     inputs.extend(sorted((crate / "compatibility").glob("*")))
     inputs.extend(sorted((crate / "mutation-witnesses").glob("*.lean")))
     if project.exists():
         inputs.extend(project_evidence_inputs(project))
+        if scenario == "projection":
+            inputs.append(project / "llbc/signal_fish_proof_core.llbc")
     return retain_snapshot(tree, inputs, destination, first_run, {
         "hax_version": VERSION, "status": status, "scenario": scenario,
         "required_theorems": THEOREMS[scenario],
@@ -296,7 +306,7 @@ def copy_sources(tree):
         shutil.copyfile(ROOT / name, destination)
 
 
-def projection_mutants(crate):
+def projection_mutants(crate, *, names=None):
     """Reject version and membership faults only after extraction compiles."""
     changes = {
         "version-floor": ("src/session_capability.rs", "capabilities.version >= 3", "capabilities.version >= 2"),
@@ -311,8 +321,13 @@ def projection_mutants(crate):
                             "            crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION,"),
         "profile-transports": ("src/session_capability.rs", "            &protocol.transports,",
                                "            &[],"),
+        "admission-version": ("src/session_admission.rs", "protocol.version >= 3", "protocol.version >= 2"),
+        "admission-topology": ("src/session_admission.rs", "protocol.topologies.contains(&stored.topology)", "true"),
+        "admission-transport": ("src/session_admission.rs", "protocol.transports.contains(&stored.transport)", "true"),
+        "admission-host": ("src/session_admission.rs", "protocol.version >= 3", "protocol.version >= 3 && stored.host.is_some()"),
     }
-    for name, (source, before, after) in changes.items():
+    selected = changes if names is None else {name: changes[name] for name in names}
+    for name, (source, before, after) in selected.items():
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -332,9 +347,9 @@ def projection_mutants(crate):
             try:
                 extract(copied, "projection")
                 run(["lake", "build", "Projection.Extraction"], project)
-                target = ["Projection.Verification.Defaults"] if name in (
+                target = ["Projection.Verification.Admission"] if name.startswith("admission-") else (["Projection.Verification.Defaults"] if name in (
                     "default-version", "overwrite-profile-version") else (["Projection.Verification.Profiles"] if name in (
-                    "server-floor", "profile-version", "profile-transports") else [])
+                    "server-floor", "profile-version", "profile-transports") else []))
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "projection", name)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
@@ -372,18 +387,24 @@ def mutants(crate):
             (project / ".lake").mkdir()
             (project / ".lake/packages").symlink_to(
                 crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
-            extract(copied)
-            run(["lake", "build", "Negotiation.Extraction"], project)
-            result = run(["lake", "build"], project, expect_success=False)
-            check_proof_rejection(result, "negotiation", name)
-            client, minimum, maximum = (2, 3, 3) if name == "lower-clamp" else (3, 2, 2)
-            witness = "import Negotiation.Extraction\nopen CoreModels Aeneas Aeneas.Std\nopen signal_fish_proof_core\n"
-            witness += f"theorem mutation_returns_wrong_value : protocol_core.negotiate_protocol_version (.Some (U16.ofNat {client})) (U16.ofNat {minimum}) (U16.ofNat {maximum}) = RustM.ok (U16.ofNat 3) := by rfl\n"
-            witness += "\n#print axioms mutation_returns_wrong_value\n"
-            (project / "Counterexample.lean").write_text(witness)
-            report = run(["lake", "env", "lean", "Counterexample.lean"], project)
-            check_axiom_reports(report.stdout, ("mutation_returns_wrong_value",))
-            print(f"REJECTED {name}: proof failed and extracted result is 3 where contract requires 2", flush=True)
+            first_run = len(RUNS)
+            status = "negative control failed"
+            try:
+                extract(copied)
+                run(["lake", "build", "Negotiation.Extraction"], project)
+                result = run(["lake", "build"], project, expect_success=False)
+                check_proof_rejection(result, "negotiation", name)
+                client, minimum, maximum = (2, 3, 3) if name == "lower-clamp" else (3, 2, 2)
+                witness = "import Negotiation.Extraction\nopen CoreModels Aeneas Aeneas.Std\nopen signal_fish_proof_core\n"
+                witness += f"theorem mutation_returns_wrong_value : protocol_core.negotiate_protocol_version (.Some (U16.ofNat {client})) (U16.ofNat {minimum}) (U16.ofNat {maximum}) = RustM.ok (U16.ofNat 3) := by rfl\n"
+                witness += "\n#print axioms mutation_returns_wrong_value\n"
+                (project / "Counterexample.lean").write_text(witness)
+                report = run(["lake", "env", "lean", "Counterexample.lean"], project)
+                check_axiom_reports(report.stdout, ("mutation_returns_wrong_value",))
+                status = "proof rejected; concrete wrong result kernel-checked"
+                print(f"REJECTED {name}: proof failed and extracted result is 3 where contract requires 2", flush=True)
+            finally:
+                retain_proof_evidence(tree, copied, "negotiation", first_run, status)
     verify(crate)
 
 

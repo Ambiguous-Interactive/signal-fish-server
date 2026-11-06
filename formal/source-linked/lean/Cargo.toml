@@ -16,8 +16,9 @@ path = "src/lib.rs"
 unsafe_code = "forbid"
 
 [package.metadata.cargo-machete]
-# Serde is used by #[path] imported src/session_capability.rs, outside this crate.
-ignored = ["serde"]
+# Dependencies are used by #[path] imported production modules, outside this crate.
+ignored = ["serde", "uuid"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+uuid = { version = "1.29.0", default-features = false }

@@ -131,6 +131,25 @@ class RequiredAggregation(unittest.TestCase):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "projection", name)
 
+    def test_admission_faults_require_only_semantic_admission_failures(self):
+        """Reject extraction, unknown names, unrelated proofs, and accepted source faults."""
+        diagnostic = "error: Projection/Verification/Admission.lean:42:6: unsolved goals\n"
+        for name in ("admission-version", "admission-topology", "admission-transport", "admission-host"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "projection", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("Admission.lean", "Profiles.lean")),
+                (1, diagnostic.replace("Verification/Admission", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "projection", name)
+
     def test_all_production_inputs_are_copied_and_missing_input_fails(self):
         """Isolated faults and extraction need every source, with unchanged bytes."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -268,6 +287,134 @@ class RequiredAggregation(unittest.TestCase):
                 self.assertEqual(len(calls), 2)
 
 
+class NegotiationEvidence(unittest.TestCase):
+    """Retain isolated source faults before their temporary trees are removed."""
+
+    def exercise_mutants(self, root, *, fail_second_witness=False):
+        """Run real copying and archiving around simulated extraction/Lean commands."""
+        for name in verify.SOURCES:
+            source = root / name
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes((verify.ROOT / name).read_bytes())
+        original = (root / "src/protocol_core.rs").read_bytes()
+        crate = root / "formal/source-linked/lean"
+        project = crate / "proofs/negotiation/lean"
+        files = {
+            "Cargo.toml": "crate manifest",
+            "Cargo.lock": "dependency pins",
+            "hax.toml": "extractor pins",
+            "src/lib.rs": "production module imports",
+            "verify.py": "verification runner",
+            "proofs/negotiation/lean/lean-toolchain": "Lean pin",
+            "proofs/negotiation/lean/lake-manifest.json": "Lean dependency pins",
+            "proofs/negotiation/lean/Negotiation/Verification/ProofObligations.lean": "contracts",
+        }
+        for name, content in files.items():
+            path = crate / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        (project / ".lake/packages").mkdir(parents=True)
+        logs = root / "logs"
+        logs.mkdir()
+        commands = []
+        isolated = []
+
+        def record(command, output, code=0):
+            """Give the real archive command logs and timing records to preserve."""
+            commands.append(command)
+            log = f"{len(commands):02d}.log"
+            (logs / log).write_text(output)
+            verify.RUNS.append({"command": command, "seconds": 0.125,
+                                "exit_code": code, "log": log})
+            return SimpleNamespace(returncode=code, stdout=output)
+
+        def extract(copied):
+            """Emit a body tied to this actual mutated production source."""
+            isolated.append(copied.parents[2])
+            body = copied / "proofs/negotiation/lean/Negotiation/Extraction/Funs.lean"
+            body.parent.mkdir(parents=True)
+            body.write_text((copied.parents[2] / "src/protocol_core.rs").read_text())
+            record(["cargo", "hax", "extract", "negotiation", "--locked"], "extracted")
+
+        def run(command, copied_project, *, expect_success=True):
+            """Simulate compiled extraction, semantic rejection, and audited witness."""
+            if command == ["lake", "build", "Negotiation.Extraction"]:
+                self.assertTrue(expect_success)
+                return record(command, "extracted module compiled")
+            if command == ["lake", "build"]:
+                self.assertFalse(expect_success)
+                return record(command,
+                              "error: Negotiation/Verification/ProofObligations.lean:1:1: unsolved goals\n", 1)
+            self.assertEqual(command, ["lake", "env", "lean", "Counterexample.lean"])
+            self.assertTrue(expect_success)
+            self.assertTrue((copied_project / "Counterexample.lean").is_file())
+            if fail_second_witness and len(isolated) == 2:
+                record(command, "witness failed", 1)
+                raise RuntimeError("witness failed")
+            return record(command, "'mutation_returns_wrong_value' does not depend on any axioms")
+
+        with patch.object(verify, "ROOT", root), patch.object(verify, "LOGS", logs), \
+                patch.object(verify, "RUNS", []), patch.object(verify, "extract", extract), \
+                patch.object(verify, "run", run), patch.object(verify, "verify") as restored:
+            if fail_second_witness:
+                with self.assertRaisesRegex(RuntimeError, "witness failed"):
+                    verify.mutants(crate)
+                restored.assert_not_called()
+            else:
+                verify.mutants(crate)
+                restored.assert_called_once_with(crate)
+        self.assertEqual((root / "src/protocol_core.rs").read_bytes(), original)
+        self.assertEqual(len(isolated), 2)
+        self.assertTrue(all(not tree.exists() for tree in isolated))
+        return logs, files, original
+
+    @patch("builtins.print")
+    def test_both_negotiation_faults_retain_complete_hashed_evidence(self, _print):
+        """Keep both mutated sources, generated bodies, witnesses, pins, and timed logs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs, files, original = self.exercise_mutants(Path(tmp))
+            archives = sorted((logs / "proofs").glob("negotiation-*"))
+            self.assertEqual(len(archives), 2)
+            for archive in archives:
+                report = json.loads((archive / "results.json").read_text())
+                self.assertEqual(report["status"], "proof rejected; concrete wrong result kernel-checked")
+                self.assertEqual(report["required_theorems"], list(verify.THEOREMS["negotiation"]))
+                source = archive / "src/protocol_core.rs"
+                self.assertNotEqual(source.read_bytes(), original)
+                copied = archive / "formal/source-linked/lean"
+                self.assertEqual(source.read_bytes(),
+                                 (copied / "proofs/negotiation/lean/Negotiation/Extraction/Funs.lean").read_bytes())
+                for name, content in files.items():
+                    self.assertEqual((copied / name).read_text(), content)
+                self.assertIn("#print axioms mutation_returns_wrong_value",
+                              (copied / "proofs/negotiation/lean/Counterexample.lean").read_text())
+                self.assertEqual([run["exit_code"] for run in report["runs"]], [0, 0, 1, 0])
+                self.assertEqual(sum(run["seconds"] for run in report["runs"]), 0.5)
+                for run in report["runs"]:
+                    self.assertTrue((archive / run["log"]).is_file())
+                for name, digest in report["files_sha256"].items():
+                    self.assertEqual(hashlib.sha256((archive / name).read_bytes()).hexdigest(), digest)
+            mutations = [(archive / "src/protocol_core.rs").read_text() for archive in archives]
+            self.assertIn("if version < minimum { minimum } else { version }", mutations[0])
+            self.assertIn("if true {", mutations[1])
+
+    @patch("builtins.print")
+    def test_failed_witness_preserves_fault_and_does_not_claim_acceptance_or_restoration(self, _print):
+        """A failed second witness must leave its source and logs without an accepted status."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs, _files, _original = self.exercise_mutants(Path(tmp), fail_second_witness=True)
+            archives = sorted((logs / "proofs").glob("negotiation-*"))
+            self.assertEqual(len(archives), 2)
+            reports = [json.loads((archive / "results.json").read_text()) for archive in archives]
+            self.assertEqual(reports[0]["status"], "proof rejected; concrete wrong result kernel-checked")
+            self.assertEqual(reports[1]["status"], "negative control failed")
+            self.assertEqual([run["exit_code"] for run in reports[1]["runs"]], [0, 0, 1, 1])
+            failed = archives[1]
+            self.assertIn("if true {", (failed / "src/protocol_core.rs").read_text())
+            self.assertTrue((failed / "formal/source-linked/lean/proofs/negotiation/lean/Counterexample.lean").is_file())
+            self.assertEqual((failed / reports[1]["runs"][-1]["log"]).read_text(), "witness failed")
+
+
 class PreparedDependencies(unittest.TestCase):
     """Share exact prepared pins on fresh checkouts without replacing local data."""
 
@@ -403,6 +550,7 @@ class CapabilityEvidence(unittest.TestCase):
                 source = root / "src/protocol_core.rs"
                 source.write_text("production source\n")
                 (root / "src/session_capability.rs").write_text("production capability\n")
+                (root / "src/session_admission.rs").write_text("production admission\n")
                 crate = root / "formal/source-linked/lean"
                 negotiation = crate / "proofs/negotiation/lean"
                 negotiation.mkdir(parents=True)
@@ -484,6 +632,7 @@ class CapabilityEvidence(unittest.TestCase):
             (root / "src").mkdir()
             (root / "src/protocol_core.rs").write_text("production source\n")
             (root / "src/session_capability.rs").write_text("production capability\n")
+            (root / "src/session_admission.rs").write_text("production admission\n")
             crate = root / "formal/source-linked/lean"
             crate.mkdir(parents=True)
             (crate / "hax.toml").write_text("pinned tools\n")

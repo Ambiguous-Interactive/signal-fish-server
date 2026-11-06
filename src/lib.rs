@@ -43,6 +43,7 @@ pub mod metrics;
 pub mod protocol;
 
 mod protocol_core;
+mod session_admission;
 mod session_capability;
 
 /// Rate limiting implementation

@@ -8,15 +8,15 @@ namespace Projection
 instance : DecidableEq Transport := by intro a b; cases a <;> cases b <;> first | exact isTrue rfl | exact isFalse (by intro h; cases h)
 instance : DecidableEq Topology := by intro a b; cases a <;> cases b <;> first | exact isTrue rfl | exact isFalse (by intro h; cases h)
 
-private theorem transport_eq (a b : Transport) :
+theorem transport_eq (a b : Transport) :
     Transport.Insts.CoreCmpPartialEqTransport.eq a b = RustM.ok (decide (a = b)) := by
   cases a <;> cases b <;> simp [Transport.Insts.CoreCmpPartialEqTransport.eq, Transport.read_discriminant]
 
-private theorem topology_eq (a b : Topology) :
+theorem topology_eq (a b : Topology) :
     Topology.Insts.CoreCmpPartialEqTopology.eq a b = RustM.ok (decide (a = b)) := by
   cases a <;> cases b <;> simp [Topology.Insts.CoreCmpPartialEqTopology.eq, Topology.read_discriminant]
 
-private theorem contains_contract {T : Type} [DecidableEq T]
+theorem contains_contract {T : Type} [DecidableEq T]
     (inst : CoreModels.core.cmp.PartialEq T T)
     (eq_contract : ∀ a b, inst.eq a b = RustM.ok (decide (a = b)))
     (xs : List T) (x : T) :

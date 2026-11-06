@@ -22,6 +22,15 @@ set_option maxRecDepth 2048
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::session_capability::Topology]
+    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
+    Visibility: public -/
+@[discriminant isize]
+inductive session_capability.Topology where
+| Relay : session_capability.Topology
+| Host : session_capability.Topology
+| Mesh : session_capability.Topology
+
 /-- [signal_fish_proof_core::session_capability::Transport]
     Source: 'src/../../../../src/session_capability.rs', lines 13:0-24:1
     Visibility: public -/
@@ -31,14 +40,12 @@ inductive session_capability.Transport where
 | Direct : session_capability.Transport
 | WebRtc : session_capability.Transport
 
-/-- [signal_fish_proof_core::session_capability::Topology]
-    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
-    Visibility: public -/
-@[discriminant isize]
-inductive session_capability.Topology where
-| Relay : session_capability.Topology
-| Host : session_capability.Topology
-| Mesh : session_capability.Topology
+/-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
+    Source: 'src/../../../../src/session_admission.rs', lines 24:0-28:1 -/
+structure session_admission.ActiveSessionPlan where
+  topology : session_capability.Topology
+  transport : session_capability.Transport
+  host : core.option.Option uuid.Uuid
 
 /-- [signal_fish_proof_core::session_capability::NegotiatedProtocol]
     Source: 'src/../../../../src/session_capability.rs', lines 47:0-53:1 -/
