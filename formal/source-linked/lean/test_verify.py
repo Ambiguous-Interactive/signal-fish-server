@@ -80,6 +80,38 @@ class RequiredAggregation(unittest.TestCase):
                         verify.check_axioms(output, scenario)
         self.assertIn("capability", verify.THEOREMS)
 
+    def test_projection_controls_reject_only_contract_diagnostics(self):
+        """Never count projection compiler/tool failures as theorem rejection."""
+        diagnostic = "error: Projection/Verification/ProofObligations.lean:42:6: unsolved goals\n"
+        verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                     "projection", "version-floor")
+        for output in (diagnostic.replace("Verification/ProofObligations", "Extraction/Funs"),
+                       diagnostic + "error: dependency unavailable\n", ""):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=output),
+                                             "projection", "version-floor")
+        with self.assertRaises(RuntimeError):
+            verify.check_proof_rejection(SimpleNamespace(returncode=0, stdout=diagnostic),
+                                         "projection", "version-floor")
+
+    def test_all_production_inputs_are_copied_and_missing_input_fails(self):
+        """Isolated faults and extraction need every source, with unchanged bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "original"
+            for name in verify.SOURCES:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name)
+            destination = root / "copy"
+            with patch.object(verify, "ROOT", source):
+                verify.copy_sources(destination)
+                for name in verify.SOURCES:
+                    self.assertEqual((destination / name).read_bytes(), (source / name).read_bytes())
+                (source / verify.SOURCES[-1]).unlink()
+                with self.assertRaises(FileNotFoundError):
+                    verify.copy_sources(root / "incomplete")
+
     def test_required_mapping_and_import_must_match_reviewed_alias(self):
         """Reject a changed external iterator model or missing import."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,6 +345,7 @@ class CapabilityEvidence(unittest.TestCase):
                 (root / "src").mkdir()
                 source = root / "src/protocol_core.rs"
                 source.write_text("production source\n")
+                (root / "src/session_capability.rs").write_text("production capability\n")
                 crate = root / "formal/source-linked/lean"
                 negotiation = crate / "proofs/negotiation/lean"
                 negotiation.mkdir(parents=True)
@@ -393,6 +426,7 @@ class CapabilityEvidence(unittest.TestCase):
             root = Path(tmp)
             (root / "src").mkdir()
             (root / "src/protocol_core.rs").write_text("production source\n")
+            (root / "src/session_capability.rs").write_text("production capability\n")
             crate = root / "formal/source-linked/lean"
             crate.mkdir(parents=True)
             (crate / "hax.toml").write_text("pinned tools\n")

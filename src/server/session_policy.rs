@@ -114,17 +114,7 @@ impl ActiveSessionPlan {
     }
 }
 
-/// Version and set membership used by live session selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SessionCapabilities {
-    pub version: u16,
-    pub relay_transport: bool,
-    pub direct_transport: bool,
-    pub webrtc_transport: bool,
-    pub relay_topology: bool,
-    pub host_topology: bool,
-    pub mesh_topology: bool,
-}
+pub(crate) use crate::session_capability::SessionCapabilities;
 
 impl Default for SessionCapabilities {
     fn default() -> Self {
@@ -142,33 +132,11 @@ impl Default for SessionCapabilities {
 
 impl From<&NegotiatedProtocol> for SessionCapabilities {
     fn from(protocol: &NegotiatedProtocol) -> Self {
-        Self {
-            version: protocol.version,
-            relay_transport: protocol.transports.contains(&Transport::Relay),
-            direct_transport: protocol.transports.contains(&Transport::Direct),
-            webrtc_transport: protocol.transports.contains(&Transport::WebRtc),
-            relay_topology: protocol.topologies.contains(&Topology::Relay),
-            host_topology: protocol.topologies.contains(&Topology::Host),
-            mesh_topology: protocol.topologies.contains(&Topology::Mesh),
-        }
-    }
-}
-
-impl SessionCapabilities {
-    pub(super) fn supports_transport(self, transport: Transport) -> bool {
-        match transport {
-            Transport::Relay => self.relay_transport,
-            Transport::Direct => self.direct_transport,
-            Transport::WebRtc => self.webrtc_transport,
-        }
-    }
-
-    pub(super) fn supports_topology(self, topology: Topology) -> bool {
-        match topology {
-            Topology::Relay => self.relay_topology,
-            Topology::Host => self.host_topology,
-            Topology::Mesh => self.mesh_topology,
-        }
+        crate::session_capability::project_capabilities(
+            protocol.version,
+            &protocol.transports,
+            &protocol.topologies,
+        )
     }
 }
 
@@ -234,16 +202,6 @@ impl SessionMember {
         self.capabilities.version >= 3
     }
 
-    /// Whether this member negotiated the given data-path transport.
-    fn supports_transport(&self, transport: Transport) -> bool {
-        self.capabilities.supports_transport(transport)
-    }
-
-    /// Whether this member negotiated the given session topology.
-    fn supports_topology(&self, topology: Topology) -> bool {
-        self.capabilities.supports_topology(topology)
-    }
-
     /// Whether this member negotiated everything required to run a session on
     /// the given (topology, transport) pair: protocol v3 plus both axes.
     ///
@@ -252,7 +210,7 @@ impl SessionMember {
     /// Host validity and election wrap this with [`Self::can_host`], which adds
     /// Direct endpoint readiness.
     fn supports_session(&self, topology: Topology, transport: Transport) -> bool {
-        self.supports_v3() && self.supports_topology(topology) && self.supports_transport(transport)
+        crate::session_capability::supports_session(self.capabilities, topology, transport)
     }
 
     /// Validated direct endpoint this member can expose when elected host.

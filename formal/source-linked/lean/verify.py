@@ -29,9 +29,15 @@ THEOREMS = {"negotiation": (
     "Capability.callback_trace_contract",
     "Capability.callback_order_outcomes",
     "Capability.callback_failure_outcomes",
+), "projection": (
+    "Projection.support_contract",
+    "Projection.projection_contract",
+    "Projection.projected_support_contract",
+    "Projection.support_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
+SOURCES = ("src/protocol_core.rs", "src/session_capability.rs")
 LOGS = HERE / "target/verification-logs"
 COMMAND_COUNT = 0
 RUNS = []
@@ -99,11 +105,12 @@ def verify_body(crate, scenario="negotiation"):
     """Regenerate the helper, build its proofs, and audit their axioms."""
     extract(crate, scenario)
     project = crate / f"proofs/{scenario}/lean"
-    if scenario == "capability":
+    if scenario != "negotiation":
         share_prepared_dependencies(crate, project)
+    if scenario == "capability":
         check_iterator_alias(project, crate)
     # Check that extraction remains deterministic before accepting a proof.
-    generated = project / ("Negotiation" if scenario == "negotiation" else "Capability") / "Extraction"
+    generated = project / scenario.title() / "Extraction"
     before = {path.relative_to(generated): path.read_bytes() for path in generated.rglob("*.lean")}
     extract(crate, scenario)
     after = {path.relative_to(generated): path.read_bytes() for path in generated.rglob("*.lean")}
@@ -174,7 +181,7 @@ def check_proof_rejection(result, scenario, name):
     """
     if result.returncode == 0:
         raise RuntimeError(f"Proof accepted source mutation: {name}")
-    module = "Negotiation" if scenario == "negotiation" else "Capability"
+    module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",)
@@ -196,7 +203,7 @@ def retain_proof_evidence(tree, crate, scenario, first_run, status):
     destination = LOGS / "proofs" / f"{scenario}-{time.time_ns()}"
     destination.mkdir(parents=True)
     project = crate / f"proofs/{scenario}/lean"
-    inputs = [tree / "src/protocol_core.rs"]
+    inputs = [tree / name for name in SOURCES]
     inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs"))
     inputs.extend(sorted((crate / "compatibility").glob("*")))
     inputs.extend(sorted((crate / "mutation-witnesses").glob("*.lean")))
@@ -247,6 +254,55 @@ def retain_snapshot(tree, inputs, destination, first_run, metadata):
     return destination
 
 
+def copy_sources(tree):
+    """Copy every actual production input into an isolated verification tree."""
+    for name in SOURCES:
+        destination = tree / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, destination)
+
+
+def projection_mutants(crate):
+    """Reject version and membership faults only after extraction compiles."""
+    original = (ROOT / "src/session_capability.rs").read_text()
+    changes = {
+        "version-floor": ("capabilities.version >= 3", "capabilities.version >= 2"),
+        "transport-projection": ("direct_transport: transports.contains(&Transport::Direct)",
+                                 "direct_transport: transports.contains(&Transport::Relay)"),
+    }
+    for name, (before, after) in changes.items():
+        if original.count(before) != 1:
+            raise RuntimeError(f"Mutation anchor changed: {name}")
+        with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
+            tree = Path(tmp)
+            copy_sources(tree)
+            (tree / "src/session_capability.rs").write_text(original.replace(before, after))
+            copied = tree / "formal/source-linked/lean"
+            shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
+                ".lake*", "target", "llbc", "__pycache__", "*.log"))
+            project = copied / "proofs/projection/lean"
+            (project / ".lake").mkdir()
+            (project / ".lake/packages").symlink_to(
+                crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+            first_run = len(RUNS)
+            status = "negative control failed"
+            try:
+                extract(copied, "projection")
+                run(["lake", "build", "Projection.Extraction"], project)
+                result = run(["lake", "build"], project, expect_success=False)
+                check_proof_rejection(result, "projection", name)
+                witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
+                witness += "\n#print axioms Projection.mutation_returns_wrong_value\n"
+                (project / "Counterexample.lean").write_text(witness)
+                report = run(["lake", "env", "lean", "Counterexample.lean"], project)
+                check_axiom_reports(report.stdout, ("Projection.mutation_returns_wrong_value",))
+                status = "proof rejected; concrete wrong result kernel-checked"
+                print(f"REJECTED {name}: {status}", flush=True)
+            finally:
+                retain_proof_evidence(tree, copied, "projection", first_run, status)
+    verify(crate, "projection")
+
+
 def mutants(crate):
     """Reject isolated source faults, check their wrong results, then restore green."""
     source = ROOT / "src/protocol_core.rs"
@@ -261,7 +317,7 @@ def mutants(crate):
             raise RuntimeError(f"Mutation anchor changed: {name}")
         with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
             tree = Path(tmp)
-            (tree / "src").mkdir()
+            copy_sources(tree)
             (tree / "src/protocol_core.rs").write_text(original.replace(before, after))
             copied = tree / "formal/source-linked/lean"
             shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
@@ -302,7 +358,7 @@ def capability_mutants(crate):
             raise RuntimeError(f"Mutation anchor changed: {name}")
         with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
             tree = Path(tmp)
-            (tree / "src").mkdir()
+            copy_sources(tree)
             (tree / "src/protocol_core.rs").write_text(original.replace(before, after))
             copied = tree / "formal/source-linked/lean"
             shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
@@ -353,7 +409,7 @@ def retain_capability_evidence(tree, crate, first_run, status):
     """Keep the small source reproducer and raw commands after its tempdir ends."""
     destination = LOGS / "capability-probe" / str(time.time_ns())
     destination.mkdir(parents=True)
-    inputs = [tree / "src/protocol_core.rs"]
+    inputs = [tree / name for name in SOURCES]
     inputs.extend(crate / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs"))
     inputs.extend(sorted((crate / "compatibility").glob("*")))
     negotiation = crate / "proofs/negotiation/lean"
@@ -376,8 +432,7 @@ def probe_capability(crate):
     """
     with tempfile.TemporaryDirectory(prefix="signal-fish-lean-capability-") as tmp:
         tree = Path(tmp)
-        (tree / "src").mkdir()
-        shutil.copyfile(ROOT / "src/protocol_core.rs", tree / "src/protocol_core.rs")
+        copy_sources(tree)
         copied = tree / "formal/source-linked/lean"
         shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
             ".lake*", "target", "llbc", "__pycache__", "*.log", "capability"))
@@ -458,6 +513,7 @@ def main():
     check_version(version.stdout)
     source = ROOT / "src/protocol_core.rs"
     source_before = source.read_bytes()
+    sources_before = {ROOT / name: (ROOT / name).read_bytes() for name in SOURCES}
     lock_paths = [HERE / "Cargo.lock", HERE / "hax.toml"]
     lock_paths.extend(sorted((HERE / "compatibility").glob("*")))
     lock_paths.extend(sorted((HERE / "mutation-witnesses").glob("*.lean")))
@@ -480,17 +536,20 @@ def main():
         if args.mutations:
             mutants(HERE)
             capability_mutants(HERE)
+            projection_mutants(HERE)
         if args.probe_capability:
             capability_probe_status = probe_capability(HERE)
         completed = True
     finally:
-        unchanged = source.read_bytes() == source_before
+        unchanged = all(path.read_bytes() == value for path, value in sources_before.items())
         locks_unchanged = all(path.read_bytes() == value for path, value in locks_before.items())
         LOGS.mkdir(parents=True, exist_ok=True)
         (LOGS / "results.json").write_text(json.dumps({
             "hax_version": VERSION, "source_sha256": digest,
             "completed": completed and unchanged and locks_unchanged,
             "source_unchanged": unchanged, "locks_unchanged": locks_unchanged,
+            "source_hashes": {str(path.relative_to(ROOT)): hashlib.sha256(value).hexdigest()
+                              for path, value in sources_before.items()},
             "proved_scenarios": proved_scenarios, "capability_probe_status": capability_probe_status,
             "runs": RUNS,
         }, indent=2) + "\n")

@@ -13,3 +13,7 @@ include = ["signal_fish_proof_core::protocol_core::negotiate_protocol_version"]
 [scenario.capability]
 backend = "lean"
 include = ["signal_fish_proof_core::protocol_core::nonempty_all_support"]
+
+[scenario.projection]
+backend = "lean"
+include = ["signal_fish_proof_core::session_capability::supports_session", "signal_fish_proof_core::session_capability::project_capabilities"]
