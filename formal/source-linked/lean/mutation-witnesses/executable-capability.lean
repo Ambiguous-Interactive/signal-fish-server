@@ -5,11 +5,9 @@ open signal_fish_proof_core session_capability session_member
 namespace Capability
 /-- A stored endpoint cannot make a v2 member a Direct host. -/
 theorem mutation_returns_wrong_value (member : SessionMember) (endpoint : DirectEndpoint) :
-    let candidate := { member with capabilities := ⟨2#u16, true, true, true, true, true, true⟩,
-      direct_endpoint := .Some endpoint }
+    let candidate := { member with capabilities := ⟨2#u16, true, true, true, true, true, true⟩, direct_endpoint := .Some endpoint }
     rung_is_executable (⟨[candidate], by scalar_tac⟩ : Slice SessionMember) .Host .Direct = RustM.ok true := by
-  let candidate := { member with capabilities := ⟨2#u16, true, true, true, true, true, true⟩,
-    direct_endpoint := .Some endpoint }
+  let candidate := { member with capabilities := ⟨2#u16, true, true, true, true, true, true⟩, direct_endpoint := .Some endpoint }
   let predicate := fun member : SessionMember =>
     (MemberSupport member.capabilities .Host .Direct && HasEndpoint member.direct_endpoint) ||
       HasEndpoint member.direct_endpoint
@@ -32,5 +30,5 @@ theorem mutation_returns_wrong_value (member : SessionMember) (endpoint : Direct
     CoreModels.core.slice.Slice.iter, rust_primitives.sequence.seq_from_slice,
     CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.any,
     CoreModels.core.iter.traits.iterator.Iterator.any.default, CoreModels.core.iter.traits.iterator.iter_any,
-    candidate, predicate, MemberSupport, HasEndpoint, Aeneas.Std.bind, Bind.bind] using returned
+    candidate, predicate, MemberSupport, HasEndpoint, Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry] using returned
 end Capability

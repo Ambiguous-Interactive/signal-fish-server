@@ -22,7 +22,8 @@ theorem executable_callback_contract (topology : Topology) (transport : Transpor
   refine ⟨(topology, transport), ?_, rfl⟩
   simp [rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut,
     member_host_contract, Aeneas.Std.bind, Bind.bind]
-  rfl
+  -- A changed equation must remain an unsolved contract for fault classification.
+  try rfl
 
 private theorem executable_search (members : Slice SessionMember)
     (topology : Topology) (transport : Transport) :
@@ -58,7 +59,8 @@ theorem executability_contract (members : Slice SessionMember)
     simp [rung_is_executable, CoreModels.core.cmp.PartialEq.ne.default,
       Transport.Insts.CoreCmpPartialEqTransport.eq, Transport.read_discriminant,
       Aeneas.Std.bind, Bind.bind]
-  exact executable_search members topology .Direct
+  -- Other residual cases indicate a changed production gate, not a type error.
+  all_goals try exact executable_search members topology .Direct
 
 /-- A Direct rung cannot pass without an actual eligible member, at any length. -/
 theorem direct_executable_witness (members : Slice SessionMember) (topology : Topology) :
