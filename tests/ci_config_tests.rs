@@ -34306,7 +34306,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 50 shards, ceil(497/50) * 29s remains 290s.
 // 499 (was 497): the shared concrete capability callback adds two return-value sites (#1464).
 // With 50 shards, ceil(499/50) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 499;
+// 500 (was 499): profile/default resolution adds one return-value site (#1464).
+// With 50 shards, ceil(500/50) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 500;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

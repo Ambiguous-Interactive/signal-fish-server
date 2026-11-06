@@ -37,6 +37,12 @@ THEOREMS = {"negotiation": (
     "Projection.projection_contract",
     "Projection.projected_support_contract",
     "Projection.support_outcomes",
+    "Projection.known_profile_contract",
+    "Projection.absent_profile_contract",
+    "Projection.resolved_projection_contract",
+    "Projection.resolved_support_contract",
+    "Projection.absent_support_contract",
+    "Projection.resolution_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
@@ -186,6 +192,8 @@ def check_proof_rejection(result, scenario, name):
         raise RuntimeError(f"Proof accepted source mutation: {name}")
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
+    if scenario == "projection":
+        targets += ("Projection/Verification/Defaults.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:")
@@ -201,6 +209,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/ConcreteCallbacks.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the concrete callback proof: {name}\n{result.stdout}")
+    if name in ("default-version", "overwrite-profile-version") and not all(
+            error.startswith("Projection/Verification/Defaults.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the profile resolution proof: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -277,6 +289,9 @@ def projection_mutants(crate):
         "version-floor": ("capabilities.version >= 3", "capabilities.version >= 2"),
         "transport-projection": ("direct_transport: transports.contains(&Transport::Direct)",
                                  "direct_transport: transports.contains(&Transport::Relay)"),
+        "default-version": ("version: minimum,", "version: 3,"),
+        "overwrite-profile-version": ("Some(capabilities) => capabilities,",
+                                      "Some(capabilities) => SessionCapabilities { version: minimum, ..capabilities },"),
     }
     for name, (before, after) in changes.items():
         if original.count(before) != 1:
@@ -297,7 +312,9 @@ def projection_mutants(crate):
             try:
                 extract(copied, "projection")
                 run(["lake", "build", "Projection.Extraction"], project)
-                result = run(["lake", "build"], project, expect_success=False)
+                target = ["Projection.Verification.Defaults"] if name in (
+                    "default-version", "overwrite-profile-version") else []
+                result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "projection", name)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
                 witness += "\n#print axioms Projection.mutation_returns_wrong_value\n"

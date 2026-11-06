@@ -6082,11 +6082,21 @@ async fn compact_session_capabilities_preserve_every_negotiated_subset() {
     use super::session_policy::SessionCapabilities;
     let server = create_server_with_session(mesh_config()).await;
     let (id, _receiver) = register_client(&server).await;
+    let expected_default = SessionCapabilities {
+        version: crate::config::SERVER_MIN_PROTOCOL_VERSION,
+        relay_transport: true,
+        direct_transport: false,
+        webrtc_transport: false,
+        relay_topology: true,
+        host_topology: false,
+        mesh_topology: false,
+    };
+    assert_eq!(SessionCapabilities::default(), expected_default);
     let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
     let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
     assert_eq!(
         server.session_capabilities(&PlayerId::new_v4()),
-        SessionCapabilities::default()
+        expected_default
     );
     for version in [0, 1, 2, 3, 4, u16::MAX] {
         for transport_mask in 0_u8..8 {
@@ -6144,10 +6154,7 @@ async fn compact_session_capabilities_preserve_every_negotiated_subset() {
         }
     }
     server.disconnect_client(&id).await;
-    assert_eq!(
-        server.session_capabilities(&id),
-        SessionCapabilities::default()
-    );
+    assert_eq!(server.session_capabilities(&id), expected_default);
 }
 
 #[tokio::test]

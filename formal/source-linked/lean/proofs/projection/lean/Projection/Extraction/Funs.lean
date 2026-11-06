@@ -95,8 +95,29 @@ def session_capability.SessionCapabilities.supports_topology
   | session_capability.Topology.Host => ok self.host_topology
   | session_capability.Topology.Mesh => ok self.mesh_topology
 
+/-- [signal_fish_proof_core::session_capability::resolve_capabilities]:
+    Source: 'src/../../../../src/session_capability.rs', lines 73:0-89:1 -/
+def session_capability.resolve_capabilities
+  (capabilities : core.option.Option session_capability.SessionCapabilities)
+  (minimum : Std.U16) :
+  RustM session_capability.SessionCapabilities
+  := do
+  match capabilities with
+  | core.option.Option.None =>
+    ok
+      {
+        version := minimum,
+        relay_transport := true,
+        direct_transport := false,
+        webrtc_transport := false,
+        relay_topology := true,
+        host_topology := false,
+        mesh_topology := false
+      }
+  | core.option.Option.Some capabilities1 => ok capabilities1
+
 /-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 73:0-81:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 92:0-100:1 -/
 def session_capability.supports_session
   (capabilities : session_capability.SessionCapabilities)
   (topology : session_capability.Topology)
@@ -116,7 +137,7 @@ def session_capability.supports_session
   else ok false
 
 /-- [signal_fish_proof_core::session_capability::project_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 84:0-98:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 103:0-117:1 -/
 def session_capability.project_capabilities
   (version : Std.U16) (transports : Slice session_capability.Transport)
   (topologies : Slice session_capability.Topology) :

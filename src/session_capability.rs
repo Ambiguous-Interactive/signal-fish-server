@@ -69,6 +69,25 @@ impl SessionCapabilities {
     }
 }
 
+/// Keep a known profile, or use the relay-only floor when lookup returns no profile.
+pub(crate) fn resolve_capabilities(
+    capabilities: Option<SessionCapabilities>,
+    minimum: u16,
+) -> SessionCapabilities {
+    match capabilities {
+        Some(capabilities) => capabilities,
+        None => SessionCapabilities {
+            version: minimum,
+            relay_transport: true,
+            direct_transport: false,
+            webrtc_transport: false,
+            relay_topology: true,
+            host_topology: false,
+            mesh_topology: false,
+        },
+    }
+}
+
 /// Require protocol v3 or higher and both requested capability axes.
 pub(crate) fn supports_session(
     capabilities: SessionCapabilities,

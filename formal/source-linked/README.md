@@ -18,8 +18,9 @@ change the server's dependencies or public API.
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
 | Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; the concrete support callback is covered separately below |
 | Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and arbitrary Rust callbacks remain outside; the concrete support callback is covered below |
-| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, default fallback, member getter, and room-state correspondence remain outside |
-| Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; production member-field getter, connection lookup, defaults, and room state remain tested boundaries |
+| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, member getter, and room-state correspondence remain outside; lookup-result/default resolution has the separate contract below |
+| Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; production member-field getter, connection lookup, and room state remain tested boundaries |
+| Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup, caller floor, member getter, and room state remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -348,8 +349,9 @@ Each fault must compile extraction before its contract fails. Separate audited
 witnesses establish the wrong values. The restored source must pass. Snapshots
 and the final source guard cover both production input modules. The concrete
 support callback has the separate aggregation contract below. Connection lookup,
-defaults, the actual member getter, final callback state, external effects, room
-decisions, and asynchronous correspondence remain unresolved in #1464.
+the actual member getter, final callback state, external effects, room decisions,
+and asynchronous correspondence remain unresolved in #1464. Lookup-result/default
+resolution has the separate source contract below.
 
 A local ARM64 run with prepared dependencies completed 61 commands in 347.583
 seconds. All 15 contracts, seven source faults, audited wrong-result witnesses,
@@ -407,6 +409,47 @@ local samples; hosted CI checks the full set of scenarios and source faults.
 
 The projection theorem above proves the conversion from negotiated axis lists
 separately; the server path from connection state to aggregation is not proved.
+
+### Profile lookup-result and default resolution
+
+Both live capability lookup adapters and `SessionCapabilities::default` now call
+`session_capability::resolve_capabilities`. The function consumes the existing
+copied lookup result. It adds no allocation or profile clone and preserves the
+current runtime behavior. The proof scenario imports this actual production
+function; it does not copy the default implementation into the proof crate.
+
+[`Defaults.lean`](lean/proofs/projection/lean/Projection/Verification/Defaults.lean)
+checks six contracts. `known_profile_contract` preserves every field of any
+present capability value, regardless of its version or the supplied floor.
+`absent_profile_contract` checks all seven fallback fields for every `u16`
+floor. The fallback has only Relay transport and Relay topology.
+`resolved_projection_contract` connects production projection, `Some`, and
+resolution for arbitrary representable axis slices, including empty lists,
+duplicates, and all orders. `resolved_support_contract` checks the composed
+support decision for every version, floor, and requested axis pair.
+
+`absent_support_contract` states the exact missing-profile result: only
+Relay/Relay can pass, and it passes exactly when the supplied floor is at least
+three. The theorem does not assume a floor of two. `resolution_outcomes` checks
+a known future-version profile with duplicates and rejection of every pair for
+an absent profile at floor two, plus reachable Relay/Relay acceptance at floor
+three. The production adapters supply
+`SERVER_MIN_PROTOCOL_VERSION`; their wiring and the current constant value
+remain tested facts. The adapter test asserts the exact default fields
+independently of the `Default` implementation.
+
+The required gate audits all six contracts. Two additional isolated source
+faults promote the absent-profile version to three or replace a known profile's
+version by the supplied floor. Each must extract and compile before the
+resolution contract fails. A separate audited kernel witness checks each wrong
+result. The runner then restores the production source, proves the contracts,
+and checks identical regeneration and source/pin integrity.
+
+This closes the pure lookup-result/default decision. It does not prove the
+connection manager's map lookup, locking, profile identity, projection callback,
+actual member-field getter, membership snapshot, or asynchronous correspondence.
+Those obligations remain open. Kani retains its previous negotiation and
+zero-to-eight-member aggregation bounds; no new Kani claim is made.
 
 ## Tool references
 

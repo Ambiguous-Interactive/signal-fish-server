@@ -118,15 +118,10 @@ pub(crate) use crate::session_capability::SessionCapabilities;
 
 impl Default for SessionCapabilities {
     fn default() -> Self {
-        Self {
-            version: crate::config::SERVER_MIN_PROTOCOL_VERSION,
-            relay_transport: true,
-            direct_transport: false,
-            webrtc_transport: false,
-            relay_topology: true,
-            host_topology: false,
-            mesh_topology: false,
-        }
+        crate::session_capability::resolve_capabilities(
+            None,
+            crate::config::SERVER_MIN_PROTOCOL_VERSION,
+        )
     }
 }
 
@@ -819,9 +814,11 @@ impl EnhancedGameServer {
     }
 
     pub(super) fn session_capabilities(&self, player_id: &PlayerId) -> SessionCapabilities {
-        self.connection_manager
-            .project_protocol(player_id, |protocol| SessionCapabilities::from(protocol))
-            .unwrap_or_default()
+        crate::session_capability::resolve_capabilities(
+            self.connection_manager
+                .project_protocol(player_id, |protocol| SessionCapabilities::from(protocol)),
+            crate::config::SERVER_MIN_PROTOCOL_VERSION,
+        )
     }
 
     pub(super) fn session_members_from_selection(
@@ -862,11 +859,12 @@ impl EnhancedGameServer {
                 .map(|player| {
                     SessionMember::from_player(
                         player,
-                        connection_manager
-                            .project_protocol(&player.id, |protocol| {
+                        crate::session_capability::resolve_capabilities(
+                            connection_manager.project_protocol(&player.id, |protocol| {
                                 SessionCapabilities::from(protocol)
-                            })
-                            .unwrap_or_default(),
+                            }),
+                            crate::config::SERVER_MIN_PROTOCOL_VERSION,
+                        ),
                         // A disabled transport can never be selected. Keep its
                         // legacy metadata only in the shared GameStarting frame.
                         session_config.enable_direct,
