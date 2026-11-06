@@ -229,6 +229,11 @@ generated extraction files byte for byte, and requires a second typecheck.
 An unrelated compiler failure or a failed mapped typecheck fails CI. CI does
 not require the baseline defect to remain broken.
 
+The probe changes only its temporary scenario's include list to select the
+original generic helper. It checks that every other parsed setting stays the same.
+It uses generated external declarations. The required capability scenario still
+extracts all concrete member and host functions with their reviewed mappings.
+
 Each probe retains small source and generated-file snapshots, pin and source
 hashes, raw command logs, results, and timings under
 `lean/target/verification-logs/capability-probe/`. A baseline failure and its

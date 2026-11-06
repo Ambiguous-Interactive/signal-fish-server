@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -565,6 +566,27 @@ class PreparedDependencies(unittest.TestCase):
 class CapabilityEvidence(unittest.TestCase):
     """Keep failed and accepted extraction evidence separate from proof claims."""
 
+    def test_probe_manifest_isolates_only_target_and_fails_closed(self):
+        """Preserve tool pins, backend options and other scenarios; reject missing scope."""
+        original = ('[tools]\naeneas = "pinned"\n[scenario.capability]\n'
+                    'backend = "lean"\ninclude = [\n "first",\n "second",\n]\n'
+                    'charon-args = ["--opaque=keep"]\n[scenario.other]\ninclude = ["other"]\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            path = crate / "hax.toml"
+            path.write_text(original)
+            verify.isolate_capability_probe(crate)
+            expected = tomllib.loads(original)
+            expected["scenario"]["capability"]["include"] = [
+                "signal_fish_proof_core::protocol_core::nonempty_all_support"]
+            self.assertEqual(tomllib.loads(path.read_text()), expected)
+            for malformed in (original.replace('include = [\n "first",\n "second",\n]\n', ''),
+                              '[scenario.other]\ninclude = ["other"]\n'):
+                path.write_text(malformed)
+                with self.assertRaises(RuntimeError):
+                    verify.isolate_capability_probe(crate)
+                self.assertEqual(path.read_text(), malformed)
+
     @patch("builtins.print")
     def test_probe_retry_and_deterministic_regeneration(self, _print):
         """Check retry boundaries, stable bodies, and honest failure snapshots."""
@@ -595,12 +617,12 @@ class CapabilityEvidence(unittest.TestCase):
                     if source_path != "src/protocol_core.rs":
                         (root / source_path).write_text(f"production input {source_path}\n")
                 crate = root / "formal/source-linked/lean"
+                crate.mkdir(parents=True)
+                hax_source = (verify.HERE / "hax.toml").read_text()
+                (crate / "hax.toml").write_text(hax_source)
                 negotiation = crate / "proofs/negotiation/lean"
                 negotiation.mkdir(parents=True)
                 (negotiation / "lake-manifest.json").write_text("{}")
-                member_types = crate / "proofs/capability/lean/Capability/Assumptions/TypesExternal.lean"
-                member_types.parent.mkdir(parents=True)
-                member_types.write_text("reviewed member type interpretations\n")
                 (crate / "compatibility").mkdir()
                 (crate / "compatibility/IteratorAll.lean").write_text("upstream alias\n")
                 logs = root / "logs"
@@ -614,6 +636,10 @@ class CapabilityEvidence(unittest.TestCase):
                     calls.append(copied)
                     if len(calls) == 2 and isinstance(drift, Exception):
                         raise drift
+                    expected = tomllib.loads(hax_source)
+                    expected["scenario"]["capability"]["include"] = [
+                        "signal_fish_proof_core::protocol_core::nonempty_all_support"]
+                    self.assertEqual(tomllib.loads((copied / "hax.toml").read_text()), expected)
                     project = copied / "proofs/capability/lean/Capability"
                     (project / "Extraction").mkdir(parents=True, exist_ok=True)
                     body = "changed body\n" if drift and len(calls) == 2 else "generated body\n"
@@ -622,6 +648,7 @@ class CapabilityEvidence(unittest.TestCase):
                     if not assumptions.exists():
                         assumptions.parent.mkdir()
                         assumptions.write_text("import CoreModels\n")
+                    (project / "Assumptions/TypesExternal.lean").write_text("generated external declarations\n")
 
                 responses_iter = iter(responses)
 
@@ -649,6 +676,7 @@ class CapabilityEvidence(unittest.TestCase):
                 self.assertEqual(len(calls), extractions)
                 self.assertEqual(builds.call_count, len(responses))
                 self.assertEqual(source.read_text(), "production source\n")
+                self.assertEqual((crate / "hax.toml").read_text(), hax_source)
                 archives = sorted((logs / "capability-probe").iterdir())
                 self.assertEqual(len(archives), 2 if shim else 1)
                 if error:
@@ -661,7 +689,7 @@ class CapabilityEvidence(unittest.TestCase):
                 for archive in archives:
                     self.assertFalse(json.loads((archive / "results.json").read_text())["aggregation_theorem_proved"])
                     self.assertEqual((archive / generated / "Assumptions/TypesExternal.lean").read_text(),
-                                     member_types.read_text())
+                                     "generated external declarations\n")
                     if drift is not True:
                         self.assertEqual((archive / generated / "Extraction/Funs.lean").read_text(), "generated body\n")
                 mapped = archives[-1] / generated / "Compatibility.lean"
@@ -682,7 +710,7 @@ class CapabilityEvidence(unittest.TestCase):
                 (root / name).write_text(f"production input {name}\n")
             crate = root / "formal/source-linked/lean"
             crate.mkdir(parents=True)
-            (crate / "hax.toml").write_text("pinned tools\n")
+            (crate / "hax.toml").write_text((verify.HERE / "hax.toml").read_text())
             logs = root / "logs"
 
             def failed_extract(copied, _scenario):

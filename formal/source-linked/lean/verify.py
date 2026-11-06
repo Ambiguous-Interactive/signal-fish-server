@@ -540,6 +540,26 @@ def retain_capability_evidence(tree, crate, first_run, status):
     })
 
 
+def isolate_capability_probe(crate):
+    """Select only the original generic probe; preserve every other parsed setting."""
+    path = crate / "hax.toml"
+    original = path.read_text()
+    expected = tomllib.loads(original)
+    section = re.search(r"(?ms)^\[scenario\.capability\]\n.*?(?=^\[|\Z)", original)
+    if section is None:
+        raise RuntimeError("Missing capability scenario for isolated probe")
+    expected["scenario"]["capability"]["include"] = [
+        "signal_fish_proof_core::protocol_core::nonempty_all_support"]
+    replacement, count = re.subn(
+        r"(?ms)^include\s*=\s*\[[^]]*\]",
+        'include = ["signal_fish_proof_core::protocol_core::nonempty_all_support"]',
+        section[0], count=1)
+    isolated = original[:section.start()] + replacement + original[section.end():]
+    if count != 1 or tomllib.loads(isolated) != expected:
+        raise RuntimeError("Capability probe changed settings outside its include list")
+    path.write_text(isolated)
+
+
 def probe_capability(crate):
     """Check aggregation extraction and regeneration without claiming a theorem.
 
@@ -555,11 +575,9 @@ def probe_capability(crate):
         first_run = len(RUNS)
         status = "probe failed; no aggregation theorem proved"
         try:
+            isolate_capability_probe(copied)
             extract(copied, "capability")
             project = copied / "proofs/capability/lean"
-            # Regenerated member types use the same reviewed, operation-free interpretations.
-            shutil.copyfile(crate / "proofs/capability/lean/Capability/Assumptions/TypesExternal.lean",
-                            project / "Capability/Assumptions/TypesExternal.lean")
             manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
             manifest["name"] = "Capability"
             (project / "lake-manifest.json").write_text(json.dumps(manifest))
