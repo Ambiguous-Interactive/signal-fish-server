@@ -38,6 +38,11 @@ THEOREMS = {"negotiation": (
     "Capability.member_host_contract",
     "Capability.member_host_inputs",
     "Capability.member_host_outcomes",
+    "Capability.any_iterator_contract",
+    "Capability.host_match_contract",
+    "Capability.host_validity_contract",
+    "Capability.host_validity_witness",
+    "Capability.host_validity_outcomes",
 ), "projection": (
     "Projection.support_contract",
     "Projection.projection_contract",
@@ -216,7 +221,8 @@ def check_proof_rejection(result, scenario, name):
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:",
-                    "Capability/Verification/Members.lean:")
+                    "Capability/Verification/Members.lean:",
+                    "Capability/Verification/HostValidity.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -238,6 +244,10 @@ def check_proof_rejection(result, scenario, name):
             and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the production profile proof: {name}\n{result.stdout}")
+    if name.startswith("host-") and not all(
+            error.startswith("Capability/Verification/HostValidity.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the host-validity contract: {name}\n{result.stdout}")
     if name.startswith("member-") and not all(
             error.startswith("Capability/Verification/Members.lean:")
             and ("unsolved goals" in error or "Type mismatch" in error
@@ -444,9 +454,17 @@ def capability_mutants(crate, *, names=None):
         "member-webrtc-endpoint": ("transport != Transport::Direct || self.direct_endpoint.is_some()",
                                    "(transport != Transport::Direct || self.direct_endpoint.is_some()) && self.direct_endpoint.is_some()"),
     })
+    changes.update({
+        "host-identity": ("member.player_id == host && self.supported_by(member)",
+                          "(member.player_id == host || true) && self.supported_by(member)"),
+        "host-capability": ("member.player_id == host && self.supported_by(member)",
+                            "member.player_id == host && (self.supported_by(member) || true)"),
+        "host-topology": ("self.topology == Topology::Host", "self.topology != Topology::Host"),
+        "host-missing": ("!self.host.is_some_and", "self.host.is_some_and"),
+    })
     selected = changes if names is None else {name: changes[name] for name in names}
     for name, (before, after) in selected.items():
-        source = "src/session_member.rs" if name.startswith("member-") else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
+        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if name.startswith("member-") else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -470,7 +488,8 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.Members"] if name.startswith("member-") else [])
+                }.get(name, ["Capability.Verification.HostValidity"] if name.startswith("host-") else
+                      ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
                 run(["lake", "build", "Capability.Verification.Callbacks"], project)
@@ -521,6 +540,26 @@ def retain_capability_evidence(tree, crate, first_run, status):
     })
 
 
+def isolate_capability_probe(crate):
+    """Select only the original generic probe; preserve every other parsed setting."""
+    path = crate / "hax.toml"
+    original = path.read_text()
+    expected = tomllib.loads(original)
+    section = re.search(r"(?ms)^\[scenario\.capability\]\n.*?(?=^\[|\Z)", original)
+    if section is None:
+        raise RuntimeError("Missing capability scenario for isolated probe")
+    expected["scenario"]["capability"]["include"] = [
+        "signal_fish_proof_core::protocol_core::nonempty_all_support"]
+    replacement, count = re.subn(
+        r"(?ms)^include\s*=\s*\[[^]]*\]",
+        'include = ["signal_fish_proof_core::protocol_core::nonempty_all_support"]',
+        section[0], count=1)
+    isolated = original[:section.start()] + replacement + original[section.end():]
+    if count != 1 or tomllib.loads(isolated) != expected:
+        raise RuntimeError("Capability probe changed settings outside its include list")
+    path.write_text(isolated)
+
+
 def probe_capability(crate):
     """Check aggregation extraction and regeneration without claiming a theorem.
 
@@ -536,11 +575,9 @@ def probe_capability(crate):
         first_run = len(RUNS)
         status = "probe failed; no aggregation theorem proved"
         try:
+            isolate_capability_probe(copied)
             extract(copied, "capability")
             project = copied / "proofs/capability/lean"
-            # Regenerated member types use the same reviewed, operation-free interpretations.
-            shutil.copyfile(crate / "proofs/capability/lean/Capability/Assumptions/TypesExternal.lean",
-                            project / "Capability/Assumptions/TypesExternal.lean")
             manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
             manifest["name"] = "Capability"
             (project / "lake-manifest.json").write_text(json.dumps(manifest))
@@ -638,6 +675,7 @@ def main():
             capability_mutants(HERE)
             projection_mutants(HERE)
         if args.probe_capability:
+            capability_probe_status = "probe failed; no aggregation theorem proved"
             capability_probe_status = probe_capability(HERE)
         completed = True
     finally:

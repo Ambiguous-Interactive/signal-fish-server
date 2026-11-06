@@ -22,6 +22,15 @@ set_option maxRecDepth 2048
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::session_capability::Topology]
+    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
+    Visibility: public -/
+@[discriminant isize]
+inductive session_capability.Topology where
+| Relay : session_capability.Topology
+| Host : session_capability.Topology
+| Mesh : session_capability.Topology
+
 /-- [signal_fish_proof_core::session_capability::Transport]
     Source: 'src/../../../../src/session_capability.rs', lines 13:0-24:1
     Visibility: public -/
@@ -31,14 +40,19 @@ inductive session_capability.Transport where
 | Direct : session_capability.Transport
 | WebRtc : session_capability.Transport
 
-/-- [signal_fish_proof_core::session_capability::Topology]
-    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
+/-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
+    Source: 'src/../../../../src/session_admission.rs', lines 25:0-29:1 -/
+structure session_admission.ActiveSessionPlan where
+  topology : session_capability.Topology
+  transport : session_capability.Transport
+  host : core.option.Option uuid.Uuid
+
+/-- [signal_fish_proof_core::session_member::DirectEndpoint]
+    Source: 'src/../../../../src/session_member.rs', lines 14:0-17:1
     Visibility: public -/
-@[discriminant isize]
-inductive session_capability.Topology where
-| Relay : session_capability.Topology
-| Host : session_capability.Topology
-| Mesh : session_capability.Topology
+structure session_member.DirectEndpoint where
+  host : alloc.string.String
+  port : Std.U16
 
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
     Source: 'src/../../../../src/session_capability.rs', lines 67:0-75:1 -/
@@ -51,18 +65,6 @@ structure session_capability.SessionCapabilities where
   host_topology : Bool
   mesh_topology : Bool
 
-/-- [signal_fish_proof_core::session_capability::all_support::closure]
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
-def session_capability.all_support.closure (T : Type) (T1 : Type) :=
-  T1 × session_capability.Topology × session_capability.Transport
-
-/-- [signal_fish_proof_core::session_member::DirectEndpoint]
-    Source: 'src/../../../../src/session_member.rs', lines 14:0-17:1
-    Visibility: public -/
-structure session_member.DirectEndpoint where
-  host : alloc.string.String
-  port : Std.U16
-
 /-- [signal_fish_proof_core::session_member::SessionMember]
     Source: 'src/../../../../src/session_member.rs', lines 25:0-32:1 -/
 structure session_member.SessionMember where
@@ -73,6 +75,21 @@ structure session_member.SessionMember where
     chrono.offset.utc.Utc
   direct_endpoint : core.option.Option session_member.DirectEndpoint
   capabilities : session_capability.SessionCapabilities
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure]
+    Source: 'src/../../../../src/session_admission.rs', lines 38:38-42:13 -/
+def session_admission.ActiveSessionPlan.host_invalid.closure :=
+  Slice session_member.SessionMember × session_admission.ActiveSessionPlan
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure]
+    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+def session_admission.ActiveSessionPlan.host_invalid.closure.closure :=
+  uuid.Uuid × session_admission.ActiveSessionPlan
+
+/-- [signal_fish_proof_core::session_capability::all_support::closure]
+    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+def session_capability.all_support.closure (T : Type) (T1 : Type) :=
+  T1 × session_capability.Topology × session_capability.Transport
 
 /-- [signal_fish_proof_core::session_member::all_support::closure]
     Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/

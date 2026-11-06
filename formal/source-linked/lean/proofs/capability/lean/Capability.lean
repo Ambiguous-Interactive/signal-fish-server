@@ -3,3 +3,4 @@ import Capability.Verification.ProofObligations
 import Capability.Verification.CallbackSemantics
 import Capability.Verification.ConcreteCallbacks
 import Capability.Verification.Members
+import Capability.Verification.HostValidity

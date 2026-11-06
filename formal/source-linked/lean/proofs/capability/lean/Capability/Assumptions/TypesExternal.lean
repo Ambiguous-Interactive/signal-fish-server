@@ -21,9 +21,11 @@ set_option maxHeartbeats 1000000
 /- You can set the `maxRecDepth` value with the `-max-recdepth` CLI option -/
 set_option maxRecDepth 2048
 
-/-- External UUID representation. These contracts never inspect identity bytes. -/
+/-- External UUID representation. Equality is modeled by exact equality of all sixteen bytes. -/
 structure uuid.Uuid where
   bytes : Aeneas.Std.Array Aeneas.Std.U8 16#usize
+
+noncomputable instance : DecidableEq uuid.Uuid := Classical.decEq _
 
 /-- UTC has no stored fields in the locked Chrono dependency. -/
 inductive chrono.offset.utc.Utc where

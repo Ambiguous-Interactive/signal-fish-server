@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -149,6 +150,25 @@ class RequiredAggregation(unittest.TestCase):
                 with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "projection", name)
+
+    def test_host_faults_require_only_semantic_host_contract_rejection(self):
+        """A UUID mapping/compiler error cannot count as a host-validity rejection."""
+        diagnostic = "error: Capability/Verification/HostValidity.lean:42:6: unsolved goals\n"
+        for name in ("host-identity", "host-capability", "host-topology", "host-missing"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("HostValidity.lean", "Members.lean")),
+                (1, diagnostic.replace("Verification/HostValidity", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
 
     def test_member_faults_require_only_actual_member_contract_rejection(self):
         """Reject extraction and tool failures for the concrete getter and host controls."""
@@ -547,6 +567,63 @@ class CapabilityEvidence(unittest.TestCase):
     """Keep failed and accepted extraction evidence separate from proof claims."""
 
     @patch("builtins.print")
+    def test_main_probe_summary_distinguishes_unrequested_failed_and_passed(self, _print):
+        """A failed optional probe must remain failed in the overall report."""
+        accepted = "extraction_typechecked; no aggregation theorem proved"
+        for requested, fails, expected in (
+            (False, False, "not run; no aggregation theorem proved"),
+            (True, True, "probe failed; no aggregation theorem proved"),
+            (True, False, accepted),
+        ):
+            with self.subTest(requested=requested, fails=fails), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                verify.copy_sources(root)
+                crate = root / "formal/source-linked/lean"
+                verify.shutil.copytree(verify.HERE, crate, ignore=verify.shutil.ignore_patterns(
+                    ".lake*", "target", "llbc", "__pycache__", "*.log"))
+                logs = root / "logs"
+                argv = ["verify.py"] + (["--probe-capability"] if requested else [])
+                with patch.object(verify, "ROOT", root), patch.object(verify, "HERE", crate), \
+                        patch.object(verify, "LOGS", logs), patch.object(verify, "RUNS", []), \
+                        patch.object(verify, "run", return_value=SimpleNamespace(stdout="version=0.4.2")), \
+                        patch.object(verify, "verify"), patch.object(verify, "probe_capability") as probe, \
+                        patch("sys.argv", argv):
+                    probe.side_effect = RuntimeError("probe failed") if fails else None
+                    probe.return_value = accepted
+                    if fails:
+                        with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                            verify.main()
+                    else:
+                        verify.main()
+                    self.assertEqual(probe.call_count, int(requested))
+                report = json.loads((logs / "results.json").read_text())
+                self.assertEqual(report["capability_probe_status"], expected)
+                self.assertEqual(report["completed"], not fails)
+                self.assertTrue(report["source_unchanged"])
+                self.assertTrue(report["locks_unchanged"])
+
+    def test_probe_manifest_isolates_only_target_and_fails_closed(self):
+        """Preserve tool pins, backend options and other scenarios; reject missing scope."""
+        original = ('[tools]\naeneas = "pinned"\n[scenario.capability]\n'
+                    'backend = "lean"\ninclude = [\n "first",\n "second",\n]\n'
+                    'charon-args = ["--opaque=keep"]\n[scenario.other]\ninclude = ["other"]\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            path = crate / "hax.toml"
+            path.write_text(original)
+            verify.isolate_capability_probe(crate)
+            expected = tomllib.loads(original)
+            expected["scenario"]["capability"]["include"] = [
+                "signal_fish_proof_core::protocol_core::nonempty_all_support"]
+            self.assertEqual(tomllib.loads(path.read_text()), expected)
+            for malformed in (original.replace('include = [\n "first",\n "second",\n]\n', ''),
+                              '[scenario.other]\ninclude = ["other"]\n'):
+                path.write_text(malformed)
+                with self.assertRaises(RuntimeError):
+                    verify.isolate_capability_probe(crate)
+                self.assertEqual(path.read_text(), malformed)
+
+    @patch("builtins.print")
     def test_probe_retry_and_deterministic_regeneration(self, _print):
         """Check retry boundaries, stable bodies, and honest failure snapshots."""
         missing = f"error: Capability/Extraction/Funs.lean:42:6: {verify.CAPABILITY_LIMIT}\n"
@@ -576,12 +653,12 @@ class CapabilityEvidence(unittest.TestCase):
                     if source_path != "src/protocol_core.rs":
                         (root / source_path).write_text(f"production input {source_path}\n")
                 crate = root / "formal/source-linked/lean"
+                crate.mkdir(parents=True)
+                hax_source = (verify.HERE / "hax.toml").read_text()
+                (crate / "hax.toml").write_text(hax_source)
                 negotiation = crate / "proofs/negotiation/lean"
                 negotiation.mkdir(parents=True)
                 (negotiation / "lake-manifest.json").write_text("{}")
-                member_types = crate / "proofs/capability/lean/Capability/Assumptions/TypesExternal.lean"
-                member_types.parent.mkdir(parents=True)
-                member_types.write_text("reviewed member type interpretations\n")
                 (crate / "compatibility").mkdir()
                 (crate / "compatibility/IteratorAll.lean").write_text("upstream alias\n")
                 logs = root / "logs"
@@ -595,6 +672,10 @@ class CapabilityEvidence(unittest.TestCase):
                     calls.append(copied)
                     if len(calls) == 2 and isinstance(drift, Exception):
                         raise drift
+                    expected = tomllib.loads(hax_source)
+                    expected["scenario"]["capability"]["include"] = [
+                        "signal_fish_proof_core::protocol_core::nonempty_all_support"]
+                    self.assertEqual(tomllib.loads((copied / "hax.toml").read_text()), expected)
                     project = copied / "proofs/capability/lean/Capability"
                     (project / "Extraction").mkdir(parents=True, exist_ok=True)
                     body = "changed body\n" if drift and len(calls) == 2 else "generated body\n"
@@ -603,6 +684,7 @@ class CapabilityEvidence(unittest.TestCase):
                     if not assumptions.exists():
                         assumptions.parent.mkdir()
                         assumptions.write_text("import CoreModels\n")
+                    (project / "Assumptions/TypesExternal.lean").write_text("generated external declarations\n")
 
                 responses_iter = iter(responses)
 
@@ -630,6 +712,7 @@ class CapabilityEvidence(unittest.TestCase):
                 self.assertEqual(len(calls), extractions)
                 self.assertEqual(builds.call_count, len(responses))
                 self.assertEqual(source.read_text(), "production source\n")
+                self.assertEqual((crate / "hax.toml").read_text(), hax_source)
                 archives = sorted((logs / "capability-probe").iterdir())
                 self.assertEqual(len(archives), 2 if shim else 1)
                 if error:
@@ -642,7 +725,7 @@ class CapabilityEvidence(unittest.TestCase):
                 for archive in archives:
                     self.assertFalse(json.loads((archive / "results.json").read_text())["aggregation_theorem_proved"])
                     self.assertEqual((archive / generated / "Assumptions/TypesExternal.lean").read_text(),
-                                     member_types.read_text())
+                                     "generated external declarations\n")
                     if drift is not True:
                         self.assertEqual((archive / generated / "Extraction/Funs.lean").read_text(), "generated body\n")
                 mapped = archives[-1] / generated / "Compatibility.lean"
@@ -663,7 +746,7 @@ class CapabilityEvidence(unittest.TestCase):
                 (root / name).write_text(f"production input {name}\n")
             crate = root / "formal/source-linked/lean"
             crate.mkdir(parents=True)
-            (crate / "hax.toml").write_text("pinned tools\n")
+            (crate / "hax.toml").write_text((verify.HERE / "hax.toml").read_text())
             logs = root / "logs"
 
             def failed_extract(copied, _scenario):

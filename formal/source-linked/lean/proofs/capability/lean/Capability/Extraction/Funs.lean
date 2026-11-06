@@ -43,6 +43,71 @@ def protocol_core.nonempty_all_support
         coreopsfunctionFnMutT1TupleShared0TBoolInst i supports
     ok b1
 
+/-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Topology> for signal_fish_proof_core::session_capability::Topology}::eq]:
+    Source: 'src/../../../../src/session_capability.rs', lines 31:53-31:62
+    Visibility: public -/
+def session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
+  (self : session_capability.Topology) (other : session_capability.Topology) :
+  RustM Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
+    Source: 'src/../../../../src/session_capability.rs', lines 102:4-108:5 -/
+def session_capability.SessionCapabilities.supports_topology
+  (self : session_capability.SessionCapabilities)
+  (topology : session_capability.Topology) :
+  RustM Bool
+  := do
+  match topology with
+  | session_capability.Topology.Relay => ok self.relay_topology
+  | session_capability.Topology.Host => ok self.host_topology
+  | session_capability.Topology.Mesh => ok self.mesh_topology
+
+/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
+    Source: 'src/../../../../src/session_capability.rs', lines 94:4-100:5 -/
+def session_capability.SessionCapabilities.supports_transport
+  (self : session_capability.SessionCapabilities)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  match transport with
+  | session_capability.Transport.Relay => ok self.relay_transport
+  | session_capability.Transport.Direct => ok self.direct_transport
+  | session_capability.Transport.WebRtc => ok self.webrtc_transport
+
+/-- [signal_fish_proof_core::session_capability::supports_session]:
+    Source: 'src/../../../../src/session_capability.rs', lines 141:0-149:1 -/
+def session_capability.supports_session
+  (capabilities : session_capability.SessionCapabilities)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  if capabilities.version >= 3#u16
+  then
+    let b ←
+      session_capability.SessionCapabilities.supports_topology capabilities
+        topology
+    if b
+    then
+      session_capability.SessionCapabilities.supports_transport capabilities
+        transport
+    else ok false
+  else ok false
+
+/-- [signal_fish_proof_core::session_member::{signal_fish_proof_core::session_member::SessionMember}::supports_session]:
+    Source: 'src/../../../../src/session_member.rs', lines 42:4-44:5 -/
+def session_member.SessionMember.supports_session
+  (self : session_member.SessionMember)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  session_capability.supports_session self.capabilities topology transport
+
 /-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Transport> for signal_fish_proof_core::session_capability::Transport}::eq]:
     Source: 'src/../../../../src/session_capability.rs', lines 11:53-11:62
     Visibility: public -/
@@ -66,48 +131,136 @@ impl_def session_capability.Transport.Insts.CoreCmpPartialEqTransport :
     session_capability.Transport.Insts.CoreCmpPartialEqTransport
 }
 
-/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
-    Source: 'src/../../../../src/session_capability.rs', lines 94:4-100:5 -/
-def session_capability.SessionCapabilities.supports_transport
-  (self : session_capability.SessionCapabilities)
-  (transport : session_capability.Transport) :
-  RustM Bool
-  := do
-  match transport with
-  | session_capability.Transport.Relay => ok self.relay_transport
-  | session_capability.Transport.Direct => ok self.direct_transport
-  | session_capability.Transport.WebRtc => ok self.webrtc_transport
-
-/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
-    Source: 'src/../../../../src/session_capability.rs', lines 102:4-108:5 -/
-def session_capability.SessionCapabilities.supports_topology
-  (self : session_capability.SessionCapabilities)
-  (topology : session_capability.Topology) :
-  RustM Bool
-  := do
-  match topology with
-  | session_capability.Topology.Relay => ok self.relay_topology
-  | session_capability.Topology.Host => ok self.host_topology
-  | session_capability.Topology.Mesh => ok self.mesh_topology
-
-/-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 141:0-149:1 -/
-def session_capability.supports_session
-  (capabilities : session_capability.SessionCapabilities)
+/-- [signal_fish_proof_core::session_member::{signal_fish_proof_core::session_member::SessionMember}::can_host]:
+    Source: 'src/../../../../src/session_member.rs', lines 49:4-52:5 -/
+def session_member.SessionMember.can_host
+  (self : session_member.SessionMember)
   (topology : session_capability.Topology)
   (transport : session_capability.Transport) :
   RustM Bool
   := do
-  if capabilities.version >= 3#u16
+  let b ←
+    session_member.SessionMember.supports_session self topology transport
+  if b
   then
-    let b ←
-      session_capability.SessionCapabilities.supports_topology capabilities
-        topology
-    if b
-    then
-      session_capability.SessionCapabilities.supports_transport capabilities
-        transport
-    else ok false
+    let b1 ←
+      core.cmp.PartialEq.ne.default
+        session_capability.Transport.Insts.CoreCmpPartialEqTransport transport
+        session_capability.Transport.Direct
+    if b1
+    then ok true
+    else core.option.Option.is_some self.direct_endpoint
+  else ok false
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::supported_by]:
+    Source: 'src/../../../../src/session_admission.rs', lines 48:4-50:5 -/
+def session_admission.ActiveSessionPlan.supported_by
+  (self : session_admission.ActiveSessionPlan)
+  (member : session_member.SessionMember) :
+  RustM Bool
+  := do
+  session_member.SessionMember.can_host member self.topology self.transport
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}::call_mut]:
+    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+def
+  session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+  (c : session_admission.ActiveSessionPlan.host_invalid.closure.closure)
+  (tupled_args : session_member.SessionMember) :
+  RustM (Bool ×
+    session_admission.ActiveSessionPlan.host_invalid.closure.closure)
+  := do
+  let (u, asp) := c
+  let b ← uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq tupled_args.player_id u
+  if b
+  then
+    let b1 ← session_admission.ActiveSessionPlan.supported_by asp tupled_args
+    ok (b1, c)
+  else ok (false, c)
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}::call_once]:
+    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+def
+  session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
+  (c : session_admission.ActiveSessionPlan.host_invalid.closure.closure)
+  (sm : session_member.SessionMember) :
+  RustM Bool
+  := do
+  let (b, _) ←
+    session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+      c sm
+  ok b
+
+/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}]
+    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+@[reducible]
+def
+  session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
+  : core.ops.function.FnOnce
+  session_admission.ActiveSessionPlan.host_invalid.closure.closure
+  session_member.SessionMember Bool := {
+  call_once :=
+    session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
+}
+
+/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}]
+    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+@[reducible]
+def
+  session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
+  : core.ops.function.FnMut
+  session_admission.ActiveSessionPlan.host_invalid.closure.closure
+  session_member.SessionMember Bool := {
+  FnOnceInst :=
+    session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
+  call_mut :=
+    session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+}
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'_0, '_1>}::call_once]:
+    Source: 'src/../../../../src/session_admission.rs', lines 38:38-42:13 -/
+def
+  session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool.call_once
+  (c : session_admission.ActiveSessionPlan.host_invalid.closure)
+  (tupled_args : uuid.Uuid) :
+  RustM Bool
+  := do
+  let (s, asp) := c
+  let i ← core.slice.Slice.iter s
+  let (b, _) ←
+    core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.any
+      session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
+      i (tupled_args, asp)
+  ok b
+
+/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'_0, '_1>}]
+    Source: 'src/../../../../src/session_admission.rs', lines 38:38-42:13 -/
+@[reducible]
+def
+  session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool
+  : core.ops.function.FnOnce
+  session_admission.ActiveSessionPlan.host_invalid.closure uuid.Uuid Bool := {
+  call_once :=
+    session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool.call_once
+}
+
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid]:
+    Source: 'src/../../../../src/session_admission.rs', lines 36:4-43:5 -/
+def session_admission.ActiveSessionPlan.host_invalid
+  (self : session_admission.ActiveSessionPlan)
+  (members : Slice session_member.SessionMember) :
+  RustM Bool
+  := do
+  let b ←
+    session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq self.topology
+      session_capability.Topology.Host
+  if b
+  then
+    let b1 ←
+      core.option.Option.is_some_and
+        session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool
+        self.host (members, self)
+    ok (¬ b1)
   else ok false
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_mut]:
@@ -189,37 +342,6 @@ def session_capability.all_support
     (session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool
     coreopsfunctionFnT1TupleShared0TSessionCapabilitiesInst) members
     (capabilities, topology, transport)
-
-/-- [signal_fish_proof_core::session_member::{signal_fish_proof_core::session_member::SessionMember}::supports_session]:
-    Source: 'src/../../../../src/session_member.rs', lines 42:4-44:5 -/
-def session_member.SessionMember.supports_session
-  (self : session_member.SessionMember)
-  (topology : session_capability.Topology)
-  (transport : session_capability.Transport) :
-  RustM Bool
-  := do
-  session_capability.supports_session self.capabilities topology transport
-
-/-- [signal_fish_proof_core::session_member::{signal_fish_proof_core::session_member::SessionMember}::can_host]:
-    Source: 'src/../../../../src/session_member.rs', lines 49:4-52:5 -/
-def session_member.SessionMember.can_host
-  (self : session_member.SessionMember)
-  (topology : session_capability.Topology)
-  (transport : session_capability.Transport) :
-  RustM Bool
-  := do
-  let b ←
-    session_member.SessionMember.supports_session self topology transport
-  if b
-  then
-    let b1 ←
-      core.cmp.PartialEq.ne.default
-        session_capability.Transport.Insts.CoreCmpPartialEqTransport transport
-        session_capability.Transport.Direct
-    if b1
-    then ok true
-    else core.option.Option.is_some self.direct_endpoint
-  else ok false
 
 /-- [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::Fn<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}::call]:
     Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
@@ -316,5 +438,14 @@ def session_member_can_host
   RustM Bool
   := do
   session_member.SessionMember.can_host member topology transport
+
+/-- [signal_fish_proof_core::stored_host_invalid]:
+    Source: 'src/lib.rs', lines 31:0-36:1 -/
+def stored_host_invalid
+  (stored : session_admission.ActiveSessionPlan)
+  (members : Slice session_member.SessionMember) :
+  RustM Bool
+  := do
+  session_admission.ActiveSessionPlan.host_invalid stored members
 
 end signal_fish_proof_core
