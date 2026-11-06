@@ -2,20 +2,23 @@
 
 Issue [#1464](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1464)
 asks whether Rust can be translated into theorem provers without maintaining a
-second implementation. This pilot checks two private production helpers in
-[`src/protocol_core.rs`](../../src/protocol_core.rs).
+second implementation. The source-linked checks use production helpers in
+[`src/protocol_core.rs`](../../src/protocol_core.rs) and
+[`src/session_capability.rs`](../../src/session_capability.rs).
 
-The standalone Lean and Kani crates import that file with `#[path]`. Production
-version negotiation and session capability aggregation call the same helpers.
-The proof crates do not change the server's dependencies or public API.
+The standalone Lean crate imports both files with `#[path]`. The Kani crate
+imports `protocol_core.rs`. Production version negotiation, capability projection,
+support checks, and aggregation call the same helpers. The proof crates do not
+change the server's dependencies or public API.
 
 ## Contracts and boundaries
 
 | Backend and target | Checked property | Boundary |
 | --- | --- | --- |
 | Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
-| Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; capability projection and caller correspondence remain pending |
+| Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; concrete capability callback and caller correspondence remain pending |
 | Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and correspondence to a concrete Rust callback remain pending |
+| Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, default fallback, concrete aggregation callback, and room-state correspondence remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -254,8 +257,8 @@ call the callback.
 Failing or diverging callbacks and state-dependent truth values fall outside
 this total fixed-predicate contract. The operational contract below covers their
 modeled results. Neither contract exposes final callback state or external effects.
-The capability projection and production callers still need source-linked
-correspondence. Keep the bounded Kani checks and adapter tests.
+The capability projection has the separate contract below. Concrete aggregation
+callback and production caller/state correspondence remain pending. Keep the bounded Kani checks and adapter tests.
 
 The required runner checks the result and callback-semantics theorems on every run. It
 regenerates each scenario twice and rejects different output. Empty-room and
@@ -306,7 +309,55 @@ final callback state. The trace is a specification, not an exported observation
 of Rust side effects. Callback errors and divergence are values in `RustM`; these
 proofs do not establish how a concrete Rust callback produces those values.
 Allocator failure, process failure, panic recovery, and external state remain
-outside this result correspondence. Production capability projection remains open.
+outside this result correspondence. The capability projection has the separate
+contract below; it is not yet linked to the generic aggregation callback.
+
+### Production capability projection
+
+The projection scenario extracts the actual `Transport`, `Topology`, and
+`SessionCapabilities` definitions, their derived enum equality, and the production
+`project_capabilities` and `supports_session` functions. Public enum paths remain
+re-exported from `protocol::types`. Serde attributes and variants stay unchanged.
+The isolated Lean crate uses the server's pinned Serde version. The production
+crate gains no dependency.
+
+`Projection.projection_contract` proves that conversion preserves the `u16`
+version and all six membership bits for arbitrary representable slices. It permits
+empty lists, duplicates, and any ordering. `support_contract` proves that all
+versions below three fail, while every other version requires both selected axes.
+It covers all nine topology/transport pairs and all capability field assignments.
+`projected_support_contract` composes these two extracted functions without input
+assumptions. `support_outcomes` checks acceptance, v2 refusal, and a missing
+transport at the maximum `u16` version. These are kernel-checked contracts,
+not bounded enumeration.
+
+The production `From<&NegotiatedProtocol>` passes its stored vectors as slices to
+the projection function. `SessionMember::supports_session` calls the extracted
+support predicate. Existing adapter tests now check all nine pairs for every
+negotiated subset, including duplicates, reverse order, versions zero through
+four, and `u16::MAX`. Tests also check absent/disconnected profiles and member
+ordering. Those caller, lookup, and membership relationships are tested; the Lean
+composition theorem does not prove the server's entire call path or state.
+
+The required runner regenerates this scenario twice, audits all four contracts,
+and checks isolated version-floor and wrong-transport-membership source faults.
+Each fault must compile extraction before its contract fails. Separate audited
+witnesses establish the wrong values. The restored source must pass. Snapshots
+and the final source guard cover both production input modules. No theorem
+connects the generic aggregation callback to this projection yet. Final callback
+state, external effects, room decisions, and asynchronous correspondence remain
+unresolved in #1464.
+
+A local ARM64 run with prepared dependencies completed 61 commands in 347.583
+seconds. All 15 contracts, seven source faults, audited wrong-result witnesses,
+restored proofs, regeneration, and both-source integrity checks passed. The first
+projection extraction/repeat/build/audit cycle took 31.501 seconds; its restored
+cycle took 11.135 seconds. Accepted checks emitted no warnings. Deliberately
+rejected fault proofs can emit tactic diagnostics and warnings.
+
+This expanded local cycle exceeds the original five-minute pilot target. It is
+one cached-dependency sample, not a hosted warm-job or installation measurement.
+Record hosted evidence separately and reassess cost before expanding more seams.
 
 The reviewed [obligation inventory](obligations.md) tracks the production
 seams, current evidence, negative controls, and caller/state/concurrency gaps.

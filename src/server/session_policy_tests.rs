@@ -6088,7 +6088,7 @@ async fn compact_session_capabilities_preserve_every_negotiated_subset() {
         server.session_capabilities(&PlayerId::new_v4()),
         SessionCapabilities::default()
     );
-    for version in [0, 2, 3, 4] {
+    for version in [0, 1, 2, 3, 4, u16::MAX] {
         for transport_mask in 0_u8..8 {
             for topology_mask in 0_u8..8 {
                 let protocol = NegotiatedProtocol {
@@ -6126,6 +6126,18 @@ async fn compact_session_capabilities_preserve_every_negotiated_subset() {
                     for value in topologies {
                         assert_eq!(projected.supports_topology(value), protocol.topologies.contains(&value),
                             "version={version} transport_mask={transport_mask} topology_mask={topology_mask} duplicates={duplicates}");
+                    }
+                    for topology in topologies {
+                        for transport in transports {
+                            let expected = version >= 3
+                                && protocol.topologies.contains(&topology)
+                                && protocol.transports.contains(&transport);
+                            assert_eq!(
+                                crate::session_capability::supports_session(projected, topology, transport),
+                                expected,
+                                "version={version} topology={topology:?} transport={transport:?} transport_mask={transport_mask} topology_mask={topology_mask} duplicates={duplicates}"
+                            );
+                        }
                     }
                 }
             }

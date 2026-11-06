@@ -14,3 +14,10 @@ path = "src/lib.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[package.metadata.cargo-machete]
+# Serde is used by #[path] imported src/session_capability.rs, outside this crate.
+ignored = ["serde"]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }

@@ -89,42 +89,7 @@ impl GameDataEncoding {
     }
 }
 
-/// Data-path transport a client can use for game traffic.
-///
-/// `Relay` is the universal floor (WebSocket fan-out through the server) and is
-/// always available. `Direct` is a LAN / routable IP:port path and `WebRtc` is a
-/// peer-to-peer WebRTC data channel; both are opt-in upgrades negotiated in
-/// `Authenticate`. Protocol v3 wire tokens: `relay`, `direct`, `webrtc`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Transport {
-    /// Server WebSocket fan-out — the mandatory floor every client supports.
-    Relay,
-    /// Direct IP:port connection (LAN / routable host).
-    Direct,
-    /// Peer-to-peer WebRTC data channel.
-    ///
-    /// `rename_all = "snake_case"` would emit `web_rtc`; the wire contract requires the
-    /// token `webrtc`, so the variant is renamed explicitly.
-    #[serde(rename = "webrtc")]
-    WebRtc,
-}
-
-/// Session topology negotiated for a room.
-///
-/// `Relay` keeps the v2 server-relay hub. `Host` is a star topology around a
-/// single authoritative peer, and `Mesh` is everyone-to-everyone. Protocol v3
-/// wire tokens: `relay`, `host`, `mesh`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Topology {
-    /// Server relay hub (v2 behavior, always available).
-    Relay,
-    /// Star topology around a single host/authority.
-    Host,
-    /// Full mesh: every peer connects to every other peer.
-    Mesh,
-}
+pub use crate::session_capability::{Topology, Transport};
 
 /// A single ICE (STUN/TURN) server entry delivered inside a [`SessionPlanPayload`].
 ///
