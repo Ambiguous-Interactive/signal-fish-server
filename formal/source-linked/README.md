@@ -258,8 +258,10 @@ call the callback.
 Failing or diverging callbacks and state-dependent truth values fall outside
 this total fixed-predicate contract. The operational contract below covers their
 modeled results. Neither contract exposes final callback state or external effects.
-The capability projection has the separate contract below. Concrete aggregation
-callback and production caller/state correspondence remain pending. Keep the bounded Kani checks and adapter tests.
+The capability projection and concrete aggregation callback have separate contracts
+below. The concrete callback requires a total, fixed capability getter. Production
+member-getter and caller/state correspondence remain pending. Keep the bounded Kani
+checks and adapter tests.
 
 The required runner checks the result and callback-semantics theorems on every run. It
 regenerates each scenario twice and rejects different output. Empty-room and

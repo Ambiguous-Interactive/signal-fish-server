@@ -115,6 +115,7 @@ mod tests {
 
     use super::{all_support, SessionCapabilities, Topology, Transport};
 
+    /// Check that aggregation reads no members after the first rejection.
     #[test]
     fn concrete_aggregation_reads_members_once_until_first_rejection() {
         for (members, expected, visited) in [
