@@ -41,7 +41,10 @@ fn negotiation_defaults_and_refusal() {
         );
     }
     kani::cover!(
-        minimum == 3 && maximum == 3 && client == 2,
+        minimum == 3
+            && maximum == 3
+            && client == 2
+            && client == protocol_core::SERVER_MIN_PROTOCOL_VERSION,
         "v2 refusal reachable"
     );
     kani::cover!(minimum == 0 && maximum == u16::MAX, "full range reachable");

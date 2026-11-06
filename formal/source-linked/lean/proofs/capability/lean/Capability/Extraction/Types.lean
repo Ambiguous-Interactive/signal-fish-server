@@ -41,7 +41,7 @@ inductive session_capability.Topology where
 | Mesh : session_capability.Topology
 
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
-    Source: 'src/../../../../src/session_capability.rs', lines 44:0-52:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 67:0-75:1 -/
 structure session_capability.SessionCapabilities where
   version : Std.U16
   relay_transport : Bool
@@ -52,7 +52,7 @@ structure session_capability.SessionCapabilities where
   mesh_topology : Bool
 
 /-- [signal_fish_proof_core::session_capability::all_support::closure]
-    Source: 'src/../../../../src/session_capability.rs', lines 126:56-128:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
 def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 

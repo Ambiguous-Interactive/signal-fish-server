@@ -20,6 +20,7 @@ change the server's dependencies or public API.
 | Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and arbitrary Rust callbacks remain outside; the concrete support callback is covered below |
 | Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup, member getter, and room-state correspondence remain outside; lookup-result/default resolution has the separate contract below |
 | Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; production member-field getter, connection lookup, and room state remain tested boundaries |
+| Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup, caller floor, member getter, and room state remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
@@ -412,8 +413,10 @@ separately; the server path from connection state to aggregation is not proved.
 
 ### Profile lookup-result and default resolution
 
-Both live capability lookup adapters and `SessionCapabilities::default` now call
-`session_capability::resolve_capabilities`. The function consumes the existing
+The live capability lookup adapters and `SessionCapabilities::default` call
+`resolve_connection_capabilities`. This fixed-floor function calls
+`session_capability::resolve_capabilities` with the extracted server constant.
+The generic resolver consumes the existing
 copied lookup result. It adds no allocation or profile clone and preserves the
 current runtime behavior. The proof scenario imports this actual production
 function; it does not copy the default implementation into the proof crate.
@@ -433,10 +436,9 @@ Relay/Relay can pass, and it passes exactly when the supplied floor is at least
 three. The theorem does not assume a floor of two. `resolution_outcomes` checks
 a known future-version profile with duplicates and rejection of every pair for
 an absent profile at floor two, plus reachable Relay/Relay acceptance at floor
-three. The production adapters supply
-`SERVER_MIN_PROTOCOL_VERSION`; their wiring and the current constant value
-remain tested facts. The adapter test asserts the exact default fields
-independently of the `Default` implementation.
+three. The fixed-floor production resolver supplies `SERVER_MIN_PROTOCOL_VERSION`. The
+production-profile contracts below check that constant and both default bodies.
+The adapter test also asserts the exact default fields.
 
 The required gate audits all six contracts. Two additional isolated source
 faults promote the absent-profile version to three or replace a known profile's
@@ -446,10 +448,57 @@ result. The runner then restores the production source, proves the contracts,
 and checks identical regeneration and source/pin integrity.
 
 This closes the pure lookup-result/default decision. It does not prove the
-connection manager's map lookup, locking, profile identity, projection callback,
+connection manager's map lookup, locking, or selected profile identity,
 actual member-field getter, membership snapshot, or asynchronous correspondence.
 Those obligations remain open. Kani retains its previous negotiation and
 zero-to-eight-member aggregation bounds; no new Kani claim is made.
+
+### Production negotiated profiles and fixed defaults
+
+[`Profiles.lean`](lean/proofs/projection/lean/Projection/Verification/Profiles.lean)
+checks nine additional contracts. The production `NegotiatedProtocol` type,
+both `Default` implementations, and `From<&NegotiatedProtocol>` now live in the
+shared source. The former module paths re-export the same types. The public
+`config::SERVER_MIN_PROTOCOL_VERSION` path re-exports the extracted constant.
+No runtime dependency, allocation, wire format, or public API changes.
+
+A proof-crate invocation calls the actual production `From` implementation.
+This makes extraction follow the trait body; it does not restate that body.
+`profile_fields_contract` checks that the adapter selects this profile's version
+and both complete vectors. `profile_support_contract` composes it with the
+support theorem for every `u16` version, representable vector, and axis pair.
+It permits empty lists, duplicates, and every order. `profile_outcomes` checks
+future-version acceptance, v2 rejection, and missing-axis rejection through
+that actual adapter.
+
+`compact_default_contract` and `negotiated_default_contract` check both actual
+default bodies against the literal v2 relay contract. They extract the server
+constant rather than accepting a floor as a theorem input.
+`defaults_agree_contract` checks equality after the actual production adapter.
+`default_rejects_contract` rejects every session pair at the v2 floor.
+`connection_resolution_contract` checks both branches of the actual fixed-floor
+resolver for every compact profile, including all capability bits and versions.
+`connection_profile_support_contract` composes the actual From adapter, fixed
+resolver, and support predicate. Neither function accepts a caller-supplied
+floor. The generic resolver's present-profile branch remains in production use.
+
+The vector-default claim uses the pinned library allocation model. Actual
+allocator failure and process failure remain excluded.
+
+Three new isolated production-source faults change the server constant to
+three, overwrite the profile version with the floor, or discard the stored
+transport vector. The runner first compiles each extracted module. It requires
+a semantic rejection in `Profiles.lean`, then checks and audits a separate
+concrete wrong-result witness. It restores and rechecks all projection proofs.
+All nine theorem names are required by the axiom audit and CI.
+
+Both live lookup callers and the compact Default use the checked fixed-floor
+resolver. Its present and absent branches are both checked.
+The map's selected identity, synchronization, `Option` callback wiring,
+member-field construction/getter, room state, and asynchronous correspondence
+remain tested or pending. The actual `From` body and fixed default bodies are
+proved; this is not a proof of the whole lookup operation or session selector.
+Kani's existing eight-member bound is unchanged.
 
 ## Tool references
 

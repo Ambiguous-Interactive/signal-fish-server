@@ -43,6 +43,15 @@ THEOREMS = {"negotiation": (
     "Projection.resolved_support_contract",
     "Projection.absent_support_contract",
     "Projection.resolution_outcomes",
+    "Projection.profile_fields_contract",
+    "Projection.profile_support_contract",
+    "Projection.connection_resolution_contract",
+    "Projection.connection_profile_support_contract",
+    "Projection.compact_default_contract",
+    "Projection.negotiated_default_contract",
+    "Projection.defaults_agree_contract",
+    "Projection.default_rejects_contract",
+    "Projection.profile_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
@@ -193,7 +202,7 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "projection":
-        targets += ("Projection/Verification/Defaults.lean:",)
+        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:")
@@ -213,6 +222,11 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Projection/Verification/Defaults.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the profile resolution proof: {name}\n{result.stdout}")
+    if name in ("server-floor", "profile-version", "profile-transports") and not all(
+            error.startswith("Projection/Verification/Profiles.lean:")
+            and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
+            for error in locations):
+        raise RuntimeError(f"Mutation did not fail the production profile proof: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -284,22 +298,28 @@ def copy_sources(tree):
 
 def projection_mutants(crate):
     """Reject version and membership faults only after extraction compiles."""
-    original = (ROOT / "src/session_capability.rs").read_text()
     changes = {
-        "version-floor": ("capabilities.version >= 3", "capabilities.version >= 2"),
-        "transport-projection": ("direct_transport: transports.contains(&Transport::Direct)",
+        "version-floor": ("src/session_capability.rs", "capabilities.version >= 3", "capabilities.version >= 2"),
+        "transport-projection": ("src/session_capability.rs", "direct_transport: transports.contains(&Transport::Direct)",
                                  "direct_transport: transports.contains(&Transport::Relay)"),
-        "default-version": ("version: minimum,", "version: 3,"),
-        "overwrite-profile-version": ("Some(capabilities) => capabilities,",
+        "default-version": ("src/session_capability.rs", "version: minimum,", "version: 3,"),
+        "overwrite-profile-version": ("src/session_capability.rs", "Some(capabilities) => capabilities,",
                                       "Some(capabilities) => SessionCapabilities { version: minimum, ..capabilities },"),
+        "server-floor": ("src/protocol_core.rs", "SERVER_MIN_PROTOCOL_VERSION: u16 = 2;",
+                         "SERVER_MIN_PROTOCOL_VERSION: u16 = 3;"),
+        "profile-version": ("src/session_capability.rs", "            protocol.version,",
+                            "            crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION,"),
+        "profile-transports": ("src/session_capability.rs", "            &protocol.transports,",
+                               "            &[],"),
     }
-    for name, (before, after) in changes.items():
+    for name, (source, before, after) in changes.items():
+        original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
         with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
             tree = Path(tmp)
             copy_sources(tree)
-            (tree / "src/session_capability.rs").write_text(original.replace(before, after))
+            (tree / source).write_text(original.replace(before, after))
             copied = tree / "formal/source-linked/lean"
             shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
                 ".lake*", "target", "llbc", "__pycache__", "*.log"))
@@ -313,7 +333,8 @@ def projection_mutants(crate):
                 extract(copied, "projection")
                 run(["lake", "build", "Projection.Extraction"], project)
                 target = ["Projection.Verification.Defaults"] if name in (
-                    "default-version", "overwrite-profile-version") else []
+                    "default-version", "overwrite-profile-version") else (["Projection.Verification.Profiles"] if name in (
+                    "server-floor", "profile-version", "profile-transports") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "projection", name)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()

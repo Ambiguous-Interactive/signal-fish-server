@@ -9,3 +9,12 @@ import Projection
 #print axioms Projection.resolved_support_contract
 #print axioms Projection.absent_support_contract
 #print axioms Projection.resolution_outcomes
+#print axioms Projection.profile_fields_contract
+#print axioms Projection.profile_support_contract
+#print axioms Projection.compact_default_contract
+#print axioms Projection.negotiated_default_contract
+#print axioms Projection.defaults_agree_contract
+#print axioms Projection.default_rejects_contract
+#print axioms Projection.profile_outcomes
+#print axioms Projection.connection_resolution_contract
+#print axioms Projection.connection_profile_support_contract

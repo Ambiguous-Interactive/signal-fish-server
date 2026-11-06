@@ -34308,7 +34308,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 50 shards, ceil(499/50) * 29s remains 290s.
 // 500 (was 499): profile/default resolution adds one return-value site (#1464).
 // With 50 shards, ceil(500/50) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 500;
+// 501 (was 500): fixed-floor connection resolution adds one return-value site (#1464).
+// With 51 shards, ceil(501/51) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 501;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -34576,12 +34578,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/50"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/51"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/50` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/51` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -34732,7 +34734,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/50 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/51 --print-cmd",
         violations.join("\n")
     );
 }

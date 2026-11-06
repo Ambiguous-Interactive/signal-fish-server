@@ -39,6 +39,29 @@ pub enum Topology {
     Mesh,
 }
 
+/// Protocol capabilities negotiated for a single connection during `Authenticate`.
+///
+/// The default is a pure v2 client: protocol version 2, relay-only transport and
+/// relay-only topology. v3 negotiation overwrites this when the connection manager stores the profile.
+#[derive(Debug, Clone)]
+pub(crate) struct NegotiatedProtocol {
+    pub version: u16,
+    pub transports: Vec<Transport>,
+    /// Session topologies the client supports; consumed by the P3 session-plan
+    /// selection path (`session_policy::choose_session_plan`).
+    pub topologies: Vec<Topology>,
+}
+
+impl Default for NegotiatedProtocol {
+    fn default() -> Self {
+        Self {
+            version: crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION,
+            transports: vec![Transport::Relay],
+            topologies: vec![Topology::Relay],
+        }
+    }
+}
+
 /// Version and set membership used by live session selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionCapabilities {
@@ -49,6 +72,22 @@ pub(crate) struct SessionCapabilities {
     pub relay_topology: bool,
     pub host_topology: bool,
     pub mesh_topology: bool,
+}
+
+impl Default for SessionCapabilities {
+    fn default() -> Self {
+        resolve_connection_capabilities(None)
+    }
+}
+
+impl From<&NegotiatedProtocol> for SessionCapabilities {
+    fn from(protocol: &NegotiatedProtocol) -> Self {
+        crate::session_capability::project_capabilities(
+            protocol.version,
+            &protocol.transports,
+            &protocol.topologies,
+        )
+    }
 }
 
 impl SessionCapabilities {
@@ -86,6 +125,16 @@ pub(crate) fn resolve_capabilities(
             mesh_topology: false,
         },
     }
+}
+
+/// Resolve a live connection profile using this server's fixed relay floor.
+pub(crate) fn resolve_connection_capabilities(
+    capabilities: Option<SessionCapabilities>,
+) -> SessionCapabilities {
+    resolve_capabilities(
+        capabilities,
+        crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION,
+    )
 }
 
 /// Require protocol v3 or higher and both requested capability axes.
@@ -132,7 +181,24 @@ pub(crate) fn all_support<T>(
 mod tests {
     use std::cell::RefCell;
 
-    use super::{all_support, SessionCapabilities, Topology, Transport};
+    use super::{all_support, NegotiatedProtocol, SessionCapabilities, Topology, Transport};
+
+    /// The server floor and both live default representations retain the v2 contract.
+    #[test]
+    fn negotiated_and_compact_defaults_keep_v2_relay_floor() {
+        assert_eq!(crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION, 2);
+        let profile = NegotiatedProtocol::default();
+        assert_eq!(profile.version, 2);
+        assert_eq!(profile.transports, vec![Transport::Relay]);
+        assert_eq!(profile.topologies, vec![Topology::Relay]);
+        let compact = SessionCapabilities::default();
+        assert_eq!(SessionCapabilities::from(&profile), compact);
+        for topology in [Topology::Relay, Topology::Host, Topology::Mesh] {
+            for transport in [Transport::Relay, Transport::Direct, Transport::WebRtc] {
+                assert!(!super::supports_session(compact, topology, transport));
+            }
+        }
+    }
 
     /// Check that aggregation reads no members after the first rejection.
     #[test]

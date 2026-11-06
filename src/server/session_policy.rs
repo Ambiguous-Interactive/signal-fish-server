@@ -116,25 +116,6 @@ impl ActiveSessionPlan {
 
 pub(crate) use crate::session_capability::SessionCapabilities;
 
-impl Default for SessionCapabilities {
-    fn default() -> Self {
-        crate::session_capability::resolve_capabilities(
-            None,
-            crate::config::SERVER_MIN_PROTOCOL_VERSION,
-        )
-    }
-}
-
-impl From<&NegotiatedProtocol> for SessionCapabilities {
-    fn from(protocol: &NegotiatedProtocol) -> Self {
-        crate::session_capability::project_capabilities(
-            protocol.version,
-            &protocol.transports,
-            &protocol.topologies,
-        )
-    }
-}
-
 /// Per-member input to session selection: identity + negotiated capabilities +
 /// join time (for deterministic host election).
 ///
@@ -814,10 +795,9 @@ impl EnhancedGameServer {
     }
 
     pub(super) fn session_capabilities(&self, player_id: &PlayerId) -> SessionCapabilities {
-        crate::session_capability::resolve_capabilities(
+        crate::session_capability::resolve_connection_capabilities(
             self.connection_manager
                 .project_protocol(player_id, |protocol| SessionCapabilities::from(protocol)),
-            crate::config::SERVER_MIN_PROTOCOL_VERSION,
         )
     }
 
@@ -859,11 +839,10 @@ impl EnhancedGameServer {
                 .map(|player| {
                     SessionMember::from_player(
                         player,
-                        crate::session_capability::resolve_capabilities(
+                        crate::session_capability::resolve_connection_capabilities(
                             connection_manager.project_protocol(&player.id, |protocol| {
                                 SessionCapabilities::from(protocol)
                             }),
-                            crate::config::SERVER_MIN_PROTOCOL_VERSION,
                         ),
                         // A disabled transport can never be selected. Keep its
                         // legacy metadata only in the shared GameStarting frame.

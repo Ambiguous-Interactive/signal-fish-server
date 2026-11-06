@@ -27,7 +27,7 @@ noncomputable section
 namespace signal_fish_proof_core
 
 /-- [signal_fish_proof_core::protocol_core::negotiate_protocol_version]:
-    Source: 'src/../../../../src/protocol_core.rs', lines 6:0-20:1 -/
+    Source: 'src/../../../../src/protocol_core.rs', lines 9:0-23:1 -/
 def protocol_core.negotiate_protocol_version
   (client_max : core.option.Option Std.U16) (minimum : Std.U16)
   (maximum : Std.U16) :

@@ -1,5 +1,8 @@
 //! Deterministic protocol decisions shared by production and source-linked proofs.
 
+/// Lowest protocol version this server build still accepts (the v2 floor).
+pub const SERVER_MIN_PROTOCOL_VERSION: u16 = 2;
+
 /// Negotiate without raising an explicit client ceiling.
 ///
 /// A result below `minimum` remains below it for the caller to reject.

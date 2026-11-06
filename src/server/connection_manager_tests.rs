@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::Topology;
 
 impl ConnectionManager {
     #[cfg(all(test, signal_fish_repository_tests))]

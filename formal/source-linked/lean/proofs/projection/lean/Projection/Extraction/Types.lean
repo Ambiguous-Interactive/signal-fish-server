@@ -2,6 +2,7 @@
 -- [signal_fish_proof_core]: type definitions
 import Aeneas
 import CoreModels
+import Projection.Extraction.TypesExternal
 open CoreModels Aeneas
 open Aeneas.Std hiding namespace core alloc
 open RustM ControlFlow Error
@@ -39,8 +40,15 @@ inductive session_capability.Topology where
 | Host : session_capability.Topology
 | Mesh : session_capability.Topology
 
+/-- [signal_fish_proof_core::session_capability::NegotiatedProtocol]
+    Source: 'src/../../../../src/session_capability.rs', lines 47:0-53:1 -/
+structure session_capability.NegotiatedProtocol where
+  version : Std.U16
+  transports : alloc.vec.Vec session_capability.Transport
+  topologies : alloc.vec.Vec session_capability.Topology
+
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
-    Source: 'src/../../../../src/session_capability.rs', lines 44:0-52:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 67:0-75:1 -/
 structure session_capability.SessionCapabilities where
   version : Std.U16
   relay_transport : Bool

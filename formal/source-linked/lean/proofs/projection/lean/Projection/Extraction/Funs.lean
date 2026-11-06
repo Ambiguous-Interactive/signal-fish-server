@@ -26,6 +26,12 @@ noncomputable section
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::protocol_core::SERVER_MIN_PROTOCOL_VERSION]
+    Source: 'src/../../../../src/protocol_core.rs', lines 4:0-4:47
+    Visibility: public -/
+@[global_simps, irreducible]
+def protocol_core.SERVER_MIN_PROTOCOL_VERSION : Std.U16 := 2#u16
+
 /-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Transport> for signal_fish_proof_core::session_capability::Transport}::eq]:
     Source: 'src/../../../../src/session_capability.rs', lines 11:53-11:62
     Visibility: public -/
@@ -71,32 +77,30 @@ impl_def session_capability.Topology.Insts.CoreCmpPartialEqTopology :
     session_capability.Topology.Insts.CoreCmpPartialEqTopology
 }
 
-/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
-    Source: 'src/../../../../src/session_capability.rs', lines 55:4-61:5 -/
-def session_capability.SessionCapabilities.supports_transport
-  (self : session_capability.SessionCapabilities)
-  (transport : session_capability.Transport) :
-  RustM Bool
-  := do
-  match transport with
-  | session_capability.Transport.Relay => ok self.relay_transport
-  | session_capability.Transport.Direct => ok self.direct_transport
-  | session_capability.Transport.WebRtc => ok self.webrtc_transport
-
-/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
-    Source: 'src/../../../../src/session_capability.rs', lines 63:4-69:5 -/
-def session_capability.SessionCapabilities.supports_topology
-  (self : session_capability.SessionCapabilities)
-  (topology : session_capability.Topology) :
-  RustM Bool
-  := do
-  match topology with
-  | session_capability.Topology.Relay => ok self.relay_topology
-  | session_capability.Topology.Host => ok self.host_topology
-  | session_capability.Topology.Mesh => ok self.mesh_topology
+/-- [signal_fish_proof_core::session_capability::{impl core::default::Default for signal_fish_proof_core::session_capability::NegotiatedProtocol}::default]:
+    Source: 'src/../../../../src/session_capability.rs', lines 56:4-62:5
+    Visibility: public -/
+def session_capability.NegotiatedProtocol.Insts.CoreDefaultDefault.default
+  : RustM session_capability.NegotiatedProtocol := do
+  let y ←
+    lift (Std.Array.to_slice
+      (Array.make 1#usize [ session_capability.Transport.Relay ] : Array
+      session_capability.Transport 1#usize))
+  let ret ← alloc.slice.Slice.into_vec y
+  let y1 ←
+    lift (Std.Array.to_slice
+      (Array.make 1#usize [ session_capability.Topology.Relay ] : Array
+      session_capability.Topology 1#usize))
+  let ret1 ← alloc.slice.Slice.into_vec y1
+  ok
+    {
+      version := protocol_core.SERVER_MIN_PROTOCOL_VERSION,
+      transports := ret,
+      topologies := ret1
+    }
 
 /-- [signal_fish_proof_core::session_capability::resolve_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 73:0-89:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 112:0-128:1 -/
 def session_capability.resolve_capabilities
   (capabilities : core.option.Option session_capability.SessionCapabilities)
   (minimum : Std.U16) :
@@ -116,28 +120,24 @@ def session_capability.resolve_capabilities
       }
   | core.option.Option.Some capabilities1 => ok capabilities1
 
-/-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 92:0-100:1 -/
-def session_capability.supports_session
-  (capabilities : session_capability.SessionCapabilities)
-  (topology : session_capability.Topology)
-  (transport : session_capability.Transport) :
-  RustM Bool
+/-- [signal_fish_proof_core::session_capability::resolve_connection_capabilities]:
+    Source: 'src/../../../../src/session_capability.rs', lines 131:0-138:1 -/
+def session_capability.resolve_connection_capabilities
+  (capabilities : core.option.Option session_capability.SessionCapabilities) :
+  RustM session_capability.SessionCapabilities
   := do
-  if capabilities.version >= 3#u16
-  then
-    let b ←
-      session_capability.SessionCapabilities.supports_topology capabilities
-        topology
-    if b
-    then
-      session_capability.SessionCapabilities.supports_transport capabilities
-        transport
-    else ok false
-  else ok false
+  session_capability.resolve_capabilities capabilities
+    protocol_core.SERVER_MIN_PROTOCOL_VERSION
+
+/-- [signal_fish_proof_core::session_capability::{impl core::default::Default for signal_fish_proof_core::session_capability::SessionCapabilities}::default]:
+    Source: 'src/../../../../src/session_capability.rs', lines 78:4-80:5
+    Visibility: public -/
+def session_capability.SessionCapabilities.Insts.CoreDefaultDefault.default
+  : RustM session_capability.SessionCapabilities := do
+  session_capability.resolve_connection_capabilities core.option.Option.None
 
 /-- [signal_fish_proof_core::session_capability::project_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 103:0-117:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 152:0-166:1 -/
 def session_capability.project_capabilities
   (version : Std.U16) (transports : Slice session_capability.Transport)
   (topologies : Slice session_capability.Topology) :
@@ -177,5 +177,72 @@ def session_capability.project_capabilities
       host_topology := b4,
       mesh_topology := b5
     }
+
+/-- [signal_fish_proof_core::session_capability::{impl core::convert::From<&'_0 signal_fish_proof_core::session_capability::NegotiatedProtocol> for signal_fish_proof_core::session_capability::SessionCapabilities}::from]:
+    Source: 'src/../../../../src/session_capability.rs', lines 84:4-90:5
+    Visibility: public -/
+def
+  session_capability.SessionCapabilities.Insts.CoreConvertFromShared0NegotiatedProtocol.from
+  (protocol : session_capability.NegotiatedProtocol) :
+  RustM session_capability.SessionCapabilities
+  := do
+  let s ←
+    alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref protocol.transports
+  let s1 ←
+    alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref protocol.topologies
+  session_capability.project_capabilities protocol.version s s1
+
+/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
+    Source: 'src/../../../../src/session_capability.rs', lines 94:4-100:5 -/
+def session_capability.SessionCapabilities.supports_transport
+  (self : session_capability.SessionCapabilities)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  match transport with
+  | session_capability.Transport.Relay => ok self.relay_transport
+  | session_capability.Transport.Direct => ok self.direct_transport
+  | session_capability.Transport.WebRtc => ok self.webrtc_transport
+
+/-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
+    Source: 'src/../../../../src/session_capability.rs', lines 102:4-108:5 -/
+def session_capability.SessionCapabilities.supports_topology
+  (self : session_capability.SessionCapabilities)
+  (topology : session_capability.Topology) :
+  RustM Bool
+  := do
+  match topology with
+  | session_capability.Topology.Relay => ok self.relay_topology
+  | session_capability.Topology.Host => ok self.host_topology
+  | session_capability.Topology.Mesh => ok self.mesh_topology
+
+/-- [signal_fish_proof_core::session_capability::supports_session]:
+    Source: 'src/../../../../src/session_capability.rs', lines 141:0-149:1 -/
+def session_capability.supports_session
+  (capabilities : session_capability.SessionCapabilities)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  if capabilities.version >= 3#u16
+  then
+    let b ←
+      session_capability.SessionCapabilities.supports_topology capabilities
+        topology
+    if b
+    then
+      session_capability.SessionCapabilities.supports_transport capabilities
+        transport
+    else ok false
+  else ok false
+
+/-- [signal_fish_proof_core::negotiated_profile_capabilities]:
+    Source: 'src/lib.rs', lines 10:0-14:1 -/
+def negotiated_profile_capabilities
+  (protocol : session_capability.NegotiatedProtocol) :
+  RustM session_capability.SessionCapabilities
+  := do
+  session_capability.SessionCapabilities.Insts.CoreConvertFromShared0NegotiatedProtocol.from
+    protocol
 
 end signal_fish_proof_core
