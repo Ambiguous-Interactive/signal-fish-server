@@ -51,6 +51,7 @@ DIFF_BASE=
 # tests/doc_consistency_policy_tests.rs.
 CHANGELOG_FORBIDDEN_BULLET_RE='^[[:space:]]*-+[[:space:]]*[*_"`]*[[:space:]]*([Tt]ests?|[Cc][Ii])[[:space:]]*:'
 
+# Bash 3.2 needs the + expansion below to iterate empty arrays under set -u.
 declare -a CHANGED_FILES=()
 
 action_error() {
@@ -944,7 +945,7 @@ elif [ "$CHANGED_MODE" != "none" ]; then
     action_info "Evaluating changelog gate for changed files mode: $CHANGED_MODE"
 
     local_has_changelog=0
-    for path in "${CHANGED_FILES[@]}"; do
+    for path in ${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}; do
         if [ "$path" = "CHANGELOG.md" ]; then
             local_has_changelog=1
             break
@@ -953,7 +954,7 @@ elif [ "$CHANGED_MODE" != "none" ]; then
 
     declare -a NON_INTERNAL_CHANGED=()
     declare -a REFACTOR_PATHS=()
-    for path in "${CHANGED_FILES[@]}"; do
+    for path in ${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}; do
         if [ "$path" = ".github/internal-refactor.json" ]; then
             refactor_mode="Comparison"
             [ "$CHANGED_MODE" = "staged" ] && refactor_mode="Staged"
@@ -969,14 +970,14 @@ elif [ "$CHANGED_MODE" != "none" ]; then
         fi
     done
     local_exempted_test_only=0
-    for path in "${CHANGED_FILES[@]}"; do
+    for path in ${CHANGED_FILES[@]+"${CHANGED_FILES[@]}"}; do
         [ -z "$path" ] && continue
         [ "$path" = "CHANGELOG.md" ] && continue
         if is_internal_path "$path"; then
             continue
         fi
         declared_refactor=0
-        for refactor_path in "${REFACTOR_PATHS[@]}"; do
+        for refactor_path in ${REFACTOR_PATHS[@]+"${REFACTOR_PATHS[@]}"}; do
             [ "$refactor_path" != "$path" ] || declared_refactor=1
         done
         [ "$declared_refactor" -eq 0 ] || continue

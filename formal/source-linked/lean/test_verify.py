@@ -150,6 +150,29 @@ class RequiredAggregation(unittest.TestCase):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "projection", name)
 
+    def test_member_faults_require_only_actual_member_contract_rejection(self):
+        """Reject extraction and tool failures for the concrete getter and host controls."""
+        diagnostic = "error: Capability/Verification/Members.lean:42:6: unsolved goals\n"
+        names = ("member-getter", "member-support", "member-direct-endpoint", "member-webrtc-endpoint")
+        for name in names:
+            for failure in ("unsolved goals", "Type mismatch", "Tactic `rfl` failed"):
+                with self.subTest(name=name, failure=failure):
+                    verify.check_proof_rejection(SimpleNamespace(
+                        returncode=1, stdout=diagnostic.replace("unsolved goals", failure)),
+                        "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("Members.lean", "ConcreteCallbacks.lean")),
+                (1, diagnostic.replace("Verification/Members", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, diagnostic + "error: Capability/Extraction/Types.lean:5:1: Type mismatch\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, code=code, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
+
     def test_all_production_inputs_are_copied_and_missing_input_fails(self):
         """Isolated faults and extraction need every source, with unchanged bytes."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -549,12 +572,16 @@ class CapabilityEvidence(unittest.TestCase):
                 (root / "src").mkdir()
                 source = root / "src/protocol_core.rs"
                 source.write_text("production source\n")
-                (root / "src/session_capability.rs").write_text("production capability\n")
-                (root / "src/session_admission.rs").write_text("production admission\n")
+                for name in verify.SOURCES:
+                    if name != "src/protocol_core.rs":
+                        (root / name).write_text(f"production input {name}\n")
                 crate = root / "formal/source-linked/lean"
                 negotiation = crate / "proofs/negotiation/lean"
                 negotiation.mkdir(parents=True)
                 (negotiation / "lake-manifest.json").write_text("{}")
+                member_types = crate / "proofs/capability/lean/Capability/Assumptions/TypesExternal.lean"
+                member_types.parent.mkdir(parents=True)
+                member_types.write_text("reviewed member type interpretations\n")
                 (crate / "compatibility").mkdir()
                 (crate / "compatibility/IteratorAll.lean").write_text("upstream alias\n")
                 logs = root / "logs"
@@ -614,6 +641,8 @@ class CapabilityEvidence(unittest.TestCase):
                 generated = "formal/source-linked/lean/proofs/capability/lean/Capability"
                 for archive in archives:
                     self.assertFalse(json.loads((archive / "results.json").read_text())["aggregation_theorem_proved"])
+                    self.assertEqual((archive / generated / "Assumptions/TypesExternal.lean").read_text(),
+                                     member_types.read_text())
                     if drift is not True:
                         self.assertEqual((archive / generated / "Extraction/Funs.lean").read_text(), "generated body\n")
                 mapped = archives[-1] / generated / "Compatibility.lean"
@@ -630,9 +659,8 @@ class CapabilityEvidence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "src").mkdir()
-            (root / "src/protocol_core.rs").write_text("production source\n")
-            (root / "src/session_capability.rs").write_text("production capability\n")
-            (root / "src/session_admission.rs").write_text("production admission\n")
+            for name in verify.SOURCES:
+                (root / name).write_text(f"production input {name}\n")
             crate = root / "formal/source-linked/lean"
             crate.mkdir(parents=True)
             (crate / "hax.toml").write_text("pinned tools\n")
@@ -666,7 +694,7 @@ class CapabilityEvidence(unittest.TestCase):
             logs = root / "logs"
             logs.mkdir()
             files = {
-                "src/protocol_core.rs": "production source\n",
+                **{name: f"production input {name}\n" for name in verify.SOURCES},
                 "formal/source-linked/lean/Cargo.toml": "cargo manifest\n",
                 "formal/source-linked/lean/Cargo.lock": "cargo lock\n",
                 "formal/source-linked/lean/hax.toml": "tool pins\n",
@@ -677,6 +705,7 @@ class CapabilityEvidence(unittest.TestCase):
                 "formal/source-linked/lean/proofs/negotiation/lean/lakefile.toml": "lean pins\n",
                 "formal/source-linked/lean/proofs/negotiation/lean/lean-toolchain": "lean version\n",
                 "formal/source-linked/lean/proofs/capability/lean/Capability/Extraction/Funs.lean": "generated body\n",
+                "formal/source-linked/lean/proofs/capability/lean/Capability/Assumptions/TypesExternal.lean": "external member types\n",
                 "formal/source-linked/lean/proofs/capability/lean/lake-manifest.json": "{}\n",
             }
             for relative, content in files.items():
@@ -709,6 +738,36 @@ class CapabilityEvidence(unittest.TestCase):
                 self.assertEqual((archive / "commands/02.log").read_text(), "raw typecheck failure\n")
                 self.assertEqual(report["runs"][1]["exit_code"], 1)
             self.assertEqual(runs[1]["log"], "02.log")
+
+
+    def test_required_member_evidence_retains_external_types_and_llbc(self):
+        """Preserve member interpretation and extractor IR with source and proof hashes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crate = root / "formal/source-linked/lean"
+            inputs = {name: f"production input {name}\n" for name in verify.SOURCES}
+            prefix = "formal/source-linked/lean/proofs/capability/lean/"
+            inputs.update({
+                prefix + "Capability/Assumptions/TypesExternal.lean": "reviewed external types\n",
+                prefix + "Capability/Extraction/Types.lean": "actual extracted member\n",
+                prefix + "Capability/Verification/Members.lean": "member contracts\n",
+                prefix + "llbc/signal_fish_proof_core.llbc": "raw extractor type information\n",
+            })
+            for relative, content in inputs.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            with patch.object(verify, "LOGS", root / "logs"), patch.object(verify, "RUNS", []):
+                archive = verify.retain_proof_evidence(root, crate, "capability", 0, "failed proof")
+            report = json.loads((archive / "results.json").read_text())
+            self.assertEqual(report["status"], "failed proof")
+            self.assertEqual(report["required_theorems"], list(verify.THEOREMS["capability"]))
+            self.assertEqual(set(report["files_sha256"]), set(inputs))
+            for relative, content in inputs.items():
+                (root / relative).unlink()
+                self.assertEqual((archive / relative).read_text(), content)
+                self.assertEqual(report["files_sha256"][relative],
+                                 hashlib.sha256(content.encode()).hexdigest())
 
 
 if __name__ == "__main__":

@@ -17,8 +17,9 @@ unsafe_code = "forbid"
 
 [package.metadata.cargo-machete]
 # Dependencies are used by #[path] imported production modules, outside this crate.
-ignored = ["serde", "uuid"]
+ignored = ["chrono", "serde", "uuid"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 uuid = { version = "1.29.0", default-features = false }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }

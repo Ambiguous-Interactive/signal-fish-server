@@ -268,16 +268,7 @@ impl std::fmt::Debug for ConnectionInfo {
     }
 }
 
-/// A syntactically usable direct host endpoint carried by a v3
-/// [`SessionPlanPayload`].
-///
-/// This type deliberately models only the connect target. It does not claim
-/// that the self-declared address is reachable from another room member.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirectEndpoint {
-    pub host: String,
-    pub port: u16,
-}
+pub use crate::session_member::DirectEndpoint;
 
 /// Information about a player in a room
 #[derive(Debug, Clone, Serialize, Deserialize)]

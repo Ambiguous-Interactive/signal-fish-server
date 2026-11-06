@@ -1657,6 +1657,17 @@ fn run_checker_with_git_base(
 }
 
 #[test]
+fn empty_staged_diff_passes_changelog_gate() {
+    let (exit, output) = run_checker_with_git_base(&[], &[], &["--staged"]);
+
+    assert_eq!(exit, 0, "an empty staged diff must pass.\n{output}");
+    assert!(
+        output.contains("No non-internal changed files detected"),
+        "an empty staged diff must reach the gate result.\n{output}"
+    );
+}
+
+#[test]
 fn test_only_rust_diff_passes_changelog_gate_with_diff_base() {
     let insertion = "        assert!(super::ready());\n    }\n";
     let replacement = "        assert!(super::ready());\n    }\n\n    #[test]\n    fn ready_still_true() {\n        assert!(super::ready());\n    }\n";
@@ -1718,8 +1729,8 @@ fn changed_files_mode_without_diff_base_stays_conservative() {
         exit, 0,
         "without a diff base the gate must stay conservative.\n{output}"
     );
-    assert!(output.contains("without CHANGELOG.md update"));
-    assert!(output.contains("--diff-base"));
+    assert!(output.contains("without CHANGELOG.md update"), "{output}");
+    assert!(output.contains("--diff-base"), "{output}");
 }
 
 #[test]
@@ -1767,7 +1778,7 @@ fn deleting_from_a_file_without_a_test_module_requires_changelog() {
         exit, 0,
         "a deletion from a file that never had a test module must require a changelog entry.\n{output}"
     );
-    assert!(output.contains("without CHANGELOG.md update"));
+    assert!(output.contains("without CHANGELOG.md update"), "{output}");
 }
 
 #[test]

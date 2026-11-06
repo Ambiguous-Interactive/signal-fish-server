@@ -20,3 +20,21 @@ set_option maxHeartbeats 1000000
 
 /- You can set the `maxRecDepth` value with the `-max-recdepth` CLI option -/
 set_option maxRecDepth 2048
+
+/-- External UUID representation. These contracts never inspect identity bytes. -/
+structure uuid.Uuid where
+  bytes : Aeneas.Std.Array Aeneas.Std.U8 16#usize
+
+/-- UTC has no stored fields in the locked Chrono dependency. -/
+inductive chrono.offset.utc.Utc where
+  | Utc
+
+/-- External timestamp interpretation for fields these decisions never read.
+Chrono 0.4.45 stores a packed date, seconds, fraction and offset. This interpretation
+permits every scalar value, including invalid dates. It adds no timestamp operations,
+ordering rules or axioms. Timestamp construction and host election remain outside. -/
+structure chrono.datetime.DateTime (Tz Offset : Type) where
+  packedDate : I32
+  seconds : U32
+  fraction : U32
+  offset : Offset

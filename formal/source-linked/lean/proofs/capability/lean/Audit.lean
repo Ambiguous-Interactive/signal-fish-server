@@ -10,3 +10,9 @@ import Capability
 #print axioms Capability.concrete_callback_contract
 #print axioms Capability.concrete_aggregation_contract
 #print axioms Capability.concrete_aggregation_outcomes
+#print axioms Capability.member_support_contract
+#print axioms Capability.member_getter_contract
+#print axioms Capability.member_aggregation_contract
+#print axioms Capability.member_host_contract
+#print axioms Capability.member_host_inputs
+#print axioms Capability.member_host_outcomes

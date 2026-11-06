@@ -15,3 +15,15 @@ fn negotiated_profile_capabilities(
 
 #[path = "../../../../src/session_admission.rs"]
 mod session_admission;
+
+#[path = "../../../../src/session_member.rs"]
+mod session_member;
+
+// Invoke the production method so extraction follows its actual implementation.
+fn session_member_can_host(
+    member: &session_member::SessionMember,
+    topology: session_capability::Topology,
+    transport: session_capability::Transport,
+) -> bool {
+    member.can_host(topology, transport)
+}

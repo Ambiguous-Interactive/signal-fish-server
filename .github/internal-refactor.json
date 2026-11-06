@@ -1,26 +1,31 @@
 {
-  "base": "1577066e4fe56a4c44a63fa6a59faf8894627ce8",
-  "reason": "Move the unchanged sticky-session admission predicate and actual stored plan into a private module for source-linked contracts. Keep server paths through reexports and keep the server-specific plan methods in place. PlayerId remains the same UUID type. Preserve runtime behavior, wire formats, public APIs, allocations, dependencies, map lookup, and locking. Keep the moved admission code in the existing mutation scope.",
+  "base": "e5c56dee583ecb166f06339ce4609e920c0eb6e8",
+  "reason": "Move the unchanged actual session member, DirectEndpoint type, support and host predicates, and aggregation getter into shared production source for extraction. Re-export the same server and public protocol paths. Keep constructors, validation, host election and room transactions in place. Preserve behavior, wire formats, public APIs, allocations and runtime dependencies. Retain mutation coverage for moved code.",
   "files": [
     {
       "path": "src/lib.rs",
-      "before": "366336a04d45147cfb79d0545ba9e9234128b180",
-      "after": "5d33117bf36c19cf4cb963591511e9116e0901d0"
+      "before": "5d33117bf36c19cf4cb963591511e9116e0901d0",
+      "after": "5ed3eebc0de1a8a269e6c9c85b84563a5501c3fb"
+    },
+    {
+      "path": "src/protocol/types.rs",
+      "before": "00db857376dc3600c80c74260446aca75e35d033",
+      "after": "d839345934ea24ea53f4d162b580b92fa1c09093"
     },
     {
       "path": "src/server/session_policy.rs",
-      "before": "94fc5217a9aac447b373fe5ec6669b0a1927d444",
-      "after": "11d3b1d4c790149355563bda768ebc4caa6abad6"
+      "before": "11d3b1d4c790149355563bda768ebc4caa6abad6",
+      "after": "ccc284a76fc7dd2823016b0fcf66cc603738c0bf"
     },
     {
-      "path": "src/session_admission.rs",
+      "path": "src/session_member.rs",
       "before": null,
-      "after": "05e43ff985813be46ff3ce483815e0107b13cbd2"
+      "after": "2b194fae6b4f9432543becdb053a26c26dc1bff9"
     },
     {
       "path": ".cargo/mutants.toml",
-      "before": "1fb539f02e78ecab69caabdcf8d9f81c7e810158",
-      "after": "700136f191159b756aa71329bca1522f6541a0f7"
+      "before": "700136f191159b756aa71329bca1522f6541a0f7",
+      "after": "8058df7739f28f788808944736cc95ecbb8b2d4b"
     }
   ]
 }

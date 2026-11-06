@@ -45,6 +45,7 @@ pub mod protocol;
 mod protocol_core;
 mod session_admission;
 mod session_capability;
+mod session_member;
 
 /// Rate limiting implementation
 pub mod rate_limit;

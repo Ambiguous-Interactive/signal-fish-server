@@ -32,6 +32,12 @@ THEOREMS = {"negotiation": (
     "Capability.concrete_callback_contract",
     "Capability.concrete_aggregation_contract",
     "Capability.concrete_aggregation_outcomes",
+    "Capability.member_support_contract",
+    "Capability.member_getter_contract",
+    "Capability.member_aggregation_contract",
+    "Capability.member_host_contract",
+    "Capability.member_host_inputs",
+    "Capability.member_host_outcomes",
 ), "projection": (
     "Projection.support_contract",
     "Projection.projection_contract",
@@ -59,7 +65,7 @@ THEOREMS = {"negotiation": (
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
-SOURCES = ("src/protocol_core.rs", "src/session_capability.rs", "src/session_admission.rs")
+SOURCES = ("src/protocol_core.rs", "src/session_capability.rs", "src/session_admission.rs", "src/session_member.rs")
 LOGS = HERE / "target/verification-logs"
 COMMAND_COUNT = 0
 RUNS = []
@@ -209,7 +215,8 @@ def check_proof_rejection(result, scenario, name):
         targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
-                    "Capability/Verification/ConcreteCallbacks.lean:")
+                    "Capability/Verification/ConcreteCallbacks.lean:",
+                    "Capability/Verification/Members.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -231,6 +238,11 @@ def check_proof_rejection(result, scenario, name):
             and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the production profile proof: {name}\n{result.stdout}")
+    if name.startswith("member-") and not all(
+            error.startswith("Capability/Verification/Members.lean:")
+            and ("unsolved goals" in error or "Type mismatch" in error
+                 or "Tactic `rfl` failed" in error) for error in locations):
+        raise RuntimeError(f"Mutation did not fail the actual member contract: {name}\n{result.stdout}")
     if name.startswith("admission-") and not all(
             error.startswith("Projection/Verification/Admission.lean:")
             and "unsolved goals" in error for error in locations):
@@ -251,7 +263,7 @@ def retain_proof_evidence(tree, crate, scenario, first_run, status):
     inputs.extend(sorted((crate / "mutation-witnesses").glob("*.lean")))
     if project.exists():
         inputs.extend(project_evidence_inputs(project))
-        if scenario == "projection":
+        if scenario in ("projection", "capability"):
             inputs.append(project / "llbc/signal_fish_proof_core.llbc")
     return retain_snapshot(tree, inputs, destination, first_run, {
         "hax_version": VERSION, "status": status, "scenario": scenario,
@@ -408,7 +420,7 @@ def mutants(crate):
     verify(crate)
 
 
-def capability_mutants(crate):
+def capability_mutants(crate, *, names=None):
     """Reject result and callback-state faults with kernel-checked results."""
     changes = {
         "empty-room": ("!members.is_empty() && members.iter().all(supports)",
@@ -424,8 +436,17 @@ def capability_mutants(crate):
         "supports_session(capabilities(member), topology, "
         "match transport { Transport::Direct => Transport::Relay, other => other })",
     )
-    for name, (before, after) in changes.items():
-        source = "src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs"
+    changes.update({
+        "member-getter": ("|member| member.capabilities", "|member| SessionCapabilities { version: 0, ..member.capabilities }"),
+        "member-support": ("supports_session(self.capabilities, topology, transport)",
+                           "supports_session(SessionCapabilities { version: 3, ..self.capabilities }, topology, transport)"),
+        "member-direct-endpoint": ("transport != Transport::Direct || self.direct_endpoint.is_some()", "transport != Transport::Direct || true"),
+        "member-webrtc-endpoint": ("transport != Transport::Direct || self.direct_endpoint.is_some()",
+                                   "(transport != Transport::Direct || self.direct_endpoint.is_some()) && self.direct_endpoint.is_some()"),
+    })
+    selected = changes if names is None else {name: changes[name] for name in names}
+    for name, (before, after) in selected.items():
+        source = "src/session_member.rs" if name.startswith("member-") else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -449,7 +470,7 @@ def capability_mutants(crate):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, [])
+                }.get(name, ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
                 run(["lake", "build", "Capability.Verification.Callbacks"], project)
@@ -517,6 +538,9 @@ def probe_capability(crate):
         try:
             extract(copied, "capability")
             project = copied / "proofs/capability/lean"
+            # Regenerated member types use the same reviewed, operation-free interpretations.
+            shutil.copyfile(crate / "proofs/capability/lean/Capability/Assumptions/TypesExternal.lean",
+                            project / "Capability/Assumptions/TypesExternal.lean")
             manifest = json.loads((crate / "proofs/negotiation/lean/lake-manifest.json").read_text())
             manifest["name"] = "Capability"
             (project / "lake-manifest.json").write_text(json.dumps(manifest))
