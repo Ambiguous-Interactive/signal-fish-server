@@ -313,9 +313,12 @@ pub(crate) fn membership_session_decision(
 ///
 /// An empty room never supports an upgrade (there is nothing to connect).
 fn all_support(members: &[SessionMember], topology: Topology, transport: Transport) -> bool {
-    crate::protocol_core::nonempty_all_support(members, |member| {
-        member.supports_session(topology, transport)
-    })
+    crate::session_capability::all_support(
+        members,
+        |member| member.capabilities,
+        topology,
+        transport,
+    )
 }
 
 /// Whether a joiner's negotiated capabilities satisfy a stored sticky session

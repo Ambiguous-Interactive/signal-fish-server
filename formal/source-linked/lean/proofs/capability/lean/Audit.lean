@@ -7,3 +7,6 @@ import Capability
 #print axioms Capability.callback_trace_contract
 #print axioms Capability.callback_order_outcomes
 #print axioms Capability.callback_failure_outcomes
+#print axioms Capability.concrete_callback_contract
+#print axioms Capability.concrete_aggregation_contract
+#print axioms Capability.concrete_aggregation_outcomes

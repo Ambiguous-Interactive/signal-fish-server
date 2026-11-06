@@ -1,31 +1,16 @@
 {
-  "base": "af0dd6beec6677532060caef0dea611d71635372",
-  "reason": "Move unchanged capability enums, membership projection, and support decisions into shared production source for Lean proofs; preserve public paths, wire tokens, defaults, and selection behavior. Add development-only proof contracts, fault controls, and evidence without changing server dependencies or client behavior.",
+  "base": "3606ab6b98608c58d3a780028a7ab9a2e3677661",
+  "reason": "Share the unchanged nonempty room capability callback with source-linked Lean proofs. Preserve member order, short circuit, version and axis checks, public APIs, wire formats, defaults, and runtime dependencies. The production getter copies the same stored capability fields without allocation.",
   "files": [
     {
-      "path": ".cargo/mutants.toml",
-      "before": "b88b1a258b1ed895cd20f87ce7c046adf82c2158",
-      "after": "1fb539f02e78ecab69caabdcf8d9f81c7e810158"
-    },
-    {
-      "path": "src/lib.rs",
-      "before": "f5824085643ef7a8dfa85d10c8231dc100cab710",
-      "after": "366336a04d45147cfb79d0545ba9e9234128b180"
-    },
-    {
-      "path": "src/protocol/types.rs",
-      "before": "1a9b66695be75582ebbd4198fbe654d50d6840c3",
-      "after": "00db857376dc3600c80c74260446aca75e35d033"
-    },
-    {
       "path": "src/server/session_policy.rs",
-      "before": "e6a49efb34bc4f6ac8f7c72db829c18b43f6a7fe",
-      "after": "1a086422812c97b6b4caf1d469dbcd1e89545e0f"
+      "before": "1a086422812c97b6b4caf1d469dbcd1e89545e0f",
+      "after": "e401406b94add4fe28648100243777c7f1a16837"
     },
     {
       "path": "src/session_capability.rs",
-      "before": null,
-      "after": "a143e29b044a1a4e36cc49ee9f33f7c3851aa3f8"
+      "before": "a143e29b044a1a4e36cc49ee9f33f7c3851aa3f8",
+      "after": "8ad7326263314d27d0b41d6163f6b4f19a6cd8ec"
     }
   ]
 }
