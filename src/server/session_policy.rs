@@ -75,6 +75,7 @@ impl ActiveSessionPlan {
 
 pub(crate) use crate::session_capability::SessionCapabilities;
 
+use crate::session_member::rung_is_executable;
 pub(crate) use crate::session_member::{all_support, SessionMember};
 
 impl SessionMember {
@@ -210,16 +211,6 @@ pub(crate) fn membership_session_decision(
             is_replan: false,
         }
     }
-}
-
-/// Whether a capability-compatible rung has every piece needed to execute it.
-/// Only `host + direct` has an additional requirement: at least one capable
-/// member must have provided a syntactically usable connect endpoint.
-fn rung_is_executable(members: &[SessionMember], topology: Topology, transport: Transport) -> bool {
-    transport != Transport::Direct
-        || members
-            .iter()
-            .any(|member| member.can_host(topology, transport))
 }
 
 /// The session-upgrade ladder (ADR-0001 §1), richest rung first.

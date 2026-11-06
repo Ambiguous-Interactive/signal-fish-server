@@ -96,4 +96,9 @@ def session_capability.all_support.closure (T : Type) (T1 : Type) :=
 @[reducible]
 def session_member.all_support.closure := Unit
 
+/-- [signal_fish_proof_core::session_member::rung_is_executable::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+def session_member.rung_is_executable.closure :=
+  session_capability.Topology × session_capability.Transport
+
 end signal_fish_proof_core

@@ -43,6 +43,10 @@ THEOREMS = {"negotiation": (
     "Capability.host_validity_contract",
     "Capability.host_validity_witness",
     "Capability.host_validity_outcomes",
+    "Capability.executable_callback_contract",
+    "Capability.executability_contract",
+    "Capability.direct_executable_witness",
+    "Capability.executability_outcomes",
 ), "projection": (
     "Projection.support_contract",
     "Projection.projection_contract",
@@ -222,7 +226,8 @@ def check_proof_rejection(result, scenario, name):
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:",
                     "Capability/Verification/Members.lean:",
-                    "Capability/Verification/HostValidity.lean:")
+                    "Capability/Verification/HostValidity.lean:",
+                    "Capability/Verification/Executability.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -244,6 +249,10 @@ def check_proof_rejection(result, scenario, name):
             and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the production profile proof: {name}\n{result.stdout}")
+    if name.startswith("executable-") and not all(
+            error.startswith("Capability/Verification/Executability.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the executability contract: {name}\n{result.stdout}")
     if name.startswith("host-") and not all(
             error.startswith("Capability/Verification/HostValidity.lean:")
             and "unsolved goals" in error for error in locations):
@@ -462,9 +471,14 @@ def capability_mutants(crate, *, names=None):
         "host-topology": ("self.topology == Topology::Host", "self.topology != Topology::Host"),
         "host-missing": ("!self.host.is_some_and", "self.host.is_some_and"),
     })
+    changes.update({
+        "executable-transport": ("transport != Transport::Direct\n        || members", "transport == Transport::Direct\n        || members"),
+        "executable-capability": ("|member| member.can_host(topology, transport)", "|member| member.can_host(topology, transport) || member.direct_endpoint.is_some()"),
+        "executable-missing": ("transport != Transport::Direct\n        || members", "transport != Transport::Direct\n        && members"),
+    })
     selected = changes if names is None else {name: changes[name] for name in names}
     for name, (before, after) in selected.items():
-        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if name.startswith("member-") else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
+        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if (name.startswith("member-") or name.startswith("executable-")) else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -488,7 +502,8 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.HostValidity"] if name.startswith("host-") else
+                }.get(name, ["Capability.Verification.Executability"] if name.startswith("executable-") else
+                      ["Capability.Verification.HostValidity"] if name.startswith("host-") else
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
