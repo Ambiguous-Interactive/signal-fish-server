@@ -500,6 +500,130 @@ def session_member.rung_is_executable
         i (topology, transport)
     ok b1
 
+/-- [signal_fish_proof_core::session_member::UPGRADE_LADDER]
+    Source: 'src/../../../../src/session_member.rs', lines 93:0-97:2 -/
+@[global_simps, irreducible]
+def session_member.UPGRADE_LADDER
+  :
+  Array (session_capability.Topology × session_capability.Transport) 3#usize
+  :=
+  Array.make 3#usize [
+    (session_capability.Topology.Mesh, session_capability.Transport.WebRtc),
+    (session_capability.Topology.Host, session_capability.Transport.WebRtc),
+    (session_capability.Topology.Host, session_capability.Transport.Direct)
+    ]
+
+/-- [signal_fish_proof_core::session_member::RELAY_FLOOR]
+    Source: 'src/../../../../src/session_member.rs', lines 103:0-103:90 -/
+@[global_simps, irreducible]
+def session_member.RELAY_FLOOR
+  : (session_capability.Topology × session_capability.Transport) :=
+  (session_capability.Topology.Relay, session_capability.Transport.Relay)
+
+/-- [signal_fish_proof_core::session_member::topology_rank]:
+    Source: 'src/../../../../src/session_member.rs', lines 111:0-117:1 -/
+def session_member.topology_rank
+  (topology : session_capability.Topology) : RustM Std.U8 := do
+  match topology with
+  | session_capability.Topology.Relay => ok 0#u8
+  | session_capability.Topology.Host => ok 1#u8
+  | session_capability.Topology.Mesh => ok 2#u8
+
+/-- [signal_fish_proof_core::session_member::transport_enabled]:
+    Source: 'src/../../../../src/session_member.rs', lines 121:0-127:1 -/
+def session_member.transport_enabled
+  (enable_direct : Bool) (enable_webrtc : Bool)
+  (transport : session_capability.Transport) :
+  RustM Bool
+  := do
+  match transport with
+  | session_capability.Transport.Relay => ok true
+  | session_capability.Transport.Direct => ok enable_direct
+  | session_capability.Transport.WebRtc => ok enable_webrtc
+
+/-- [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnMut<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}::call_mut]:
+    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+def
+  session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool.call_mut
+  (c : session_member.select_session_pair.closure)
+  (tupled_args : (session_capability.Topology × session_capability.Transport))
+  :
+  RustM (Bool × session_member.select_session_pair.closure)
+  := do
+  let (t, b, b1, s) := c
+  let (topology, transport) := tupled_args
+  let i ← session_member.topology_rank topology
+  let i1 ← session_member.topology_rank t
+  if i <= i1
+  then
+    let b2 ← session_member.transport_enabled b b1 transport
+    if b2
+    then
+      let b3 ← session_member.all_support s topology transport
+      if b3
+      then
+        let b4 ← session_member.rung_is_executable s topology transport
+        ok (b4, c)
+      else ok (false, c)
+    else ok (false, c)
+  else ok (false, c)
+
+/-- [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnOnce<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+def
+  session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairTopologyTransportBool.call_once
+  (c : session_member.select_session_pair.closure)
+  (p : (session_capability.Topology × session_capability.Transport)) :
+  RustM Bool
+  := do
+  let (b, _) ←
+    session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool.call_mut
+      c p
+  ok b
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnOnce<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}]
+    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+@[reducible]
+def
+  session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairTopologyTransportBool
+  : core.ops.function.FnOnce session_member.select_session_pair.closure
+  (session_capability.Topology × session_capability.Transport) Bool := {
+  call_once :=
+    session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairTopologyTransportBool.call_once
+}
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnMut<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}]
+    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+@[reducible]
+def
+  session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool
+  : core.ops.function.FnMut session_member.select_session_pair.closure
+  (session_capability.Topology × session_capability.Transport) Bool := {
+  FnOnceInst :=
+    session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairTopologyTransportBool
+  call_mut :=
+    session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool.call_mut
+}
+
+/-- [signal_fish_proof_core::session_member::select_session_pair]:
+    Source: 'src/../../../../src/session_member.rs', lines 130:0-145:1 -/
+def session_member.select_session_pair
+  (members : Slice session_member.SessionMember)
+  (desired : session_capability.Topology) (enable_direct : Bool)
+  (enable_webrtc : Bool) :
+  RustM (session_capability.Topology × session_capability.Transport)
+  := do
+  let ii ←
+    core.Array.Insts.CoreIterTraitsCollectIntoIteratorTIntoIter.into_iter
+      session_member.UPGRADE_LADDER
+  let (o, _) ←
+    core.iter.traits.iterator.Iterator.find.default
+      (core.array.iter.IntoIter.Insts.CoreIterTraitsIteratorIterator
+      (session_capability.Topology × session_capability.Transport) 3#usize)
+      session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool
+      ii (desired, enable_direct, enable_webrtc, members)
+  core.option.Option.unwrap_or o session_member.RELAY_FLOOR
+
 /-- [signal_fish_proof_core::session_member_can_host]:
     Source: 'src/lib.rs', lines 23:0-29:1 -/
 def session_member_can_host

@@ -75,8 +75,10 @@ impl ActiveSessionPlan {
 
 pub(crate) use crate::session_capability::SessionCapabilities;
 
-use crate::session_member::rung_is_executable;
-pub(crate) use crate::session_member::{all_support, SessionMember};
+use crate::session_member::select_session_pair;
+pub(crate) use crate::session_member::SessionMember;
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(crate) use crate::session_member::{RELAY_FLOOR, UPGRADE_LADDER};
 
 impl SessionMember {
     /// Copy selection fields and include validated endpoints only when the caller needs Direct.
@@ -213,50 +215,6 @@ pub(crate) fn membership_session_decision(
     }
 }
 
-/// The session-upgrade ladder (ADR-0001 §1), richest rung first.
-///
-/// Each entry is a legal `(topology, transport)` pair the room may settle on, in
-/// strict preference order. [`choose_session_plan`] selects the first rung that
-/// fits the room's `desired` ceiling, has its transport enabled, and is supported
-/// by every member. Holding the ladder in one constant makes it the single source
-/// of truth shared by the selector, its doc comment, the CHANGELOG, and the
-/// selection tests — `ladder_is_the_documented_adr_waterfall` fails on any drift.
-pub(crate) const UPGRADE_LADDER: [(Topology, Transport); 3] = [
-    (Topology::Mesh, Transport::WebRtc),
-    (Topology::Host, Transport::WebRtc),
-    (Topology::Host, Transport::Direct),
-];
-
-/// The universal floor: server WebSocket relay, always available (ADR-0001 §3).
-///
-/// Selected only when no [`UPGRADE_LADDER`] rung fits. Each v3 member receives an
-/// explicit no-peer `SessionPlan` for this pair; v2 members remain plan-free.
-pub(crate) const RELAY_FLOOR: (Topology, Transport) = (Topology::Relay, Transport::Relay);
-
-/// Richness rank of a topology ceiling: `Relay < Host < Mesh` (ADR-0001 §1).
-///
-/// `desired` is a *ceiling*, so a room may settle on any topology whose rank is
-/// `<=` the desired rank (a mesh-preferring room can fall back to host). Written
-/// as an explicit match — not the wire enum's declaration order — so reordering
-/// [`Topology`] variants can never silently reshape selection.
-const fn topology_rank(topology: Topology) -> u8 {
-    match topology {
-        Topology::Relay => 0,
-        Topology::Host => 1,
-        Topology::Mesh => 2,
-    }
-}
-
-/// Whether `cfg` permits the given data-path transport. `Relay` is the mandatory
-/// floor (always permitted); `Direct` and `WebRtc` are opt-in upgrade gates.
-const fn transport_enabled(cfg: &SessionConfig, transport: Transport) -> bool {
-    match transport {
-        Transport::Relay => true,
-        Transport::Direct => cfg.enable_direct,
-        Transport::WebRtc => cfg.enable_webrtc,
-    }
-}
-
 /// The desired (ceiling) topology for `game_name`: the per-game override when
 /// mapped, else the configured default (the session-selection `desired` lookup).
 ///
@@ -320,7 +278,7 @@ pub(crate) fn ice_pregather_eligible(
 }
 
 /// Whether `(topology, transport)` is one of the four legal session pairs — the
-/// three [`UPGRADE_LADDER`] rungs plus the [`RELAY_FLOOR`].
+/// three [`crate::session_member::UPGRADE_LADDER`] rungs plus the [`crate::session_member::RELAY_FLOOR`].
 ///
 /// Every other combination (e.g. `Mesh + Direct`, `Host + Relay`) is illegal and
 /// must never reach a client: downstream consumers — late-join WebRTC pairing, ICE
@@ -340,11 +298,11 @@ pub(crate) fn is_valid_pair(topology: Topology, transport: Transport) -> bool {
 /// Choose the room-wide session plan from member capabilities (ADR-0001).
 ///
 /// `desired` (the per-game override, else the configured default) is a *ceiling*,
-/// not an exact match: the room settles on the richest [`UPGRADE_LADDER`] rung that
+/// not an exact match: the room settles on the richest [`crate::session_member::UPGRADE_LADDER`] rung that
 /// is **no richer than `desired`**, has its transport enabled, and is supported by
 /// *every* member. A rung fails when any single member lacks its topology/transport
 /// (or the transport is disabled); the walk then continues to the next rung, reaching
-/// the universal [`RELAY_FLOOR`] only when no rung fits. With the richest-first ladder
+/// the universal [`crate::session_member::RELAY_FLOOR`] only when no rung fits. With the richest-first ladder
 /// that is exactly (ADR-0001 §1):
 ///
 /// 1. `Mesh` + WebRTC — `desired == Mesh`, webrtc enabled, all support mesh+webrtc.
@@ -372,15 +330,8 @@ pub(crate) fn choose_session_plan(
     // Walk the richest-first ladder and settle on the first rung that fits the
     // `desired` ceiling, has its transport enabled, and is supported by *every*
     // member; otherwise fall to the universal relay floor (ADR-0001 §1/§3).
-    let (topology, transport) = UPGRADE_LADDER
-        .into_iter()
-        .find(|&(topology, transport)| {
-            topology_rank(topology) <= topology_rank(desired)
-                && transport_enabled(cfg, transport)
-                && all_support(&members, topology, transport)
-                && rung_is_executable(&members, topology, transport)
-        })
-        .unwrap_or(RELAY_FLOOR);
+    let (topology, transport) =
+        select_session_pair(&members, desired, cfg.enable_direct, cfg.enable_webrtc);
 
     let host = if topology == Topology::Host {
         elect_host(
@@ -513,7 +464,7 @@ impl SessionPlanDecision {
     /// host failover, endpoint refresh, finalized join, and reconnect), so the filter
     /// holds uniformly. At FINALIZE it is
     /// provably a no-op: [`choose_session_plan`] selects a non-relay pair only
-    /// when [`all_support`] holds, i.e. every member already satisfies the
+    /// when [`crate::session_member::all_support`] holds, i.e. every member already satisfies the
     /// predicate.
     #[must_use]
     #[cfg(any(test, feature = "allocation-tracking"))]
@@ -1524,7 +1475,7 @@ impl EnhancedGameServer {
     /// rejected); each publication counts every such member it observes —
     /// exactly once per publication event, not per delivery retry or outcome.
     /// Finalize needs no call:
-    /// a non-relay selection requires [`all_support`](fn@all_support), and the
+    /// a non-relay selection requires [`crate::session_member::all_support`], and the
     /// relay floor is not observed by definition.
     pub(crate) fn observe_mixed_path_members(
         &self,

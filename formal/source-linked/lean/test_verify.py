@@ -189,6 +189,29 @@ class RequiredAggregation(unittest.TestCase):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "capability", name)
 
+    def test_selection_faults_require_only_semantic_contract_rejection(self):
+        """Neither compiler errors nor an unrelated failed proof establish a selector fault."""
+        diagnostic = "error: Capability/Verification/Selection.lean:42:6: unsolved goals\n"
+        for name in ("selection-mesh-order", "selection-host-order", "selection-exact-ceiling",
+                     "selection-no-ceiling", "selection-switch", "selection-members",
+                     "selection-execution", "selection-floor"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("Selection.lean", "SelectionEvaluation.lean")),
+                (1, diagnostic.replace("Selection.lean", "Executability.lean")),
+                (1, diagnostic.replace("Verification/Selection", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic.replace("unsolved goals", "Tactic `rewrite` failed")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
+
     def test_member_faults_require_only_actual_member_contract_rejection(self):
         """Reject extraction and tool failures for the concrete getter and host controls."""
         diagnostic = "error: Capability/Verification/Members.lean:42:6: unsolved goals\n"

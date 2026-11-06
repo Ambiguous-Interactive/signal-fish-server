@@ -26,6 +26,7 @@ change the server's dependencies or public API.
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
+| Lean session pair selection | Select the first permitted, unanimously supported and executable ADR rung; otherwise Relay/Relay | Every representable finite member slice, all capability fields, ceilings and switches; configuration lookup, endpoint validation, election, state and publication remain outside |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -679,8 +680,9 @@ future versions, and a ready member after an unready member.
 The contract makes no legal-pair or membership-uniqueness assumption. It checks
 endpoint presence, not endpoint validation or reachability. The extra gate alone
 does not establish unanimous support: the selector separately calls `all_support`.
-Full ladder order, configuration and ceiling selection, host election, input
-construction, state commits and asynchronous correspondence remain open in P09–P12.
+The next section adds the pure ladder, ceiling and transport-switch contracts.
+Configuration lookup, host election, input construction, state commits and
+asynchronous correspondence remain open in P09–P12.
 The existing member and library-model boundaries still apply. No new trusted
 mapping or axiom is introduced. Kani keeps its eight-member bound and unwind ten.
 
@@ -697,6 +699,61 @@ behavior, wire format, public API, allocation or runtime dependency. Rust, .NET
 and Godot clients need no changes for that reason. The exact source blobs are
 recorded in `.github/internal-refactor.json`; hashes identify the reviewed diff,
 not a proof of semantic equivalence.
+
+### Session pair selection
+
+The live `choose_session_plan` now calls the unchanged iterator decision in
+[`session_member::select_session_pair`](../../src/session_member.rs).
+It passes the resolved topology ceiling and the two transport switches.
+The ladder, floor and rank move with this private decision. Host election,
+generation creation and member ownership remain in the original caller.
+
+[`Selection.lean`](lean/proofs/capability/lean/Capability/Verification/Selection.lean)
+specifies the ADR-0001 order independently: Mesh/WebRTC, Host/WebRTC, Host/Direct,
+then Relay/Relay. Its `RungFits` predicate requires the topology ceiling, the
+matching transport switch, nonempty unanimous v3+ support for both axes, and
+Direct execution readiness. The predicate uses the proved member semantics.
+It does not derive the required order from the production ladder constant.
+
+Eight additional audited contracts cover the pinned array search loop, its lift
+through the production selector, the actual callback, first-fit selection, the
+explicit waterfall, exact fallback, accepted-upgrade gates and reachable outcomes.
+The search proof terminates for finite arrays under a total fixed-predicate
+callback contract. The actual callback discharges that contract without an
+external getter assumption. All representable member slices, capability fields,
+versions, ceilings and switch values are covered. Identity uniqueness is not
+required. Empty rooms and legacy members cannot enable an upgrade.
+
+Eight isolated production-source faults change each priority, require an exact
+ceiling, ignore the ceiling, read the wrong transport switch, omit unanimity,
+omit execution readiness, or change the relay floor. Each extracted module must
+compile before the owning selection contract rejects it with an unsolved goal.
+Compiler errors, tool errors and failures in other modules do not count. A
+separate kernel-checked witness proves each wrong result without importing the
+rejected selection contract. Witnesses reuse the proved generic iterator lift
+with a concrete actual callback; they do not substitute a selection implementation.
+The standard runner restores proofs, regenerates twice, audits axioms, and retains
+source hashes, generated files, raw logs and timings. The independent Rust oracle
+checks 82,944 capability/version/endpoint/membership/ceiling/switch combinations.
+
+P09's pure pair decision is proved. Configuration map lookup and argument mapping,
+member construction and endpoint validation, elected-host choice, state commits,
+publication and asynchronous correspondence remain tested or pending. An endpoint
+in these proofs is present in the input; its address validity and reachability
+are not proved. UUID, timestamp and other metadata do not enter the pair decision.
+The existing external member types remain. This proof also relies on the pinned
+array `IntoIterator`, `IntoIter::next`, `Iterator::find`, option fallback and
+sequence models. The search theorem unfolds those definitions; their refinement
+to the Rust standard library remains a trusted extraction boundary.
+Kani retains its eight-member aggregation bound and unwind ten; it does not
+establish these new selector contracts.
+
+This internal source move preserves behavior, APIs, wire formats, allocation
+strategy and runtime dependencies. Rust clients are unaffected because session
+pairs and defaults are unchanged. .NET clients are unaffected for the same reason.
+Godot clients are unaffected for the same reason. No client migration is required.
+The exact source diff is declared in `.github/internal-refactor.json`; the blob
+hashes identify the reviewed change and do not prove semantic equivalence.
 
 ## Tool references
 
