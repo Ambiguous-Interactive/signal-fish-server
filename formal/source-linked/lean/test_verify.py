@@ -566,6 +566,42 @@ class PreparedDependencies(unittest.TestCase):
 class CapabilityEvidence(unittest.TestCase):
     """Keep failed and accepted extraction evidence separate from proof claims."""
 
+    @patch("builtins.print")
+    def test_main_probe_summary_distinguishes_unrequested_failed_and_passed(self, _print):
+        """A failed optional probe must remain failed in the overall report."""
+        accepted = "extraction_typechecked; no aggregation theorem proved"
+        for requested, fails, expected in (
+            (False, False, "not run; no aggregation theorem proved"),
+            (True, True, "probe failed; no aggregation theorem proved"),
+            (True, False, accepted),
+        ):
+            with self.subTest(requested=requested, fails=fails), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                verify.copy_sources(root)
+                crate = root / "formal/source-linked/lean"
+                verify.shutil.copytree(verify.HERE, crate, ignore=verify.shutil.ignore_patterns(
+                    ".lake*", "target", "llbc", "__pycache__", "*.log"))
+                logs = root / "logs"
+                argv = ["verify.py"] + (["--probe-capability"] if requested else [])
+                with patch.object(verify, "ROOT", root), patch.object(verify, "HERE", crate), \
+                        patch.object(verify, "LOGS", logs), patch.object(verify, "RUNS", []), \
+                        patch.object(verify, "run", return_value=SimpleNamespace(stdout="version=0.4.2")), \
+                        patch.object(verify, "verify"), patch.object(verify, "probe_capability") as probe, \
+                        patch("sys.argv", argv):
+                    probe.side_effect = RuntimeError("probe failed") if fails else None
+                    probe.return_value = accepted
+                    if fails:
+                        with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                            verify.main()
+                    else:
+                        verify.main()
+                    self.assertEqual(probe.call_count, int(requested))
+                report = json.loads((logs / "results.json").read_text())
+                self.assertEqual(report["capability_probe_status"], expected)
+                self.assertEqual(report["completed"], not fails)
+                self.assertTrue(report["source_unchanged"])
+                self.assertTrue(report["locks_unchanged"])
+
     def test_probe_manifest_isolates_only_target_and_fails_closed(self):
         """Preserve tool pins, backend options and other scenarios; reject missing scope."""
         original = ('[tools]\naeneas = "pinned"\n[scenario.capability]\n'

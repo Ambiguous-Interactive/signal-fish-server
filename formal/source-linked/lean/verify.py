@@ -675,6 +675,7 @@ def main():
             capability_mutants(HERE)
             projection_mutants(HERE)
         if args.probe_capability:
+            capability_probe_status = "probe failed; no aggregation theorem proved"
             capability_probe_status = probe_capability(HERE)
         completed = True
     finally:
