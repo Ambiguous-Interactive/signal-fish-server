@@ -13,5 +13,5 @@ theorem mutation_returns_wrong_value (member : SessionMember) :
     let high := { member with player_id := highId, capabilities := capable }
     peer_initiate low high .Host .WebRtc (.Some high.player_id) = RustM.ok .None := by
   simp [peer_initiate, member_support_contract, MemberSupport,
-    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq, distinct, Aeneas.Std.bind, Bind.bind]
+    uuid.Uuid.Insts.CoreCmpPartialEqUuid, uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq, CoreModels.core.cmp.PartialEq.ne.default, distinct, Aeneas.Std.bind, Bind.bind]
 end Capability
