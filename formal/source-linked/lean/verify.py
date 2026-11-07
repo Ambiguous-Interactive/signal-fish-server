@@ -117,6 +117,9 @@ THEOREMS = {"negotiation": (
     "Projection.admission_support_contract",
     "Projection.admission_host_independent",
     "Projection.admission_outcomes",
+    "Projection.pregather_contract",
+    "Projection.pregather_support_contract",
+    "Projection.pregather_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
@@ -267,7 +270,7 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "projection":
-        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:",)
+        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:",
@@ -337,6 +340,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Projection/Verification/Admission.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the admission contract: {name}\n{result.stdout}")
+    if name.startswith("pregather-") and not all(
+            error.startswith("Projection/Verification/Pregather.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the pregather contract: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -427,6 +434,13 @@ def projection_mutations():
         "admission-topology": ("src/session_admission.rs", "protocol.topologies.contains(&stored.topology)", "true"),
         "admission-transport": ("src/session_admission.rs", "protocol.transports.contains(&stored.transport)", "true"),
         "admission-host": ("src/session_admission.rs", "protocol.version >= 3", "protocol.version >= 3 && stored.host.is_some()"),
+        "pregather-switch": ("src/session_admission.rs", "    enable_pregather\n", "    true\n"),
+        "pregather-webrtc": ("src/session_admission.rs", "        && enable_webrtc\n", "        && true\n"),
+        "pregather-relay": ("src/session_admission.rs", "desired != Topology::Relay", "true"),
+        "pregather-finalized": ("src/session_admission.rs", "!finalized", "true"),
+        "pregather-version": ("src/session_admission.rs", "recipient.version >= 3", "recipient.version >= 2"),
+        "pregather-transport": ("src/session_admission.rs", "recipient.transports.contains(&Transport::WebRtc)", "true"),
+        "pregather-topology": ("src/session_admission.rs", "recipient.topologies.contains(&desired)", "true"),
     }
 
 
@@ -454,9 +468,9 @@ def projection_mutants(crate, *, names=None):
             try:
                 extract(copied, "projection")
                 run(["lake", "build", "Projection.Extraction"], project)
-                target = ["Projection.Verification.Admission"] if name.startswith("admission-") else (["Projection.Verification.Defaults"] if name in (
+                target = ["Projection.Verification.Pregather"] if name.startswith("pregather-") else (["Projection.Verification.Admission"] if name.startswith("admission-") else (["Projection.Verification.Defaults"] if name in (
                     "default-version", "overwrite-profile-version") else (["Projection.Verification.Profiles"] if name in (
-                    "server-floor", "profile-version", "profile-transports") else []))
+                    "server-floor", "profile-version", "profile-transports") else [])))
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "projection", name)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
@@ -633,24 +647,30 @@ def check_mutation_anchors(root):
 
 
 def capability_mutants(crate, *, names=None):
-    """Reject result and callback-state faults with kernel-checked results."""
+    """Reject faults independently while reusing unchanged Lean build inputs.
+
+    Lake tracks source and dependency hashes within this one isolated tree.
+    Reset all production files between faults; never share mutable build output
+    with the production checkout or another worker.
+    """
     changes = capability_mutations()
     selected = changes if names is None else {name: changes[name] for name in names}
-    for name, (source, before, after) in selected.items():
-        original = (ROOT / source).read_text()
-        if original.count(before) != 1:
-            raise RuntimeError(f"Mutation anchor changed: {name}")
-        with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
-            tree = Path(tmp)
+    with tempfile.TemporaryDirectory(prefix="signal-fish-lean-capability-mutants-") as tmp:
+        tree = Path(tmp)
+        copied = tree / "formal/source-linked/lean"
+        shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
+            ".lake*", "target", "llbc", "__pycache__", "*.log"))
+        project = copied / "proofs/capability/lean"
+        (project / ".lake").mkdir()
+        (project / ".lake/packages").symlink_to(
+            crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+        for name, (source, before, after) in selected.items():
+            original = (ROOT / source).read_text()
+            if original.count(before) != 1:
+                raise RuntimeError(f"Mutation anchor changed: {name}")
             copy_sources(tree)
             (tree / source).write_text(original.replace(before, after))
-            copied = tree / "formal/source-linked/lean"
-            shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
-                ".lake*", "target", "llbc", "__pycache__", "*.log"))
-            project = copied / "proofs/capability/lean"
-            (project / ".lake").mkdir()
-            (project / ".lake/packages").symlink_to(
-                crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+            (project / "Counterexample.lean").unlink(missing_ok=True)
             first_run = len(RUNS)
             status = "negative control failed"
             try:
@@ -684,7 +704,10 @@ def capability_mutants(crate, *, names=None):
                 status = "proof rejected; concrete wrong result kernel-checked"
                 print(f"REJECTED {name}: {status}", flush=True)
             finally:
-                retain_proof_evidence(tree, copied, "capability", first_run, status)
+                try:
+                    retain_proof_evidence(tree, copied, "capability", first_run, status)
+                finally:
+                    copy_sources(tree)
     verify(crate, "capability")
 
 

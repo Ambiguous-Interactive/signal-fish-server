@@ -40,19 +40,19 @@ inductive session_capability.Transport where
 | Direct : session_capability.Transport
 | WebRtc : session_capability.Transport
 
-/-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
-    Source: 'src/../../../../src/session_admission.rs', lines 25:0-29:1 -/
-structure session_admission.ActiveSessionPlan where
-  topology : session_capability.Topology
-  transport : session_capability.Transport
-  host : core.option.Option uuid.Uuid
-
 /-- [signal_fish_proof_core::session_capability::NegotiatedProtocol]
     Source: 'src/../../../../src/session_capability.rs', lines 47:0-53:1 -/
 structure session_capability.NegotiatedProtocol where
   version : Std.U16
   transports : alloc.vec.Vec session_capability.Transport
   topologies : alloc.vec.Vec session_capability.Topology
+
+/-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
+    Source: 'src/../../../../src/session_admission.rs', lines 43:0-47:1 -/
+structure session_admission.ActiveSessionPlan where
+  topology : session_capability.Topology
+  transport : session_capability.Transport
+  host : core.option.Option uuid.Uuid
 
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
     Source: 'src/../../../../src/session_capability.rs', lines 67:0-75:1 -/

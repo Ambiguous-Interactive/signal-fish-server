@@ -227,14 +227,13 @@ pub(crate) fn ice_pregather_eligible(
     lobby_state: &LobbyState,
     recipient: &NegotiatedProtocol,
 ) -> bool {
-    let desired = desired_topology_for(game_name, cfg);
-    cfg.enable_ice_pregather
-        && cfg.enable_webrtc
-        && desired != Topology::Relay
-        && *lobby_state != LobbyState::Finalized
-        && recipient.version >= 3
-        && recipient.transports.contains(&Transport::WebRtc)
-        && recipient.topologies.contains(&desired)
+    crate::session_admission::ice_pregather_eligible(
+        cfg.enable_ice_pregather,
+        cfg.enable_webrtc,
+        desired_topology_for(game_name, cfg),
+        *lobby_state == LobbyState::Finalized,
+        recipient,
+    )
 }
 
 /// Whether `(topology, transport)` is one of the four legal session pairs — the

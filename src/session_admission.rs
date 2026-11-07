@@ -5,6 +5,24 @@ use uuid::Uuid;
 use crate::session_capability::{NegotiatedProtocol, Topology, Transport};
 use crate::session_member::SessionMember;
 
+/// Whether this profile can receive ICE before the room finalizes.
+/// Configuration lookup and the current room state are supplied by the caller.
+pub(crate) fn ice_pregather_eligible(
+    enable_pregather: bool,
+    enable_webrtc: bool,
+    desired: Topology,
+    finalized: bool,
+    recipient: &NegotiatedProtocol,
+) -> bool {
+    enable_pregather
+        && enable_webrtc
+        && desired != Topology::Relay
+        && !finalized
+        && recipient.version >= 3
+        && recipient.transports.contains(&Transport::WebRtc)
+        && recipient.topologies.contains(&desired)
+}
+
 /// The sticky per-room session decision recorded when a room finalizes to a
 /// non-relay plan. Relay-floor rooms record nothing; a later reconnect derives
 /// its explicit Relay/Relay refresh from that absence rather than sticky state.

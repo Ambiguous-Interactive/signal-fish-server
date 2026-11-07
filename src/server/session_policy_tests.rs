@@ -5446,6 +5446,85 @@ fn topology_mapping_lookup_is_case_sensitive() {
     assert_eq!(desired_topology_for("FastFPS", &cfg), Topology::Host);
 }
 
+/// #1464: check the live lookup/state adapter against an independent bit-set oracle.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn ice_pregather_adapter_matches_protocol_matrix() {
+    let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
+    let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+    let states = [
+        LobbyState::Waiting,
+        LobbyState::Lobby,
+        LobbyState::Finalized,
+    ];
+    let mut cases = 0;
+    for pregather in [false, true] {
+        for webrtc in [false, true] {
+            for (default_index, default_topology) in topologies.iter().enumerate() {
+                // None uses the default; each mapped value must override it.
+                for mapping in [None, Some(0), Some(1), Some(2)] {
+                    let mut cfg = SessionConfig {
+                        enable_ice_pregather: pregather,
+                        enable_webrtc: webrtc,
+                        default_topology: *default_topology,
+                        ..SessionConfig::default()
+                    };
+                    if let Some(index) = mapping {
+                        cfg.game_topology_mappings
+                            .insert("matrix-game".into(), topologies[index]);
+                    }
+                    let desired_index = mapping.unwrap_or(default_index);
+                    for (state_index, state) in states.iter().enumerate() {
+                        for version in [0, 1, 2, 3, 4, u16::MAX] {
+                            for mask in 0_u8..64 {
+                                for repeated in [false, true] {
+                                    let mut profile = NegotiatedProtocol {
+                                        version,
+                                        topologies: topologies
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(index, _)| mask & (1 << index) != 0)
+                                            .map(|(_, axis)| *axis)
+                                            .collect(),
+                                        transports: transports
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(index, _)| mask & (8 << index) != 0)
+                                            .map(|(_, axis)| *axis)
+                                            .collect(),
+                                    };
+                                    if repeated {
+                                        profile.topologies.reverse();
+                                        profile.topologies.extend_from_within(..);
+                                        profile.transports.reverse();
+                                        profile.transports.extend_from_within(..);
+                                    }
+                                    let expected = pregather
+                                        && webrtc
+                                        && desired_index != 0
+                                        && state_index != 2
+                                        && version > 2
+                                        && mask & 32 != 0
+                                        && mask & (1 << desired_index) != 0;
+                                    assert_eq!(
+                                        ice_pregather_eligible(&cfg, "matrix-game", state, &profile),
+                                        expected,
+                                        "pregather={pregather} webrtc={webrtc} default={default_index} \
+                                         mapping={mapping:?} state={state:?} version={version} \
+                                         mask={mask} repeated={repeated}"
+                                    );
+                                    cases += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 110_592);
+}
+
 #[test]
 fn ice_pregather_eligibility_flips_every_conjunct_independently() {
     let cfg = pregather_session_config();
