@@ -95,10 +95,69 @@ private theorem election_next_empty (authority : CoreModels.core.option.Option u
       elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once,
       RustOption, Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry]
 
-private theorem election_candidate_callback (head : SessionMember) (candidate : ElectionCandidate) :
-      elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
-        electionIterator head candidate = RustM.ok (decide (electionKey (memberCandidate head) < electionKey candidate)) := by
-  exact candidate_comparison (memberCandidate head) candidate
+private theorem election_candidate_callback
+    (iterator : CoreModels.core.iter.traits.collect.IntoIterator
+      (Slice SessionMember) SessionMember (Slice SessionMember)) (head : SessionMember) (candidate : ElectionCandidate) :
+      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iterator).call_once
+        head candidate = RustM.ok (decide (electionKey (memberCandidate head) < electionKey candidate)) := by
+  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+  simp only [memberCandidate]
+  -- A compiled source fault leaves this semantic contract unsolved.
+  try exact candidate_comparison (head.joined_at, head.player_id) candidate
+
+private def replacementWanted (head : SessionMember) (current : Option ElectionCandidate) : Bool :=
+  match current with
+  | none => true
+  | some candidate => decide (electionKey (memberCandidate head) < electionKey candidate)
+
+private theorem optional_some {F T : Type} (callback : CoreModels.core.ops.function.FnOnce F T Bool)
+    (value : T) (state : F) :
+    CoreModels.core.option.Option.is_none_or callback (.Some value) state = callback.call_once state value := rfl
+
+private theorem election_optional_callback
+    (iterator : CoreModels.core.iter.traits.collect.IntoIterator
+      (Slice SessionMember) SessionMember (Slice SessionMember))
+    (head : SessionMember) (current : Option ElectionCandidate) :
+    CoreModels.core.option.Option.is_none_or
+      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iterator)
+      (RustOption current) head = RustM.ok (replacementWanted head current) := by
+  cases current with
+  | none => rfl
+  | some candidate =>
+    simp only [RustOption, replacementWanted]
+    rw [optional_some, election_candidate_callback]
+
+private theorem earlier_candidate_replacement (head : SessionMember) (current : Option ElectionCandidate) :
+    RustOption (earlierCandidate current head) =
+      if replacementWanted head current then .Some (memberCandidate head) else RustOption current := by
+  cases current with
+  | none => rfl
+  | some candidate =>
+    simp only [replacementWanted, earlierCandidate, decide_eq_true_eq]
+    split_ifs <;> rfl
+
+private theorem election_next_cons_generic
+    (iterator : CoreModels.core.iter.traits.collect.IntoIterator
+      (Slice SessionMember) SessionMember (Slice SessionMember)) (authority : CoreModels.core.option.Option uuid.Uuid)
+    (head : SessionMember) (tail : List SessionMember) (bound : (head :: tail).length ≤ Usize.max)
+    (current : Option ElectionCandidate)
+    (next : iterator.iteratorIteratorInst.next (⟨head :: tail, bound⟩ : Slice SessionMember) =
+      RustM.ok (.Some head, (⟨tail, by simp only [List.length_cons] at bound; omega⟩ : Slice SessionMember))) :
+    elect_host_loop.body iterator authority (⟨head :: tail, bound⟩ : Slice SessionMember)
+      (RustOption current) = RustM.ok
+        (if CoreModels.core.option.Option.Some head.player_id = authority then .done (.Some head.player_id)
+         else .cont ((⟨tail, by simp only [List.length_cons] at bound; omega⟩ : Slice SessionMember),
+           RustOption (earlierCandidate current head))) := by
+  unfold elect_host_loop.body
+  rw [next]
+  simp only [Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry, option_identity,
+    election_optional_callback]
+  rw [earlier_candidate_replacement]
+  by_cases present : CoreModels.core.option.Option.Some head.player_id = authority
+  · simp only [present, decide_true, ↓reduceIte]
+  · simp only [present, decide_false, Bool.false_eq_true, ↓reduceIte]
+    try (cases replacementWanted head current <;> rfl)
 
 private theorem election_next_cons (authority : CoreModels.core.option.Option uuid.Uuid)
     (head : SessionMember) (tail : List SessionMember) (bound : (head :: tail).length ≤ Usize.max)
@@ -108,23 +167,9 @@ private theorem election_next_cons (authority : CoreModels.core.option.Option uu
         (if CoreModels.core.option.Option.Some head.player_id = authority then .done (.Some head.player_id)
          else .cont ((⟨tail, by simp only [List.length_cons] at bound; omega⟩ : Slice SessionMember),
            RustOption (earlierCandidate current head))) := by
-  unfold elect_host_loop.body
-  rw [iterator_next, next_cons]
-  simp only [Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry, option_identity,
-    CoreModels.core.option.Option.Some]
-  by_cases present : CoreModels.core.option.Option.Some head.player_id = authority
-  · simp only [present, decide_true, ↓reduceIte]
-  · simp only [present, decide_false, ↓reduceIte, Bool.false_eq_true]
-    cases current with
-    | none => rfl
-    | some candidate =>
-      simp only [RustOption, CoreModels.core.option.Option.is_none_or]
-      rw [election_candidate_callback]
-      by_cases earlier : electionKey (memberCandidate head) < electionKey candidate
-      · simp only [earlier, decide_true, ↓reduceIte, earlierCandidate]
-        rfl
-      · simp only [earlier, decide_false, ↓reduceIte, Bool.false_eq_true, earlierCandidate]
-
+  apply election_next_cons_generic
+  rw [iterator_next]
+  exact next_cons head tail bound
 
 private theorem election_loop_evaluation (authority : CoreModels.core.option.Option uuid.Uuid)
     (members : List SessionMember) (bound : members.length ≤ Usize.max)
@@ -143,6 +188,7 @@ private theorem election_loop_evaluation (authority : CoreModels.core.option.Opt
     simp only [election_next_cons]
     by_cases present : CoreModels.core.option.Option.Some head.player_id = authority
     · simp [present, electionScan, RustOption, memberCandidate]
+      cases authority <;> rfl
     · simp only [present, ↓reduceIte]
       simpa only [elect_host_loop, electionScan, present, ↓reduceIte]
         using ih tail_bound (earlierCandidate current head)
