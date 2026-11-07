@@ -56,4 +56,36 @@ abbrev iterator : CoreModels.core.iter.traits.collect.IntoIterator
   CoreModels.core.iter.traits.collect.IntoIterator.Blanket
     (CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT SessionMember)
 
+theorem pair_self_comparison {A B : Type} (first : A → Nat) (second : B → Nat) (value : A × B) :
+    CoreModels.core.Pair.Insts.CoreCmpPartialOrdPair.lt
+      (ElectionOrder.orderBy first first) (ElectionOrder.orderBy second second) value value = RustM.ok false := by
+  simp only [CoreModels.core.Pair.Insts.CoreCmpPartialOrdPair.lt, ElectionOrder.orderBy,
+    Nat.lt_irrefl, eq_self, ↓reduceIte, Aeneas.Std.bind, Bind.bind, CoreModels.core.option.Option.Some,
+    decide_false]
+
+/-- Start the extracted generic election without expanding a concrete iterator dictionary. -/
+theorem election_start
+    (iter : CoreModels.core.iter.traits.collect.IntoIterator
+      (Slice SessionMember) SessionMember (Slice SessionMember))
+    (authority : CoreModels.core.option.Option uuid.Uuid) (members initial : Slice SessionMember)
+    (into : iter.into_iter members = RustM.ok initial) :
+    elect_host iter authority members = elect_host_loop iter initial authority .None := by
+  unfold elect_host
+  rw [into]
+  rfl
+
+/-- Three observed loop steps suffice for a concrete wrong-result witness. -/
+theorem three_steps {State Result : Type} (body : State → RustM (ControlFlow State Result))
+    (first second third : State) (result : Result)
+    (one : body first = RustM.ok (.cont second))
+    (two : body second = RustM.ok (.cont third))
+    (three : body third = RustM.ok (.done result)) :
+    loop body first = RustM.ok result := by
+  rw [loop]
+  simp only [one]
+  rw [loop]
+  simp only [two]
+  rw [loop]
+  simp only [three]
+
 end Capability.ElectionFixtures
