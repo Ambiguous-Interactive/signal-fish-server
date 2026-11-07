@@ -55,6 +55,17 @@ THEOREMS = {"negotiation": (
     "Capability.selection_fallback_contract",
     "Capability.selection_upgrade_contract",
     "Capability.selection_outcomes",
+    "Capability.election_empty_contract",
+    "Capability.election_authority_contract",
+    "Capability.election_membership_contract",
+    "Capability.election_minimum_contract",
+    "Capability.election_total_contract",
+    "Capability.election_outcomes",
+    "Capability.election_permutation_contract",
+    "Capability.timestamp_key_order",
+    "Capability.timestamp_key_equal",
+    "Capability.uuid_key_equal",
+    "Capability.uuid_key_order",
 ), "projection": (
     "Projection.support_contract",
     "Projection.projection_contract",
@@ -236,7 +247,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/Members.lean:",
                     "Capability/Verification/HostValidity.lean:",
                     "Capability/Verification/Executability.lean:",
-                    "Capability/Verification/Selection.lean:")
+                    "Capability/Verification/Selection.lean:",
+                    "Capability/Verification/Election.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -258,6 +270,10 @@ def check_proof_rejection(result, scenario, name):
             and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the production profile proof: {name}\n{result.stdout}")
+    if name.startswith("election-") and not all(
+            error.startswith("Capability/Verification/Election.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the election contract: {name}\n{result.stdout}")
     if name.startswith("selection-") and not all(
             error.startswith("Capability/Verification/Selection.lean:")
             and "unsolved goals" in error for error in locations):
@@ -505,9 +521,14 @@ def capability_mutants(crate, *, names=None):
                                   "&& (rung_is_executable(members, topology, transport) || true)"),
         "selection-floor": ("= (Topology::Relay, Transport::Relay);", "= (Topology::Host, Transport::Direct);"),
     })
+    changes.update({
+        "election-authority": ("if Some(member.player_id) == authority {", "if Some(member.player_id) == authority && false {"),
+        "election-date": ("(member.joined_at, member.player_id) < candidate", "candidate < (member.joined_at, member.player_id)"),
+        "election-uuid": ("(member.joined_at, member.player_id) < candidate", "(member.joined_at, member.player_id) < (candidate.0, member.player_id)"),
+    })
     selected = changes if names is None else {name: changes[name] for name in names}
     for name, (before, after) in selected.items():
-        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if (name.startswith("member-") or name.startswith("executable-") or name.startswith("selection-")) else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
+        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if name.startswith(("member-", "executable-", "selection-", "election-")) else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -531,13 +552,15 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.Selection"] if name.startswith("selection-") else
+                }.get(name, ["Capability.Verification.Election"] if name.startswith("election-") else
+                      ["Capability.Verification.Selection"] if name.startswith("selection-") else
                       ["Capability.Verification.Executability"] if name.startswith("executable-") else
                       ["Capability.Verification.HostValidity"] if name.startswith("host-") else
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.SelectionEvaluation"] if name.startswith("selection-") else
+                run(["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
+                    ["lake", "build", "Capability.Verification.SelectionEvaluation"] if name.startswith("selection-") else
                     ["lake", "build", "Capability.Verification.Callbacks"], project)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
                 witness += "\n#print axioms Capability.mutation_returns_wrong_value\n"

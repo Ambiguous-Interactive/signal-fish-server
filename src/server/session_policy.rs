@@ -76,7 +76,7 @@ impl ActiveSessionPlan {
 pub(crate) use crate::session_capability::SessionCapabilities;
 
 use crate::session_member::select_session_pair;
-pub(crate) use crate::session_member::SessionMember;
+pub(crate) use crate::session_member::{elect_host, SessionMember};
 #[cfg(all(test, signal_fish_repository_tests))]
 pub(crate) use crate::session_member::{RELAY_FLOOR, UPGRADE_LADDER};
 
@@ -351,30 +351,6 @@ pub(crate) fn choose_session_plan(
         host,
         members,
     }
-}
-
-/// Elect the host for a `host`-topology room.
-///
-/// Prefers the explicitly designated `authority` *if that id is present in
-/// `members`*; otherwise the earliest joiner (ties broken by the smaller
-/// `player_id` for determinism); `None` for an empty room.
-#[must_use]
-pub(crate) fn elect_host<'a>(
-    authority: Option<PlayerId>,
-    members: impl IntoIterator<Item = &'a SessionMember>,
-) -> Option<PlayerId> {
-    let mut earliest: Option<&SessionMember> = None;
-    for member in members {
-        if Some(member.player_id) == authority {
-            return Some(member.player_id);
-        }
-        if earliest.is_none_or(|candidate| {
-            (member.joined_at, member.player_id) < (candidate.joined_at, candidate.player_id)
-        }) {
-            earliest = Some(member);
-        }
-    }
-    earliest.map(|member| member.player_id)
 }
 
 impl SessionPlanDecision {

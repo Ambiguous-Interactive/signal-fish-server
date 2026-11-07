@@ -27,18 +27,10 @@
 #   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
-#   - miri (two parallel lanes, the #424 owner decision): Interprets test code
-#     to detect undefined behavior (UB), uninitialized reads, data races, and
-#     other safety violations unreachable by native tests. The single-lane run
-#     measured 12m14s hosted (PR #425 evidence) with a flat long tail, so the
-#     suite is split across two lanes that each compile the library under Miri
-#     and run a filter subset:
-#       - core: `websocket coordination server protocol protocol_core` (the measured heavy
-#         modules)
-#       - remaining: every other module
-#     The filters are libtest name filters, so the lane union covers the whole
-#     `--lib` suite; a test whose full path merely contains another module's
-#     name may run in both lanes, which duplicates work but never skips it.
+#   - miri: Four parallel lanes interpret every root library module once.
+#     Exact test paths prevent nested modules from duplicating expensive
+#     work in other lanes. Coordination, session policy, server/WebSocket, and
+#     the remaining modules have separate budgets.
 #   - asan: Runs the full test suite under AddressSanitizer to detect memory
 #     errors such as use-after-free, buffer overflows, and memory leaks
 #
@@ -127,27 +119,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verified-head-guard]
     if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
-    # Miri interprets code rather than compiling it natively, which is
-    # significantly slower — 10-50x depending on the test suite size. Two
-    # parallel lanes keep the per-lane step wall near the compile floor
-    # (#424) at the cost of one extra runner allocation per event, and
-    # `fail-fast: false` keeps a failure in one lane from cancelling the
-    # other's diagnostic output.
+    # The scheduled run at bff212da exhausted both 45-minute interpreter lanes.
+    # Keep every test, remove substring overlap, and split heavy owners.
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         lane:
           - name: core
-            # The measured heavy modules (#425 evidence): websocket::sending,
-            # upgrade admission, room/admission flows, coordination stress,
-            # protocol parsing.
-            filters: "websocket coordination server protocol protocol_core session_capability session_admission session_member"
+            modules: "protocol protocol_core session_capability session_admission session_member"
+          - name: coordination
+            modules: "coordination"
+          - name: server
+            modules: "websocket server"
           - name: remaining
-            filters:
+            modules:
               "auth config database deadline distributed logging metrics
-              reconnection rate_limit retry security session_records
-              trace_validation"
+              reconnection rate_limit retry security session_records trace_validation"
     env:
       CARGO_TARGET_DIR: target/miri
     steps:
@@ -189,11 +177,9 @@ jobs:
           echo "Note: Integration tests are excluded because they use networking,"
           echo "async runtimes, and OS-level I/O that Miri cannot interpret."
           echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
-          # The lane filters are libtest name filters (OR-combined, passed
-          # through `--` to the test binary); their union across lanes covers
-          # every module of the library suite.
-          cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast -- \
-            ${{ matrix.lane.filters }} 2>&1 | tee miri-output.txt
+          python3 -m unittest discover -s scripts -p test_run_miri_lane.py
+          python3 scripts/run-miri-lane.py --toolchain nightly-2026-08-01 \
+            --modules ${{ matrix.lane.modules }} 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
       - name: Diagnose Miri failures
@@ -242,7 +228,9 @@ jobs:
         uses: actions/upload-artifact@v7.0.2
         with:
           name: miri-output-${{ matrix.lane.name }}
-          path: miri-output.txt
+          path: |
+            miri-output.txt
+            miri-selected-tests.json
           retention-days: 14
 
   asan:
@@ -250,7 +238,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verified-head-guard]
     if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
-    timeout-minutes: 30
+    # The measured cold server suite used 27 minutes before the native suite.
+    timeout-minutes: 45
     # Gating: sanitizer/test failures must fail this job and workflow.
     env:
       ASAN_OPTIONS: "detect_odr_violation=0"

@@ -144,9 +144,167 @@ pub(crate) fn select_session_pair(
         .unwrap_or(RELAY_FLOOR)
 }
 
+/// Elect the host for a `host`-topology room.
+///
+/// Prefers the explicitly designated `authority` *if that id is present in
+/// `members`*; otherwise the earliest joiner (ties broken by the smaller
+/// `player_id` for determinism); `None` for an empty room.
+#[must_use]
+pub(crate) fn elect_host<'a>(
+    authority: Option<Uuid>,
+    members: impl IntoIterator<Item = &'a SessionMember>,
+) -> Option<Uuid> {
+    let mut earliest: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
+    for member in members {
+        if Some(member.player_id) == authority {
+            return Some(member.player_id);
+        }
+        if earliest.is_none_or(|candidate| (member.joined_at, member.player_id) < candidate) {
+            earliest = Some((member.joined_at, member.player_id));
+        }
+    }
+    earliest.map(|(_, player_id)| player_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1464: the extracted election must select the protocol minimum, including timestamp boundaries.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn host_election_matches_authority_and_independent_sorted_order() {
+        let instants = [
+            chrono::DateTime::<chrono::Utc>::MIN_UTC,
+            chrono::DateTime::from_timestamp(-1, 999_999_999).unwrap(),
+            chrono::DateTime::UNIX_EPOCH,
+            chrono::DateTime::from_timestamp(0, 1).unwrap(),
+            chrono::DateTime::from_timestamp(1_483_228_799, 999_999_999).unwrap(),
+            chrono::DateTime::from_timestamp(1_483_228_799, 1_999_999_999).unwrap(),
+            chrono::DateTime::from_timestamp(1_483_228_800, 0).unwrap(),
+            chrono::DateTime::<chrono::Utc>::MAX_UTC,
+        ];
+        let identities = [Uuid::nil(), Uuid::from_u128(1 << 120), Uuid::max()];
+        let candidates: Vec<_> = instants
+            .into_iter()
+            .flat_map(|joined_at| {
+                identities.into_iter().map(move |player_id| SessionMember {
+                    player_id,
+                    player_name: String::new(),
+                    is_authority: true,
+                    joined_at,
+                    direct_endpoint: None,
+                    capabilities: SessionCapabilities::default(),
+                })
+            })
+            .collect();
+        let absent = Uuid::from_u128(123);
+        for authority in [None, Some(absent)] {
+            assert_eq!(elect_host(authority, &[]), None);
+        }
+        for first in &candidates {
+            for second in &candidates {
+                for third in &candidates {
+                    let members = [first.clone(), second.clone(), third.clone()];
+                    let mut sorted = [&members[0], &members[1], &members[2]];
+                    sorted.sort_by_key(|member| (member.joined_at, member.player_id));
+                    for authority in [
+                        None,
+                        Some(first.player_id),
+                        Some(third.player_id),
+                        Some(absent),
+                    ] {
+                        let expected = authority
+                            .filter(|id| members.iter().any(|member| member.player_id == *id))
+                            .or(Some(sorted[0].player_id));
+                        assert_eq!(
+                            elect_host(authority, &members),
+                            expected,
+                            "authority={authority:?}, members={members:?}"
+                        );
+                        assert_eq!(
+                            elect_host(authority, members.iter().rev()),
+                            expected,
+                            "reverse order: authority={authority:?}, members={members:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn host_election_reads_every_uuid_byte_after_timestamp_ties() {
+        for position in 0..16 {
+            for byte in [0_u8, 1, 127, 128, 254] {
+                let mut lower = [0xff; 16];
+                let mut higher = [0; 16];
+                lower[..position].fill(0x7f);
+                higher[..position].fill(0x7f);
+                lower[position] = byte;
+                higher[position] = byte + 1;
+                let first = SessionMember {
+                    player_id: Uuid::from_bytes(higher),
+                    player_name: String::new(),
+                    is_authority: false,
+                    joined_at: chrono::DateTime::UNIX_EPOCH,
+                    direct_endpoint: None,
+                    capabilities: SessionCapabilities::default(),
+                };
+                let second = SessionMember {
+                    player_id: Uuid::from_bytes(lower),
+                    ..first.clone()
+                };
+                let members = [first, second];
+                assert_eq!(
+                    elect_host(None, &members),
+                    Some(Uuid::from_bytes(lower)),
+                    "byte={position}, value={byte}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_election_preserves_calendar_order_across_year_and_leap_boundaries() {
+        for (year, month, day) in [
+            (-400, 2, 28),
+            (-1, 12, 31),
+            (0, 2, 28),
+            (1999, 12, 31),
+            (2000, 2, 28),
+        ] {
+            let date = chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            let earlier = date
+                .and_hms_nano_opt(23, 59, 59, 999_999_999)
+                .unwrap()
+                .and_utc();
+            let later = date
+                .succ_opt()
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc();
+            let old = SessionMember {
+                player_id: Uuid::max(),
+                player_name: String::new(),
+                is_authority: false,
+                joined_at: earlier,
+                direct_endpoint: None,
+                capabilities: SessionCapabilities::default(),
+            };
+            let new = SessionMember {
+                player_id: Uuid::nil(),
+                joined_at: later,
+                ..old.clone()
+            };
+            assert_eq!(
+                elect_host(None, &[new, old]),
+                Some(Uuid::max()),
+                "calendar boundary={date}"
+            );
+        }
+    }
 
     /// #1464: endpoints alone cannot make a Direct rung executable.
     #[test]

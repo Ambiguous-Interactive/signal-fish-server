@@ -27,6 +27,7 @@ change the server's dependencies or public API.
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Lean session pair selection | Select the first permitted, unanimously supported and executable ADR rung; otherwise Relay/Relay | Every representable finite member slice, all capability fields, ceilings and switches; configuration lookup, endpoint validation, election, state and publication remain outside |
+| Lean host election | A seated authority wins; otherwise elect the least timestamp/UUID key; only input identities can win; empty input alone returns no host; finite modeled iteration terminates and permutations preserve the winner | Extracted generic production loop instantiated with the pinned slice iterator; Chrono/UUID field interpretations and tuple comparison are trusted mappings; filter enumeration, caller arguments and state remain tested/pending |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -705,8 +706,9 @@ not a proof of semantic equivalence.
 The live `choose_session_plan` now calls the unchanged iterator decision in
 [`session_member::select_session_pair`](../../src/session_member.rs).
 It passes the resolved topology ceiling and the two transport switches.
-The ladder, floor and rank move with this private decision. Host election,
-generation creation and member ownership remain in the original caller.
+The ladder, floor and rank move with this private decision. The caller still
+creates the generation and owns the members. Host election has its separate
+source-linked boundary below.
 
 [`Selection.lean`](lean/proofs/capability/lean/Capability/Verification/Selection.lean)
 specifies the ADR-0001 order independently: Mesh/WebRTC, Host/WebRTC, Host/Direct,
@@ -754,6 +756,76 @@ pairs and defaults are unchanged. .NET clients are unaffected for the same reaso
 Godot clients are unaffected for the same reason. No client migration is required.
 The exact source diff is declared in `.github/internal-refactor.json`; the blob
 hashes identify the reviewed change and do not prove semantic equivalence.
+
+### Host election
+
+The production callers now use
+[`session_member::elect_host`](../../src/session_member.rs).
+The loop still prefers the explicit authority among its input candidates.
+Otherwise it keeps the least `(joined_at, player_id)` key. It stores that copied
+key instead of a borrowed member. It adds no allocation and keeps the same
+iterator, early return and strict comparison. The callers keep their eligibility
+filters; authority cannot bypass those filters.
+
+[`Election.lean`](lean/proofs/capability/lean/Capability/Verification/Election.lean)
+checks seven contracts over the extracted generic loop with the pinned slice
+iterator: empty input iff no host, authority preference, input membership,
+minimum timestamp/UUID when authority is absent, successful finite termination,
+empty/singleton outcomes, and permutation stability. The minimum and authority
+properties specify the required protocol behavior independently of the scan
+used in the loop-correspondence lemma. Duplicate identities, proxy authority
+flags, names, capabilities and endpoints need no extra assumptions. Eligibility
+is a caller obligation; this loop selects among candidates it receives.
+
+The initial pinned extraction rejected a candidate reference held across the
+loop (`There should be no bottoms in the value`). Copying the two key fields
+clears that failure. Instantiating the extraction with a Rust slice-iterator
+wrapper also pulls in a higher-ranked `Iterator::find` lifetime unsupported by
+the pinned backend. The required extraction therefore keeps the actual generic
+function. The Lean contracts instantiate its iterator dictionary with the pinned
+slice model. This is not an extracted proof of the production `Filter` adapters.
+Their enumeration, caller arguments, input snapshots and state correspondence
+remain tested or pending in P10. Neither a failed extraction nor a typecheck is
+counted as a protocol theorem.
+
+The new external comparison mappings are explicit trusted boundaries:
+
+- UUID 1.29.0 derives comparison on its fixed sixteen-byte field.
+- Chrono 0.4.45 `DateTime::partial_cmp` compares its `NaiveDateTime`. Its derived
+  order reads signed packed date, unsigned seconds, then unsigned fraction.
+- The pinned standard tuple comparison checks the first field, then the second
+  on equality. The TimeZone interpretation supplies only the associated type
+  needed by the UTC comparison; it models no timezone conversion operations.
+
+[`ElectionOrder.lean`](lean/proofs/capability/lean/Capability/Verification/ElectionOrder.lean)
+proves four interpretation lemmas. Numeric timestamp keys preserve field order
+and equality for all modeled scalar values. Numeric UUID keys preserve byte
+order and exact identity for every sixteen-byte array. These lemmas check the
+encodings, not the Rust dependency layouts or implementations. Timestamp inputs
+overapproximate valid Chrono values; construction and calendar validity are not
+claimed. The extractor, standard iterator model and dependency interpretations
+remain trusted even when every axiom audit passes.
+
+Three isolated source faults ignore authority, reverse date priority, and drop
+the UUID tie-break. Each extracted module must compile, fail only its election
+contract with an unsolved goal, and have a separate kernel-checked wrong-result
+witness. The witnesses use two candidate records with the same supplied date;
+changing their seconds or UUID gives the required ordering. They do not import
+the rejected election contract. Tool failures and signature errors do not count.
+The runner restores the source, checks identical regeneration and approved axioms,
+and retains sources, pins, generated output, raw command logs and timings.
+
+The independent Rust sorting oracle checks 110,592 forward/reversed elections.
+Further cases cover every UUID byte, timestamp extremes, negative years,
+year/leap-day boundaries and leap-second fractions. Existing caller tests cover
+filtered authority and capability cases. These are adapter evidence, not formal
+caller/state refinement. Kani retains its separate eight-member aggregation
+bound and does not prove election.
+
+The change is internal. Rust, .NET and Godot clients are unaffected because
+runtime behavior, public APIs and wire formats are unchanged. The exact source
+diff is declared in `.github/internal-refactor.json`. Issue #1464 remains open
+for the caller, endpoint, state and concurrency obligations.
 
 ## Tool references
 
