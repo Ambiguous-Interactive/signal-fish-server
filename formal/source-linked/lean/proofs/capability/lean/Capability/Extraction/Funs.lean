@@ -773,6 +773,102 @@ def session_member.elect_host
     coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
     iter authority core.option.Option.None
 
+/-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_mut]:
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  (tupled_args : session_member.SessionMember) :
+  RustM (Bool × (session_member.elect_eligible_host.closure T1
+    Clause0_IntoIter))
+  := do
+  let (t, t1) := c
+  let b ← session_member.SessionMember.can_host tupled_args t t1
+  ok (b, c)
+
+/-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  (sm : session_member.SessionMember) :
+  RustM Bool
+  := do
+  let (b, _) ←
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
+      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+      c sm
+  ok b
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+@[reducible]
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  session_member.SessionMember Bool := {
+  call_once :=
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+@[reducible]
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnMut
+  (session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  session_member.SessionMember Bool := {
+  FnOnceInst :=
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  call_mut :=
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- [signal_fish_proof_core::session_member::elect_eligible_host]:
+    Source: 'src/../../../../src/session_member.rs', lines 172:0-184:1 -/
+def session_member.elect_eligible_host
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid) (members : T1)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport) :
+  RustM (core.option.Option uuid.Uuid)
+  := do
+  let t ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
+      members
+  let f ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst.filter
+      (session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
+      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)
+      t (topology, transport)
+  session_member.elect_host (core.iter.traits.collect.IntoIterator.Blanket
+    (core.iter.adapters.filter.Filter.Insts.CoreIterTraitsIteratorIterator
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst
+    (session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)))
+    authority f
+
 /-- [signal_fish_proof_core::session_member_can_host]:
     Source: 'src/lib.rs', lines 23:0-29:1 -/
 def session_member_can_host

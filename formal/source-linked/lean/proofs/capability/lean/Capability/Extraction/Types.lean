@@ -120,4 +120,10 @@ Unit
 def session_member.elect_host.closure (T1 : Type) (Clause0_IntoIter : Type) :=
   session_member.SessionMember
 
+/-- [signal_fish_proof_core::session_member::elect_eligible_host::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+def session_member.elect_eligible_host.closure (T1 : Type) (Clause0_IntoIter :
+  Type) :=
+  session_capability.Topology × session_capability.Transport
+
 end signal_fish_proof_core

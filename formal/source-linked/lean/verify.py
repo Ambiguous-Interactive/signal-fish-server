@@ -62,6 +62,14 @@ THEOREMS = {"negotiation": (
     "Capability.election_total_contract",
     "Capability.election_outcomes",
     "Capability.election_permutation_contract",
+    "Capability.eligible_callback_contract",
+    "Capability.eligible_election_contract",
+    "Capability.eligible_empty_contract",
+    "Capability.eligible_authority_contract",
+    "Capability.eligible_membership_contract",
+    "Capability.eligible_minimum_contract",
+    "Capability.eligible_total_contract",
+    "Capability.eligible_outcomes",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",
@@ -248,7 +256,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/HostValidity.lean:",
                     "Capability/Verification/Executability.lean:",
                     "Capability/Verification/Selection.lean:",
-                    "Capability/Verification/Election.lean:")
+                    "Capability/Verification/Election.lean:",
+                    "Capability/Verification/EligibleElection.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -274,6 +283,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/Election.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the election contract: {name}\n{result.stdout}")
+    if name.startswith("eligible-") and not all(
+            error.startswith("Capability/Verification/EligibleElection.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the eligible-election contract: {name}\n{result.stdout}")
     if name.startswith("selection-") and not all(
             error.startswith("Capability/Verification/Selection.lean:")
             and "unsolved goals" in error for error in locations):
@@ -526,9 +539,17 @@ def capability_mutants(crate, *, names=None):
         "election-date": ("(member.joined_at, member.player_id) < candidate", "candidate < (member.joined_at, member.player_id)"),
         "election-uuid": ("(member.joined_at, member.player_id) < candidate", "(member.joined_at, member.player_id) < (candidate.0, member.player_id)"),
     })
+    changes.update({
+        "eligible-capability": (".filter(move |member| member.can_host(topology, transport))",
+                                ".filter(move |member| member.can_host(topology, transport) || true)"),
+        "eligible-endpoint": (".filter(move |member| member.can_host(topology, transport))",
+                              ".filter(move |member| member.supports_session(topology, transport))"),
+        "eligible-authority": (") -> Option<Uuid> {\n    elect_host(",
+                               ") -> Option<Uuid> {\n    if let Some(host) = authority { return Some(host); }\n    elect_host("),
+    })
     selected = changes if names is None else {name: changes[name] for name in names}
     for name, (before, after) in selected.items():
-        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if name.startswith(("member-", "executable-", "selection-", "election-")) else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
+        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-")) else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -552,14 +573,16 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.Election"] if name.startswith("election-") else
+                }.get(name, ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
+                      ["Capability.Verification.Election"] if name.startswith("election-") else
                       ["Capability.Verification.Selection"] if name.startswith("selection-") else
                       ["Capability.Verification.Executability"] if name.startswith("executable-") else
                       ["Capability.Verification.HostValidity"] if name.startswith("host-") else
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
+                run(["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
+                    ["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
                     ["lake", "build", "Capability.Verification.SelectionEvaluation"] if name.startswith("selection-") else
                     ["lake", "build", "Capability.Verification.Callbacks"], project)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()

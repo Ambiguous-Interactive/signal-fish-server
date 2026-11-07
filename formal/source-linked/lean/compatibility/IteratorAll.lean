@@ -20,4 +20,12 @@ abbrev slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.any
   iter.traits.iterator.Iterator.any.default
     (slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT T) FnInst
 
+/- Local dispatch alias for the extracted generic Iterator::filter call.
+The pinned library already supplies filter.default and Filter::next. This alias
+only exposes that default under the generated method name; it adds no behavior. -/
+abbrev iter.traits.iterator.Iterator.filter
+    {Self P Item : Type} (IteratorInst : iter.traits.iterator.Iterator Self Item)
+    (FnInst : ops.function.FnMut P Item Bool) :=
+  iter.traits.iterator.Iterator.filter.default IteratorInst FnInst
+
 end CoreModels.core

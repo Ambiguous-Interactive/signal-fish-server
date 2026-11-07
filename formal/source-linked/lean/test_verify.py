@@ -209,6 +209,28 @@ class RequiredAggregation(unittest.TestCase):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "capability", name)
 
+    def test_eligible_faults_require_only_semantic_contract_rejection(self):
+        """Filter compiler errors and unrelated election failures are not eligible-election evidence."""
+        diagnostic = "error: Capability/Verification/EligibleElection.lean:42:6: unsolved goals\n"
+        for name in ("eligible-capability", "eligible-endpoint", "eligible-authority"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("EligibleElection.lean", "Election.lean")),
+                (1, diagnostic.replace("EligibleElection.lean", "ElectionFixtures.lean")),
+                (1, diagnostic.replace("EligibleElection.lean", "Members.lean")),
+                (1, diagnostic.replace("Verification/EligibleElection", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic.replace("unsolved goals", "Tactic `rewrite` failed")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
+
     def test_selection_faults_require_only_semantic_contract_rejection(self):
         """Neither compiler errors nor an unrelated failed proof establish a selector fault."""
         diagnostic = "error: Capability/Verification/Selection.lean:42:6: unsolved goals\n"

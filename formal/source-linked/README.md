@@ -27,7 +27,8 @@ change the server's dependencies or public API.
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Lean session pair selection | Select the first permitted, unanimously supported and executable ADR rung; otherwise Relay/Relay | Every representable finite member slice, all capability fields, ceilings and switches; configuration lookup, endpoint validation, election, state and publication remain outside |
-| Lean host election | A seated authority wins; otherwise elect the least timestamp/UUID key; only input identities can win; empty input alone returns no host; finite modeled iteration terminates and permutations preserve the winner | Extracted generic production loop instantiated with the pinned slice iterator; Chrono/UUID field interpretations and tuple comparison are trusted mappings; filter enumeration, caller arguments and state remain tested/pending |
+| Lean host election | A seated authority wins; otherwise elect the least timestamp/UUID key; only input identities can win; empty input alone returns no host; finite modeled iteration terminates and permutations preserve the winner | Extracted generic production loop instantiated with the pinned slice iterator; Chrono/UUID field interpretations and tuple comparison are trusted mappings; the eligible-filter contracts below cover the shared filter; caller arguments and state remain tested/pending |
+| Lean eligible host election | Filter by the actual capability and Direct endpoint predicate before authority preference; otherwise select the minimum eligible key; return no host exactly when no member qualifies; terminate for finite modeled input | Extracted production helper and closure with pinned slice and Filter models; caller arguments, snapshots, endpoint validation and async correspondence remain tested/pending |
 | Kani negotiation | Both ceilings, exact selection, the `None` default, and preservation of below-floor requests | All `u16` inputs; default/refusal harness assumes ordered server bounds |
 | Kani aggregation | A nonempty boolean list passes exactly when every member is true | Length zero through eight, unwind bound ten; no proof for larger lists or the production capability projection |
 
@@ -759,13 +760,13 @@ hashes identify the reviewed change and do not prove semantic equivalence.
 
 ### Host election
 
-The production callers now use
+The shared production helper calls
 [`session_member::elect_host`](../../src/session_member.rs).
 The loop still prefers the explicit authority among its input candidates.
 Otherwise it keeps the least `(joined_at, player_id)` key. It stores that copied
 key instead of a borrowed member. It adds no allocation and keeps the same
-iterator, early return and strict comparison. The callers keep their eligibility
-filters; authority cannot bypass those filters.
+iterator, early return and strict comparison. The shared eligible-host helper
+below owns the callers' eligibility filter; authority cannot bypass it.
 
 [`Election.lean`](lean/proofs/capability/lean/Capability/Verification/Election.lean)
 checks seven contracts over the extracted generic loop with the pinned slice
@@ -784,8 +785,9 @@ wrapper also pulls in a higher-ranked `Iterator::find` lifetime unsupported by
 the pinned backend. The required extraction therefore keeps the actual generic
 function. The Lean contracts instantiate its iterator dictionary with the pinned
 slice model. This is not an extracted proof of the production `Filter` adapters.
-Their enumeration, caller arguments, input snapshots and state correspondence
-remain tested or pending in P10. Neither a failed extraction nor a typecheck is
+The eligible-host contracts below add Filter enumeration correspondence. Caller
+arguments, input snapshots and state correspondence remain tested or pending in
+P10. Neither a failed extraction nor a typecheck is
 counted as a protocol theorem.
 
 The new external comparison mappings are explicit trusted boundaries:
@@ -833,3 +835,52 @@ for the caller, endpoint, state and concurrency obligations.
 - [hax tool and scenario pins](https://hax.cryspen.com/manual/tools/)
 - [Kani loop bounds](https://model-checking.github.io/kani/tutorial-loop-unwinding.html)
 - [Kani feature limits](https://model-checking.github.io/kani/rust-feature-support.html)
+
+### Eligible host election
+
+Both finalize-time selection and membership repair now call the same private
+[`elect_eligible_host`](../../src/session_member.rs) helper. It filters candidates
+with the actual `SessionMember::can_host` method before calling `elect_host`.
+An authority with an old protocol, a missing capability axis, or a missing
+Direct endpoint cannot bypass this gate. An eligible seated authority wins;
+otherwise the least eligible timestamp/UUID key wins.
+
+[`EligibleElection.lean`](lean/proofs/capability/lean/Capability/Verification/EligibleElection.lean)
+checks the extracted callback, the pinned Filter iterator and the actual shared
+helper for every representable finite member slice. The callback contract uses
+the independent capability and endpoint predicates proved for `can_host`. The
+whole-helper contract connects filtered enumeration to the checked election loop.
+Separate contracts specify eligible authority preference, eligible membership,
+minimum eligible fallback, no host exactly when no member qualifies, and successful
+finite termination. `eligible_outcomes` checks accepting and rejecting singleton
+snapshots with arbitrary member metadata and endpoint contents. The input domain
+includes all `u16` versions, capability
+subsets, endpoint presence, metadata, optional authority and empty slices.
+
+The concrete slice wrapper still hits the pinned backend's higher-ranked
+`Iterator::find` lifetime limit. A generic wrapper with a borrowed closure also
+fails in Aeneas `Interp.ml`. The production helper accepts an `IntoIterator` and
+uses a `move` closure over the copied axes; this extracts without changing tool
+pins. One local dispatch alias exposes the pinned library's existing
+`Iterator.filter.default` under the generated `Iterator.filter` method name.
+It adds no predicate, loop, axiom or iterator semantics. The existing reviewed
+compatibility file carries this alias; the gate compares its installed bytes
+with the canonical file. The proofs instantiate that extracted generic helper
+with the pinned slice iterator and Filter model. They do not replace the
+production predicate or election body.
+
+The caller argument selection, snapshot construction, endpoint validation,
+locking, generation updates, publication and async interleavings remain tested
+or pending. An endpoint's presence proves neither its validity nor reachability.
+Chrono/UUID comparison retains the trusted interpretations described above.
+No runtime dependency, allocation, public API, wire format or client behavior
+changes. Rust, .NET and Godot clients need no migration because both callers
+apply the same eligibility predicate and election order as before.
+
+Three isolated source faults bypass all eligibility, drop Direct endpoint
+readiness, or return the authority before checking eligibility. Every control
+must extract and typecheck, then fail only the eligible-election semantic
+contract. Each has an independently audited theorem of the wrong result over
+the actual extracted helper. The runner rejects compiler/tool errors as fault
+evidence, restores the source and rechecks the capability proofs. The required
+CI run retains source hashes, pins, generated output, logs, audits and timings.

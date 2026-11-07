@@ -23,7 +23,7 @@
 //! intersection can only widen when members depart — a mid-game data-path
 //! migration would disrupt gameplay for zero correctness gain.
 //!
-//! The selection core ([`choose_session_plan`], [`elect_host`],
+//! The selection core ([`choose_session_plan`], [`elect_eligible_host`],
 //! `SessionPlanDecision::plan_for`) is pure and unit-testable; the thin
 //! [`EnhancedGameServer::emit_session_plan`] method gathers per-member
 //! capabilities, runs the core, and best-effort delivers the result — gated on
@@ -75,8 +75,10 @@ impl ActiveSessionPlan {
 
 pub(crate) use crate::session_capability::SessionCapabilities;
 
-use crate::session_member::select_session_pair;
-pub(crate) use crate::session_member::{elect_host, SessionMember};
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(crate) use crate::session_member::elect_host;
+pub(crate) use crate::session_member::SessionMember;
+use crate::session_member::{elect_eligible_host, select_session_pair};
 #[cfg(all(test, signal_fish_repository_tests))]
 pub(crate) use crate::session_member::{RELAY_FLOOR, UPGRADE_LADDER};
 
@@ -186,9 +188,11 @@ pub(crate) fn membership_session_decision(
         };
     }
 
-    let host = elect_host(
+    let host = elect_eligible_host(
         authority,
-        members.iter().filter(|member| stored.supported_by(member)),
+        members.as_slice(),
+        stored.topology,
+        stored.transport,
     );
     if let Some(host) = host {
         let updated = ActiveSessionPlan {
@@ -334,12 +338,7 @@ pub(crate) fn choose_session_plan(
         select_session_pair(&members, desired, cfg.enable_direct, cfg.enable_webrtc);
 
     let host = if topology == Topology::Host {
-        elect_host(
-            authority,
-            members
-                .iter()
-                .filter(|member| member.can_host(topology, transport)),
-        )
+        elect_eligible_host(authority, members.as_slice(), topology, transport)
     } else {
         None
     };
@@ -1076,12 +1075,10 @@ impl EnhancedGameServer {
     /// [`joiner_supports_sticky_plan`]) and can even hold authority (plain v2
     /// `RequestAuthority` has no version gate), but it must never be named host
     /// of a session it cannot run — the v3 members would receive a failover
-    /// plan naming a host that cannot anchor the selected transport. The member slice is
-    /// pre-filtered and the authority preference passes through the same
-    /// filter (authority must not outrank the capability gate); [`elect_host`]
-    /// itself stays generic — its other caller, finalize-time
-    /// [`choose_session_plan`], needs no filter because `all_support` already
-    /// guarantees every member's capability there.
+    /// plan naming a host that cannot anchor the selected transport.
+    /// [`elect_eligible_host`] applies the capability and Direct endpoint gates
+    /// before authority preference. Finalize-time [`choose_session_plan`] uses
+    /// the same gate because `all_support` does not require Direct endpoints.
     ///
     /// If **no** member qualifies, the session ends: the exact publication
     /// removes its stored entry and sends every remaining v3 member an
