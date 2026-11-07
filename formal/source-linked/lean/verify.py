@@ -480,9 +480,11 @@ def negotiation_mutations():
     }
 
 
-def mutants(crate):
+def mutants(crate, *, names=None):
     """Reject isolated source faults, check their wrong results, then restore green."""
-    for name, (source, before, after) in negotiation_mutations().items():
+    changes = negotiation_mutations()
+    selected = changes if names is None else {name: changes[name] for name in names}
+    for name, (source, before, after) in selected.items():
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -818,6 +820,103 @@ def prepare():
     run(["lake", "exe", "cache", "get", *sorted(modules)], project)
 
 
+def mutation_inventory():
+    """Return the ordered, unique production fault inventory for all backends."""
+    inventory = {"negotiation": list(negotiation_mutations()),
+                 "capability": list(capability_mutations()),
+                 "projection": list(projection_mutations())}
+    names = [name for group in inventory.values() for name in group]
+    if len(names) != len(set(names)):
+        raise RuntimeError("Duplicate source fault name")
+    return inventory
+
+
+def select_mutations(scenarios, names=None, shard=None):
+    """Partition every required fault once; explicit names support local loops."""
+    inventory = mutation_inventory()
+    available = [name for scenario in scenarios for name in inventory[scenario]]
+    if names is not None:
+        if len(names) != len(set(names)) or set(names) - set(available):
+            raise ValueError("Unknown, repeated, or out-of-scenario source fault")
+        available = [name for name in available if name in names]
+    if shard is not None:
+        index, count = shard
+        if count < 1 or not 0 <= index < count or count > len(available):
+            raise ValueError("Mutation shard needs 0 <= index < count <= fault count")
+        available = available[index::count]
+    return {scenario: [name for name in inventory[scenario] if name in available]
+            for scenario in scenarios}
+
+
+def parse_shard(value):
+    """Parse a zero-based INDEX/COUNT without silently accepting bad bounds."""
+    try:
+        index, count = map(int, value.split("/"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("Expected INDEX/COUNT") from error
+    if count < 1 or not 0 <= index < count:
+        raise argparse.ArgumentTypeError("Expected 0 <= INDEX < COUNT")
+    return index, count
+
+
+def audit_shards(directory, count):
+    """Require complete current-input evidence before the aggregate CI passes."""
+    paths = sorted(directory.glob("*/results.json"))
+    if len(paths) != count:
+        raise RuntimeError(f"Expected {count} shard reports, found {len(paths)}")
+    source_hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+                     for name in SOURCES}
+    seen = set()
+    current_locks = current_lock_hashes()
+    for path in paths:
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"Unreadable shard report: {path}") from error
+        if not isinstance(report, dict):
+            raise RuntimeError(f"Invalid shard report: {path}")
+        shard = report.get("mutation_shard")
+        if (not isinstance(shard, list) or len(shard) != 2
+                or any(type(value) is not int for value in shard)
+                or shard[1] != count or not 0 <= shard[0] < count or shard[0] in seen):
+            raise RuntimeError(f"Invalid or duplicate shard: {path}")
+        expected = select_mutations(list(THEOREMS), shard=shard)
+        if (report.get("completed") is not True or report.get("source_unchanged") is not True
+                or report.get("locks_unchanged") is not True or report.get("hax_version") != VERSION
+                or report.get("source_hashes") != source_hashes
+                or report.get("proved_scenarios") != list(THEOREMS)
+                or report.get("selected_mutations") != expected
+                or report.get("completed_mutations") != expected
+                or report.get("capability_probe_status") not in (
+                    "extraction_typechecked; no aggregation theorem proved",
+                    "extraction_typechecked with upstream alias backport; no aggregation theorem proved")):
+            raise RuntimeError(f"Incomplete or stale shard: {path}")
+        lock_hashes = report.get("lock_hashes", {})
+        if not lock_hashes or lock_hashes != current_locks:
+            raise RuntimeError(f"Stale proof pins or witnesses: {path}")
+        seen.add(shard[0])
+    if seen != set(range(count)):
+        raise RuntimeError("Missing mutation shard")
+    print(f"PASS: {count} current-input shards cover every required source fault", flush=True)
+
+
+def lock_inputs():
+    """List every pinned dependency, mapping and fault witness."""
+    paths = [HERE / name for name in ("Cargo.toml", "Cargo.lock", "hax.toml", "src/lib.rs", "verify.py")]
+    paths.extend(sorted((HERE / "compatibility").glob("*")))
+    paths.extend(sorted((HERE / "mutation-witnesses").glob("*.lean")))
+    for scenario in THEOREMS:
+        project = HERE / f"proofs/{scenario}/lean"
+        paths.extend(project_evidence_inputs(project))
+    return paths
+
+
+def current_lock_hashes():
+    """Bind aggregate reports to the current pins and witnesses."""
+    return {str(path.relative_to(HERE)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in lock_inputs()}
+
+
 def main():
     """Run selected checks and record results while guarding source and tool pins."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -826,7 +925,33 @@ def main():
                         help="classify harder-target extraction support; never claims an aggregation proof")
     parser.add_argument("--prepare", action="store_true",
                         help="fetch pinned dependencies and only required Mathlib cache modules")
+    parser.add_argument("--scenario", action="append", choices=list(THEOREMS),
+                        help="local loop: verify only the named scenario (repeatable)")
+    parser.add_argument("--mutation", action="append",
+                        help="local loop: check only this source fault (repeatable; needs --mutations)")
+    parser.add_argument("--mutation-shard", type=parse_shard,
+                        help="CI: zero-based INDEX/COUNT partition of source faults")
+    parser.add_argument("--audit-shards", type=Path,
+                        help="audit downloaded shard reports instead of running proof tools")
+    parser.add_argument("--shard-count", type=int, default=4)
     args = parser.parse_args()
+    if args.audit_shards is not None:
+        if args.shard_count < 1:
+            parser.error("--shard-count must be positive")
+        audit_shards(args.audit_shards, args.shard_count)
+        return
+    if (args.mutation or args.mutation_shard) and not args.mutations:
+        parser.error("fault selection requires --mutations")
+    if args.mutation_shard and (args.scenario or args.mutation):
+        parser.error("CI shards cannot restrict scenarios or faults")
+    scenarios = args.scenario or list(THEOREMS)
+    if len(scenarios) != len(set(scenarios)):
+        parser.error("repeated scenario")
+    try:
+        selected = select_mutations(scenarios, args.mutation, args.mutation_shard) if args.mutations else {}
+    except ValueError as error:
+        parser.error(str(error))
+    completed_mutations = {}
     if args.mutations:
         check_mutation_anchors(ROOT)
     version = run(["cargo", "hax", "--version"], HERE)
@@ -834,13 +959,7 @@ def main():
     source = ROOT / "src/protocol_core.rs"
     source_before = source.read_bytes()
     sources_before = {ROOT / name: (ROOT / name).read_bytes() for name in SOURCES}
-    lock_paths = [HERE / "Cargo.lock", HERE / "hax.toml"]
-    lock_paths.extend(sorted((HERE / "compatibility").glob("*")))
-    lock_paths.extend(sorted((HERE / "mutation-witnesses").glob("*.lean")))
-    for scenario in THEOREMS:
-        project = HERE / f"proofs/{scenario}/lean"
-        lock_paths.extend(project / name for name in (
-            "lake-manifest.json", "lakefile.toml", "lean-toolchain"))
+    lock_paths = lock_inputs()
     locks_before = {path: path.read_bytes() for path in lock_paths}
     digest = hashlib.sha256(source_before).hexdigest()
     print(json.dumps({"production_source_sha256": digest}), flush=True)
@@ -850,13 +969,16 @@ def main():
     try:
         if args.prepare:
             prepare()
-        for scenario in THEOREMS:
+        for scenario in scenarios:
             verify(HERE, scenario)
             proved_scenarios.append(scenario)
         if args.mutations:
-            mutants(HERE)
-            capability_mutants(HERE)
-            projection_mutants(HERE)
+            runners = {"negotiation": mutants, "capability": capability_mutants,
+                       "projection": projection_mutants}
+            for scenario, names in selected.items():
+                if names:
+                    runners[scenario](HERE, names=names)
+                completed_mutations[scenario] = names
         if args.probe_capability:
             capability_probe_status = "probe failed; no aggregation theorem proved"
             capability_probe_status = probe_capability(HERE)
@@ -872,6 +994,10 @@ def main():
             "source_hashes": {str(path.relative_to(ROOT)): hashlib.sha256(value).hexdigest()
                               for path, value in sources_before.items()},
             "proved_scenarios": proved_scenarios, "capability_probe_status": capability_probe_status,
+            "mutation_shard": args.mutation_shard,
+            "selected_mutations": selected, "completed_mutations": completed_mutations,
+            "lock_hashes": {str(path.relative_to(HERE)): hashlib.sha256(value).hexdigest()
+                            for path, value in locks_before.items()},
             "runs": RUNS,
         }, indent=2) + "\n")
         if not unchanged:
