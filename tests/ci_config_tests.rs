@@ -34310,7 +34310,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 50 shards, ceil(500/50) * 29s remains 290s.
 // 501 (was 500): fixed-floor connection resolution adds one return-value site (#1464).
 // With 51 shards, ceil(501/51) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 501;
+// 502 (was 501): the extracted session pair selector adds a tuple return-value site (#1464).
+// With 51 shards, ceil(502/51) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 502;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
