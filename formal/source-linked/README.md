@@ -966,15 +966,14 @@ smaller UUID; Host clients offer and the host answers. Direct peer membership
 needs no endpoint; only host election checks endpoint presence. No legal-pair,
 member-uniqueness, endpoint or roster-membership assumption hides malformed input.
 
-The required contracts are `glare_contract`, `glare_antisymmetric`,
-`peer_edge_contract`, `peer_self_contract`, `peer_capability_contract`,
-`peer_relay_contract`, `peer_host_contract`, `peer_mesh_contract`,
-`peer_mesh_pair_contract`, `peer_host_no_client_edges` and `peer_edge_outcomes` in `Capability/Verification/PeerEdges.lean`. The pair theorem checks reciprocal mesh edges with exactly one offerer; the
-client theorem rejects Host client-to-client edges. The exact
-result theorem includes successful termination in the extracted model. The
-reachability theorem checks both mesh directions, self refusal, both host
-roles, absent host, relay, v2 recipient and unsupported Direct peer.
-UUID equality/order retain the documented trusted dependency mappings.
+The required contracts are `glare_contract`, `glare_antisymmetric`, `peer_edge_contract`,
+`peer_self_contract`, `peer_capability_contract`, `peer_relay_contract`, `peer_host_contract`,
+`peer_mesh_contract`, `peer_mesh_pair_contract`, `peer_host_no_client_edges` and
+`peer_edge_outcomes` in `Capability/Verification/PeerEdges.lean`. The pair theorem checks reciprocal
+mesh edges with exactly one offerer; the client theorem rejects Host client-to-client edges. The
+exact result theorem includes successful termination in the extracted model. The reachability
+theorem checks both mesh directions, self refusal, both host roles, absent host, relay, v2 recipient
+and unsupported Direct peer. UUID equality/order retain the documented trusted dependency mappings.
 
 Seven production faults permit self edges, bypass either member's capability
 gate, reverse mesh offers, invert the host target, make the host offer, or
