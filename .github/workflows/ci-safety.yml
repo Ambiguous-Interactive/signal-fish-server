@@ -27,10 +27,10 @@
 #   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
-#   - miri: Four parallel lanes interpret every root library module once.
+#   - miri: Five parallel lanes interpret every root library module once.
 #     Exact test paths prevent nested modules from duplicating expensive
-#     work in other lanes. Coordination, session policy, server/WebSocket, and
-#     the remaining modules have separate budgets.
+#     work in other lanes. Coordination, session policy, server, WebSocket,
+#     and the remaining modules have separate budgets.
 #   - asan: Runs the full test suite under AddressSanitizer to detect memory
 #     errors such as use-after-free, buffer overflows, and memory leaks
 #
@@ -131,7 +131,9 @@ jobs:
           - name: coordination
             modules: "coordination"
           - name: server
-            modules: "websocket server"
+            modules: "server"
+          - name: websocket
+            modules: "websocket"
           - name: remaining
             modules:
               "auth config database deadline distributed logging metrics
