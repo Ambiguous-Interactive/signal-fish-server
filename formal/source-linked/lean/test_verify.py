@@ -1063,6 +1063,17 @@ class FaultPartitions(unittest.TestCase):
                     path.write_text(json.dumps(dict(original, **{key: value})))
                     with self.assertRaises((RuntimeError, ValueError)):
                         verify.audit_shards(root, 4)
+            for field in ("completed", "source_unchanged", "locks_unchanged"):
+                for malformed in ("false", 1, None):
+                    path.write_text(json.dumps(dict(original, **{field: malformed})))
+                    with self.subTest(field=field, value=malformed), self.assertRaises(RuntimeError):
+                        verify.audit_shards(root, 4)
+            for malformed in ([[0], 4], [False, 4], [0, True], [0.0, 4], ["0", 4],
+                              [-1, 4], [4, 4], [0, 5], [0], None):
+                with self.subTest(shard=malformed):
+                    path.write_text(json.dumps(dict(original, mutation_shard=malformed)))
+                    with self.assertRaisesRegex(RuntimeError, "Invalid or duplicate shard"):
+                        verify.audit_shards(root, 4)
             path.write_text(json.dumps(original))
             path.unlink()
             with self.assertRaisesRegex(RuntimeError, "Expected 4 shard reports"):

@@ -31976,7 +31976,7 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
         (
             "lean",
             "0.4.2",
-            "--prepare --mutations --probe-capability --mutation-shard ${{ matrix.shard }}/4",
+            "--prepare --mutations --probe-capability --mutation-shard \"$MUTATION_SHARD/4\"",
         ),
     ] {
         let job = jobs
@@ -32000,6 +32000,15 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
             .as_mapping_get("continue-on-error")
             .is_none());
         assert!(verification_step.as_mapping_get("if").is_none());
+        if backend == "lean" {
+            assert_eq!(
+                verification_step
+                    .as_mapping_get("env")
+                    .and_then(|env| env.as_mapping_get("MUTATION_SHARD"))
+                    .and_then(Yaml::as_str),
+                Some("${{ matrix.shard }}")
+            );
+        }
         let runner =
             read_live_file(&root.join(format!("formal/source-linked/{backend}/verify.py")));
         assert!(runner.contains(&format!("VERSION = \"{version}\"")));
@@ -32063,6 +32072,26 @@ fn source_linked_lean_shards_require_complete_evidence() {
         assert!(step.as_mapping_get("continue-on-error").is_none());
     }
     let workers = jobs.as_mapping_get("lean-shards").expect("fault workers");
+    for job in [aggregate, workers] {
+        let checkout = job
+            .as_mapping_get("steps")
+            .and_then(Yaml::as_sequence)
+            .expect("proof steps")
+            .iter()
+            .find(|step| {
+                step.as_mapping_get("uses")
+                    .and_then(Yaml::as_str)
+                    .is_some_and(|action| action.starts_with("actions/checkout@"))
+            })
+            .expect("proof checkout");
+        assert_eq!(
+            checkout
+                .as_mapping_get("with")
+                .and_then(|settings| settings.as_mapping_get("persist-credentials"))
+                .and_then(Yaml::as_bool),
+            Some(false)
+        );
+    }
     let strategy = workers.as_mapping_get("strategy").expect("fault strategy");
     assert_eq!(
         strategy.as_mapping_get("fail-fast").and_then(Yaml::as_bool),

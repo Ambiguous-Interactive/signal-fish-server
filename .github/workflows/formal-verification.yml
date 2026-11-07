@@ -80,6 +80,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - name: Require every proof worker
         env:
           SHARD_RESULT: ${{ needs.lean-shards.result }}
@@ -105,6 +107,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Read production Rust toolchain
         id: toolchain
@@ -146,7 +150,9 @@ jobs:
         run: python3 -m unittest discover -s formal/source-linked/lean -p 'test_*.py'
 
       - name: Extract production source and check proofs and negative controls
-        run: python3 formal/source-linked/lean/verify.py --prepare --mutations --probe-capability --mutation-shard ${{ matrix.shard }}/4
+        env:
+          MUTATION_SHARD: ${{ matrix.shard }}
+        run: python3 formal/source-linked/lean/verify.py --prepare --mutations --probe-capability --mutation-shard "$MUTATION_SHARD/4"
 
       - name: Check generated proof files are current
         shell: bash

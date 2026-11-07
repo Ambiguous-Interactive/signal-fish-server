@@ -870,11 +870,13 @@ def audit_shards(directory, count):
     for path in paths:
         report = json.loads(path.read_text())
         shard = report.get("mutation_shard")
-        if not isinstance(shard, list) or len(shard) != 2 or shard[1] != count or shard[0] in seen:
+        if (not isinstance(shard, list) or len(shard) != 2
+                or any(type(value) is not int for value in shard)
+                or shard[1] != count or not 0 <= shard[0] < count or shard[0] in seen):
             raise RuntimeError(f"Invalid or duplicate shard: {path}")
         expected = select_mutations(list(THEOREMS), shard=shard)
-        if (not report.get("completed") or not report.get("source_unchanged")
-                or not report.get("locks_unchanged") or report.get("hax_version") != VERSION
+        if (report.get("completed") is not True or report.get("source_unchanged") is not True
+                or report.get("locks_unchanged") is not True or report.get("hax_version") != VERSION
                 or report.get("source_hashes") != source_hashes
                 or report.get("proved_scenarios") != list(THEOREMS)
                 or report.get("selected_mutations") != expected
