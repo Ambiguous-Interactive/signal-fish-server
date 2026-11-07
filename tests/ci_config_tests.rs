@@ -34371,7 +34371,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // Host election retains 502 sites after moving its tied-key exclusion with the source.
 // 504 (was 502): shared eligible-host election adds two return-value sites (#1464).
 // With 51 shards, ceil(504/51) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 504;
+// 505 (was 504): shared membership resolution changes return-value sites (#1464).
+// With 51 shards, ceil(505/51) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 505;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

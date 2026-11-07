@@ -25,6 +25,7 @@ change the server's dependencies or public API.
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
+| Lean membership repair | Preserve a usable saved plan; otherwise replace only its host with the eligible election result or remove it and publish relay; exact stored-state update and replan flag; finite modeled termination | Every representable finite member slice, all stored pairs, profiles and authorities; pinned slice enumeration and shared-reference clone; generation, snapshots, endpoint validity, commits and delivery remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Lean session pair selection | Select the first permitted, unanimously supported and executable ADR rung; otherwise Relay/Relay | Every representable finite member slice, all capability fields, ceilings and switches; configuration lookup, endpoint validation, election, state and publication remain outside |
 | Lean host election | A seated authority wins; otherwise elect the least timestamp/UUID key; only input identities can win; empty input alone returns no host; finite modeled iteration terminates and permutations preserve the winner | Extracted generic production loop instantiated with the pinned slice iterator; Chrono/UUID field interpretations and tuple comparison are trusted mappings; the eligible-filter contracts below cover the shared filter; caller arguments and state remain tested/pending |
@@ -888,3 +889,59 @@ CI run retains source hashes, pins, generated output, logs, audits and timings.
 Before tool setup, `--mutations` checks that every declared source anchor occurs
 exactly once. The same definitions drive this preflight and the fault controls.
 Missing or ambiguous anchors fail before dependency preparation and proof work.
+
+## Membership session transition
+
+The production `session_admission::resolve_membership_plan` now owns the decision
+previously in `membership_session_decision`. Its output contains the plan to
+publish, the optional sticky-state update, and the replan flag. The server
+adapter passes the same stored plan, authority and shared member slice. It adds
+one new generation and retains the original member vector as before. Runtime
+behavior, wire formats and public APIs are unchanged. Rust, .NET and Godot
+clients therefore need no changes.
+
+Eight required contracts in `Membership.lean` check the extracted production
+function. The specification preserves any valid stored plan, including a
+non-Host plan. An invalid Host plan uses the already-verified eligible election
+on its stored pair. A replacement changes only the host and writes the exact
+plan selected for publication. No eligible replacement removes sticky state,
+publishes Relay/Relay without a host, and does not count a host replan. No stored
+plan also publishes relay but leaves state untouched. Reachability cases cover
+a valid incumbent, repair, and Direct endpoint refusal. The totality contract
+covers every finite slice representable by the pinned model.
+
+The contracts compose the existing saved-host validity, capability, Filter,
+authority and timestamp/UUID election results. They do not assume a legal stored
+pair, unique identities, a nonempty room, or a capable authority. UUID equality,
+UUID/Chrono ordering, extraction and pinned standard-library models retain their
+existing trust boundaries.
+
+The first concrete-slice extraction reproduced the pinned Aeneas failure on
+`core::slice::Iter::find`: a higher-ranked lifetime relates to a free lifetime.
+The accepted production function uses generic enumeration with a clone for the
+validity pass. Production supplies `&[SessionMember]`; cloning that reference
+preserves the snapshot and order without cloning the members. Required Lean
+contracts instantiate the same pinned slice iterator as the election proofs and
+the library's existing shared-reference Clone model. They do not prove arbitrary
+custom iterators or custom Clone implementations correct. `host_invalid` shares
+this generic enumeration seam; its existing four contracts and source-fault
+witnesses now use the pinned iterator explicitly.
+
+A local dispatch alias exposes the pinned `Iterator.any.default`, as the
+existing alias does for `Iterator.filter.default`. It adds no loop, predicate,
+axiom or replacement for extracted Rust. Tool and dependency pins are unchanged.
+
+Four independent source faults invert validity, change the repaired transport,
+drop the state-removal update, or suppress the replan flag. Each must compile,
+fail only the membership semantic contracts, and pass a separate audited
+kernel-checked wrong-result witness. CI retains baseline, faults, restored
+proofs, generated definitions, source/pin hashes and command timings. The
+independent Rust oracle compares 737,280 production outcomes against sorted
+eligible-member sets and a sticky-state table. Existing production-adapter tests
+check endpoint failover and keeping or replacing the saved host.
+
+These checks establish the pure transition over the supplied snapshot.
+Snapshot acquisition, current connection/profile identity, endpoint syntax and
+reachability, generation freshness, transaction commit, publication, cancellation
+and concurrent membership changes remain tested or pending. They are separate
+P12 correspondence obligations; this stage does not close issue #1464.

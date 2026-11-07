@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 42)
+        self.assertEqual(sum(map(len, definitions)), 46)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -123,6 +123,24 @@ class RequiredAggregation(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             verify.check_proof_rejection(SimpleNamespace(returncode=0, stdout=diagnostic),
                                          "projection", "version-floor")
+
+    def test_membership_faults_require_only_semantic_transition_failures(self):
+        """Compiler errors and failed dependencies cannot count as protocol evidence."""
+        diagnostic = "error: Capability/Verification/Membership.lean:42:6: unsolved goals\n"
+        for name in ("membership-validity", "membership-pair", "membership-update", "membership-replan"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("Membership.lean", "HostValidity.lean")),
+                (1, diagnostic.replace("Verification/Membership", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
 
     def test_resolution_faults_require_only_semantic_default_contract_failures(self):
         """Wrong-profile and fallback faults cannot pass on compiler or unrelated errors."""

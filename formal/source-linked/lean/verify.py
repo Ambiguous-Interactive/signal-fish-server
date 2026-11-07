@@ -70,6 +70,14 @@ THEOREMS = {"negotiation": (
     "Capability.eligible_minimum_contract",
     "Capability.eligible_total_contract",
     "Capability.eligible_outcomes",
+    "Capability.membership_contract",
+    "Capability.membership_absent_contract",
+    "Capability.membership_preserve_contract",
+    "Capability.membership_repair_contract",
+    "Capability.membership_remove_contract",
+    "Capability.membership_replacement_eligible",
+    "Capability.membership_outcomes",
+    "Capability.membership_total_contract",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",
@@ -257,7 +265,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/Executability.lean:",
                     "Capability/Verification/Selection.lean:",
                     "Capability/Verification/Election.lean:",
-                    "Capability/Verification/EligibleElection.lean:")
+                    "Capability/Verification/EligibleElection.lean:",
+                    "Capability/Verification/Membership.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -283,6 +292,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/Election.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the election contract: {name}\n{result.stdout}")
+    if name.startswith("membership-") and not all(
+            error.startswith("Capability/Verification/Membership.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the membership contract: {name}\n{result.stdout}")
     if name.startswith("eligible-") and not all(
             error.startswith("Capability/Verification/EligibleElection.lean:")
             and "unsolved goals" in error for error in locations):
@@ -556,6 +569,16 @@ def capability_mutations():
         "eligible-authority": (") -> Option<Uuid> {\n    elect_host(",
                                ") -> Option<Uuid> {\n    if let Some(host) = authority { return Some(host); }\n    elect_host("),
     })
+    changes.update({
+        "membership-validity": ("if !stored.host_invalid(members.clone()) {",
+                                "if stored.host_invalid(members.clone()) {"),
+        "membership-pair": ("let updated = ActiveSessionPlan {\n            host: Some(host),\n            ..stored\n        };",
+                            "let updated = ActiveSessionPlan {\n            host: Some(host),\n            transport: Transport::Relay,\n            ..stored\n        };"),
+        "membership-update": ("plan: relay,\n            active_plan_update: Some(None),",
+                              "plan: relay,\n            active_plan_update: None,"),
+        "membership-replan": ("active_plan_update: Some(Some(updated)),\n            is_replan: true,",
+                              "active_plan_update: Some(Some(updated)),\n            is_replan: false,"),
+    })
     return {
         name: (capability_mutation_source(name), before, after)
         for name, (before, after) in changes.items()
@@ -564,7 +587,7 @@ def capability_mutations():
 
 def capability_mutation_source(name):
     """Resolve the production file for each capability fault family."""
-    if name.startswith("host-"):
+    if name.startswith(("host-", "membership-")):
         return "src/session_admission.rs"
     if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-")):
         return "src/session_member.rs"
@@ -610,7 +633,8 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
+                }.get(name, ["Capability.Verification.Membership"] if name.startswith("membership-") else
+                      ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
                       ["Capability.Verification.Election"] if name.startswith("election-") else
                       ["Capability.Verification.Selection"] if name.startswith("selection-") else
                       ["Capability.Verification.Executability"] if name.startswith("executable-") else
@@ -618,7 +642,8 @@ def capability_mutants(crate, *, names=None):
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
+                run(["lake", "build", "Capability.Verification.MembershipInputs"] if name.startswith("membership-") else
+                    ["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
                     ["lake", "build", "Capability.Verification.SelectionEvaluation"] if name.startswith("selection-") else
                     ["lake", "build", "Capability.Verification.Callbacks"], project)
