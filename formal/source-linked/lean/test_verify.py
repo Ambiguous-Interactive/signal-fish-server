@@ -1010,6 +1010,7 @@ class FaultPartitions(unittest.TestCase):
     """Keep local selection explicit and require the full CI fault inventory."""
 
     def test_partitions_cover_every_fault_once(self):
+        """Require disjoint, balanced partitions with no omitted production fault."""
         inventory = verify.mutation_inventory()
         full = [name for names in inventory.values() for name in names]
         parts = [verify.select_mutations(list(verify.THEOREMS), shard=(i, 4)) for i in range(4)]
@@ -1019,6 +1020,7 @@ class FaultPartitions(unittest.TestCase):
         self.assertLessEqual(max(sum(map(len, p.values())) for p in parts), 14)
 
     def test_local_selection_and_invalid_selection(self):
+        """Accept explicit local scope and reject unknown, repeated or invalid choices."""
         self.assertEqual(verify.select_mutations(["negotiation"], ["lower-clamp"]),
                          {"negotiation": ["lower-clamp"]})
         for names, shard in ((["missing"], None), (["lower-clamp"] * 2, None),
@@ -1028,6 +1030,7 @@ class FaultPartitions(unittest.TestCase):
                 verify.select_mutations(["negotiation"], names, shard)
 
     def reports(self, root):
+        """Write complete current-input reports for all four fault partitions."""
         reports = []
         for index in range(4):
             part = root / f"source-linked-lean-{index}"
@@ -1048,6 +1051,7 @@ class FaultPartitions(unittest.TestCase):
 
     @patch("builtins.print")
     def test_aggregate_accepts_only_complete_current_evidence(self, _print):
+        """Reject missing, stale, incomplete and malformed shard evidence."""
         cases = {"completed": False, "source_unchanged": False, "locks_unchanged": False,
                  "hax_version": "other", "source_hashes": {}, "lock_hashes": {},
                  "proved_scenarios": ["negotiation"], "mutation_shard": [1, 4],
@@ -1081,6 +1085,7 @@ class FaultPartitions(unittest.TestCase):
 
     @patch("builtins.print")
     def test_main_dispatches_only_explicit_faults_and_records_scope(self, _print):
+        """Check actual CLI dispatch and honest evidence for full and selected runs."""
         for arguments, scenarios, selected in (
             (["--mutations"], list(verify.THEOREMS), verify.mutation_inventory()),
             (["--scenario", "negotiation", "--mutations", "--mutation", "lower-clamp"],
@@ -1110,6 +1115,7 @@ class FaultPartitions(unittest.TestCase):
                 self.assertEqual(report["proved_scenarios"], scenarios)
 
     def test_invalid_cli_selection_fails_before_proof_tools(self):
+        """Reject invalid CLI scope before any external proof command starts."""
         for arguments in (["--mutation", "lower-clamp"], ["--mutation-shard", "0/4"],
                           ["--mutations", "--mutation-shard", "4/4"],
                           ["--mutations", "--mutation-shard", "bad"],
