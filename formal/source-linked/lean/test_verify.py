@@ -1002,9 +1002,6 @@ class CapabilityEvidence(unittest.TestCase):
                                  hashlib.sha256(content.encode()).hexdigest())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class FaultPartitions(unittest.TestCase):
     """Keep local selection explicit and require the full CI fault inventory."""
@@ -1128,3 +1125,7 @@ class FaultPartitions(unittest.TestCase):
                     verify.main()
                 self.assertEqual(error.exception.code, 2)
                 run.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
