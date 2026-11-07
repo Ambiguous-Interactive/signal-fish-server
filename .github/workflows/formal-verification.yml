@@ -75,8 +75,8 @@ jobs:
   lean:
     name: Source-linked Lean Proofs
     runs-on: ubuntu-24.04
-    # The prior cold cycle took 1268s. Eight selector faults add several minutes.
-    timeout-minutes: 40
+    # The prior cold cycle took 2116s. Election proofs and three faults need headroom.
+    timeout-minutes: 50
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1

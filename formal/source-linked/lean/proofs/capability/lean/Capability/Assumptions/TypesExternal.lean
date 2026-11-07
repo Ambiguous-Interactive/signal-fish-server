@@ -31,10 +31,11 @@ noncomputable instance : DecidableEq uuid.Uuid := Classical.decEq _
 inductive chrono.offset.utc.Utc where
   | Utc
 
-/-- External timestamp interpretation for fields these decisions never read.
+/-- External timestamp interpretation for the locked dependency.
 Chrono 0.4.45 stores a packed date, seconds, fraction and offset. This interpretation
-permits every scalar value, including invalid dates. It adds no timestamp operations,
-ordering rules or axioms. Timestamp construction and host election remain outside. -/
+permits every scalar value, including invalid dates. Election ordering uses the
+explicit trusted field interpretation in FunsExternal.lean. Timestamp construction
+and the dependency implementation remain outside the source proof. -/
 structure chrono.datetime.DateTime (Tz Offset : Type) where
   packedDate : I32
   seconds : U32

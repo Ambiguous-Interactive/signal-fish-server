@@ -1,16 +1,21 @@
 {
-  "base": "d0a78e5c957ee7c9deaaa6b56df99e1e522c0f69",
-  "reason": "Move the unchanged iterator-based session pair decision, ladder, floor and gates into shared private production source. Pass the same members, resolved ceiling and transport switches. Add source-linked contracts and independent matrix tests. Preserve behavior, APIs, wire formats, allocation strategy and runtime dependencies. Keep host election and publication in place. Existing Miri and mutation inventories cover both files.",
+  "base": "bff212dad71ce6bd31ead6cc9e4d6ff8f714af94",
+  "reason": "Move host election into shared private production source and copy its timestamp/UUID candidate key. Preserve authority preference, candidate order, strict comparison, early return, allocation strategy, public APIs and wire formats. Add source-linked election contracts and fault controls. Callers retain eligibility filters. Rust, .NET and Godot clients are unaffected. Miri and mutation inventories include the shared source. Move the equivalent tied-key mutant exclusion with the function; the measured inventory remains 502.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "248b11196f301ab99185cccda8dd5ecbfc84bc43",
-      "after": "335789b8bcf727b52830efc21a5037111111a4f6"
+      "before": "335789b8bcf727b52830efc21a5037111111a4f6",
+      "after": "b84e91561bf90c24a260f0d3de8137506bd472cd"
     },
     {
       "path": "src/session_member.rs",
-      "before": "68b1e23c95e0c4429415d757dde655d55dd31a94",
-      "after": "97bc2f445918d8e7f603740adfff5d810c4ef8c2"
+      "before": "97bc2f445918d8e7f603740adfff5d810c4ef8c2",
+      "after": "66275b50e4efa6abcc283aabd184cce885bd11e4"
+    },
+    {
+      "path": ".cargo/mutants.toml",
+      "before": "8058df7739f28f788808944736cc95ecbb8b2d4b",
+      "after": "0ce40f1bf44369ed96f9a1dfb6e1c1ee833c614b"
     }
   ]
 }

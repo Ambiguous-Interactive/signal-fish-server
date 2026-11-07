@@ -92,9 +92,9 @@ exclude_globs = [
 exclude_re = [
     # At client_max == maximum, both negotiation branches return that same u16.
     "^src/protocol_core\\.rs:[0-9]+:[0-9]+: replace < with <= in negotiate_protocol_version$",
-    # Equal keys include the returned player ID. Choosing another tied reference
+    # Equal keys include the returned player ID. Choosing another tied key
     # cannot change later comparisons or the result.
-    "^src/server/session_policy\\.rs:[0-9]+:[0-9]+: replace < with <= in elect_host$",
+    "^src/session_member\\.rs:[0-9]+:[0-9]+: replace < with <= in elect_host$",
     # This constructor exists only behind `allocation-tracking` so the external
     # allocation benchmark can build a production-shaped classified handle.
     # The mutation oracle deliberately enables only `trace-validation`, while

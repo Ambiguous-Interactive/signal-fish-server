@@ -33,3 +33,15 @@ import Capability
 #print axioms Capability.selection_fallback_contract
 #print axioms Capability.selection_upgrade_contract
 #print axioms Capability.selection_outcomes
+
+#print axioms Capability.election_empty_contract
+#print axioms Capability.election_authority_contract
+#print axioms Capability.election_membership_contract
+#print axioms Capability.election_minimum_contract
+#print axioms Capability.election_total_contract
+#print axioms Capability.election_outcomes
+#print axioms Capability.election_permutation_contract
+#print axioms Capability.timestamp_key_order
+#print axioms Capability.timestamp_key_equal
+#print axioms Capability.uuid_key_equal
+#print axioms Capability.uuid_key_order

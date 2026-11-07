@@ -107,4 +107,17 @@ def session_member.select_session_pair.closure :=
   session_capability.Topology × Bool × Bool × Slice
   session_member.SessionMember
 
+/-- [signal_fish_proof_core::session_member::elect_host::closure#1]
+    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+@[reducible]
+def session_member.elect_host.closure_1 (T1 : Type) (Clause0_IntoIter : Type)
+  :=
+Unit
+
+/-- [signal_fish_proof_core::session_member::elect_host::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+@[reducible]
+def session_member.elect_host.closure (T1 : Type) (Clause0_IntoIter : Type) :=
+  session_member.SessionMember
+
 end signal_fish_proof_core

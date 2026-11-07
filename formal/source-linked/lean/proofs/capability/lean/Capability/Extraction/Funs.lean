@@ -624,6 +624,155 @@ def session_member.select_session_pair
       ii (desired, enable_direct, enable_webrtc, members)
   core.option.Option.unwrap_or o session_member.RELAY_FLOOR
 
+/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+def
+  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_member.elect_host.closure_1 T1 Clause0_IntoIter)
+  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
+  chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM uuid.Uuid
+  := do
+  let (_, player_id) := tupled_args
+  ok player_id
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+@[reducible]
+def
+  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_member.elect_host.closure_1 T1 Clause0_IntoIter)
+  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
+  uuid.Uuid) uuid.Uuid := {
+  call_once :=
+    session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+def
+  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (c : session_member.elect_host.closure T1 Clause0_IntoIter)
+  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
+  chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM Bool
+  := do
+  core.Pair.Insts.CoreCmpPartialOrdPair.lt
+    (chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime
+    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc
+    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc)
+    uuid.Uuid.Insts.CoreCmpPartialOrdUuid (c.joined_at, c.player_id)
+    tupled_args
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+@[reducible]
+def
+  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_member.elect_host.closure T1 Clause0_IntoIter)
+  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
+  uuid.Uuid) Bool := {
+  call_once :=
+    session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- [signal_fish_proof_core::session_member::elect_host]: loop body 0:
+    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
+@[rust_loop_body]
+def session_member.elect_host_loop.body
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid)
+  (iter : Clause0_IntoIter)
+  (earliest : core.option.Option ((chrono.datetime.DateTime
+  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM (ControlFlow (Clause0_IntoIter × (core.option.Option
+    ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
+    uuid.Uuid))) (core.option.Option uuid.Uuid))
+  := do
+  let (o, iter1) ←
+    coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst.iteratorIteratorInst.next
+      iter
+  match o with
+  | core.option.Option.None =>
+    let o1 ←
+      core.option.Option.map
+        (session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
+        coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
+        earliest ()
+    ok (done o1)
+  | core.option.Option.Some member =>
+    let b ←
+      core.option.Option.Insts.CoreCmpPartialEqOption.eq
+        uuid.Uuid.Insts.CoreCmpPartialEqUuid (core.option.Option.Some
+        member.player_id) authority
+    if b
+    then ok (done (core.option.Option.Some member.player_id))
+    else
+      let b1 ←
+        core.option.Option.is_none_or
+          (session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+          coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
+          earliest member
+      if b1
+      then
+        ok (cont (iter1, core.option.Option.Some (member.joined_at,
+          member.player_id)))
+      else ok (cont (iter1, earliest))
+
+/-- [signal_fish_proof_core::session_member::elect_host]: loop 0:
+    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
+@[rust_loop]
+def session_member.elect_host_loop
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (iter : Clause0_IntoIter)
+  (authority : core.option.Option uuid.Uuid)
+  (earliest : core.option.Option ((chrono.datetime.DateTime
+  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM (core.option.Option uuid.Uuid)
+  := do
+  loop
+    (fun (iter1, earliest1) => session_member.elect_host_loop.body
+      coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst
+      authority iter1 earliest1)
+    (iter, earliest)
+
+/-- [signal_fish_proof_core::session_member::elect_host]:
+    Source: 'src/../../../../src/session_member.rs', lines 153:0-167:1 -/
+def session_member.elect_host
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid) (members : T1) :
+  RustM (core.option.Option uuid.Uuid)
+  := do
+  let iter ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
+      members
+  session_member.elect_host_loop
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+    iter authority core.option.Option.None
+
 /-- [signal_fish_proof_core::session_member_can_host]:
     Source: 'src/lib.rs', lines 23:0-29:1 -/
 def session_member_can_host

@@ -2725,16 +2725,54 @@ fn snapshot_readiness_preserves_identity_metadata_and_ready_order() {
                 })
                 .collect();
             let unchanged_ready = ready.clone();
+            // Keep the oracle independent of the production sort/scan without
+            // repeating a quadratic membership scan under Miri.
+            let ready_ids: std::collections::HashSet<_> = ready.iter().copied().collect();
             let mut expected = players.clone();
             for player in &mut expected {
-                player.is_ready = ready.contains(&player.id);
+                player.is_ready = ready_ids.contains(&player.id);
             }
             super::ready_state::apply_snapshot_readiness(&mut players, &ready);
-            assert_eq!(
-                serde_json::to_value(&players).expect("actual players"),
-                serde_json::to_value(&expected).expect("expected players"),
-                "members={count}, ready={ready_count}"
-            );
+            assert_eq!(players.len(), expected.len());
+            for (actual, expected) in players.iter().zip(&expected) {
+                // Compare every field directly. New fields must join this check.
+                let PlayerInfo {
+                    id,
+                    name,
+                    is_authority,
+                    is_ready,
+                    connected_at,
+                    connection_info,
+                    epoch,
+                    seq,
+                    region_id,
+                } = actual;
+                assert_eq!(
+                    (
+                        id,
+                        name,
+                        is_authority,
+                        is_ready,
+                        connected_at,
+                        connection_info,
+                        epoch,
+                        seq,
+                        region_id,
+                    ),
+                    (
+                        &expected.id,
+                        &expected.name,
+                        &expected.is_authority,
+                        &expected.is_ready,
+                        &expected.connected_at,
+                        &expected.connection_info,
+                        &expected.epoch,
+                        &expected.seq,
+                        &expected.region_id,
+                    ),
+                    "members={count}, ready={ready_count}"
+                );
+            }
             assert_eq!(
                 players
                     .iter()

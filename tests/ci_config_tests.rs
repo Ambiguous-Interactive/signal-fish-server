@@ -22696,18 +22696,62 @@ fn test_ci_safety_workflow_has_required_jobs() {
     validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
 }
 
+fn miri_module_filter_violations(modules: &[String], filters: &[&str]) -> Vec<String> {
+    let mut violations = Vec::new();
+    for filter in filters {
+        if !modules.iter().any(|known| known == filter) {
+            violations.push(format!("unknown Miri root module: {filter}"));
+        }
+    }
+    for module in modules {
+        let count = filters.iter().filter(|filter| **filter == module).count();
+        if count != 1 {
+            violations.push(format!(
+                "Miri module {module} needs one owner, found {count}"
+            ));
+        }
+    }
+    violations
+}
+
+#[test]
+fn test_ci_safety_miri_filters_require_one_qualified_owner_per_module() {
+    let modules = ["protocol".to_string(), "server".to_string()];
+    for (description, filters, expected_valid) in [
+        ("one root owner each", vec!["protocol", "server"], true),
+        ("substring filter", vec!["protocol::", "server"], false),
+        (
+            "duplicate owner",
+            vec!["protocol", "server", "server"],
+            false,
+        ),
+        ("missing module", vec!["protocol"], false),
+        (
+            "unknown module",
+            vec!["protocol", "server", "unknown"],
+            false,
+        ),
+        (
+            "nested substring",
+            vec!["protocol", "server::tests::"],
+            false,
+        ),
+    ] {
+        let violations = miri_module_filter_violations(&modules, &filters);
+        assert_eq!(
+            violations.is_empty(),
+            expected_valid,
+            "{description}: {violations:?}"
+        );
+    }
+}
+
 #[test]
 fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
-    // The Miri lanes use hand-maintained libtest name filters, so the union
-    // of the lane filters must name every top-level module declared in
-    // `src/lib.rs`. A module named by no filter would silently never run
-    // under Miri — the missed-coverage failure class the previous single
-    // unfiltered run was structurally immune to. libtest runs a test when
-    // any filter is a substring of its full path, so a module is covered
-    // exactly when its name appears among the filter tokens.
+    // The exact-name runner selects the compiled tests for each root module.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
     let documents = Yaml::load_from_str(&content).expect("ci-safety.yml must parse as YAML");
     let jobs = documents
         .first()
@@ -22730,9 +22774,9 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
     let mut filter_tokens: Vec<&str> = Vec::new();
     for lane in lanes {
         let filters = lane
-            .as_mapping_get("filters")
+            .as_mapping_get("modules")
             .and_then(|value| value.as_str())
-            .expect("every Miri lane must define string filters");
+            .expect("every Miri lane must define root modules");
         filter_tokens.extend(filters.split_whitespace());
     }
 
@@ -22756,15 +22800,15 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
          declaration style changed, update this parser before trusting the \
          coverage assertion"
     );
-    for module in &modules {
-        assert!(
-            filter_tokens.contains(&module.as_str()),
-            "library module `{module}` is named by no Miri lane filter and \
-             would silently never run under Miri. Add it to a lane in \
-             ci-safety.yml (core or remaining) in the same change.\n\
-             Lane filters: {filter_tokens:?}"
-        );
-    }
+    assert!(content.contains("python3 scripts/run-miri-lane.py --toolchain nightly-2026-08-01"));
+    assert!(content.contains("--modules ${{ matrix.lane.modules }}"));
+    assert!(content.contains("python3 -m unittest discover -s scripts -p test_run_miri_lane.py"));
+    assert!(content.contains("miri-selected-tests.json"));
+    let violations = miri_module_filter_violations(&modules, &filter_tokens);
+    assert!(
+        violations.is_empty(),
+        "Miri lane coverage is invalid: {violations:?}"
+    );
 }
 
 #[test]
@@ -23297,9 +23341,21 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
     let content = read_file(&workflow_path);
     let content_live = strip_comment_lines(&content);
 
+    let runner = read_live_file(&root.join("scripts/run-miri-lane.py"));
+    for required in [
+        "\"miri\", \"test\", \"--locked\", \"--lib\", \"--no-fail-fast\"",
+        "\"--list\"",
+        "\"--exact\", *selected",
+    ] {
+        assert!(
+            runner.contains(required),
+            "Miri exact-name runner must retain {required}"
+        );
+    }
+
     for required in [
         "Run Miri on library tests",
-        "cargo +nightly-2026-08-01 miri test --locked --lib --no-fail-fast",
+        "python3 scripts/run-miri-lane.py --toolchain nightly-2026-08-01",
         "Run tests with AddressSanitizer",
         "cargo +nightly-2026-08-01 test --locked --target x86_64-unknown-linux-gnu",
         "--all-features --no-fail-fast 2>&1 | tee asan-output.txt",
@@ -34312,6 +34368,7 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 51 shards, ceil(501/51) * 29s remains 290s.
 // 502 (was 501): the extracted session pair selector adds a tuple return-value site (#1464).
 // With 51 shards, ceil(502/51) * 29s remains 290s.
+// Host election retains 502 sites after moving its tied-key exclusion with the source.
 const MUTATION_TOTAL_MUTANTS: u32 = 502;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
