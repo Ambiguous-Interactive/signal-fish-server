@@ -87,6 +87,8 @@ THEOREMS = {"negotiation": (
     "Capability.peer_host_contract",
     "Capability.peer_mesh_contract",
     "Capability.peer_edge_outcomes",
+    "Capability.peer_mesh_pair_contract",
+    "Capability.peer_host_no_client_edges",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",

@@ -18,7 +18,7 @@ Functions modeled by hand (source correspondence requires separate Rust tests):
   (``UPGRADE_LADDER`` :190, ``topology_rank`` :208, ``transport_enabled`` :218,
    ``all_support`` :175, ``is_valid_pair`` :297)
 - ``elect_host``                        — src/server/session_policy.rs:372
-- ``local_initiates`` (glare rule)      — src/server/signaling.rs:60
+- ``local_initiates`` (glare rule)      — src/session_member.rs::local_initiates
 - replay truncation predicate           — src/reconnection.rs
   (``get_missed_events``'s ``evicted_watermark > last_sequence`` over
    ``EventBuffer::push``'s max-evicted watermark invariant)
@@ -280,7 +280,7 @@ def proof_set_b() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Proof set C — the glare / offerer rule (src/server/signaling.rs:60).
+# Proof set C — the glare / offerer rule (src/session_member.rs::local_initiates).
 # local_initiates(a,b) := a < b over the total UUID order (modeled as Int order).
 # ---------------------------------------------------------------------------
 def proof_set_c() -> None:

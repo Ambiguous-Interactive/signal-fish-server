@@ -12,12 +12,6 @@ theorem mutation_returns_wrong_value (member : SessionMember) :
     let low := { member with player_id := lowId, capabilities := capable }
     let high := { member with player_id := highId, capabilities := capable }
     peer_initiate low high .Relay .Relay .None = RustM.ok (.Some false) := by
-  have reverse_order : ¬ElectionOrder.uuidKey highId < ElectionOrder.uuidKey lowId := by
-    have order := id_order
-    omega
-  simp [peer_initiate, local_initiates, member_support_contract, MemberSupport,
-    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq,
-    CoreModels.core.cmp.PartialOrd.lt.default,
-    uuid.Uuid.Insts.CoreCmpPartialOrdUuid, ElectionOrder.orderBy,
-    distinct, Ne.symm distinct, id_order, reverse_order, Aeneas.Std.bind, Bind.bind]
+  simp [peer_initiate, member_support_contract, MemberSupport,
+    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq, distinct, Aeneas.Std.bind, Bind.bind]
 end Capability

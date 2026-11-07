@@ -238,7 +238,7 @@ direct Rust tests must establish that link.
 | --- | ------ | ------ |
 | **A** | the ladder walk in `choose_session_plan` (`session_policy.rs`) | legal, bounded, richest-first selection; Direct requires a usable host endpoint; a positive host control and a missing-endpoint mutant witness check that boundary |
 | **B** | `all_support` over an unbounded member set (`session_policy.rs:175`) | a single non-v3 member denies every upgrade rung (the relay-floor back-compat invariant), `all_support` implies pointwise support, and an empty room never upgrades |
-| **C** | `local_initiates` glare rule (`signaling.rs:60`) | exactly one designated offerer per distinct pair, no self-initiation, and an acyclic offer orientation; signaling delivery and SDP state are outside this model |
+| **C** | `local_initiates` glare rule (`session_member.rs::local_initiates`) | exactly one designated offerer per distinct pair, no self-initiation, and an acyclic offer orientation; signaling delivery and SDP state are outside this model |
 | **D** | `elect_host` over the eligible input set (`session_policy.rs`) | `(joined_at, id)` totally orders candidates; an eligible authority is unambiguous; production host filtering is a separate obligation |
 | **G** | `negotiate_protocol_version` and the caller's refusal predicate (`config/protocol.rs`, `websocket/connection.rs`) | negotiation honors both ceilings and preserves below-floor requests for refusal; a lower-clamp mutant silently upgrades a v2 client on a v3-only deployment |
 | **J** | the numeric guards of `validate_config_security` + `WebSocketConfig::validate` (`config/validation.rs`) | the config-admission closure: every admitted config satisfies the runtime safety envelope (relay-envelope headroom, capacity pairing, positive occupied-room GC deadline, batch-deadline ceiling, slow-consumer floor); the compiled defaults pass (non-vacuity); and the session-197 guards plus the strict headroom are necessary — each has an explicit witness config that would violate its runtime property without it |
@@ -283,7 +283,7 @@ this table and may drift a few lines.
 | `CapabilityReconnect`                    | saved-member restore, conditional authority restore, fresh-profile transfer, and finalized publication — `src/server/reconnection_service.rs`, `src/server/connection_manager.rs`, `src/server/signaling.rs` |
 | `connectionGeneration`                   | fresh socket ownership transferred to the restored player ID by `reassign_connection` — `src/server/connection_manager.rs` |
 | `Finalize` membership precondition (`members # <<>>`) | `Room::should_enter_lobby` — `src/protocol/room_state.rs:350` (lobby is now entered by any **non-empty** `Waiting` room; `max_players` is a **ceiling**, not a required count — the old fullness gate is gone, so finalize may fire below `max_players`) |
-| `r < q` (glare rule, election tie-break) | `local_initiates` — `src/server/signaling.rs:60`; UUID order via integer player ids            |
+| `r < q` (glare rule, election tie-break) | `local_initiates` — `src/session_member.rs::local_initiates`; UUID order via integer player ids            |
 
 ### Invariants and properties
 

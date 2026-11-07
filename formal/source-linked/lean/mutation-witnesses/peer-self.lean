@@ -10,14 +10,8 @@ open ElectionFixtures
 theorem mutation_returns_wrong_value (member : SessionMember) :
     let capable : SessionCapabilities := ⟨65535#u16, true, true, true, true, true, true⟩
     let low := { member with player_id := lowId, capabilities := capable }
-    let high := { member with player_id := highId, capabilities := capable }
     peer_initiate low low .Mesh .WebRtc .None = RustM.ok (.Some false) := by
-  have reverse_order : ¬ElectionOrder.uuidKey highId < ElectionOrder.uuidKey lowId := by
-    have order := id_order
-    omega
-  simp [peer_initiate, local_initiates, member_support_contract, MemberSupport,
-    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq,
-    CoreModels.core.cmp.PartialOrd.lt.default,
-    uuid.Uuid.Insts.CoreCmpPartialOrdUuid, ElectionOrder.orderBy,
-    distinct, Ne.symm distinct, id_order, reverse_order, Aeneas.Std.bind, Bind.bind]
+  simp [peer_initiate, member_support_contract, MemberSupport,
+    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq, local_initiates, CoreModels.core.cmp.PartialOrd.lt.default,
+    uuid.Uuid.Insts.CoreCmpPartialOrdUuid, ElectionOrder.orderBy, Aeneas.Std.bind, Bind.bind]
 end Capability

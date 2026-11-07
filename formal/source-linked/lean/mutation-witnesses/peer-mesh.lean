@@ -15,9 +15,10 @@ theorem mutation_returns_wrong_value (member : SessionMember) :
   have reverse_order : ¬ElectionOrder.uuidKey highId < ElectionOrder.uuidKey lowId := by
     have order := id_order
     omega
-  simp [peer_initiate, local_initiates, member_support_contract, MemberSupport,
-    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq,
-    CoreModels.core.cmp.PartialOrd.lt.default,
-    uuid.Uuid.Insts.CoreCmpPartialOrdUuid, ElectionOrder.orderBy,
-    distinct, Ne.symm distinct, id_order, reverse_order, Aeneas.Std.bind, Bind.bind]
+  have keys_different : ElectionOrder.uuidKey highId ≠ ElectionOrder.uuidKey lowId := by
+    intro equal
+    exact distinct ((uuid_key_equal lowId highId).mp equal.symm)
+  simp [peer_initiate, member_support_contract, MemberSupport,
+    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq, local_initiates, CoreModels.core.cmp.PartialOrd.lt.default,
+    uuid.Uuid.Insts.CoreCmpPartialOrdUuid, ElectionOrder.orderBy, distinct, reverse_order, keys_different, Aeneas.Std.bind, Bind.bind]
 end Capability

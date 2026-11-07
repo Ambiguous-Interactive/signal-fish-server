@@ -104,6 +104,29 @@ theorem peer_mesh_contract (recipient peer : SessionMember) (transport : Transpo
       (.Some (decide (ElectionOrder.uuidKey recipient.player_id < ElectionOrder.uuidKey peer.player_id))) := by
   simp [peer_edge_contract, PeerEdge, different, recipient_ok, peer_ok]
 
+/-- A compatible mesh pair has reciprocal edges and exactly one offerer. -/
+theorem peer_mesh_pair_contract (left right : SessionMember) (transport : Transport)
+    (host : core.option.Option uuid.Uuid) (different : left.player_id ≠ right.player_id)
+    (left_ok : MemberSupport left.capabilities .Mesh transport = true)
+    (right_ok : MemberSupport right.capabilities .Mesh transport = true) :
+    ∃ offer : Bool, peer_initiate left right .Mesh transport host = RustM.ok (.Some offer) ∧
+      peer_initiate right left .Mesh transport host = RustM.ok (.Some (!offer)) := by
+  obtain ⟨offer, forward, backward⟩ := glare_antisymmetric left.player_id right.player_id different
+  refine ⟨offer, ?_, ?_⟩
+  · rw [peer_mesh_contract left right transport host different left_ok right_ok]
+    rw [glare_contract] at forward
+    exact congrArg (fun value => RustM.ok (core.option.Option.Some value)) (RustM.ok.inj forward)
+  · rw [peer_mesh_contract right left transport host (Ne.symm different) right_ok left_ok]
+    have result := backward
+    rw [glare_contract] at result
+    exact congrArg (fun value => RustM.ok (core.option.Option.Some value)) (RustM.ok.inj result)
+
+/-- Two Host clients cannot form a peer edge, even with arbitrary capabilities. -/
+theorem peer_host_no_client_edges (left right : SessionMember) (transport : Transport)
+    (host : uuid.Uuid) (left_client : left.player_id ≠ host) (right_client : right.player_id ≠ host) :
+    peer_initiate left right .Host transport (.Some host) = RustM.ok .None := by
+  simp [peer_edge_contract, PeerEdge, left_client, right_client]
+
 /-- Accepting, refusing and both offer directions are reachable without a
 roster-membership, endpoint, metadata or legal-pair assumption. -/
 theorem peer_edge_outcomes (member : SessionMember) :

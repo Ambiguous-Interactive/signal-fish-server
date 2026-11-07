@@ -72,3 +72,5 @@ import Capability
 #print axioms Capability.peer_host_contract
 #print axioms Capability.peer_mesh_contract
 #print axioms Capability.peer_edge_outcomes
+#print axioms Capability.peer_mesh_pair_contract
+#print axioms Capability.peer_host_no_client_edges
