@@ -123,7 +123,9 @@ fn sorted_reservation_validation_matches_original_large_roster() {
         });
         recipients.push((id, handle));
     }
-    let transactions = 100;
+    // Miri checks the full 255-member input once; native runs retain the
+    // repeated timing sample and comparison budgets.
+    let transactions = if cfg!(miri) { 1 } else { 100 };
     let validations_per_transaction = 2;
     let members = recipients.len();
     let logarithmic_bound = usize::try_from(members.ilog2()).unwrap() + 2;
