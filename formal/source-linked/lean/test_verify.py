@@ -66,6 +66,35 @@ class AxiomAudit(unittest.TestCase):
 class RequiredAggregation(unittest.TestCase):
     """Require aggregation contracts, exact external mapping, and real faults."""
 
+    def test_all_production_mutation_anchors_are_unique(self):
+        """Each actual backend mutation must change exactly one production decision."""
+        definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
+                       verify.projection_mutations())
+        self.assertEqual(sum(map(len, definitions)), 42)
+        verify.check_mutation_anchors(verify.ROOT)
+
+    def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
+        """Missing and duplicate anchors fail before preparation or any proof tool runs."""
+        for definitions in (verify.negotiation_mutations(), verify.capability_mutations(),
+                            verify.projection_mutations()):
+            name, (source, before, _) = next(iter(definitions.items()))
+            for mode in ("missing", "duplicate"):
+                with self.subTest(name=name, mode=mode), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    verify.copy_sources(root)
+                    path = root / source
+                    original = path.read_text()
+                    path.write_text(original.replace(before, "") if mode == "missing"
+                                    else original + "\n" + before)
+                    with patch.object(verify, "ROOT", root), \
+                            patch("sys.argv", ["verify.py", "--prepare", "--mutations"]), \
+                            patch.object(verify, "run") as run, \
+                            patch.object(verify, "prepare") as prepare:
+                        with self.assertRaisesRegex(RuntimeError, "Mutation anchor changed:"):
+                            verify.main()
+                        run.assert_not_called()
+                        prepare.assert_not_called()
+
     @patch("builtins.print")
     def test_every_required_scenario_needs_complete_approved_axiom_reports(self, _print):
         """Reject omitted aggregation contracts and proof holes in every scenario."""
@@ -202,6 +231,28 @@ class RequiredAggregation(unittest.TestCase):
                 (1, diagnostic.replace("Verification/Election", "Extraction/Funs")),
                 (1, diagnostic.replace("unsolved goals", "unknown identifier")),
                 (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
+
+    def test_eligible_faults_require_only_semantic_contract_rejection(self):
+        """Filter compiler errors and unrelated election failures are not eligible-election evidence."""
+        diagnostic = "error: Capability/Verification/EligibleElection.lean:42:6: unsolved goals\n"
+        for name in ("eligible-capability", "eligible-endpoint", "eligible-authority"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("EligibleElection.lean", "Election.lean")),
+                (1, diagnostic.replace("EligibleElection.lean", "ElectionFixtures.lean")),
+                (1, diagnostic.replace("EligibleElection.lean", "Members.lean")),
+                (1, diagnostic.replace("Verification/EligibleElection", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic.replace("unsolved goals", "Tactic `rewrite` failed")),
                 (1, diagnostic + "error: dependency unavailable\n"),
                 (1, ""),
             ):

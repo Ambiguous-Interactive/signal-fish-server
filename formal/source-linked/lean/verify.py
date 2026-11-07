@@ -62,6 +62,14 @@ THEOREMS = {"negotiation": (
     "Capability.election_total_contract",
     "Capability.election_outcomes",
     "Capability.election_permutation_contract",
+    "Capability.eligible_callback_contract",
+    "Capability.eligible_election_contract",
+    "Capability.eligible_empty_contract",
+    "Capability.eligible_authority_contract",
+    "Capability.eligible_membership_contract",
+    "Capability.eligible_minimum_contract",
+    "Capability.eligible_total_contract",
+    "Capability.eligible_outcomes",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",
@@ -248,7 +256,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/HostValidity.lean:",
                     "Capability/Verification/Executability.lean:",
                     "Capability/Verification/Selection.lean:",
-                    "Capability/Verification/Election.lean:")
+                    "Capability/Verification/Election.lean:",
+                    "Capability/Verification/EligibleElection.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -274,6 +283,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/Election.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the election contract: {name}\n{result.stdout}")
+    if name.startswith("eligible-") and not all(
+            error.startswith("Capability/Verification/EligibleElection.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the eligible-election contract: {name}\n{result.stdout}")
     if name.startswith("selection-") and not all(
             error.startswith("Capability/Verification/Selection.lean:")
             and "unsolved goals" in error for error in locations):
@@ -366,9 +379,9 @@ def copy_sources(tree):
         shutil.copyfile(ROOT / name, destination)
 
 
-def projection_mutants(crate, *, names=None):
-    """Reject version and membership faults only after extraction compiles."""
-    changes = {
+def projection_mutations():
+    """Define the production source faults used by projection checks."""
+    return {
         "version-floor": ("src/session_capability.rs", "capabilities.version >= 3", "capabilities.version >= 2"),
         "transport-projection": ("src/session_capability.rs", "direct_transport: transports.contains(&Transport::Direct)",
                                  "direct_transport: transports.contains(&Transport::Relay)"),
@@ -386,6 +399,11 @@ def projection_mutants(crate, *, names=None):
         "admission-transport": ("src/session_admission.rs", "protocol.transports.contains(&stored.transport)", "true"),
         "admission-host": ("src/session_admission.rs", "protocol.version >= 3", "protocol.version >= 3 && stored.host.is_some()"),
     }
+
+
+def projection_mutants(crate, *, names=None):
+    """Reject version and membership faults only after extraction compiles."""
+    changes = projection_mutations()
     selected = changes if names is None else {name: changes[name] for name in names}
     for name, (source, before, after) in selected.items():
         original = (ROOT / source).read_text()
@@ -424,22 +442,25 @@ def projection_mutants(crate, *, names=None):
     verify(crate, "projection")
 
 
+def negotiation_mutations():
+    """Define the production source faults used by negotiation checks."""
+    return {
+        "lower-clamp": ("src/protocol_core.rs", "Some(version) => version,",
+                        "Some(version) => if version < minimum { minimum } else { version },"),
+        "ignore-server-ceiling": ("src/protocol_core.rs", "if requested < maximum {", "if true {"),
+    }
+
+
 def mutants(crate):
     """Reject isolated source faults, check their wrong results, then restore green."""
-    source = ROOT / "src/protocol_core.rs"
-    original = source.read_text()
-    changes = {
-        "lower-clamp": ("Some(version) => version,",
-                        "Some(version) => if version < minimum { minimum } else { version },"),
-        "ignore-server-ceiling": ("if requested < maximum {", "if true {"),
-    }
-    for name, (before, after) in changes.items():
+    for name, (source, before, after) in negotiation_mutations().items():
+        original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
         with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
             tree = Path(tmp)
             copy_sources(tree)
-            (tree / "src/protocol_core.rs").write_text(original.replace(before, after))
+            (tree / source).write_text(original.replace(before, after))
             copied = tree / "formal/source-linked/lean"
             shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
                 ".lake*", "target", "llbc", "__pycache__", "*.log", "capability"))
@@ -468,8 +489,8 @@ def mutants(crate):
     verify(crate)
 
 
-def capability_mutants(crate, *, names=None):
-    """Reject result and callback-state faults with kernel-checked results."""
+def capability_mutations():
+    """Define the production source faults used by capability checks."""
     changes = {
         "empty-room": ("!members.is_empty() && members.iter().all(supports)",
                        "members.iter().all(supports)"),
@@ -502,7 +523,8 @@ def capability_mutants(crate, *, names=None):
     })
     changes.update({
         "executable-transport": ("transport != Transport::Direct\n        || members", "transport == Transport::Direct\n        || members"),
-        "executable-capability": ("|member| member.can_host(topology, transport)", "|member| member.can_host(topology, transport) || member.direct_endpoint.is_some()"),
+        "executable-capability": (".any(|member| member.can_host(topology, transport))",
+                                  ".any(|member| member.can_host(topology, transport) || member.direct_endpoint.is_some())"),
         "executable-missing": ("transport != Transport::Direct\n        || members", "transport != Transport::Direct\n        && members"),
     })
     changes.update({
@@ -526,9 +548,45 @@ def capability_mutants(crate, *, names=None):
         "election-date": ("(member.joined_at, member.player_id) < candidate", "candidate < (member.joined_at, member.player_id)"),
         "election-uuid": ("(member.joined_at, member.player_id) < candidate", "(member.joined_at, member.player_id) < (candidate.0, member.player_id)"),
     })
+    changes.update({
+        "eligible-capability": (".filter(move |member| member.can_host(topology, transport))",
+                                ".filter(move |member| member.can_host(topology, transport) || true)"),
+        "eligible-endpoint": (".filter(move |member| member.can_host(topology, transport))",
+                              ".filter(move |member| member.supports_session(topology, transport))"),
+        "eligible-authority": (") -> Option<Uuid> {\n    elect_host(",
+                               ") -> Option<Uuid> {\n    if let Some(host) = authority { return Some(host); }\n    elect_host("),
+    })
+    return {
+        name: (capability_mutation_source(name), before, after)
+        for name, (before, after) in changes.items()
+    }
+
+
+def capability_mutation_source(name):
+    """Resolve the production file for each capability fault family."""
+    if name.startswith("host-"):
+        return "src/session_admission.rs"
+    if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-")):
+        return "src/session_member.rs"
+    if name == "wrong-callback-transport":
+        return "src/session_capability.rs"
+    return "src/protocol_core.rs"
+
+
+def check_mutation_anchors(root):
+    """Reject missing or ambiguous source anchors before proof tools start."""
+    for changes in (negotiation_mutations(), capability_mutations(), projection_mutations()):
+        for name, (source, before, _) in changes.items():
+            count = (root / source).read_text().count(before)
+            if count != 1:
+                raise RuntimeError(f"Mutation anchor changed: {name}: {source}: expected 1 occurrence, found {count}")
+
+
+def capability_mutants(crate, *, names=None):
+    """Reject result and callback-state faults with kernel-checked results."""
+    changes = capability_mutations()
     selected = changes if names is None else {name: changes[name] for name in names}
-    for name, (before, after) in selected.items():
-        source = "src/session_admission.rs" if name.startswith("host-") else "src/session_member.rs" if name.startswith(("member-", "executable-", "selection-", "election-")) else ("src/session_capability.rs" if name == "wrong-callback-transport" else "src/protocol_core.rs")
+    for name, (source, before, after) in selected.items():
         original = (ROOT / source).read_text()
         if original.count(before) != 1:
             raise RuntimeError(f"Mutation anchor changed: {name}")
@@ -552,14 +610,16 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.Election"] if name.startswith("election-") else
+                }.get(name, ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
+                      ["Capability.Verification.Election"] if name.startswith("election-") else
                       ["Capability.Verification.Selection"] if name.startswith("selection-") else
                       ["Capability.Verification.Executability"] if name.startswith("executable-") else
                       ["Capability.Verification.HostValidity"] if name.startswith("host-") else
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
+                run(["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
+                    ["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
                     ["lake", "build", "Capability.Verification.SelectionEvaluation"] if name.startswith("selection-") else
                     ["lake", "build", "Capability.Verification.Callbacks"], project)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
@@ -715,6 +775,8 @@ def main():
     parser.add_argument("--prepare", action="store_true",
                         help="fetch pinned dependencies and only required Mathlib cache modules")
     args = parser.parse_args()
+    if args.mutations:
+        check_mutation_anchors(ROOT)
     version = run(["cargo", "hax", "--version"], HERE)
     check_version(version.stdout)
     source = ROOT / "src/protocol_core.rs"

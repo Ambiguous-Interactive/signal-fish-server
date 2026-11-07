@@ -1,21 +1,16 @@
 {
-  "base": "bff212dad71ce6bd31ead6cc9e4d6ff8f714af94",
-  "reason": "Move host election into shared private production source and copy its timestamp/UUID candidate key. Preserve authority preference, candidate order, strict comparison, early return, allocation strategy, public APIs and wire formats. Add source-linked election contracts and fault controls. Callers retain eligibility filters. Rust, .NET and Godot clients are unaffected. Miri and mutation inventories include the shared source. Move the equivalent tied-key mutant exclusion with the function; the measured inventory remains 502.",
+  "base": "50319265a36ec75a47d4cd67cda2dc0b94fdacf0",
+  "reason": "Share the existing host eligibility filter between finalize-time selection and membership repair. Preserve capability and Direct endpoint checks before authority preference, iterator order, timestamp/UUID selection, short circuit, allocation strategy, public APIs and wire formats. A move closure owns the same copied axes for source extraction. Both production callers pass slices. Rust, .NET and Godot clients are unaffected. Add extracted Filter/election contracts and independent source faults; caller snapshots, endpoint validation and async state remain outside these proofs.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "335789b8bcf727b52830efc21a5037111111a4f6",
-      "after": "b84e91561bf90c24a260f0d3de8137506bd472cd"
+      "before": "b84e91561bf90c24a260f0d3de8137506bd472cd",
+      "after": "38607aa0c3be4f93140d7bbb23f12dd37f05c88f"
     },
     {
       "path": "src/session_member.rs",
-      "before": "97bc2f445918d8e7f603740adfff5d810c4ef8c2",
-      "after": "66275b50e4efa6abcc283aabd184cce885bd11e4"
-    },
-    {
-      "path": ".cargo/mutants.toml",
-      "before": "8058df7739f28f788808944736cc95ecbb8b2d4b",
-      "after": "0ce40f1bf44369ed96f9a1dfb6e1c1ee833c614b"
+      "before": "66275b50e4efa6abcc283aabd184cce885bd11e4",
+      "after": "07033c07b75352cde24084205eaa34b80a21ff79"
     }
   ]
 }

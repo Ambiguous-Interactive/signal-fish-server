@@ -166,9 +166,177 @@ pub(crate) fn elect_host<'a>(
     earliest.map(|(_, player_id)| player_id)
 }
 
+/// Elect only members that can run the selected pair and expose any required
+/// Direct endpoint. Authority preference never bypasses these requirements.
+#[must_use]
+pub(crate) fn elect_eligible_host<'a>(
+    authority: Option<Uuid>,
+    members: impl IntoIterator<Item = &'a SessionMember>,
+    topology: Topology,
+    transport: Transport,
+) -> Option<Uuid> {
+    elect_host(
+        authority,
+        members
+            .into_iter()
+            .filter(move |member| member.can_host(topology, transport)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1464: authority, version, both axes and Direct readiness use an independent set oracle.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn eligible_host_election_matches_capability_and_endpoint_oracle() {
+        let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
+        let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+        for version in [0, 1, 2, 3, 4, u16::MAX] {
+            for mask in 0_u8..64 {
+                for has_endpoint in [false, true] {
+                    let profile = SessionCapabilities {
+                        version,
+                        relay_transport: mask & 1 != 0,
+                        direct_transport: mask & 2 != 0,
+                        webrtc_transport: mask & 4 != 0,
+                        relay_topology: mask & 8 != 0,
+                        host_topology: mask & 16 != 0,
+                        mesh_topology: mask & 32 != 0,
+                    };
+                    let member = SessionMember {
+                        player_id: Uuid::from_u128(1),
+                        player_name: String::new(),
+                        is_authority: false,
+                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        direct_endpoint: has_endpoint.then(|| DirectEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: 1,
+                        }),
+                        capabilities: profile,
+                    };
+                    for (topology_index, topology) in topologies.into_iter().enumerate() {
+                        for (transport_index, transport) in transports.into_iter().enumerate() {
+                            let eligible = version >= 3
+                                && mask & (1 << (topology_index + 3)) != 0
+                                && mask & (1 << transport_index) != 0
+                                && (transport != Transport::Direct || has_endpoint);
+                            let expected = eligible.then_some(member.player_id);
+                            for authority in [None, Some(member.player_id), Some(Uuid::max())] {
+                                assert_eq!(
+                                    elect_eligible_host(
+                                        authority,
+                                        std::slice::from_ref(&member),
+                                        topology,
+                                        transport,
+                                    ),
+                                    expected,
+                                    "version={version}, mask={mask}, endpoint={has_endpoint}, pair=({topology:?}, {transport:?}), authority={authority:?}",
+                                );
+                                assert_eq!(
+                                    elect_eligible_host(authority, &[], topology, transport),
+                                    None,
+                                    "empty pair=({topology:?}, {transport:?}), authority={authority:?}",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// #1464: ineligible authority cannot displace the least eligible timestamp/UUID.
+    #[test]
+    fn eligible_host_election_filters_before_authority_and_minimum_selection() {
+        let complete = SessionCapabilities {
+            version: 3,
+            relay_transport: true,
+            direct_transport: true,
+            webrtc_transport: true,
+            relay_topology: true,
+            host_topology: true,
+            mesh_topology: true,
+        };
+        let member = |identity, seconds, capabilities, has_endpoint: bool| SessionMember {
+            player_id: Uuid::from_u128(identity),
+            player_name: String::new(),
+            is_authority: identity == 1,
+            joined_at: chrono::DateTime::from_timestamp(seconds, 0).unwrap(),
+            direct_endpoint: has_endpoint.then(|| DirectEndpoint {
+                host: "127.0.0.1".into(),
+                port: 1,
+            }),
+            capabilities,
+        };
+        for (label, rejected) in [
+            (
+                "old protocol",
+                member(
+                    1,
+                    -1,
+                    SessionCapabilities {
+                        version: 2,
+                        ..complete
+                    },
+                    true,
+                ),
+            ),
+            (
+                "missing topology",
+                member(
+                    1,
+                    -1,
+                    SessionCapabilities {
+                        host_topology: false,
+                        ..complete
+                    },
+                    true,
+                ),
+            ),
+            (
+                "missing transport",
+                member(
+                    1,
+                    -1,
+                    SessionCapabilities {
+                        direct_transport: false,
+                        ..complete
+                    },
+                    true,
+                ),
+            ),
+            ("missing endpoint", member(1, -1, complete, false)),
+        ] {
+            let mut members = [
+                rejected,
+                member(3, 1, complete, true),
+                member(4, 0, complete, true),
+                member(2, 0, complete, true),
+            ];
+            for _ in 0..members.len() {
+                for authority in [None, Some(Uuid::from_u128(1)), Some(Uuid::max())] {
+                    assert_eq!(
+                        elect_eligible_host(authority, &members, Topology::Host, Transport::Direct),
+                        Some(Uuid::from_u128(2)),
+                        "case={label}, authority={authority:?}, members={members:?}",
+                    );
+                }
+                assert_eq!(
+                    elect_eligible_host(
+                        Some(Uuid::from_u128(3)),
+                        &members,
+                        Topology::Host,
+                        Transport::Direct
+                    ),
+                    Some(Uuid::from_u128(3)),
+                    "eligible authority: case={label}, members={members:?}",
+                );
+                members.rotate_left(1);
+            }
+        }
+    }
 
     /// #1464: the extracted election must select the protocol minimum, including timestamp boundaries.
     #[test]

@@ -45,3 +45,12 @@ import Capability
 #print axioms Capability.timestamp_key_equal
 #print axioms Capability.uuid_key_equal
 #print axioms Capability.uuid_key_order
+
+#print axioms Capability.eligible_callback_contract
+#print axioms Capability.eligible_election_contract
+#print axioms Capability.eligible_empty_contract
+#print axioms Capability.eligible_authority_contract
+#print axioms Capability.eligible_membership_contract
+#print axioms Capability.eligible_minimum_contract
+#print axioms Capability.eligible_total_contract
+#print axioms Capability.eligible_outcomes
