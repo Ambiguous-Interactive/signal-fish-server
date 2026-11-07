@@ -66,6 +66,35 @@ class AxiomAudit(unittest.TestCase):
 class RequiredAggregation(unittest.TestCase):
     """Require aggregation contracts, exact external mapping, and real faults."""
 
+    def test_all_production_mutation_anchors_are_unique(self):
+        """Each actual backend mutation must change exactly one production decision."""
+        definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
+                       verify.projection_mutations())
+        self.assertEqual(sum(map(len, definitions)), 42)
+        verify.check_mutation_anchors(verify.ROOT)
+
+    def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
+        """Missing and duplicate anchors fail before preparation or any proof tool runs."""
+        for definitions in (verify.negotiation_mutations(), verify.capability_mutations(),
+                            verify.projection_mutations()):
+            name, (source, before, _) = next(iter(definitions.items()))
+            for mode in ("missing", "duplicate"):
+                with self.subTest(name=name, mode=mode), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    verify.copy_sources(root)
+                    path = root / source
+                    original = path.read_text()
+                    path.write_text(original.replace(before, "") if mode == "missing"
+                                    else original + "\n" + before)
+                    with patch.object(verify, "ROOT", root), \
+                            patch("sys.argv", ["verify.py", "--prepare", "--mutations"]), \
+                            patch.object(verify, "run") as run, \
+                            patch.object(verify, "prepare") as prepare:
+                        with self.assertRaisesRegex(RuntimeError, "Mutation anchor changed:"):
+                            verify.main()
+                        run.assert_not_called()
+                        prepare.assert_not_called()
+
     @patch("builtins.print")
     def test_every_required_scenario_needs_complete_approved_axiom_reports(self, _print):
         """Reject omitted aggregation contracts and proof holes in every scenario."""

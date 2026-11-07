@@ -884,3 +884,7 @@ contract. Each has an independently audited theorem of the wrong result over
 the actual extracted helper. The runner rejects compiler/tool errors as fault
 evidence, restores the source and rechecks the capability proofs. The required
 CI run retains source hashes, pins, generated output, logs, audits and timings.
+
+Before tool setup, `--mutations` checks that every declared source anchor occurs
+exactly once. The same definitions drive this preflight and the fault controls.
+Missing or ambiguous anchors fail before dependency preparation and proof work.
