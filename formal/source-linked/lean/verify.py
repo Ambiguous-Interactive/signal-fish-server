@@ -78,6 +78,17 @@ THEOREMS = {"negotiation": (
     "Capability.membership_replacement_eligible",
     "Capability.membership_outcomes",
     "Capability.membership_total_contract",
+    "Capability.glare_contract",
+    "Capability.peer_edge_contract",
+    "Capability.peer_self_contract",
+    "Capability.peer_capability_contract",
+    "Capability.peer_relay_contract",
+    "Capability.glare_antisymmetric",
+    "Capability.peer_host_contract",
+    "Capability.peer_mesh_contract",
+    "Capability.peer_edge_outcomes",
+    "Capability.peer_mesh_pair_contract",
+    "Capability.peer_host_no_client_edges",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",
@@ -266,7 +277,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/Selection.lean:",
                     "Capability/Verification/Election.lean:",
                     "Capability/Verification/EligibleElection.lean:",
-                    "Capability/Verification/Membership.lean:")
+                    "Capability/Verification/Membership.lean:",
+                    "Capability/Verification/PeerEdges.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -292,6 +304,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/Election.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the election contract: {name}\n{result.stdout}")
+    if name.startswith("peer-") and not all(
+            error.startswith("Capability/Verification/PeerEdges.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the peer-edge contract: {name}\n{result.stdout}")
     if name.startswith("membership-") and not all(
             error.startswith("Capability/Verification/Membership.lean:")
             and "unsolved goals" in error for error in locations):
@@ -579,6 +595,15 @@ def capability_mutations():
         "membership-replan": ("active_plan_update: Some(Some(updated)),\n            is_replan: true,",
                               "active_plan_update: Some(Some(updated)),\n            is_replan: false,"),
     })
+    changes.update({
+        "peer-self": ("if recipient.player_id == peer.player_id\n", "if recipient.player_id == peer.player_id && false\n"),
+        "peer-recipient": ("|| !recipient.supports_session(topology, transport)", "|| (!recipient.supports_session(topology, transport) && false)"),
+        "peer-capability": ("|| !peer.supports_session(topology, transport)", "|| (!peer.supports_session(topology, transport) && false)"),
+        "peer-mesh": ("local < remote", "remote < local"),
+        "peer-star": ("Some(host) if peer.player_id == host => Some(true)", "Some(host) if peer.player_id != host => Some(true)"),
+        "peer-host": ("Some(host) if recipient.player_id == host => Some(false)", "Some(host) if recipient.player_id == host => Some(true)"),
+        "peer-relay": ("Topology::Relay => None,", "Topology::Relay => Some(false),"),
+    })
     return {
         name: (capability_mutation_source(name), before, after)
         for name, (before, after) in changes.items()
@@ -589,7 +614,7 @@ def capability_mutation_source(name):
     """Resolve the production file for each capability fault family."""
     if name.startswith(("host-", "membership-")):
         return "src/session_admission.rs"
-    if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-")):
+    if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-", "peer-")):
         return "src/session_member.rs"
     if name == "wrong-callback-transport":
         return "src/session_capability.rs"
@@ -633,7 +658,8 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.Membership"] if name.startswith("membership-") else
+                }.get(name, ["Capability.Verification.PeerEdges"] if name.startswith("peer-") else
+                      ["Capability.Verification.Membership"] if name.startswith("membership-") else
                       ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
                       ["Capability.Verification.Election"] if name.startswith("election-") else
                       ["Capability.Verification.Selection"] if name.startswith("selection-") else
@@ -642,7 +668,8 @@ def capability_mutants(crate, *, names=None):
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.MembershipInputs"] if name.startswith("membership-") else
+                run(["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.Members"] if name.startswith("peer-") else
+                    ["lake", "build", "Capability.Verification.MembershipInputs"] if name.startswith("membership-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
                     ["lake", "build", "Capability.Verification.SelectionEvaluation"] if name.startswith("selection-") else

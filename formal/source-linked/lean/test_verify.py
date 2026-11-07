@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 46)
+        self.assertEqual(sum(map(len, definitions)), 53)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -123,6 +123,24 @@ class RequiredAggregation(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             verify.check_proof_rejection(SimpleNamespace(returncode=0, stdout=diagnostic),
                                          "projection", "version-floor")
+
+    def test_peer_faults_require_only_semantic_graph_failures(self):
+        """Compiler errors and failed dependencies cannot count as protocol evidence."""
+        diagnostic = "error: Capability/Verification/PeerEdges.lean:42:6: unsolved goals\n"
+        for name in ("peer-self", "peer-recipient", "peer-capability", "peer-mesh", "peer-star", "peer-host", "peer-relay"):
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "capability", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("PeerEdges.lean", "HostValidity.lean")),
+                (1, diagnostic.replace("Verification/PeerEdges", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "capability", name)
 
     def test_membership_faults_require_only_semantic_transition_failures(self):
         """Compiler errors and failed dependencies cannot count as protocol evidence."""

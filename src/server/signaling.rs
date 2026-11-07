@@ -37,16 +37,6 @@ pub(super) fn sorted_routed_player_ids(mut players: Vec<PlayerId>) -> Vec<Player
     players
 }
 
-/// Glare-avoidance offerer designation (the deterministic mesh rule).
-///
-/// For a pair of peers, exactly one side must send the offer. The local peer
-/// initiates iff its id sorts before the remote peer's id (UUID compare). This
-/// is stateless and antisymmetric: `local_initiates(a, b) != local_initiates(b, a)`
-/// for any `a != b`, and `local_initiates(x, x) == false`.
-pub(crate) fn local_initiates(local: PlayerId, remote: PlayerId) -> bool {
-    local < remote
-}
-
 /// Canonical serialized JSON byte length of an attacker-controlled payload —
 /// the measure the per-payload byte caps (`security.max_signal_bytes`,
 /// `security.max_connection_info_bytes`, the relay byte budget) enforce.

@@ -4759,10 +4759,10 @@ mod properties {
         choose_session_plan, elect_host, is_valid_pair, ActiveSessionPlan, SessionMember,
         SessionPlanDecision, RELAY_FLOOR, UPGRADE_LADDER,
     };
-    use super::super::signaling::local_initiates;
     use super::base_time;
     use crate::config::SessionConfig;
     use crate::protocol::{IceServer, PlayerId, Topology, Transport};
+    use crate::session_member::local_initiates;
     use proptest::prelude::*;
     use std::collections::HashMap;
     use uuid::Uuid;

@@ -299,7 +299,7 @@ def session_admission.ActiveSessionPlan.host_invalid
   else ok false
 
 /-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_mut]:
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+    Source: 'src/../../../../src/session_member.rs', lines 221:20-221:70 -/
 def
   session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -316,7 +316,7 @@ def
   ok (b, c)
 
 /-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+    Source: 'src/../../../../src/session_member.rs', lines 221:20-221:70 -/
 def
   session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -334,7 +334,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+    Source: 'src/../../../../src/session_member.rs', lines 221:20-221:70 -/
 @[reducible]
 def
   session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
@@ -350,7 +350,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+    Source: 'src/../../../../src/session_member.rs', lines 221:20-221:70 -/
 @[reducible]
 def
   session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
@@ -369,7 +369,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+    Source: 'src/../../../../src/session_member.rs', lines 205:17-205:43 -/
 def
   session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -385,7 +385,7 @@ def
   ok player_id
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+    Source: 'src/../../../../src/session_member.rs', lines 205:17-205:43 -/
 @[reducible]
 def
   session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
@@ -402,7 +402,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+    Source: 'src/../../../../src/session_member.rs', lines 201:31-201:91 -/
 def
   session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -421,7 +421,7 @@ def
     tupled_args
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+    Source: 'src/../../../../src/session_member.rs', lines 201:31-201:91 -/
 @[reducible]
 def
   session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
@@ -438,7 +438,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_member::elect_host]: loop body 0:
-    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 197:4-206:1 -/
 @[rust_loop_body]
 def session_member.elect_host_loop.body
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -483,7 +483,7 @@ def session_member.elect_host_loop.body
       else ok (cont (iter1, earliest))
 
 /-- [signal_fish_proof_core::session_member::elect_host]: loop 0:
-    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 197:4-206:1 -/
 @[rust_loop]
 def session_member.elect_host_loop
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -502,7 +502,7 @@ def session_member.elect_host_loop
     (iter, earliest)
 
 /-- [signal_fish_proof_core::session_member::elect_host]:
-    Source: 'src/../../../../src/session_member.rs', lines 153:0-167:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 192:0-206:1 -/
 def session_member.elect_host
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
@@ -518,7 +518,7 @@ def session_member.elect_host
     iter authority core.option.Option.None
 
 /-- [signal_fish_proof_core::session_member::elect_eligible_host]:
-    Source: 'src/../../../../src/session_member.rs', lines 172:0-184:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 211:0-223:1 -/
 def session_member.elect_eligible_host
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
@@ -691,8 +691,62 @@ def session_capability.all_support
     coreopsfunctionFnT1TupleShared0TSessionCapabilitiesInst) members
     (capabilities, topology, transport)
 
+/-- [signal_fish_proof_core::session_member::local_initiates]:
+    Source: 'src/../../../../src/session_member.rs', lines 61:0-63:1 -/
+def session_member.local_initiates
+  («local» : uuid.Uuid) (remote : uuid.Uuid) : RustM Bool := do
+  core.cmp.PartialOrd.lt.default uuid.Uuid.Insts.CoreCmpPartialOrdUuid
+    «local» remote
+
+/-- [signal_fish_proof_core::session_member::peer_initiate]:
+    Source: 'src/../../../../src/session_member.rs', lines 70:0-92:1 -/
+def session_member.peer_initiate
+  (recipient : session_member.SessionMember)
+  (peer : session_member.SessionMember)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport)
+  (host : core.option.Option uuid.Uuid) :
+  RustM (core.option.Option Bool)
+  := do
+  let b ←
+    uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq recipient.player_id peer.player_id
+  if b
+  then ok core.option.Option.None
+  else
+    let b1 ←
+      session_member.SessionMember.supports_session recipient topology
+        transport
+    if b1
+    then
+      let b2 ←
+        session_member.SessionMember.supports_session peer topology transport
+      if b2
+      then
+        match topology with
+        | session_capability.Topology.Relay => ok core.option.Option.None
+        | session_capability.Topology.Host =>
+          match host with
+          | core.option.Option.None => ok core.option.Option.None
+          | core.option.Option.Some host1 =>
+            let b3 ←
+              uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq recipient.player_id host1
+            if b3
+            then ok (core.option.Option.Some false)
+            else
+              let b4 ←
+                uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq peer.player_id host1
+              if b4
+              then ok (core.option.Option.Some true)
+              else ok core.option.Option.None
+        | session_capability.Topology.Mesh =>
+          let b3 ←
+            session_member.local_initiates recipient.player_id peer.player_id
+          ok (core.option.Option.Some b3)
+      else ok core.option.Option.None
+    else ok core.option.Option.None
+
 /-- [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::Fn<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}::call]:
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 def
   session_member.all_support.closure.Insts.CoreOpsFunctionFnTupleSharedSessionMemberSessionCapabilities.call
   (c : session_member.all_support.closure)
@@ -702,7 +756,7 @@ def
   ok tupled_args.capabilities
 
 /-- [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}::call_mut]:
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 def
   session_member.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberSessionCapabilities.call_mut
   (state : session_member.all_support.closure)
@@ -716,7 +770,7 @@ def
   ok (sc, state)
 
 /-- [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 def
   session_member.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberSessionCapabilities.call_once
   (c : session_member.all_support.closure) (sm : session_member.SessionMember)
@@ -729,7 +783,7 @@ def
   ok sc
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}]
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 @[reducible]
 def
   session_member.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberSessionCapabilities
@@ -740,7 +794,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}]
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 @[reducible]
 def
   session_member.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberSessionCapabilities
@@ -753,7 +807,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::all_support::{impl core::ops::function::Fn<(&'_ signal_fish_proof_core::session_member::SessionMember,), signal_fish_proof_core::session_capability::SessionCapabilities> for signal_fish_proof_core::session_member::all_support::closure}]
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 @[reducible]
 def
   session_member.all_support.closure.Insts.CoreOpsFunctionFnTupleSharedSessionMemberSessionCapabilities
@@ -766,7 +820,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_member::all_support]:
-    Source: 'src/../../../../src/session_member.rs', lines 58:0-69:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 97:0-108:1 -/
 def session_member.all_support
   (members : Slice session_member.SessionMember)
   (topology : session_capability.Topology)
@@ -778,7 +832,7 @@ def session_member.all_support
     members () topology transport
 
 /-- [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}::call_mut]:
-    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+    Source: 'src/../../../../src/session_member.rs', lines 121:17-121:62 -/
 def
   session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
   (c : session_member.rung_is_executable.closure)
@@ -790,7 +844,7 @@ def
   ok (b, c)
 
 /-- [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+    Source: 'src/../../../../src/session_member.rs', lines 121:17-121:62 -/
 def
   session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
   (c : session_member.rung_is_executable.closure)
@@ -803,7 +857,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}]
-    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+    Source: 'src/../../../../src/session_member.rs', lines 121:17-121:62 -/
 @[reducible]
 def
   session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
@@ -814,7 +868,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::rung_is_executable::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::rung_is_executable::closure<'_0, '_1>}]
-    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+    Source: 'src/../../../../src/session_member.rs', lines 121:17-121:62 -/
 @[reducible]
 def
   session_member.rung_is_executable.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
@@ -827,7 +881,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_member::rung_is_executable]:
-    Source: 'src/../../../../src/session_member.rs', lines 74:0-83:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 113:0-122:1 -/
 def session_member.rung_is_executable
   (members : Slice session_member.SessionMember)
   (topology : session_capability.Topology)
@@ -849,7 +903,7 @@ def session_member.rung_is_executable
     ok b1
 
 /-- [signal_fish_proof_core::session_member::UPGRADE_LADDER]
-    Source: 'src/../../../../src/session_member.rs', lines 93:0-97:2 -/
+    Source: 'src/../../../../src/session_member.rs', lines 132:0-136:2 -/
 @[global_simps, irreducible]
 def session_member.UPGRADE_LADDER
   :
@@ -862,14 +916,14 @@ def session_member.UPGRADE_LADDER
     ]
 
 /-- [signal_fish_proof_core::session_member::RELAY_FLOOR]
-    Source: 'src/../../../../src/session_member.rs', lines 103:0-103:90 -/
+    Source: 'src/../../../../src/session_member.rs', lines 142:0-142:90 -/
 @[global_simps, irreducible]
 def session_member.RELAY_FLOOR
   : (session_capability.Topology × session_capability.Transport) :=
   (session_capability.Topology.Relay, session_capability.Transport.Relay)
 
 /-- [signal_fish_proof_core::session_member::topology_rank]:
-    Source: 'src/../../../../src/session_member.rs', lines 111:0-117:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 150:0-156:1 -/
 def session_member.topology_rank
   (topology : session_capability.Topology) : RustM Std.U8 := do
   match topology with
@@ -878,7 +932,7 @@ def session_member.topology_rank
   | session_capability.Topology.Mesh => ok 2#u8
 
 /-- [signal_fish_proof_core::session_member::transport_enabled]:
-    Source: 'src/../../../../src/session_member.rs', lines 121:0-127:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 160:0-166:1 -/
 def session_member.transport_enabled
   (enable_direct : Bool) (enable_webrtc : Bool)
   (transport : session_capability.Transport) :
@@ -890,7 +944,7 @@ def session_member.transport_enabled
   | session_capability.Transport.WebRtc => ok enable_webrtc
 
 /-- [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnMut<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}::call_mut]:
-    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
 def
   session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool.call_mut
   (c : session_member.select_session_pair.closure)
@@ -917,7 +971,7 @@ def
   else ok (false, c)
 
 /-- [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnOnce<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
 def
   session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairTopologyTransportBool.call_once
   (c : session_member.select_session_pair.closure)
@@ -930,7 +984,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnOnce<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}]
-    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
 @[reducible]
 def
   session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnOnceTupleSharedPairTopologyTransportBool
@@ -941,7 +995,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_member::select_session_pair::{impl core::ops::function::FnMut<(&'_ (signal_fish_proof_core::session_capability::Topology, signal_fish_proof_core::session_capability::Transport),), bool> for signal_fish_proof_core::session_member::select_session_pair::closure<'_0, '_1, '_2, '_3>}]
-    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
 @[reducible]
 def
   session_member.select_session_pair.closure.Insts.CoreOpsFunctionFnMutTupleSharedPairTopologyTransportBool
@@ -954,7 +1008,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_member::select_session_pair]:
-    Source: 'src/../../../../src/session_member.rs', lines 130:0-145:1 -/
+    Source: 'src/../../../../src/session_member.rs', lines 169:0-184:1 -/
 def session_member.select_session_pair
   (members : Slice session_member.SessionMember)
   (desired : session_capability.Topology) (enable_direct : Bool)

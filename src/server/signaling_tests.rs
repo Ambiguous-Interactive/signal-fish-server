@@ -25,9 +25,9 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
 use super::session_policy::ActiveSessionPlan;
-use super::signaling::local_initiates;
 use super::InMemoryMessageCoordinator;
 use super::MessageCoordinator;
+use crate::session_member::local_initiates;
 
 const STATIC_STUN_URL: &str = "stun:static.example.com:3478";
 const TURN_STUN_URL: &str = "stun:stun.l.google.com:19302";

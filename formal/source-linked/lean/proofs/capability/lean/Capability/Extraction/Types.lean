@@ -97,20 +97,20 @@ structure session_admission.MembershipPlan where
   is_replan : Bool
 
 /-- [signal_fish_proof_core::session_member::elect_eligible_host::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+    Source: 'src/../../../../src/session_member.rs', lines 221:20-221:70 -/
 def session_member.elect_eligible_host.closure (T1 : Type) (Clause0_IntoIter :
   Type) :=
   session_capability.Topology × session_capability.Transport
 
 /-- [signal_fish_proof_core::session_member::elect_host::closure#1]
-    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+    Source: 'src/../../../../src/session_member.rs', lines 205:17-205:43 -/
 @[reducible]
 def session_member.elect_host.closure_1 (T1 : Type) (Clause0_IntoIter : Type)
   :=
 Unit
 
 /-- [signal_fish_proof_core::session_member::elect_host::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+    Source: 'src/../../../../src/session_member.rs', lines 201:31-201:91 -/
 @[reducible]
 def session_member.elect_host.closure (T1 : Type) (Clause0_IntoIter : Type) :=
   session_member.SessionMember
@@ -121,17 +121,17 @@ def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 
 /-- [signal_fish_proof_core::session_member::all_support::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 65:8-65:36 -/
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
 @[reducible]
 def session_member.all_support.closure := Unit
 
 /-- [signal_fish_proof_core::session_member::rung_is_executable::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 82:17-82:62 -/
+    Source: 'src/../../../../src/session_member.rs', lines 121:17-121:62 -/
 def session_member.rung_is_executable.closure :=
   session_capability.Topology × session_capability.Transport
 
 /-- [signal_fish_proof_core::session_member::select_session_pair::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
 def session_member.select_session_pair.closure :=
   session_capability.Topology × Bool × Bool × Slice
   session_member.SessionMember

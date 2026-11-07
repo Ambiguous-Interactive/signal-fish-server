@@ -63,3 +63,14 @@ import Capability
 #print axioms Capability.membership_replacement_eligible
 #print axioms Capability.membership_outcomes
 #print axioms Capability.membership_total_contract
+#print axioms Capability.glare_contract
+#print axioms Capability.peer_edge_contract
+#print axioms Capability.peer_self_contract
+#print axioms Capability.peer_capability_contract
+#print axioms Capability.peer_relay_contract
+#print axioms Capability.glare_antisymmetric
+#print axioms Capability.peer_host_contract
+#print axioms Capability.peer_mesh_contract
+#print axioms Capability.peer_edge_outcomes
+#print axioms Capability.peer_mesh_pair_contract
+#print axioms Capability.peer_host_no_client_edges

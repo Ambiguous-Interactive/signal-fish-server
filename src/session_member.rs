@@ -52,6 +52,45 @@ impl SessionMember {
     }
 }
 
+/// Glare-avoidance offerer designation (the deterministic mesh rule).
+///
+/// For a pair of peers, exactly one side must send the offer. The local peer
+/// initiates iff its id sorts before the remote peer's id (UUID compare). This
+/// is stateless and antisymmetric: `local_initiates(a, b) != local_initiates(b, a)`
+/// for any `a != b`, and `local_initiates(x, x) == false`.
+pub(crate) fn local_initiates(local: uuid::Uuid, remote: uuid::Uuid) -> bool {
+    local < remote
+}
+
+/// Offer direction for one peer edge in a recipient's session plan.
+/// Both members must support the pair. Mesh offers follow UUID order; a Host
+/// client offers to the host, which answers. Relay and self edges have no peer.
+/// The caller supplies members from the same publication snapshot and resolves
+/// the saved host separately. Endpoint and ICE projection are separate steps.
+pub(crate) fn peer_initiate(
+    recipient: &SessionMember,
+    peer: &SessionMember,
+    topology: Topology,
+    transport: Transport,
+    host: Option<Uuid>,
+) -> Option<bool> {
+    if recipient.player_id == peer.player_id
+        || !recipient.supports_session(topology, transport)
+        || !peer.supports_session(topology, transport)
+    {
+        return None;
+    }
+    match topology {
+        Topology::Relay => None,
+        Topology::Mesh => Some(local_initiates(recipient.player_id, peer.player_id)),
+        Topology::Host => match host {
+            Some(host) if recipient.player_id == host => Some(false),
+            Some(host) if peer.player_id == host => Some(true),
+            _ => None,
+        },
+    }
+}
+
 /// Whether *every* member supports v3 and the given (topology, transport) pair.
 ///
 /// An empty room never supports an upgrade (there is nothing to connect).
@@ -186,6 +225,81 @@ pub(crate) fn elect_eligible_host<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1464: compare actual edges to an independent adjacency-list oracle.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn peer_edges_match_protocol_graph_for_both_capability_sets() {
+        let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
+        let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+        let ids = [Uuid::nil(), Uuid::from_u128(u128::MAX)];
+        let outsider = Uuid::from_u128(1);
+        let profiles: Vec<_> = (0_u8..64)
+            .map(|mask| (3, mask))
+            .chain([(0, 63), (2, 63), (u16::MAX, 63)])
+            .collect();
+        let member = |player_id, version, mask: u8| SessionMember {
+            player_id,
+            player_name: "peer".into(),
+            is_authority: false,
+            joined_at: chrono::DateTime::UNIX_EPOCH,
+            direct_endpoint: None,
+            capabilities: SessionCapabilities {
+                version,
+                relay_transport: mask & 1 != 0,
+                direct_transport: mask & 2 != 0,
+                webrtc_transport: mask & 4 != 0,
+                relay_topology: mask & 8 != 0,
+                host_topology: mask & 16 != 0,
+                mesh_topology: mask & 32 != 0,
+            },
+        };
+        for (rv, rm) in profiles.iter().copied() {
+            for (pv, pm) in profiles.iter().copied() {
+                for recipient_id in ids {
+                    for peer_id in ids {
+                        let recipient = member(recipient_id, rv, rm);
+                        let peer = member(peer_id, pv, pm);
+                        for (ti, topology) in topologies.into_iter().enumerate() {
+                            for (pi, transport) in transports.into_iter().enumerate() {
+                                for host in [None, Some(ids[0]), Some(ids[1]), Some(outsider)] {
+                                    let edges = match topology {
+                                        Topology::Relay => vec![],
+                                        Topology::Mesh => vec![(ids[0], ids[1]), (ids[1], ids[0])],
+                                        Topology::Host => ids
+                                            .iter()
+                                            .copied()
+                                            .flat_map(|a| {
+                                                ids.iter().copied().filter_map(move |b| {
+                                                    (a != b && (Some(a) == host || Some(b) == host))
+                                                        .then_some((a, b))
+                                                })
+                                            })
+                                            .collect(),
+                                    };
+                                    let supported = |version, mask: u8| {
+                                        version >= 3
+                                            && mask & (1 << (ti + 3)) != 0
+                                            && mask & (1 << pi) != 0
+                                    };
+                                    let expected = (edges.contains(&(recipient_id, peer_id))
+                                        && supported(rv, rm)
+                                        && supported(pv, pm))
+                                    .then_some(if topology == Topology::Mesh {
+                                        recipient_id.as_u128() < peer_id.as_u128()
+                                    } else {
+                                        Some(peer_id) == host
+                                    });
+                                    assert_eq!(peer_initiate(&recipient, &peer, topology, transport, host), expected,
+                                        "recipient={recipient_id}/{rv}/{rm}, peer={peer_id}/{pv}/{pm}, topology={topology:?}, transport={transport:?}, host={host:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// #1464: authority, version, both axes and Direct readiness use an independent set oracle.
     #[test]
