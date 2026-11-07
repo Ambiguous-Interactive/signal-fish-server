@@ -79,6 +79,41 @@ The root Rust toolchain remains unchanged. Proof packages are unpublished,
 isolated Cargo workspaces. Local proof-tool installation is opt-in; CI uses
 the same runner commands.
 
+### Focused iteration and CI partitions
+
+Use explicit selectors for a local proof edit:
+
+```bash
+python3 formal/source-linked/lean/verify.py --scenario negotiation --mutations --mutation lower-clamp
+```
+
+Repeat `--scenario` or `--mutation` to select more work. Unknown, duplicate or
+out-of-scenario faults fail before proof tools start. A selected run proves only
+its recorded scenarios and controls. It does not replace the full CI gate.
+Without selectors, the command keeps the full inventory.
+
+CI partitions the ordered fault inventory with `--mutation-shard INDEX/4`,
+using zero-based indices. Every worker checks all positive scenarios, its
+disjoint source faults, restored proofs for each affected scenario, and the
+capability probe. Each fault still needs successful extraction/typechecking,
+the expected semantic rejection, and an audited wrong-result witness.
+Workers retain separate `source-linked-lean-INDEX` evidence artifacts.
+
+The required `Source-linked Lean Proofs` check waits for all four workers.
+It rejects missing, duplicate, failed or stale reports. It compares production
+source, proof inputs, witnesses and pins with the current checkout, and requires
+the exact scenario and fault lists. It cannot accept a focused local report as
+full CI evidence. To repeat its report audit after downloading all artifacts:
+
+```bash
+python3 formal/source-linked/lean/verify.py --audit-shards lean-evidence --shard-count 4
+```
+
+Place each artifact in its own directory under `lean-evidence`. Partitioning
+reduces the serial critical path but repeats positive builds and setup. Compare
+hosted wall time and total worker time separately; no speedup is assumed from
+the worker count alone. No protocol theorem or trusted model changes here.
+
 ## Initial source checks
 
 The stable Rust checks cover 196,611 negotiation inputs: `None` and every

@@ -31973,9 +31973,19 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
     let jobs = documents[0].as_mapping_get("jobs").expect("formal jobs");
     for (backend, version, arguments) in [
         ("kani", "0.68.0", "--mutations"),
-        ("lean", "0.4.2", "--prepare --mutations --probe-capability"),
+        (
+            "lean",
+            "0.4.2",
+            "--prepare --mutations --probe-capability --mutation-shard ${{ matrix.shard }}/4",
+        ),
     ] {
-        let job = jobs.as_mapping_get(backend).expect("source-linked job");
+        let job = jobs
+            .as_mapping_get(if backend == "lean" {
+                "lean-shards"
+            } else {
+                backend
+            })
+            .expect("source-linked job");
         assert!(job.as_mapping_get("continue-on-error").is_none());
         let steps = job
             .as_mapping_get("steps")
@@ -32016,6 +32026,57 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
                         == Some(true))
         }));
     }
+}
+
+#[test]
+fn source_linked_lean_shards_require_complete_evidence() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/formal-verification.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("valid formal workflow");
+    let jobs = documents[0].as_mapping_get("jobs").expect("formal jobs");
+    let aggregate = jobs.as_mapping_get("lean").expect("required Lean check");
+    assert_eq!(
+        aggregate.as_mapping_get("name").and_then(Yaml::as_str),
+        Some("Source-linked Lean Proofs")
+    );
+    assert_eq!(
+        aggregate.as_mapping_get("needs").and_then(Yaml::as_str),
+        Some("lean-shards")
+    );
+    assert_eq!(
+        aggregate.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert!(aggregate.as_mapping_get("continue-on-error").is_none());
+    let steps = aggregate
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("aggregate steps");
+    for command in [
+        "test \"$SHARD_RESULT\" = success",
+        "python3 formal/source-linked/lean/verify.py --audit-shards lean-evidence --shard-count 4",
+    ] {
+        let step = steps
+            .iter()
+            .find(|step| step.as_mapping_get("run").and_then(Yaml::as_str) == Some(command))
+            .expect("required aggregate gate");
+        assert!(step.as_mapping_get("if").is_none());
+        assert!(step.as_mapping_get("continue-on-error").is_none());
+    }
+    let workers = jobs.as_mapping_get("lean-shards").expect("fault workers");
+    let strategy = workers.as_mapping_get("strategy").expect("fault strategy");
+    assert_eq!(
+        strategy.as_mapping_get("fail-fast").and_then(Yaml::as_bool),
+        Some(false)
+    );
+    let indices = strategy
+        .as_mapping_get("matrix")
+        .and_then(|matrix| matrix.as_mapping_get("shard"))
+        .and_then(Yaml::as_sequence)
+        .expect("all four fault partitions");
+    assert_eq!(
+        indices.iter().map(Yaml::as_integer).collect::<Vec<_>>(),
+        vec![Some(0), Some(1), Some(2), Some(3)]
+    );
 }
 
 #[test]

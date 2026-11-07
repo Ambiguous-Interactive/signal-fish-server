@@ -1004,3 +1004,110 @@ class CapabilityEvidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FaultPartitions(unittest.TestCase):
+    """Keep local selection explicit and require the full CI fault inventory."""
+
+    def test_partitions_cover_every_fault_once(self):
+        inventory = verify.mutation_inventory()
+        full = [name for names in inventory.values() for name in names]
+        parts = [verify.select_mutations(list(verify.THEOREMS), shard=(i, 4)) for i in range(4)]
+        combined = [name for part in parts for names in part.values() for name in names]
+        self.assertCountEqual(combined, full)
+        self.assertEqual(len(combined), len(set(combined)))
+        self.assertLessEqual(max(sum(map(len, p.values())) for p in parts), 14)
+
+    def test_local_selection_and_invalid_selection(self):
+        self.assertEqual(verify.select_mutations(["negotiation"], ["lower-clamp"]),
+                         {"negotiation": ["lower-clamp"]})
+        for names, shard in ((["missing"], None), (["lower-clamp"] * 2, None),
+                             (["peer-self"], None), (None, (-1, 4)),
+                             (None, (4, 4)), (None, (0, 0)), (None, (0, 3))):
+            with self.subTest(names=names, shard=shard), self.assertRaises(ValueError):
+                verify.select_mutations(["negotiation"], names, shard)
+
+    def reports(self, root):
+        reports = []
+        for index in range(4):
+            part = root / f"source-linked-lean-{index}"
+            part.mkdir()
+            selected = verify.select_mutations(list(verify.THEOREMS), shard=(index, 4))
+            report = {"completed": True, "source_unchanged": True, "locks_unchanged": True,
+                      "hax_version": verify.VERSION,
+                      "source_hashes": {name: hashlib.sha256((verify.ROOT / name).read_bytes()).hexdigest()
+                                        for name in verify.SOURCES},
+                      "proved_scenarios": list(verify.THEOREMS), "mutation_shard": [index, 4],
+                      "selected_mutations": selected, "completed_mutations": selected,
+                      "lock_hashes": verify.current_lock_hashes(),
+                      "capability_probe_status": "extraction_typechecked; no aggregation theorem proved"}
+            path = part / "results.json"
+            path.write_text(json.dumps(report))
+            reports.append((path, report))
+        return reports
+
+    @patch("builtins.print")
+    def test_aggregate_accepts_only_complete_current_evidence(self, _print):
+        cases = {"completed": False, "source_unchanged": False, "locks_unchanged": False,
+                 "hax_version": "other", "source_hashes": {}, "lock_hashes": {},
+                 "proved_scenarios": ["negotiation"], "mutation_shard": [1, 4],
+                 "selected_mutations": {}, "completed_mutations": {},
+                 "capability_probe_status": "not typechecked"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = self.reports(root)
+            verify.audit_shards(root, 4)
+            path, original = reports[0]
+            for key, value in cases.items():
+                with self.subTest(key=key):
+                    path.write_text(json.dumps(dict(original, **{key: value})))
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        verify.audit_shards(root, 4)
+            path.write_text(json.dumps(original))
+            path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "Expected 4 shard reports"):
+                verify.audit_shards(root, 4)
+
+    @patch("builtins.print")
+    def test_main_dispatches_only_explicit_faults_and_records_scope(self, _print):
+        for arguments, scenarios, selected in (
+            (["--mutations"], list(verify.THEOREMS), verify.mutation_inventory()),
+            (["--scenario", "negotiation", "--mutations", "--mutation", "lower-clamp"],
+             ["negotiation"], {"negotiation": ["lower-clamp"]}),
+            (["--mutations", "--mutation-shard", "0/4"], list(verify.THEOREMS),
+             verify.select_mutations(list(verify.THEOREMS), shard=(0, 4))),
+        ):
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as tmp:
+                with patch.object(verify, "LOGS", Path(tmp)), patch.object(verify, "RUNS", []), \
+                        patch.object(verify, "run", return_value=SimpleNamespace(stdout="version=0.4.2")), \
+                        patch.object(verify, "verify") as proof, \
+                        patch.object(verify, "mutants") as negotiation, \
+                        patch.object(verify, "capability_mutants") as capability, \
+                        patch.object(verify, "projection_mutants") as projection, \
+                        patch("sys.argv", ["verify.py", *arguments]):
+                    verify.main()
+                    self.assertEqual([call.args[1] for call in proof.call_args_list], scenarios)
+                    for scenario, runner in (("negotiation", negotiation), ("capability", capability),
+                                             ("projection", projection)):
+                        if selected.get(scenario):
+                            runner.assert_called_once_with(verify.HERE, names=selected[scenario])
+                        else:
+                            runner.assert_not_called()
+                report = json.loads((Path(tmp) / "results.json").read_text())
+                self.assertEqual(report["selected_mutations"], selected)
+                self.assertEqual(report["completed_mutations"], selected)
+                self.assertEqual(report["proved_scenarios"], scenarios)
+
+    def test_invalid_cli_selection_fails_before_proof_tools(self):
+        for arguments in (["--mutation", "lower-clamp"], ["--mutation-shard", "0/4"],
+                          ["--mutations", "--mutation-shard", "4/4"],
+                          ["--mutations", "--mutation-shard", "bad"],
+                          ["--mutations", "--mutation-shard", "0/4", "--scenario", "negotiation"],
+                          ["--mutations", "--mutation", "missing"],
+                          ["--scenario", "negotiation", "--scenario", "negotiation"]):
+            with self.subTest(arguments=arguments), patch("sys.argv", ["verify.py", *arguments]), \
+                    patch.object(verify, "run") as run, patch("sys.stderr"):
+                with self.assertRaises(SystemExit) as error:
+                    verify.main()
+                self.assertEqual(error.exception.code, 2)
+                run.assert_not_called()
