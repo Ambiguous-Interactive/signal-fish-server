@@ -27,10 +27,3 @@ fn session_member_can_host(
 ) -> bool {
     member.can_host(topology, transport)
 }
-
-fn stored_host_invalid(
-    stored: &session_admission::ActiveSessionPlan,
-    members: &[session_member::SessionMember],
-) -> bool {
-    stored.host_invalid(members)
-}

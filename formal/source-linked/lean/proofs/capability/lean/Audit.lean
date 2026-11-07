@@ -54,3 +54,12 @@ import Capability
 #print axioms Capability.eligible_minimum_contract
 #print axioms Capability.eligible_total_contract
 #print axioms Capability.eligible_outcomes
+
+#print axioms Capability.membership_contract
+#print axioms Capability.membership_absent_contract
+#print axioms Capability.membership_preserve_contract
+#print axioms Capability.membership_repair_contract
+#print axioms Capability.membership_remove_contract
+#print axioms Capability.membership_replacement_eligible
+#print axioms Capability.membership_outcomes
+#print axioms Capability.membership_total_contract

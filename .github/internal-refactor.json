@@ -1,16 +1,16 @@
 {
-  "base": "50319265a36ec75a47d4cd67cda2dc0b94fdacf0",
-  "reason": "Share the existing host eligibility filter between finalize-time selection and membership repair. Preserve capability and Direct endpoint checks before authority preference, iterator order, timestamp/UUID selection, short circuit, allocation strategy, public APIs and wire formats. A move closure owns the same copied axes for source extraction. Both production callers pass slices. Rust, .NET and Godot clients are unaffected. Add extracted Filter/election contracts and independent source faults; caller snapshots, endpoint validation and async state remain outside these proofs.",
+  "base": "586dc0a875de6ed746af0f163ca6aa77c7e81d06",
+  "reason": "Move the unchanged membership session decision into a private shared production helper for source-linked verification. Preserve incumbent validity, eligible authority and timestamp/UUID election, stored pair, relay fallback, state-update and replan flags, one fresh generation, member snapshot, public APIs and wire formats. Production passes a shared slice; cloning copies its reference. Rust, .NET and Godot clients are unaffected. Snapshot acquisition, endpoint validity, state commits and delivery remain outside the pure transition proof.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "b84e91561bf90c24a260f0d3de8137506bd472cd",
-      "after": "38607aa0c3be4f93140d7bbb23f12dd37f05c88f"
+      "before": "38607aa0c3be4f93140d7bbb23f12dd37f05c88f",
+      "after": "f49c64f910fbc0d76e08e7394355489efe4f65cf"
     },
     {
-      "path": "src/session_member.rs",
-      "before": "66275b50e4efa6abcc283aabd184cce885bd11e4",
-      "after": "07033c07b75352cde24084205eaa34b80a21ff79"
+      "path": "src/session_admission.rs",
+      "before": "47b26c036840c2d38577a144d568aae1864ee46c",
+      "after": "cb52c9ad0753308d9490b2d83f5d913a9a370812"
     }
   ]
 }

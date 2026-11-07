@@ -153,7 +153,7 @@ def session_member.SessionMember.can_host
   else ok false
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::supported_by]:
-    Source: 'src/../../../../src/session_admission.rs', lines 48:4-50:5 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 51:4-53:5 -/
 def session_admission.ActiveSessionPlan.supported_by
   (self : session_admission.ActiveSessionPlan)
   (member : session_member.SessionMember) :
@@ -161,14 +161,19 @@ def session_admission.ActiveSessionPlan.supported_by
   := do
   session_member.SessionMember.can_host member self.topology self.transport
 
-/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}::call_mut]:
-    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}::call_mut]:
+    Source: 'src/../../../../src/session_admission.rs', lines 44:25-44:87 -/
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
-  (c : session_admission.ActiveSessionPlan.host_invalid.closure.closure)
-  (tupled_args : session_member.SessionMember) :
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_admission.ActiveSessionPlan.host_invalid.closure.closure T1
+  Clause0_IntoIter) (tupled_args : session_member.SessionMember) :
   RustM (Bool ×
-    session_admission.ActiveSessionPlan.host_invalid.closure.closure)
+    (session_admission.ActiveSessionPlan.host_invalid.closure.closure T1
+    Clause0_IntoIter))
   := do
   let (u, asp) := c
   let b ← uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq tupled_args.player_id u
@@ -178,77 +183,106 @@ def
     ok (b1, c)
   else ok (false, c)
 
-/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}::call_once]:
-    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_admission.rs', lines 44:25-44:87 -/
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
-  (c : session_admission.ActiveSessionPlan.host_invalid.closure.closure)
-  (sm : session_member.SessionMember) :
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_admission.ActiveSessionPlan.host_invalid.closure.closure T1
+  Clause0_IntoIter) (sm : session_member.SessionMember) :
   RustM Bool
   := do
   let (b, _) ←
     session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
       c sm
   ok b
 
-/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}]
-    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_admission.rs', lines 44:25-44:87 -/
 @[reducible]
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
-  : core.ops.function.FnOnce
-  session_admission.ActiveSessionPlan.host_invalid.closure.closure
-  session_member.SessionMember Bool := {
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_admission.ActiveSessionPlan.host_invalid.closure.closure T1
+  Clause0_IntoIter) session_member.SessionMember Bool := {
   call_once :=
     session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
 }
 
-/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'_0, '_1>}]
-    Source: 'src/../../../../src/session_admission.rs', lines 41:25-41:87 -/
+/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_admission.rs', lines 44:25-44:87 -/
 @[reducible]
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
-  : core.ops.function.FnMut
-  session_admission.ActiveSessionPlan.host_invalid.closure.closure
-  session_member.SessionMember Bool := {
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnMut
+  (session_admission.ActiveSessionPlan.host_invalid.closure.closure T1
+  Clause0_IntoIter) session_member.SessionMember Bool := {
   FnOnceInst :=
     session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
   call_mut :=
     session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
 }
 
-/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'_0, '_1>}::call_once]:
-    Source: 'src/../../../../src/session_admission.rs', lines 38:38-42:13 -/
+/-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_admission.rs', lines 41:38-45:13 -/
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool.call_once
-  (c : session_admission.ActiveSessionPlan.host_invalid.closure)
-  (tupled_args : uuid.Uuid) :
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_admission.ActiveSessionPlan.host_invalid.closure T1
+  Clause0_IntoIter) (tupled_args : uuid.Uuid) :
   RustM Bool
   := do
-  let (s, asp) := c
-  let i ← core.slice.Slice.iter s
+  let (t, asp) := c
+  let t1 ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
+      t
   let (b, _) ←
-    core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.any
-      session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
-      i (tupled_args, asp)
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst.any
+      (session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
+      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)
+      t1 (tupled_args, asp)
   ok b
 
-/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'_0, '_1>}]
-    Source: 'src/../../../../src/session_admission.rs', lines 38:38-42:13 -/
+/-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'a, '_1, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_admission.rs', lines 41:38-45:13 -/
 @[reducible]
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool
-  : core.ops.function.FnOnce
-  session_admission.ActiveSessionPlan.host_invalid.closure uuid.Uuid Bool := {
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_admission.ActiveSessionPlan.host_invalid.closure T1
+  Clause0_IntoIter) uuid.Uuid Bool := {
   call_once :=
     session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
 }
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid]:
-    Source: 'src/../../../../src/session_admission.rs', lines 36:4-43:5 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 36:4-46:5 -/
 def session_admission.ActiveSessionPlan.host_invalid
-  (self : session_admission.ActiveSessionPlan)
-  (members : Slice session_member.SessionMember) :
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (self : session_admission.ActiveSessionPlan) (members : T1)
+  :
   RustM Bool
   := do
   let b ←
@@ -258,10 +292,324 @@ def session_admission.ActiveSessionPlan.host_invalid
   then
     let b1 ←
       core.option.Option.is_some_and
-        session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool
+        (session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool
+        coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)
         self.host (members, self)
     ok (¬ b1)
   else ok false
+
+/-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_mut]:
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  (tupled_args : session_member.SessionMember) :
+  RustM (Bool × (session_member.elect_eligible_host.closure T1
+    Clause0_IntoIter))
+  := do
+  let (t, t1) := c
+  let b ← session_member.SessionMember.can_host tupled_args t t1
+  ok (b, c)
+
+/-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  (sm : session_member.SessionMember) :
+  RustM Bool
+  := do
+  let (b, _) ←
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
+      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+      c sm
+  ok b
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+@[reducible]
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  session_member.SessionMember Bool := {
+  call_once :=
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
+@[reducible]
+def
+  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnMut
+  (session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
+  session_member.SessionMember Bool := {
+  FnOnceInst :=
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  call_mut :=
+    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+def
+  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter)
+  (c : session_member.elect_host.closure_1 T1 Clause0_IntoIter)
+  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
+  chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM uuid.Uuid
+  := do
+  let (_, player_id) := tupled_args
+  ok player_id
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
+@[reducible]
+def
+  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_member.elect_host.closure_1 T1 Clause0_IntoIter)
+  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
+  uuid.Uuid) uuid.Uuid := {
+  call_once :=
+    session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
+    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+def
+  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (c : session_member.elect_host.closure T1 Clause0_IntoIter)
+  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
+  chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM Bool
+  := do
+  core.Pair.Insts.CoreCmpPartialOrdPair.lt
+    (chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime
+    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc
+    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc)
+    uuid.Uuid.Insts.CoreCmpPartialOrdUuid (c.joined_at, c.player_id)
+    tupled_args
+
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}]
+    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
+@[reducible]
+def
+  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) : core.ops.function.FnOnce
+  (session_member.elect_host.closure T1 Clause0_IntoIter)
+  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
+  uuid.Uuid) Bool := {
+  call_once :=
+    session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+}
+
+/-- [signal_fish_proof_core::session_member::elect_host]: loop body 0:
+    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
+@[rust_loop_body]
+def session_member.elect_host_loop.body
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid)
+  (iter : Clause0_IntoIter)
+  (earliest : core.option.Option ((chrono.datetime.DateTime
+  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM (ControlFlow (Clause0_IntoIter × (core.option.Option
+    ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
+    uuid.Uuid))) (core.option.Option uuid.Uuid))
+  := do
+  let (o, iter1) ←
+    coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst.iteratorIteratorInst.next
+      iter
+  match o with
+  | core.option.Option.None =>
+    let o1 ←
+      core.option.Option.map
+        (session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
+        coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
+        earliest ()
+    ok (done o1)
+  | core.option.Option.Some member =>
+    let b ←
+      core.option.Option.Insts.CoreCmpPartialEqOption.eq
+        uuid.Uuid.Insts.CoreCmpPartialEqUuid (core.option.Option.Some
+        member.player_id) authority
+    if b
+    then ok (done (core.option.Option.Some member.player_id))
+    else
+      let b1 ←
+        core.option.Option.is_none_or
+          (session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+          coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
+          earliest member
+      if b1
+      then
+        ok (cont (iter1, core.option.Option.Some (member.joined_at,
+          member.player_id)))
+      else ok (cont (iter1, earliest))
+
+/-- [signal_fish_proof_core::session_member::elect_host]: loop 0:
+    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
+@[rust_loop]
+def session_member.elect_host_loop
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst :
+  core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (iter : Clause0_IntoIter)
+  (authority : core.option.Option uuid.Uuid)
+  (earliest : core.option.Option ((chrono.datetime.DateTime
+  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
+  RustM (core.option.Option uuid.Uuid)
+  := do
+  loop
+    (fun (iter1, earliest1) => session_member.elect_host_loop.body
+      coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst
+      authority iter1 earliest1)
+    (iter, earliest)
+
+/-- [signal_fish_proof_core::session_member::elect_host]:
+    Source: 'src/../../../../src/session_member.rs', lines 153:0-167:1 -/
+def session_member.elect_host
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid) (members : T1) :
+  RustM (core.option.Option uuid.Uuid)
+  := do
+  let iter ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
+      members
+  session_member.elect_host_loop
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+    iter authority core.option.Option.None
+
+/-- [signal_fish_proof_core::session_member::elect_eligible_host]:
+    Source: 'src/../../../../src/session_member.rs', lines 172:0-184:1 -/
+def session_member.elect_eligible_host
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid) (members : T1)
+  (topology : session_capability.Topology)
+  (transport : session_capability.Transport) :
+  RustM (core.option.Option uuid.Uuid)
+  := do
+  let t ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
+      members
+  let f ←
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst.filter
+      (session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
+      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)
+      t (topology, transport)
+  session_member.elect_host (core.iter.traits.collect.IntoIterator.Blanket
+    (core.iter.adapters.filter.Filter.Insts.CoreIterTraitsIteratorIterator
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst
+    (session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
+    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)))
+    authority f
+
+/-- [signal_fish_proof_core::session_admission::resolve_membership_plan]:
+    Source: 'src/../../../../src/session_admission.rs', lines 67:0-114:1 -/
+def session_admission.resolve_membership_plan
+  {T1 : Type} {Clause0_IntoIter : Type}
+  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
+  Clause0_IntoIter) (corecloneCloneInst : core.clone.Clone T1)
+  (stored : core.option.Option session_admission.ActiveSessionPlan)
+  (authority : core.option.Option uuid.Uuid) (members : T1) :
+  RustM session_admission.MembershipPlan
+  := do
+  match stored with
+  | core.option.Option.None =>
+    ok
+      {
+        plan :=
+          {
+            topology := session_capability.Topology.Relay,
+            transport := session_capability.Transport.Relay,
+            host := core.option.Option.None
+          },
+        active_plan_update := core.option.Option.None,
+        is_replan := false
+      }
+  | core.option.Option.Some stored1 =>
+    let t ← corecloneCloneInst.clone members
+    let b ←
+      session_admission.ActiveSessionPlan.host_invalid
+        coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+        stored1 t
+    if b
+    then
+      let host ←
+        session_member.elect_eligible_host
+          coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
+          authority members stored1.topology stored1.transport
+      match host with
+      | core.option.Option.None =>
+        ok
+          {
+            plan :=
+              {
+                topology := session_capability.Topology.Relay,
+                transport := session_capability.Transport.Relay,
+                host := core.option.Option.None
+              },
+            active_plan_update :=
+              (core.option.Option.Some core.option.Option.None),
+            is_replan := false
+          }
+      | core.option.Option.Some _ =>
+        ok
+          {
+            plan := { stored1 with host },
+            active_plan_update :=
+              (core.option.Option.Some
+                (core.option.Option.Some
+                { stored1 with host })),
+            is_replan := true
+          }
+    else
+      ok
+        {
+          plan := stored1,
+          active_plan_update := core.option.Option.None,
+          is_replan := false
+        }
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_mut]:
     Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
@@ -624,251 +972,6 @@ def session_member.select_session_pair
       ii (desired, enable_direct, enable_webrtc, members)
   core.option.Option.unwrap_or o session_member.RELAY_FLOOR
 
-/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
-def
-  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter)
-  (c : session_member.elect_host.closure_1 T1 Clause0_IntoIter)
-  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
-  chrono.offset.utc.Utc) × uuid.Uuid)) :
-  RustM uuid.Uuid
-  := do
-  let (_, player_id) := tupled_args
-  ok player_id
-
-/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 166:17-166:43 -/
-@[reducible]
-def
-  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) : core.ops.function.FnOnce
-  (session_member.elect_host.closure_1 T1 Clause0_IntoIter)
-  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
-  uuid.Uuid) uuid.Uuid := {
-  call_once :=
-    session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-}
-
-/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
-def
-  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) (c : session_member.elect_host.closure T1 Clause0_IntoIter)
-  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
-  chrono.offset.utc.Utc) × uuid.Uuid)) :
-  RustM Bool
-  := do
-  core.Pair.Insts.CoreCmpPartialOrdPair.lt
-    (chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime
-    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc
-    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc)
-    uuid.Uuid.Insts.CoreCmpPartialOrdUuid (c.joined_at, c.player_id)
-    tupled_args
-
-/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 162:31-162:91 -/
-@[reducible]
-def
-  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) : core.ops.function.FnOnce
-  (session_member.elect_host.closure T1 Clause0_IntoIter)
-  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
-  uuid.Uuid) Bool := {
-  call_once :=
-    session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-}
-
-/-- [signal_fish_proof_core::session_member::elect_host]: loop body 0:
-    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
-@[rust_loop_body]
-def session_member.elect_host_loop.body
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst :
-  core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid)
-  (iter : Clause0_IntoIter)
-  (earliest : core.option.Option ((chrono.datetime.DateTime
-  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
-  RustM (ControlFlow (Clause0_IntoIter × (core.option.Option
-    ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
-    uuid.Uuid))) (core.option.Option uuid.Uuid))
-  := do
-  let (o, iter1) ←
-    coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst.iteratorIteratorInst.next
-      iter
-  match o with
-  | core.option.Option.None =>
-    let o1 ←
-      core.option.Option.map
-        (session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
-        coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
-        earliest ()
-    ok (done o1)
-  | core.option.Option.Some member =>
-    let b ←
-      core.option.Option.Insts.CoreCmpPartialEqOption.eq
-        uuid.Uuid.Insts.CoreCmpPartialEqUuid (core.option.Option.Some
-        member.player_id) authority
-    if b
-    then ok (done (core.option.Option.Some member.player_id))
-    else
-      let b1 ←
-        core.option.Option.is_none_or
-          (session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
-          coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
-          earliest member
-      if b1
-      then
-        ok (cont (iter1, core.option.Option.Some (member.joined_at,
-          member.player_id)))
-      else ok (cont (iter1, earliest))
-
-/-- [signal_fish_proof_core::session_member::elect_host]: loop 0:
-    Source: 'src/../../../../src/session_member.rs', lines 158:4-167:1 -/
-@[rust_loop]
-def session_member.elect_host_loop
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst :
-  core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) (iter : Clause0_IntoIter)
-  (authority : core.option.Option uuid.Uuid)
-  (earliest : core.option.Option ((chrono.datetime.DateTime
-  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
-  RustM (core.option.Option uuid.Uuid)
-  := do
-  loop
-    (fun (iter1, earliest1) => session_member.elect_host_loop.body
-      coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst
-      authority iter1 earliest1)
-    (iter, earliest)
-
-/-- [signal_fish_proof_core::session_member::elect_host]:
-    Source: 'src/../../../../src/session_member.rs', lines 153:0-167:1 -/
-def session_member.elect_host
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid) (members : T1) :
-  RustM (core.option.Option uuid.Uuid)
-  := do
-  let iter ←
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
-      members
-  session_member.elect_host_loop
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-    iter authority core.option.Option.None
-
-/-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_mut]:
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
-def
-  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter)
-  (c : session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
-  (tupled_args : session_member.SessionMember) :
-  RustM (Bool × (session_member.elect_eligible_host.closure T1
-    Clause0_IntoIter))
-  := do
-  let (t, t1) := c
-  let b ← session_member.SessionMember.can_host tupled_args t t1
-  ok (b, c)
-
-/-- [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
-def
-  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter)
-  (c : session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
-  (sm : session_member.SessionMember) :
-  RustM Bool
-  := do
-  let (b, _) ←
-    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
-      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-      c sm
-  ok b
-
-/-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnOnce<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
-@[reducible]
-def
-  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) : core.ops.function.FnOnce
-  (session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
-  session_member.SessionMember Bool := {
-  call_once :=
-    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool.call_once
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-}
-
-/-- Trait implementation: [signal_fish_proof_core::session_member::elect_eligible_host::{impl core::ops::function::FnMut<(&'_ &'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_member::elect_eligible_host::closure<'a, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_member.rs', lines 182:20-182:70 -/
-@[reducible]
-def
-  session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) : core.ops.function.FnMut
-  (session_member.elect_eligible_host.closure T1 Clause0_IntoIter)
-  session_member.SessionMember Bool := {
-  FnOnceInst :=
-    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSharedSessionMemberBool
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  call_mut :=
-    session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool.call_mut
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-}
-
-/-- [signal_fish_proof_core::session_member::elect_eligible_host]:
-    Source: 'src/../../../../src/session_member.rs', lines 172:0-184:1 -/
-def session_member.elect_eligible_host
-  {T1 : Type} {Clause0_IntoIter : Type}
-  (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
-  : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
-  Clause0_IntoIter) (authority : core.option.Option uuid.Uuid) (members : T1)
-  (topology : session_capability.Topology)
-  (transport : session_capability.Transport) :
-  RustM (core.option.Option uuid.Uuid)
-  := do
-  let t ←
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.into_iter
-      members
-  let f ←
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst.filter
-      (session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
-      coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)
-      t (topology, transport)
-  session_member.elect_host (core.iter.traits.collect.IntoIterator.Blanket
-    (core.iter.adapters.filter.Filter.Insts.CoreIterTraitsIteratorIterator
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst.iteratorIteratorInst
-    (session_member.elect_eligible_host.closure.Insts.CoreOpsFunctionFnMutTupleSharedSharedSessionMemberBool
-    coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst)))
-    authority f
-
 /-- [signal_fish_proof_core::session_member_can_host]:
     Source: 'src/lib.rs', lines 23:0-29:1 -/
 def session_member_can_host
@@ -878,14 +981,5 @@ def session_member_can_host
   RustM Bool
   := do
   session_member.SessionMember.can_host member topology transport
-
-/-- [signal_fish_proof_core::stored_host_invalid]:
-    Source: 'src/lib.rs', lines 31:0-36:1 -/
-def stored_host_invalid
-  (stored : session_admission.ActiveSessionPlan)
-  (members : Slice session_member.SessionMember) :
-  RustM Bool
-  := do
-  session_admission.ActiveSessionPlan.host_invalid stored members
 
 end signal_fish_proof_core

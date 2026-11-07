@@ -33,11 +33,14 @@ impl ActiveSessionPlan {
     /// absent, lacks the negotiated capabilities, or has no usable Direct
     /// endpoint. Membership refreshes and Direct host endpoint updates resolve
     /// this state before publishing a new authoritative plan.
-    pub(crate) fn host_invalid(&self, members: &[SessionMember]) -> bool {
+    pub(crate) fn host_invalid<'a>(
+        &self,
+        members: impl IntoIterator<Item = &'a SessionMember>,
+    ) -> bool {
         self.topology == Topology::Host
             && !self.host.is_some_and(|host| {
                 members
-                    .iter()
+                    .into_iter()
                     .any(|member| member.player_id == host && self.supported_by(member))
             })
     }
@@ -47,6 +50,66 @@ impl ActiveSessionPlan {
     /// sticky (topology, transport) pair, and a usable endpoint for Direct.
     pub(crate) fn supported_by(&self, member: &SessionMember) -> bool {
         member.can_host(self.topology, self.transport)
+    }
+}
+
+/// Deterministic sticky plan update after a membership or endpoint change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MembershipPlan {
+    pub plan: ActiveSessionPlan,
+    /// None keeps state; Some(Some(plan)) replaces it; Some(None) removes it.
+    pub active_plan_update: Option<Option<ActiveSessionPlan>>,
+    pub is_replan: bool,
+}
+
+/// Both passes must enumerate the same snapshot. Production passes a shared slice,
+/// whose clone copies the reference and preserves member order and fields.
+pub(crate) fn resolve_membership_plan<'a>(
+    stored: Option<ActiveSessionPlan>,
+    authority: Option<Uuid>,
+    members: impl IntoIterator<Item = &'a SessionMember> + Clone,
+) -> MembershipPlan {
+    let relay = ActiveSessionPlan {
+        topology: Topology::Relay,
+        transport: Transport::Relay,
+        host: None,
+    };
+    let Some(stored) = stored else {
+        return MembershipPlan {
+            plan: relay,
+            active_plan_update: None,
+            is_replan: false,
+        };
+    };
+    if !stored.host_invalid(members.clone()) {
+        return MembershipPlan {
+            plan: stored,
+            active_plan_update: None,
+            is_replan: false,
+        };
+    }
+    let host = crate::session_member::elect_eligible_host(
+        authority,
+        members,
+        stored.topology,
+        stored.transport,
+    );
+    if let Some(host) = host {
+        let updated = ActiveSessionPlan {
+            host: Some(host),
+            ..stored
+        };
+        MembershipPlan {
+            plan: updated,
+            active_plan_update: Some(Some(updated)),
+            is_replan: true,
+        }
+    } else {
+        MembershipPlan {
+            plan: relay,
+            active_plan_update: Some(None),
+            is_replan: false,
+        }
     }
 }
 
@@ -78,6 +141,144 @@ pub(crate) fn joiner_supports_sticky_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1464: independent protocol oracle covers every branch and stored pair.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn membership_resolution_matches_sticky_state_oracle() {
+        use crate::session_capability::SessionCapabilities;
+        use crate::session_member::DirectEndpoint;
+
+        let axes = [Topology::Relay, Topology::Host, Topology::Mesh];
+        let paths = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+        let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+        let relay = ActiveSessionPlan {
+            topology: Topology::Relay,
+            transport: Transport::Relay,
+            host: None,
+        };
+        for version in [0, 2, 3, 4, u16::MAX] {
+            for mask in 0_u8..64 {
+                for endpoint in [false, true] {
+                    let candidate = SessionMember {
+                        player_id: ids[0],
+                        player_name: String::new(),
+                        is_authority: false,
+                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        direct_endpoint: endpoint.then(|| DirectEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: 9000,
+                        }),
+                        capabilities: SessionCapabilities {
+                            version,
+                            relay_transport: mask & 1 != 0,
+                            direct_transport: mask & 2 != 0,
+                            webrtc_transport: mask & 4 != 0,
+                            relay_topology: mask & 8 != 0,
+                            host_topology: mask & 16 != 0,
+                            mesh_topology: mask & 32 != 0,
+                        },
+                    };
+                    let capable = SessionMember {
+                        player_id: ids[1],
+                        joined_at: chrono::DateTime::UNIX_EPOCH + chrono::Duration::seconds(1),
+                        direct_endpoint: Some(DirectEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: 9001,
+                        }),
+                        capabilities: SessionCapabilities {
+                            version: 3,
+                            relay_transport: true,
+                            direct_transport: true,
+                            webrtc_transport: true,
+                            relay_topology: true,
+                            host_topology: true,
+                            mesh_topology: true,
+                        },
+                        ..candidate.clone()
+                    };
+                    for members in [
+                        vec![],
+                        vec![candidate.clone()],
+                        vec![candidate.clone(), capable.clone()],
+                        vec![capable, candidate.clone()],
+                    ] {
+                        for (ti, topology) in axes.into_iter().enumerate() {
+                            for (pi, transport) in paths.into_iter().enumerate() {
+                                let eligible = |member: &&SessionMember| {
+                                    member.player_id == ids[1]
+                                        || (version >= 3
+                                            && mask & (1 << (ti + 3)) != 0
+                                            && mask & (1 << pi) != 0
+                                            && (transport != Transport::Direct || endpoint))
+                                };
+                                for host in [None, Some(ids[0]), Some(ids[1]), Some(ids[2])] {
+                                    for authority in
+                                        [None, Some(ids[0]), Some(ids[1]), Some(ids[2])]
+                                    {
+                                        for stored in [
+                                            None,
+                                            Some(ActiveSessionPlan {
+                                                topology,
+                                                transport,
+                                                host,
+                                            }),
+                                        ] {
+                                            let mut candidates: Vec<_> =
+                                                members.iter().filter(eligible).collect();
+                                            candidates.sort_by_key(|member| {
+                                                (
+                                                    Some(member.player_id) != authority,
+                                                    member.joined_at,
+                                                    member.player_id,
+                                                )
+                                            });
+                                            let valid = topology != Topology::Host
+                                                || candidates
+                                                    .iter()
+                                                    .any(|member| Some(member.player_id) == host);
+                                            let expected = match stored {
+                                                None => MembershipPlan {
+                                                    plan: relay,
+                                                    active_plan_update: None,
+                                                    is_replan: false,
+                                                },
+                                                Some(plan) if valid => MembershipPlan {
+                                                    plan,
+                                                    active_plan_update: None,
+                                                    is_replan: false,
+                                                },
+                                                Some(plan) => match candidates.first() {
+                                                    Some(member) => {
+                                                        let updated = ActiveSessionPlan {
+                                                            host: Some(member.player_id),
+                                                            ..plan
+                                                        };
+                                                        MembershipPlan {
+                                                            plan: updated,
+                                                            active_plan_update: Some(Some(updated)),
+                                                            is_replan: true,
+                                                        }
+                                                    }
+                                                    None => MembershipPlan {
+                                                        plan: relay,
+                                                        active_plan_update: Some(None),
+                                                        is_replan: false,
+                                                    },
+                                                },
+                                            };
+                                            assert_eq!(resolve_membership_plan(stored, authority, members.as_slice()), expected,
+                                                "version={version}, mask={mask}, endpoint={endpoint}, stored={stored:?}, authority={authority:?}, members={members:?}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// #1464: a capable bystander cannot make a missing or incapable host valid.
     #[test]

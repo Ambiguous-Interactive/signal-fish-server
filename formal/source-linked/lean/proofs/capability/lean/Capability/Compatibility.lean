@@ -28,4 +28,11 @@ abbrev iter.traits.iterator.Iterator.filter
     (FnInst : ops.function.FnMut P Item Bool) :=
   iter.traits.iterator.Iterator.filter.default IteratorInst FnInst
 
+/- Local dispatch alias for generic Iterator::any. The existing pinned default
+owns the search loop and callback semantics. -/
+abbrev iter.traits.iterator.Iterator.any
+    {Self P Item : Type} (IteratorInst : iter.traits.iterator.Iterator Self Item)
+    (FnInst : ops.function.FnMut P Item Bool) :=
+  iter.traits.iterator.Iterator.any.default IteratorInst FnInst
+
 end CoreModels.core

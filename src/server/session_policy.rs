@@ -166,56 +166,12 @@ pub(crate) fn membership_session_decision(
     authority: Option<PlayerId>,
     members: Vec<SessionMember>,
 ) -> MembershipSessionDecision {
-    let Some(stored) = stored else {
-        return MembershipSessionDecision {
-            decision: SessionPlanDecision {
-                generation: SessionGeneration::new_v4(),
-                topology: Topology::Relay,
-                transport: Transport::Relay,
-                host: None,
-                members,
-            },
-            active_plan_update: None,
-            is_replan: false,
-        };
-    };
-
-    if !stored.host_invalid(&members) {
-        return MembershipSessionDecision {
-            decision: stored.decision_with(members),
-            active_plan_update: None,
-            is_replan: false,
-        };
-    }
-
-    let host = elect_eligible_host(
-        authority,
-        members.as_slice(),
-        stored.topology,
-        stored.transport,
-    );
-    if let Some(host) = host {
-        let updated = ActiveSessionPlan {
-            host: Some(host),
-            ..stored
-        };
-        MembershipSessionDecision {
-            decision: updated.decision_with(members),
-            active_plan_update: Some(Some(updated)),
-            is_replan: true,
-        }
-    } else {
-        MembershipSessionDecision {
-            decision: SessionPlanDecision {
-                generation: SessionGeneration::new_v4(),
-                topology: Topology::Relay,
-                transport: Transport::Relay,
-                host: None,
-                members,
-            },
-            active_plan_update: Some(None),
-            is_replan: false,
-        }
+    let resolved =
+        crate::session_admission::resolve_membership_plan(stored, authority, members.as_slice());
+    MembershipSessionDecision {
+        decision: resolved.plan.decision_with(members),
+        active_plan_update: resolved.active_plan_update,
+        is_replan: resolved.is_replan,
     }
 }
 
