@@ -22751,7 +22751,7 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
     // The exact-name runner selects the compiled tests for each root module.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_file(&workflow_path);
+    let content = read_live_file(&workflow_path);
     let documents = Yaml::load_from_str(&content).expect("ci-safety.yml must parse as YAML");
     let jobs = documents
         .first()
@@ -23341,7 +23341,7 @@ fn test_ci_safety_keeps_full_miri_and_asan_coverage() {
     let content = read_file(&workflow_path);
     let content_live = strip_comment_lines(&content);
 
-    let runner = read_file(&root.join("scripts/run-miri-lane.py"));
+    let runner = read_live_file(&root.join("scripts/run-miri-lane.py"));
     for required in [
         "\"miri\", \"test\", \"--locked\", \"--lib\", \"--no-fail-fast\"",
         "\"--list\"",
