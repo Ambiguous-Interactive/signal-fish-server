@@ -1057,7 +1057,9 @@ class FaultPartitions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             reports = self.reports(root)
-            verify.audit_shards(root, 4)
+            with patch.object(verify, "current_lock_hashes", wraps=verify.current_lock_hashes) as hashes:
+                verify.audit_shards(root, 4)
+                hashes.assert_called_once_with()
             path, original = reports[0]
             for key, value in cases.items():
                 with self.subTest(key=key):
@@ -1079,6 +1081,32 @@ class FaultPartitions(unittest.TestCase):
             path.unlink()
             with self.assertRaisesRegex(RuntimeError, "Expected 4 shard reports"):
                 verify.audit_shards(root, 4)
+
+    def test_corrupt_or_unreadable_reports_have_path_diagnostics(self):
+        """Reject corrupt JSON and non-object reports with clear, chained errors."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path, _report = self.reports(root)[0]
+            for contents, message, cause in (
+                ("", "Unreadable shard report", ValueError),
+                ("{", "Unreadable shard report", ValueError),
+                ("[]", "Invalid shard report", None),
+                ("null", "Invalid shard report", None),
+                ("true", "Invalid shard report", None),
+                ('"text"', "Invalid shard report", None),
+                ("1", "Invalid shard report", None),
+            ):
+                path.write_text(contents)
+                with self.subTest(contents=contents), self.assertRaisesRegex(RuntimeError, message) as error:
+                    verify.audit_shards(root, 4)
+                self.assertIn(str(path), str(error.exception))
+                if cause is not None:
+                    self.assertIsInstance(error.exception.__cause__, cause)
+            with patch.object(Path, "read_text", side_effect=OSError("unreadable")):
+                with self.assertRaisesRegex(RuntimeError, "Unreadable shard report") as error:
+                    verify.audit_shards(root, 4)
+                self.assertIsInstance(error.exception.__cause__, OSError)
+                self.assertIn(str(path), str(error.exception))
 
     @patch("builtins.print")
     def test_main_dispatches_only_explicit_faults_and_records_scope(self, _print):

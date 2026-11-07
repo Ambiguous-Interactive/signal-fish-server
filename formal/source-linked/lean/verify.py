@@ -867,8 +867,14 @@ def audit_shards(directory, count):
     source_hashes = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                      for name in SOURCES}
     seen = set()
+    current_locks = current_lock_hashes()
     for path in paths:
-        report = json.loads(path.read_text())
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"Unreadable shard report: {path}") from error
+        if not isinstance(report, dict):
+            raise RuntimeError(f"Invalid shard report: {path}")
         shard = report.get("mutation_shard")
         if (not isinstance(shard, list) or len(shard) != 2
                 or any(type(value) is not int for value in shard)
@@ -886,7 +892,7 @@ def audit_shards(directory, count):
                     "extraction_typechecked with upstream alias backport; no aggregation theorem proved")):
             raise RuntimeError(f"Incomplete or stale shard: {path}")
         lock_hashes = report.get("lock_hashes", {})
-        if not lock_hashes or lock_hashes != current_lock_hashes():
+        if not lock_hashes or lock_hashes != current_locks:
             raise RuntimeError(f"Stale proof pins or witnesses: {path}")
         seen.add(shard[0])
     if seen != set(range(count)):
