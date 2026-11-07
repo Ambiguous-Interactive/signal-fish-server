@@ -25,6 +25,7 @@ change the server's dependencies or public API.
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
+| Lean peer edges | Both members support the pair; no self edges; complete mesh with UUID glare order; Host star with client offers; Relay has no edges; exact result and modeled termination | Extracted production helper for arbitrary member fields, all pairs and optional hosts; UUID equality/order use the existing trusted mappings; roster enumeration, host lookup, metadata, endpoint/ICE projection and publication remain outside |
 | Lean membership repair | Preserve a usable saved plan; otherwise replace only its host with the eligible election result or remove it and publish relay; exact stored-state update and replan flag; finite modeled termination | Every representable finite member slice, all stored pairs, profiles and authorities; pinned slice enumeration and shared-reference clone; generation, snapshots, endpoint validity, commits and delivery remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Lean session pair selection | Select the first permitted, unanimously supported and executable ADR rung; otherwise Relay/Relay | Every representable finite member slice, all capability fields, ceilings and switches; configuration lookup, endpoint validation, election, state and publication remain outside |
@@ -945,3 +946,49 @@ Snapshot acquisition, current connection/profile identity, endpoint syntax and
 reachability, generation freshness, transaction commit, publication, cancellation
 and concurrent membership changes remain tested or pending. They are separate
 P12 correspondence obligations; this stage does not close issue #1464.
+
+## Production peer edges (P13)
+
+`session_member::peer_initiate` owns the per-peer decision used by both mesh
+and host plan projection. `local_initiates` moved with that decision. The
+production caller retains roster order, host lookup, peer metadata, endpoint
+and ICE projection, generation and relay fallback. Incompatible or absent
+recipients still produce empty peer lists without allocating peer capacity.
+This is an internal refactor. Rust, .NET and Godot clients have no protocol,
+API, configuration, ordering or reconnect changes and need no updates.
+
+`Capability.peer_edge_contract` checks the extracted production function against
+the protocol graph for arbitrary member fields, all `u16` versions, capability
+assignments, topology/transport pairs and optional saved identities. The graph
+has no self edges, requires both members to support the stored pair, forms a
+complete mesh or a host star, and has no Relay edges. Mesh offers follow the
+smaller UUID; Host clients offer and the host answers. Direct peer membership
+needs no endpoint; only host election checks endpoint presence. No legal-pair,
+member-uniqueness, endpoint or roster-membership assumption hides malformed input.
+
+The required contracts are `glare_contract`, `glare_antisymmetric`,
+`peer_edge_contract`, `peer_self_contract`, `peer_capability_contract`,
+`peer_relay_contract`, `peer_host_contract`, `peer_mesh_contract` and
+`peer_edge_outcomes` in `Capability/Verification/PeerEdges.lean`. The exact
+result theorem includes successful termination in the extracted model. The
+reachability theorem checks both mesh directions, self refusal, both host
+roles, absent host, relay, v2 recipient and unsupported Direct peer.
+UUID equality/order retain the documented trusted dependency mappings.
+
+Seven production faults permit self edges, bypass either member's capability
+gate, reverse mesh offers, invert the host target, make the host offer, or
+add Relay peers. Each extracted module must compile before only its peer-edge
+semantic contracts fail. Each fault also needs an audited kernel witness of
+its concrete wrong result. The restored contracts, axiom reports and identical
+regeneration must pass. The runner rejects missing, ambiguous or changed anchors.
+An independent Rust adjacency oracle checks 646,416 cases, including all 64
+capability subsets on both sides, old/future versions, both UUID orders, equal
+IDs, absent/unrelated hosts and every axis pair. Existing adapter properties
+check finalized and rehydrated plans separately.
+
+These are per-edge proofs. They do not prove list enumeration, complete peer
+lists, member/host lookup or snapshot correspondence, metadata flags/names,
+endpoint/ICE projection, state commit, serialization, delivery or concurrency.
+Those P13 and shared caller obligations remain tested or pending. This stage
+does not close issue #1464. Source and proof inputs use the existing formal CI
+trigger and retained evidence pipeline.

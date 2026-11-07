@@ -52,7 +52,7 @@ use crate::protocol::{
     ServerMessage, SessionGeneration, SessionPeer, SessionPlanPayload, Topology, Transport,
 };
 
-use super::signaling::{local_initiates, sorted_routed_player_ids};
+use super::signaling::sorted_routed_player_ids;
 use super::{EnhancedGameServer, NegotiatedProtocol};
 
 pub(crate) use crate::session_admission::{joiner_supports_sticky_plan, ActiveSessionPlan};
@@ -384,7 +384,7 @@ impl SessionPlanDecision {
     /// topology:
     ///
     /// - **Mesh:** every other pairable member; `initiate` follows the glare rule
-    ///   ([`local_initiates`]) so exactly one side of each pair offers.
+    ///   ([`crate::session_member::local_initiates`]) so exactly one side of each pair offers.
     /// - **Host:** the host receives every pairable client (each
     ///   `initiate = false`); each pairable client receives only the host
     ///   (`initiate = true`). Clients never signal each other in a star topology.
@@ -405,7 +405,6 @@ impl SessionPlanDecision {
         ice_servers: Vec<IceServer>,
     ) -> SessionPlanPayload {
         self.projection().plan_for_recipient(
-            recipient,
             self.members
                 .iter()
                 .find(|member| member.player_id == recipient),
@@ -447,37 +446,42 @@ impl SessionPlanProjection<'_> {
         recipient: &SessionMember,
         ice_servers: Vec<IceServer>,
     ) -> SessionPlanPayload {
-        self.plan_for_recipient(recipient.player_id, Some(recipient), ice_servers)
+        self.plan_for_recipient(Some(recipient), ice_servers)
     }
 
     /// Shape peer edges and preserve endpoint and ICE fields for one recipient.
     fn plan_for_recipient(
         &self,
-        recipient: PlayerId,
         member: Option<&SessionMember>,
         ice_servers: Vec<IceServer>,
     ) -> SessionPlanPayload {
         let decision = self.decision;
-        let peers = if !member.is_some_and(|member| decision.pairable(member)) {
-            Vec::new()
-        } else {
-            match decision.topology {
+        let peers = match member {
+            None => Vec::new(),
+            Some(member) if decision.pairable(member) => match decision.topology {
                 Topology::Mesh => {
-                    let members = decision.members.iter().filter(|member| {
-                        member.player_id != recipient && decision.pairable(member)
-                    });
                     let mut peers = Vec::with_capacity(self.mesh_peer_capacity);
-                    peers.extend(members.map(|member| SessionPeer {
-                        player_id: member.player_id,
-                        player_name: member.player_name.clone(),
-                        is_authority: member.is_authority,
-                        initiate: local_initiates(recipient, member.player_id),
+                    peers.extend(decision.members.iter().filter_map(|peer| {
+                        crate::session_member::peer_initiate(
+                            member,
+                            peer,
+                            decision.topology,
+                            decision.transport,
+                            decision.host,
+                        )
+                        .map(|initiate| SessionPeer {
+                            player_id: peer.player_id,
+                            player_name: peer.player_name.clone(),
+                            is_authority: peer.is_authority,
+                            initiate,
+                        })
                     }));
                     peers
                 }
-                Topology::Host => self.host_peers_for(recipient),
+                Topology::Host => self.host_peers_for(member),
                 Topology::Relay => Vec::new(),
-            }
+            },
+            Some(_) => Vec::new(),
         };
         SessionPlanPayload {
             generation: decision.generation,
@@ -494,36 +498,38 @@ impl SessionPlanProjection<'_> {
     }
 
     /// Build star edges with the already-resolved host.
-    fn host_peers_for(&self, recipient: PlayerId) -> Vec<SessionPeer> {
+    fn host_peers_for(&self, recipient: &SessionMember) -> Vec<SessionPeer> {
         let decision = self.decision;
         let Some(host) = decision.host else {
             return Vec::new();
         };
-        if recipient == host {
-            let members = decision
-                .members
-                .iter()
-                .filter(|member| member.player_id != host && decision.pairable(member));
-            let mut peers = Vec::with_capacity(members.clone().count());
-            peers.extend(members.map(|member| SessionPeer {
-                player_id: member.player_id,
-                player_name: member.player_name.clone(),
-                is_authority: false,
-                initiate: false,
-            }));
+        let peer_for = |peer: &SessionMember| {
+            crate::session_member::peer_initiate(
+                recipient,
+                peer,
+                decision.topology,
+                decision.transport,
+                decision.host,
+            )
+            .map(|initiate| SessionPeer {
+                player_id: peer.player_id,
+                player_name: peer.player_name.clone(),
+                is_authority: peer.player_id == host,
+                initiate,
+            })
+        };
+        if recipient.player_id == host {
+            let mut peers = Vec::with_capacity(
+                decision
+                    .members
+                    .iter()
+                    .filter(|peer| peer.player_id != host && decision.pairable(peer))
+                    .count(),
+            );
+            peers.extend(decision.members.iter().filter_map(peer_for));
             peers
         } else {
-            self.host
-                .filter(|host| decision.pairable(host))
-                .map(|host| {
-                    vec![SessionPeer {
-                        player_id: host.player_id,
-                        player_name: host.player_name.clone(),
-                        is_authority: true,
-                        initiate: true,
-                    }]
-                })
-                .unwrap_or_default()
+            self.host.and_then(peer_for).into_iter().collect()
         }
     }
 }
