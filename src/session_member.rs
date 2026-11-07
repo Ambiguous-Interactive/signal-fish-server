@@ -82,6 +82,68 @@ pub(crate) fn rung_is_executable(
             .any(|member| member.can_host(topology, transport))
 }
 
+/// The session-upgrade ladder (ADR-0001 §1), richest rung first.
+///
+/// Each entry is a legal `(topology, transport)` pair the room may settle on, in
+/// strict preference order. The session selector selects the first rung that
+/// fits the room's `desired` ceiling, has its transport enabled, and is supported
+/// by every member. Holding the ladder in one constant makes it the single source
+/// of truth shared by the selector, its doc comment, the CHANGELOG, and the
+/// selection tests — `ladder_is_the_documented_adr_waterfall` fails on any drift.
+pub(crate) const UPGRADE_LADDER: [(Topology, Transport); 3] = [
+    (Topology::Mesh, Transport::WebRtc),
+    (Topology::Host, Transport::WebRtc),
+    (Topology::Host, Transport::Direct),
+];
+
+/// The universal floor: server WebSocket relay, always available (ADR-0001 §3).
+///
+/// Selected only when no [`UPGRADE_LADDER`] rung fits. Each v3 member receives an
+/// explicit no-peer `SessionPlan` for this pair; v2 members remain plan-free.
+pub(crate) const RELAY_FLOOR: (Topology, Transport) = (Topology::Relay, Transport::Relay);
+
+/// Richness rank of a topology ceiling: `Relay < Host < Mesh` (ADR-0001 §1).
+///
+/// `desired` is a *ceiling*, so a room may settle on any topology whose rank is
+/// `<=` the desired rank (a mesh-preferring room can fall back to host). Written
+/// as an explicit match — not the wire enum's declaration order — so reordering
+/// [`Topology`] variants can never silently reshape selection.
+const fn topology_rank(topology: Topology) -> u8 {
+    match topology {
+        Topology::Relay => 0,
+        Topology::Host => 1,
+        Topology::Mesh => 2,
+    }
+}
+
+/// Whether the switches permit the data-path transport. `Relay` is the mandatory
+/// floor (always permitted); `Direct` and `WebRtc` are opt-in upgrade gates.
+const fn transport_enabled(enable_direct: bool, enable_webrtc: bool, transport: Transport) -> bool {
+    match transport {
+        Transport::Relay => true,
+        Transport::Direct => enable_direct,
+        Transport::WebRtc => enable_webrtc,
+    }
+}
+
+/// Select the richest executable pair within the configured ceiling.
+pub(crate) fn select_session_pair(
+    members: &[SessionMember],
+    desired: Topology,
+    enable_direct: bool,
+    enable_webrtc: bool,
+) -> (Topology, Transport) {
+    UPGRADE_LADDER
+        .into_iter()
+        .find(|&(topology, transport)| {
+            topology_rank(topology) <= topology_rank(desired)
+                && transport_enabled(enable_direct, enable_webrtc, transport)
+                && all_support(members, topology, transport)
+                && rung_is_executable(members, topology, transport)
+        })
+        .unwrap_or(RELAY_FLOOR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +198,135 @@ mod tests {
                                 assert_eq!(rung_is_executable(&members, topology, transport),
                                     transport != Transport::Direct || direct_ready,
                                     "version={version} mask={mask} endpoint={has_endpoint} topology={topology:?} transport={transport:?} members={members:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Independent ADR-0001 oracle: literal legal pairs, explicit ceiling cases,
+    /// and direct field reads avoid inheriting production ladder or gate errors.
+    fn expected_session_pair(
+        members: &[SessionMember],
+        desired: Topology,
+        direct_enabled: bool,
+        webrtc_enabled: bool,
+    ) -> (Topology, Transport) {
+        [
+            (Topology::Mesh, Transport::WebRtc),
+            (Topology::Host, Transport::WebRtc),
+            (Topology::Host, Transport::Direct),
+        ]
+        .into_iter()
+        .find(|&(topology, transport)| {
+            let allowed = match desired {
+                Topology::Relay => false,
+                Topology::Host => topology == Topology::Host,
+                Topology::Mesh => true,
+            };
+            let enabled = match transport {
+                Transport::WebRtc => webrtc_enabled,
+                Transport::Direct => direct_enabled,
+                Transport::Relay => unreachable!("The upgrade oracle has no relay rung"),
+            };
+            allowed
+                && enabled
+                && !members.is_empty()
+                && members.iter().all(|member| {
+                    let caps = member.capabilities;
+                    caps.version >= 3
+                        && match topology {
+                            Topology::Host => caps.host_topology,
+                            Topology::Mesh => caps.mesh_topology,
+                            Topology::Relay => false,
+                        }
+                        && match transport {
+                            Transport::WebRtc => caps.webrtc_transport,
+                            Transport::Direct => caps.direct_transport,
+                            Transport::Relay => false,
+                        }
+                })
+                && (transport == Transport::WebRtc
+                    || members
+                        .iter()
+                        .any(|member| member.direct_endpoint.is_some()))
+        })
+        .unwrap_or((Topology::Relay, Transport::Relay))
+    }
+
+    /// #1464: the whole production pair selector must enforce the ADR waterfall.
+    #[test]
+    fn session_pair_matches_protocol_for_capabilities_ceiling_and_switches() {
+        let legacy = SessionMember {
+            player_id: Uuid::nil(),
+            player_name: String::new(),
+            is_authority: false,
+            joined_at: chrono::DateTime::UNIX_EPOCH,
+            direct_endpoint: None,
+            capabilities: SessionCapabilities::default(),
+        };
+        let full = SessionMember {
+            player_id: Uuid::from_u128(1),
+            capabilities: SessionCapabilities {
+                version: 3,
+                relay_transport: true,
+                direct_transport: true,
+                webrtc_transport: true,
+                relay_topology: true,
+                host_topology: true,
+                mesh_topology: true,
+            },
+            ..legacy.clone()
+        };
+        let endpoint = DirectEndpoint {
+            host: "127.0.0.1".into(),
+            port: 9000,
+        };
+        let ready = SessionMember {
+            direct_endpoint: Some(endpoint.clone()),
+            ..full.clone()
+        };
+        for version in [0, 1, 2, 3, 4, u16::MAX] {
+            for mask in 0u8..64 {
+                for has_endpoint in [false, true] {
+                    let candidate = SessionMember {
+                        player_id: Uuid::from_u128(2),
+                        capabilities: SessionCapabilities {
+                            version,
+                            relay_transport: mask & 1 != 0,
+                            direct_transport: mask & 2 != 0,
+                            webrtc_transport: mask & 4 != 0,
+                            relay_topology: mask & 8 != 0,
+                            host_topology: mask & 16 != 0,
+                            mesh_topology: mask & 32 != 0,
+                        },
+                        direct_endpoint: has_endpoint.then(|| endpoint.clone()),
+                        ..legacy.clone()
+                    };
+                    for members in [
+                        vec![],
+                        vec![candidate.clone()],
+                        vec![full.clone(), candidate.clone()],
+                        vec![candidate.clone(), full.clone()],
+                        vec![ready.clone(), candidate.clone()],
+                        vec![candidate.clone(), ready.clone()],
+                        vec![candidate.clone(), candidate.clone()],
+                        vec![legacy.clone(), candidate.clone()],
+                        vec![candidate.clone(), legacy.clone()],
+                    ] {
+                        for desired in [Topology::Relay, Topology::Host, Topology::Mesh] {
+                            for direct in [false, true] {
+                                for webrtc in [false, true] {
+                                    assert_eq!(
+                                        select_session_pair(&members, desired, direct, webrtc),
+                                        expected_session_pair(&members, desired, direct, webrtc),
+                                        "version={version} mask={mask} endpoint={has_endpoint} \
+                                         desired={desired:?} direct={direct} webrtc={webrtc} \
+                                         members={members:?}"
+                                    );
+                                }
                             }
                         }
                     }

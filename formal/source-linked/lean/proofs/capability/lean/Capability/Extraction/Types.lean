@@ -101,4 +101,10 @@ def session_member.all_support.closure := Unit
 def session_member.rung_is_executable.closure :=
   session_capability.Topology × session_capability.Transport
 
+/-- [signal_fish_proof_core::session_member::select_session_pair::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 138:14-143:9 -/
+def session_member.select_session_pair.closure :=
+  session_capability.Topology × Bool × Bool × Slice
+  session_member.SessionMember
+
 end signal_fish_proof_core

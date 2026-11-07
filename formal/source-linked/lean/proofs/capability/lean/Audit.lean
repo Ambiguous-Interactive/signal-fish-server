@@ -25,3 +25,11 @@ import Capability
 #print axioms Capability.executability_contract
 #print axioms Capability.direct_executable_witness
 #print axioms Capability.executability_outcomes
+#print axioms Capability.array_find_contract
+#print axioms Capability.selector_evaluation
+#print axioms Capability.selection_callback_contract
+#print axioms Capability.selection_contract
+#print axioms Capability.selection_waterfall_contract
+#print axioms Capability.selection_fallback_contract
+#print axioms Capability.selection_upgrade_contract
+#print axioms Capability.selection_outcomes
