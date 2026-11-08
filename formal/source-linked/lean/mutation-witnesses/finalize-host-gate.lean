@@ -12,7 +12,7 @@ theorem mutation_returns_wrong_value (member : SessionMember) (endpoint : Direct
       RustM.ok ⟨.Host, .WebRtc, .None⟩ := by
   unfold finalizePlan finalize_session_plan
   simp [CoreModels.core.Slice.Insts.CoreConvertAsRefSlice.as_ref,
-    selection_contract, ProtocolLadder, RungFits, Rank, MemberSupport, DirectReady,
-    HasEndpoint, Topology.Insts.CoreCmpPartialEqTopology.eq, Topology.read_discriminant,
+    selection_contract, ProtocolLadder, RungFits, Rank, MemberSupport,
+    CoreModels.core.cmp.PartialEq.ne.default, Topology.Insts.CoreCmpPartialEqTopology.eq,
     Aeneas.Std.bind, Bind.bind]
 end Capability

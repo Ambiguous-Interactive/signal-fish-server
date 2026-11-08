@@ -12,8 +12,8 @@ theorem mutation_returns_wrong_value (member : SessionMember) :
       RustM.ok ⟨.Host, .WebRtc, .None⟩ := by
   unfold finalizePlan finalize_session_plan
   simp [CoreModels.core.Slice.Insts.CoreConvertAsRefSlice.as_ref,
-    selection_contract, ProtocolLadder, RungFits, Rank, MemberSupport, DirectReady,
+    selection_contract, ProtocolLadder, RungFits, Rank, MemberSupport,
     HasEndpoint, eligible_election_contract, election_evaluation, Eligible, electionScan,
-    earlierCandidate, memberCandidate, RustOption, Topology.Insts.CoreCmpPartialEqTopology.eq, Topology.read_discriminant,
+    RustOption, Topology.Insts.CoreCmpPartialEqTopology.eq, Topology.read_discriminant,
     Aeneas.Std.bind, Bind.bind]
 end Capability
