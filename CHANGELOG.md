@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Require a mutable native `Engine` for `start_selected_candidate_pair_probe` (#1507).
 - Reduce server heap allocations and bytes used during P2P room changes, and avoid recipient storage growth in broadcasts
   with excluded players (#1469, #1470).
 - Reduce room-change scans on busy servers and allocations during live WebRTC signaling (#1465, #1466, #1467).

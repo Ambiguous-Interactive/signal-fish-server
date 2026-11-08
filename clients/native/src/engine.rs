@@ -542,6 +542,7 @@ struct PeerLink {
 }
 
 impl PeerLink {
+    /// Cancel every task that can retain this physical link.
     fn stop_tasks(&mut self) {
         for task in self.channel_tasks.drain(..) {
             task.abort();
@@ -551,6 +552,7 @@ impl PeerLink {
 }
 
 impl Drop for PeerLink {
+    /// Retire owned tasks even when teardown is cancelled or the Engine drops.
     fn drop(&mut self) {
         // Runtime handles detach on drop. Explicit cancellation also covers
         // failed pairing, cancelled teardown, and destruction of the engine.
@@ -1449,17 +1451,20 @@ impl Engine {
     }
 }
 
+/// A single cancellable query and its serialized result-publication state.
 struct SelectedPairProbe {
     task: Box<dyn JoinHandle>,
     completed: Arc<std::sync::Mutex<bool>>,
 }
 
 impl Drop for SelectedPairProbe {
+    /// Cancel query work without removing any result already published.
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
+/// Run a link-owned query and publish its result before marking completion.
 fn spawn_selected_pair_probe(
     runtime: Arc<dyn Runtime>,
     results: mpsc::UnboundedSender<SelectedPairProbeResult>,
@@ -2479,6 +2484,7 @@ mod tests {
     /// arrival, so a datagram from anything else cannot be mistaken for it.
     const ROUTE_PROBE: &[u8] = b"signal-fish-route-probe";
 
+    /// A pending owned query leaves unrelated gameplay work runnable.
     #[tokio::test]
     async fn detached_selected_pair_probe_cannot_block_unrelated_work() {
         let runtime = default_runtime().expect("test runtime is available");

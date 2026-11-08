@@ -2268,6 +2268,8 @@ where
         }
     }
 
+    /// Drain available media and bounded data batches, reporting local progress.
+    /// Progress requires another write pass before the event loop waits.
     async fn poll_reads(&mut self) -> Result<bool> {
         let mut progressed = false;
         // 3.a turn_relayer poll_read() - deliver decapsulated relay data,
@@ -2488,6 +2490,7 @@ mod tests {
     // A slow old receiver must leave the next lifetime's markers in the core.
     #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
     #[test]
+    /// Preserve lifetime ordering under backpressure and reach idle after drain.
     fn slow_receiver_holds_later_lifetime_markers_in_core() {
         let runtime = crate::runtime::default_runtime().unwrap();
         runtime.block_on(Box::pin(async {

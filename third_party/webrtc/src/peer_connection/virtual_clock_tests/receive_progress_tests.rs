@@ -2,6 +2,7 @@ use super::*;
 use crate::data_channel::DataChannelEvent;
 use futures::FutureExt;
 
+/// Build a peer whose small SCTP window makes held callbacks close receive credit.
 async fn small_window_peer(network: &Arc<MockUDPNetwork>) -> Peer {
     let rt = Arc::new(MockRuntime::with_network(network.clone()));
     rt.clock().advance(CLOCK_OFFSET);
@@ -26,7 +27,7 @@ async fn small_window_peer(network: &Arc<MockUDPNetwork>) -> Peer {
     }
 }
 
-// Regression #1508: accepted input must not wait for a new packet or timer.
+/// Regression #1508: accepted input must not wait for a new packet or timer.
 #[test]
 fn resumed_receive_window_sends_credit_without_an_unrelated_timer() {
     let runtime = MockRuntime::new();
@@ -39,6 +40,7 @@ fn resumed_receive_window_sends_credit_without_an_unrelated_timer() {
     }));
 }
 
+/// Drain accepted input with frozen clocks, then recover refused input normally.
 async fn resumed_receive_window_case(receiver_offers: bool) {
     let network = Arc::new(MockUDPNetwork::new());
     let a = small_window_peer(&network).await;

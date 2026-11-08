@@ -19,8 +19,22 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
 });
+/** Attempt every cleanup and report failures without replacing the test error. */
+async function cleanup(resources) {
+  for (const close of resources) {
+    try {
+      await close();
+    } catch (error) {
+      console.error('UDP loss control cleanup failed:', error);
+      process.exitCode = 1;
+    }
+  }
+}
+
+/** Drop one selected gameplay transmission and check exact receipt qualification. */
 async function runLossControl(droppedLabel) {
   const sockets = [createSocket('udp4'), createSocket('udp4')];
+  const boundSockets = new Set();
   const targets = [null, null];
   const forwarded = [0, 0];
   const dropped = [];
@@ -35,6 +49,8 @@ async function runLossControl(droppedLabel) {
     for (let side = 0; side < 2; side++) {
       const socket = sockets[side];
       socket.on('error', (error) => errors.push(String(error)));
+      socket.on('listening', () => boundSockets.add(socket));
+      socket.on('close', () => boundSockets.delete(socket));
       await new Promise((resolve, reject) => {
         const failed = (error) => reject(error);
         socket.once('error', failed);
@@ -88,10 +104,12 @@ async function runLossControl(droppedLabel) {
     await page.exposeFunction('waitForLoss', () => dropObserved);
     await page.addScriptTag({ content: bundle.outputFiles[0].text });
     const result = await page.evaluate(async (droppedLabel) => {
+      /** Reject any mismatch in the live packet and receipt history. */
       const check = (condition, message) => {
         if (!condition) throw new Error(message);
       };
       const deadline = performance.now() + 10000;
+      /** Poll within one fixed deadline for all phases of this pairing. */
       const until = async (condition, message) => {
         while (!condition()) {
           check(performance.now() < deadline, message);
@@ -273,18 +291,16 @@ async function runLossControl(droppedLabel) {
       JSON.stringify({ control: `${droppedLabel}-udp-loss`, dropped, forwarded, ...result }),
     );
   } finally {
-    for (const socket of sockets) {
-      try {
-        socket.close();
-      } catch (error) {
-        if (error.code !== 'ERR_SOCKET_DGRAM_NOT_RUNNING') throw error;
-      }
-    }
-    await page?.close();
+    await cleanup([
+      ...sockets
+        .filter((socket) => boundSockets.has(socket))
+        .map((socket) => () => new Promise((resolve) => socket.close(resolve))),
+      () => page?.close(),
+    ]);
   }
 }
 try {
   for (const label of ['unreliable', 'reliable']) await runLossControl(label);
 } finally {
-  await browser.close();
+  await cleanup([() => browser.close()]);
 }

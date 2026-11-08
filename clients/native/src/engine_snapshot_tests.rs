@@ -20,12 +20,14 @@ struct HeldClock {
 struct ProbeTaskGuard(Arc<AtomicUsize>);
 
 impl Drop for ProbeTaskGuard {
+    /// Record capture release when the observed query exits or is cancelled.
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 impl Runtime for HeldClock {
+    /// Hold one real RTC send inside its core lock until the test releases it.
     fn now(&self) -> std::time::Instant {
         if std::thread::current().name() == Some("snapshot-held-send") {
             if let Some((started, release)) = self.hold.lock().unwrap().take() {
@@ -36,6 +38,7 @@ impl Runtime for HeldClock {
         self.inner.now()
     }
 
+    /// Observe only the next query task so teardown tasks cannot affect its count.
     fn spawn(&self, future: RuntimeFuture<'static, ()>) -> Box<dyn JoinHandle> {
         let observed = self.probe_tasks.lock().unwrap().take();
         if let Some(observed) = observed {
@@ -128,6 +131,7 @@ async fn next_exact_receipt(
     .unwrap()
 }
 
+/// Construct both channel profiles with an observable receiver runtime.
 fn unconnected_pair(profile: ChannelProfile) -> (LivePair, Arc<HeldClock>) {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
     let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
@@ -423,7 +427,7 @@ async fn stalled_transport_snapshot_keeps_real_closure_and_receive_refusal_disti
     }
 }
 
-// Regression #1507: a blocked nominated-pair query belongs to its physical link.
+/// Regression #1507: retire a blocked query, then qualify the fresh link and route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retired_links_cancel_blocked_selected_pair_queries_before_fresh_gameplay() {
     for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
@@ -522,6 +526,8 @@ async fn retired_links_cancel_blocked_selected_pair_queries_before_fresh_gamepla
                 std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
             }
             assert_ne!(pair.receiver.peers[&peer].generation, old_generation);
+            assert_fresh_selected_pair(&mut pair.receiver, peer).await;
+            assert_fresh_selected_pair(&mut pair.sender, pair.receiver_id).await;
             let expected = vec![b'F'; 4096];
             pair.sender
                 .channel(pair.receiver_id, RELIABLE_LABEL)
@@ -569,6 +575,7 @@ async fn retired_links_cancel_blocked_selected_pair_queries_before_fresh_gamepla
     }
 }
 
+/// Engine destruction cancels pending work; replacement keeps published evidence.
 #[tokio::test]
 async fn dropped_engine_cancels_its_pending_query_and_replacement_preserves_published_rows() {
     for drop_engine in [false, true] {
@@ -654,5 +661,42 @@ async fn dropped_engine_cancels_its_pending_query_and_replacement_preserves_publ
             assert!(published.completed_at <= next.completed_at);
             assert!(published.selected.is_none());
         }
+    }
+}
+
+/// Both fresh endpoints must publish their actual nominated route and generation.
+async fn assert_fresh_selected_pair(engine: &mut Engine, peer: PlayerId) {
+    let generation = engine.peers[&peer].generation;
+    let (results, mut rows) = mpsc::unbounded_channel();
+    let selected = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(engine.start_selected_candidate_pair_probe(peer, results.clone()));
+            let row = rows.recv().await.expect("fresh query publishes its result");
+            assert_eq!(row.peer, peer);
+            assert_eq!(row.generation, generation);
+            assert!(engine.is_current_generation(row.peer, row.generation));
+            if let Some(selected) = row.selected {
+                break selected;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fresh physical link publishes nominated transport evidence");
+    assert_eq!(selected.local_candidate_type, "host");
+    assert!(matches!(
+        selected.remote_candidate_type.as_str(),
+        "host" | "prflx"
+    ));
+    for address in [
+        selected.local_candidate_address,
+        selected.remote_candidate_address,
+    ] {
+        let address: IpAddr = address
+            .expect("nominated candidate keeps its actual address")
+            .parse()
+            .expect("nominated candidate has a concrete IP address");
+        assert!(!address.is_unspecified());
+        assert!(!address.is_multicast());
     }
 }
