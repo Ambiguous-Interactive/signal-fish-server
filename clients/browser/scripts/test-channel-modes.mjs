@@ -149,6 +149,19 @@ try {
             'one pair connection and no rejection callbacks',
           );
           const snapshot = engine.diagnosticSnapshot('peer');
+          const announcements = snapshot.remoteChannelAnnouncements;
+          check(
+            announcements.received === 3 &&
+              announcements.accepted === 2 &&
+              announcements.invalidMode === 1 &&
+              announcements.duplicate === 0 &&
+              announcements.terminal === 0 &&
+              announcements.lastInvalidMode.label === label &&
+              announcements.lastInvalidMode.ordered === rejected.ordered &&
+              announcements.lastInvalidMode.maxRetransmits === rejected.maxRetransmits &&
+              announcements.lastInvalidMode.maxPacketLifeTime === rejected.maxPacketLifeTime,
+            'retain exact rejected mode separately from admitted followups',
+          );
           for (const channel of [reliable, unreliable]) {
             const diagnostic = snapshot.channels[channel.label];
             check(
@@ -165,6 +178,7 @@ try {
           return {
             name,
             receiptDiagnostics: snapshot.channels,
+            remoteChannelAnnouncements: announcements,
             rejectedMode: {
               ordered: rejected.ordered,
               maxRetransmits: rejected.maxRetransmits,

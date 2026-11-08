@@ -669,6 +669,7 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
                 Duration::from_secs(15),
                 wait_for_held_sctp_refusal(
                     || pair.receiver.transport_diagnostic_snapshot(peer),
+                    || pair.sender.transport_diagnostic_snapshot(pair.receiver_id),
                     &mut last_snapshot,
                     &mut polls,
                     &mut progress,
@@ -687,7 +688,7 @@ async fn godot_reliable_prefix_survives_saturated_callback_queues_and_fresh_pair
                     panic!("held application polling fills downstream queues and exhausts SCTP receive credit: {error}; receiver_offers={receiver_offers} payload_generation={generation} sent={PACKETS} packet_bytes={PACKET_BYTES} polls={polls} wait_us={wait_us} last_snapshot={last_snapshot} sender_snapshot={sender_snapshot} progress={progress}");
                 }
             };
-            println!("GODOT_HELD_REFUSAL receiver_offers={receiver_offers} payload_generation={generation} polls={polls} wait_us={}", wait_started.elapsed().as_micros());
+            println!("GODOT_HELD_REFUSAL receiver_offers={receiver_offers} payload_generation={generation} polls={polls} wait_us={} progress={}", wait_started.elapsed().as_micros(), serde_json::to_string(&progress).unwrap());
             let received = held["transport_channels"]
                 .as_array()
                 .unwrap()
@@ -1054,6 +1055,9 @@ struct HeldRefusalProgressPoint {
 #[derive(Default, Debug, serde::Serialize)]
 struct HeldRefusalProgress {
     checkpoints: Vec<HeldRefusalProgressPoint>,
+    sender_checkpoints: Vec<serde_json::Value>,
+    sender_query_started_after_us: Option<u64>,
+    sender_query_pending: bool,
     latest: Option<HeldRefusalProgressPoint>,
     #[serde(skip)]
     next_checkpoint: usize,
@@ -1061,6 +1065,39 @@ struct HeldRefusalProgress {
 
 impl HeldRefusalProgress {
     const CHECKPOINTS_MS: [u64; 8] = [0, 100, 500, 1000, 2000, 4000, 8000, 12000];
+
+    fn sender_checkpoint_due(&self, elapsed: Duration) -> bool {
+        Self::CHECKPOINTS_MS
+            .get(self.sender_checkpoints.len())
+            .is_some_and(|millis| elapsed >= Duration::from_millis(*millis))
+    }
+
+    /// Match one bounded sender sample to every crossed receiver checkpoint.
+    /// These are sequential observations, not an atomic view of both endpoints.
+    fn observe_sender(
+        &mut self,
+        receiver_elapsed: Duration,
+        sender_elapsed: Duration,
+        snapshot: &serde_json::Value,
+    ) {
+        while self.sender_checkpoint_due(receiver_elapsed) {
+            let scheduled = Self::CHECKPOINTS_MS[self.sender_checkpoints.len()];
+            self.sender_checkpoints.push(serde_json::json!({
+                "scheduled_after_ms": scheduled,
+                "receiver_observed_after_us": receiver_elapsed.as_micros(),
+                "sender_observed_after_us": sender_elapsed.as_micros(),
+                "snapshot_error": snapshot["transport_snapshot_error"],
+                "snapshot_stage": snapshot["transport_snapshot_stage"],
+                "snapshot_channel": snapshot["transport_snapshot_channel"],
+                "sctp_error": snapshot["sctp_error"],
+                "flow_control": snapshot["sctp"]["flow_control"],
+                "data_chunks_emitted": snapshot["sctp"]["data_chunks_emitted"],
+                "data_chunks_retransmitted": snapshot["sctp"]["data_chunks_retransmitted"],
+                "retransmission_timeouts": snapshot["sctp"]["retransmission_timeouts"],
+                "reliable_outstanding_bytes": snapshot["send_channels"][RELIABLE_LABEL]["outstanding_bytes"],
+            }));
+        }
+    }
 
     /// Retain eight scheduled scalar samples and the latest observation without extra queries.
     fn observe(&mut self, elapsed: Duration, snapshot: &serde_json::Value) {
@@ -1161,8 +1198,10 @@ fn held_refusal_progress_retains_bounded_partial_and_late_observations() {
 
 /// Sample held transport state without repeatedly taking its driver's shared core lock.
 /// The caller owns the deadline and retains the last failed sample.
-async fn wait_for_held_sctp_refusal<Sample, Snapshot>(
+/// Failed observations add at most eight sender queries within that same deadline.
+async fn wait_for_held_sctp_refusal<Sample, Snapshot, SampleSender, SenderSnapshot>(
     mut sample: Sample,
+    mut sample_sender: SampleSender,
     last_snapshot: &mut serde_json::Value,
     polls: &mut u64,
     progress: &mut HeldRefusalProgress,
@@ -1170,12 +1209,15 @@ async fn wait_for_held_sctp_refusal<Sample, Snapshot>(
 where
     Sample: FnMut() -> Snapshot,
     Snapshot: std::future::Future<Output = serde_json::Value>,
+    SampleSender: FnMut() -> SenderSnapshot,
+    SenderSnapshot: std::future::Future<Output = serde_json::Value>,
 {
     let started = tokio::time::Instant::now();
     loop {
         let snapshot = sample().await;
         *polls = polls.saturating_add(1);
-        progress.observe(started.elapsed(), &snapshot);
+        let receiver_elapsed = started.elapsed();
+        progress.observe(receiver_elapsed, &snapshot);
         if snapshot["sctp"]["data_chunks_refused"]
             .as_u64()
             .is_some_and(|count| count > 0)
@@ -1183,6 +1225,14 @@ where
             return snapshot;
         }
         *last_snapshot = snapshot;
+        if progress.sender_checkpoint_due(receiver_elapsed) {
+            progress.sender_query_started_after_us =
+                Some(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+            progress.sender_query_pending = true;
+            let sender = sample_sender().await;
+            progress.sender_query_pending = false;
+            progress.observe_sender(receiver_elapsed, started.elapsed(), &sender);
+        }
         tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
     }
 }
@@ -1201,6 +1251,7 @@ async fn held_refusal_observation_allows_transport_progress_between_failed_snaps
             samples.set(samples.get() + 1);
             serde_json::json!({"sctp": {"data_chunks_refused": refused}})
         },
+        || std::future::ready(serde_json::Value::Null),
         &mut last_snapshot,
         &mut polls,
         &mut progress,
@@ -1260,6 +1311,7 @@ async fn held_refusal_observation_preserves_incomplete_evidence_until_positive_c
                     };
                     std::future::ready(snapshot)
                 },
+                || std::future::ready(serde_json::Value::Null),
                 &mut last_snapshot,
                 &mut polls,
                 &mut progress,
@@ -1277,6 +1329,159 @@ async fn held_refusal_observation_preserves_incomplete_evidence_until_positive_c
         assert_eq!(last_snapshot, initial);
         assert_eq!(polls, 2);
     }
+}
+
+/// #1319: a receive plateau alone cannot identify sender admission, flow, or observation waits.
+#[tokio::test(start_paused = true)]
+async fn held_refusal_checkpoints_match_bounded_sender_flow_without_hiding_missing_samples() {
+    let cases = [
+        (
+            "not_sent",
+            serde_json::json!({"sctp":{"flow_control":{
+            "pending_bytes":0,"inflight_bytes":0,"peer_receive_window":65536,
+            "congestion_window":4380,"earliest_outstanding_tsn":null},
+            "data_chunks_emitted":0,"data_chunks_retransmitted":0,"retransmission_timeouts":0},
+            "send_channels":{"reliable":{"outstanding_bytes":0}}}),
+        ),
+        (
+            "backpressure",
+            serde_json::json!({"sctp":{"flow_control":{
+            "pending_bytes":5000000,"inflight_bytes":1024,"peer_receive_window":0,
+            "congestion_window":4380,"earliest_outstanding_tsn":u32::MAX},
+            "data_chunks_emitted":3451,"data_chunks_retransmitted":323,"retransmission_timeouts":1},
+            "send_channels":{"reliable":{"outstanding_bytes":5001024}}}),
+        ),
+        (
+            "open_window_stall",
+            serde_json::json!({"sctp":{"flow_control":{
+            "pending_bytes":5000000,"inflight_bytes":1024,"peer_receive_window":65536,
+            "congestion_window":4380,"earliest_outstanding_tsn":u32::MAX},
+            "data_chunks_emitted":3451,"data_chunks_retransmitted":323,"retransmission_timeouts":1},
+            "send_channels":{"reliable":{"outstanding_bytes":5001024}}}),
+        ),
+        (
+            "query_blocked",
+            serde_json::json!({"transport_snapshot_error":"deadline_elapsed",
+            "transport_snapshot_stage":"send_channels", "transport_snapshot_channel":"reliable"}),
+        ),
+    ];
+    for (name, sender) in cases {
+        let receiver = serde_json::json!({"sctp":{"data_chunks_refused":0,
+            "flow_control":{"receive_window":0}},
+            "transport_channels":[{"label":"reliable","messages_received":527}]});
+        let mut last_snapshot = serde_json::Value::Null;
+        let mut polls = 0;
+        let mut progress = HeldRefusalProgress::default();
+        let sender_queries = std::cell::Cell::new(0);
+        let waiting = wait_for_held_sctp_refusal(
+            || std::future::ready(receiver.clone()),
+            || {
+                sender_queries.set(sender_queries.get() + 1);
+                std::future::ready(sender.clone())
+            },
+            &mut last_snapshot,
+            &mut polls,
+            &mut progress,
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(15), waiting)
+                .await
+                .is_err(),
+            "{name}: neither a plateau nor a sender query proves receive refusal"
+        );
+        assert_eq!(sender_queries.get(), 8, "{name}");
+        assert_eq!(progress.sender_checkpoints.len(), 8, "{name}");
+        assert_eq!(last_snapshot, receiver, "{name}");
+        assert!(
+            polls > 1000,
+            "{name}: sender queries must stay independent of poll count"
+        );
+        for (index, point) in progress.sender_checkpoints.iter().enumerate() {
+            assert_eq!(
+                point["scheduled_after_ms"],
+                HeldRefusalProgress::CHECKPOINTS_MS[index],
+                "{name}"
+            );
+            assert_eq!(
+                point["flow_control"], sender["sctp"]["flow_control"],
+                "{name}"
+            );
+            assert_eq!(
+                point["data_chunks_emitted"], sender["sctp"]["data_chunks_emitted"],
+                "{name}"
+            );
+            assert_eq!(
+                point["data_chunks_retransmitted"], sender["sctp"]["data_chunks_retransmitted"],
+                "{name}"
+            );
+            assert_eq!(
+                point["retransmission_timeouts"], sender["sctp"]["retransmission_timeouts"],
+                "{name}"
+            );
+            assert_eq!(
+                point["reliable_outstanding_bytes"],
+                sender["send_channels"][RELIABLE_LABEL]["outstanding_bytes"],
+                "{name}"
+            );
+            assert_eq!(
+                point["snapshot_error"], sender["transport_snapshot_error"],
+                "{name}"
+            );
+            assert_eq!(
+                point["snapshot_stage"], sender["transport_snapshot_stage"],
+                "{name}"
+            );
+            assert_eq!(
+                point["snapshot_channel"], sender["transport_snapshot_channel"],
+                "{name}"
+            );
+            let receiver_us = point["receiver_observed_after_us"].as_u64().unwrap();
+            assert!(
+                receiver_us >= HeldRefusalProgress::CHECKPOINTS_MS[index] * 1000,
+                "{name}"
+            );
+            assert!(
+                point["sender_observed_after_us"].as_u64().unwrap() >= receiver_us,
+                "{name}"
+            );
+        }
+    }
+    // One delayed observation fills crossed slots with its actual time, not invented earlier samples.
+    let mut delayed = HeldRefusalProgress::default();
+    delayed.observe_sender(
+        Duration::from_secs(13),
+        Duration::from_secs(14),
+        &serde_json::Value::Null,
+    );
+    assert_eq!(delayed.sender_checkpoints.len(), 8);
+    assert!(delayed
+        .sender_checkpoints
+        .iter()
+        .all(|point| point["receiver_observed_after_us"] == 13_000_000u64
+            && point["sender_observed_after_us"] == 14_000_000u64
+            && point["flow_control"].is_null()));
+
+    // If an outer deadline cancels an unfinished sender query, keep the completed
+    // receiver sample and query phase rather than reporting a transport stall.
+    let mut progress = HeldRefusalProgress::default();
+    let receiver = serde_json::json!({"sctp":{"data_chunks_refused":0}});
+    let mut last_snapshot = serde_json::Value::Null;
+    let mut polls = 0;
+    let waiting = wait_for_held_sctp_refusal(
+        || std::future::ready(receiver.clone()),
+        std::future::pending::<serde_json::Value>,
+        &mut last_snapshot,
+        &mut polls,
+        &mut progress,
+    );
+    assert!(tokio::time::timeout(Duration::from_secs(15), waiting)
+        .await
+        .is_err());
+    assert_eq!(last_snapshot, receiver);
+    assert_eq!(polls, 1);
+    assert_eq!(progress.sender_query_started_after_us, Some(0));
+    assert!(progress.sender_query_pending);
+    assert!(progress.sender_checkpoints.is_empty());
 }
 
 /// Offer the fixed burst after pollers stop and wait for observed SCTP refusal.
@@ -1307,6 +1512,7 @@ async fn saturate_held_reliable_callbacks(
         }
         let snapshot = wait_for_held_sctp_refusal(
             || pair.receiver.transport_diagnostic_snapshot(peer),
+            || pair.sender.transport_diagnostic_snapshot(pair.receiver_id),
             &mut last_snapshot,
             &mut polls,
             &mut progress,
@@ -1331,7 +1537,7 @@ async fn saturate_held_reliable_callbacks(
             panic!("held callbacks exhaust actual SCTP receive credit: {error}; payload_generation={payload_generation} packet_bytes={packet_bytes} sent={sent}/2048 polls={polls} elapsed_us={elapsed_us} last_snapshot={last_snapshot} timeout_snapshot={timeout_snapshot} sender_snapshot={sender_snapshot} progress={progress}");
         }
     };
-    println!("GODOT_HELD_REFUSAL payload_generation={payload_generation} packet_bytes={packet_bytes} polls={polls} elapsed_us={}", started.elapsed().as_micros());
+    println!("GODOT_HELD_REFUSAL payload_generation={payload_generation} packet_bytes={packet_bytes} polls={polls} elapsed_us={} progress={}", started.elapsed().as_micros(), serde_json::to_string(&progress).unwrap());
     (channel, snapshot)
 }
 

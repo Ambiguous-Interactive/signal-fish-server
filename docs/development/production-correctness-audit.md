@@ -14977,3 +14977,48 @@ Rust, .NET and Godot remain unaffected: wire payloads, recipient selection,
 ordering, generations, negotiation and reconnect rules do not change. Each
 client's current README was inspected through the connected GitHub app; no
 migration or client tracking change is needed for these private storage changes.
+
+### F287–F289 — Distinguish live P2P setup and recovery failures
+
+Issues: #853, #889, #1290 and #1319. Baseline: `8320ef24`.
+These investigations remain open. No historical cause is established.
+
+Browser failure snapshots now count remote channel announcements, admissions,
+mode rejections, duplicate labels and terminal-link rejections. The last rejected
+mode retains only the required label or `other`, with no event history or custom
+label storage. A fresh link resets these observations. Retired callbacks cannot
+change the replacement's evidence. Accepted channels still report their actual
+state and `openObserved`; admission does not prove opening or receipt.
+A terminal observer sees the rejection count before it can retire the link.
+Mocked histories check absent, accepted-but-connecting, rejected, duplicate,
+terminal and retired-link callbacks. Real Chromium controls retain exact rejected
+modes and healthy follow-up gameplay. These counts distinguish failure stages;
+they do not explain an earlier missing reliable or unreliable receipt.
+
+The held Godot callback fixture now samples sender flow at the eight existing
+receiver checkpoints. It retains queued and in-flight DATA, send windows,
+outstanding bytes, retransmission counts and partial-query markers. Observations
+are sequential and carry their actual times. Late samples do not invent earlier
+observations. The 15-second refusal deadline, receive limits, offered packets,
+exact receipt requirements and callback recovery paths stay unchanged.
+Synthetic histories preserve distinct unsent, zero-window, open-window and
+incomplete-query evidence without accepting any as a receive refusal. Removing
+sender checkpoint retention makes the new control fail. A passing live recovery
+control does not explain the earlier 527-message plateau.
+
+The Linux stdout control observes the actual reader's close-on-exec flag and
+an executed sibling's pipe descriptors. An ordinary sibling retains no target
+reader and stays alive while the reference client exits with code 3. A sibling
+explicitly given the reader as stdin receives the authentication event and masks
+pipe closure until it exits. Both native runtime modes run, with the original
+eight-second failed-output exit bound. Deliberately passing the reader to the
+ordinary sibling fails the descriptor-ownership assertion. This excludes
+persistent inheritance across the tested exec path. It does not exclude a
+transient pre-exec reader or establish the historical timeout's cause.
+
+Rust, .NET and Godot clients need no migration. Their current READMEs were
+inspected through the connected GitHub app. Server wire messages, negotiation,
+channel settings, generations and gameplay decisions do not change. Only the
+standalone browser reference client's diagnostic snapshot gains fields; the
+native changes are investigation fixtures. These controls do not establish
+remote-network qualification or complete the broader #826 audit.

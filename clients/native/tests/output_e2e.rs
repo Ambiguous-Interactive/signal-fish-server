@@ -232,6 +232,223 @@ async fn closed_stdout_fails_held_handshake() {
     blocked_handshake_output("current", true).await;
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial_test::serial(native_output_process)]
+async fn spawned_stdout_reader_ownership_controls_handshake_failure() {
+    use std::os::fd::{AsFd, AsRawFd};
+
+    const CHILD_MODE: &str = "SIGNAL_FISH_STDOUT_READER_CHILD";
+    if let Ok(mode) = std::env::var(CHILD_MODE) {
+        use std::io::Read;
+        if mode == "reader" {
+            let mut stdin = std::io::stdin();
+            let line = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut line = Vec::new();
+                let mut waiting_reported = false;
+                loop {
+                    let mut bytes = [0; 64];
+                    match stdin.read(&mut bytes) {
+                        Ok(0) => panic!("client stdout closed before authenticated event"),
+                        Ok(count) => {
+                            line.extend_from_slice(&bytes[..count]);
+                            assert!(line.len() <= 4096, "helper retains one bounded event");
+                            if line.ends_with(b"\n") {
+                                break line;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if !waiting_reported {
+                                println!("reader waiting");
+                                waiting_reported = true;
+                            }
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                        Err(error) => panic!("read client stdout: {error}"),
+                    }
+                }
+            })
+            .await
+            .expect("helper receives authenticated within five seconds");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&line).unwrap()["event"],
+                "authenticated"
+            );
+            println!("reader ownership observed");
+        } else {
+            println!("reader ready");
+        }
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        return;
+    }
+
+    for runtime in ["current", "multi"] {
+        for retain_reader in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (release_auth, auth_ready) = tokio::sync::oneshot::channel();
+            let (release_info, info_ready) = tokio::sync::oneshot::channel();
+            let stub = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let auth = ws.next().await.unwrap().unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(auth.to_text().unwrap()).unwrap()
+                        ["type"],
+                    "Authenticate"
+                );
+                auth_ready.await.unwrap();
+                let auth = json!({"type":"Authenticated","data":{"app_name":"test","rate_limits":{"per_minute":1000,"per_hour":60000,"per_day":1440000}}});
+                ws.send(Message::Text(auth.to_string().into()))
+                    .await
+                    .unwrap();
+                info_ready.await.unwrap();
+                let info = json!({"type":"ProtocolInfo","data":{"protocol_version":3,"sdk_version":"test","capabilities":[],"game_data_formats":["json"]}});
+                if ws
+                    .send(Message::Text(info.to_string().into()))
+                    .await
+                    .is_ok()
+                {
+                    while let Some(frame) = ws.next().await {
+                        if matches!(frame, Err(_) | Ok(Message::Close(_))) {
+                            break;
+                        }
+                    }
+                }
+            });
+            let mut child =
+                tokio::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-reference-native"))
+                    .args([
+                        "--server-url",
+                        &format!("ws://{addr}/v3/ws"),
+                        "--create-room",
+                        "--runtime",
+                        runtime,
+                        "--max-runtime-secs",
+                        "90",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+            let diagnostics = tokio::spawn(read_child_diagnostics(child.stderr.take().unwrap()));
+            let stdout = child.stdout.take().unwrap();
+            let descriptor = stdout.as_raw_fd();
+            let pipe = std::fs::read_link(format!("/proc/self/fd/{descriptor}")).unwrap();
+            let descriptor_info =
+                std::fs::read_to_string(format!("/proc/self/fdinfo/{descriptor}")).unwrap();
+            let flags = descriptor_info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:\t"))
+                .unwrap();
+            assert_ne!(
+                u32::from_str_radix(flags, 8).unwrap() & 0o2000000,
+                0,
+                "stdout reader must close across exec: {descriptor_info}"
+            );
+            let sibling_stdin = if retain_reader {
+                Stdio::from(stdout.as_fd().try_clone_to_owned().unwrap())
+            } else {
+                Stdio::null()
+            };
+            let mut stdout = BufReader::new(stdout).lines();
+            let connected = tokio::time::timeout(Duration::from_secs(5), stdout.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&connected).unwrap()["event"],
+                "connected"
+            );
+            let mut sibling = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "spawned_stdout_reader_ownership_controls_handshake_failure",
+                    "--nocapture",
+                ])
+                .env(
+                    CHILD_MODE,
+                    if retain_reader { "reader" } else { "ordinary" },
+                )
+                .stdin(sibling_stdin)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let sibling_id = sibling.id().unwrap();
+            let sibling_pipe_descriptors: Vec<_> =
+                std::fs::read_dir(format!("/proc/{sibling_id}/fd"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| std::fs::read_link(path).is_ok_and(|target| target == pipe))
+                    .collect();
+            assert_eq!(sibling_pipe_descriptors.len(), usize::from(retain_reader), "{runtime}, retained={retain_reader}: {sibling_pipe_descriptors:?}; {descriptor_info}");
+            drop(stdout);
+            let mut sibling_output = BufReader::new(sibling.stdout.take().unwrap()).lines();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(line) = sibling_output.next_line().await.unwrap() {
+                    if line.ends_with(if retain_reader {
+                        "reader waiting"
+                    } else {
+                        "reader ready"
+                    }) {
+                        return;
+                    }
+                }
+                panic!("sibling must report its reader state");
+            })
+            .await
+            .unwrap();
+            release_auth.send(()).unwrap();
+            if retain_reader {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(line) = sibling_output.next_line().await.unwrap() {
+                        if line.ends_with("reader ownership observed") {
+                            return;
+                        }
+                    }
+                    panic!("sibling must receive the exact authenticated event");
+                })
+                .await
+                .unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), child.wait())
+                        .await
+                        .is_err(),
+                    "{runtime}: the sibling reader must mask the closed original reader"
+                );
+                sibling.kill().await.unwrap();
+            }
+            release_info.send(()).unwrap();
+            let status = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+            if status.is_err() {
+                child.kill().await.unwrap();
+            }
+            if !retain_reader {
+                assert!(
+                    sibling.try_wait().unwrap().is_none(),
+                    "ordinary sibling must remain alive during failed client exit"
+                );
+                sibling.kill().await.unwrap();
+            }
+            let diagnostics = tokio::time::timeout(Duration::from_secs(5), diagnostics)
+                .await
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), stub)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(status.is_ok(), "{runtime}, retained={retain_reader}: closed stdout must finish within eight seconds; diagnostics: {diagnostics}; sibling descriptors: {sibling_pipe_descriptors:?}; {descriptor_info}");
+            assert_eq!(status.unwrap().unwrap().code(), Some(3), "{runtime}, retained={retain_reader}: {diagnostics}; sibling descriptors: {sibling_pipe_descriptors:?}; {descriptor_info}");
+            eprintln!("{runtime}, retained={retain_reader}: code=3; sibling descriptors: {sibling_pipe_descriptors:?}; {descriptor_info}");
+        }
+    }
+}
+
 /// Check writer failure with an explicit retained-reader observation window.
 async fn retained_stdout_reader_control(held_window: Duration) {
     async fn read_event(reader: std::io::PipeReader) -> (serde_json::Value, std::io::PipeReader) {

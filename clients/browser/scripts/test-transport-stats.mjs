@@ -67,6 +67,16 @@ try {
       const snapshots = engines.map((engine) => engine.diagnosticSnapshot('peer'));
       for (let side = 0; side < 2; side++) {
         const snapshot = snapshots[side];
+        const announcements = snapshot.remoteChannelAnnouncements;
+        check(
+          announcements.received === (side === 1 ? 2 : 0) &&
+            announcements.accepted === announcements.received &&
+            announcements.invalidMode === 0 &&
+            announcements.duplicate === 0 &&
+            announcements.terminal === 0 &&
+            announcements.lastInvalidMode === null,
+          `side ${side}: only the answerer admits the two remote DCEP channels`,
+        );
         check(
           snapshot.transportStateHistory.some((entry) => entry.dtlsState === 'connected') &&
             snapshot.transportStateHistory.some((entry) => entry.sctpState === 'connected'),
@@ -108,10 +118,13 @@ try {
           );
         }
       }
-      return snapshots.map(({ dataChannelStats, transportStateHistory }) => ({
-        dataChannelStats,
-        transportStateHistory,
-      }));
+      return snapshots.map(
+        ({ dataChannelStats, transportStateHistory, remoteChannelAnnouncements }) => ({
+          dataChannelStats,
+          transportStateHistory,
+          remoteChannelAnnouncements,
+        }),
+      );
     } finally {
       for (const engine of engines) engine.removePeer('peer');
     }
