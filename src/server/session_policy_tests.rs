@@ -6537,7 +6537,14 @@ fn shared_projection_preserves_star_order_endpoints_and_missing_recipients() {
 /// Preserve exact peer storage, edge order, and capability filtering (#1443).
 #[test]
 fn shared_mesh_projection_preserves_filtered_edges_for_every_roster_shape() {
-    for count in [0, 1, 2, 16, 64, 255] {
+    // Building every recipient's peer list is quadratic. Keep empty, singleton,
+    // paired, and mixed rosters under Miri; native tests also cover large rooms.
+    let roster_counts: &[u128] = if cfg!(miri) {
+        &[0, 1, 2, 16]
+    } else {
+        &[0, 1, 2, 16, 64, 255]
+    };
+    for &count in roster_counts {
         for mixed in [false, true] {
             let members = (1..=count)
                 .map(|index| {
