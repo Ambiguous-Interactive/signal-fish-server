@@ -158,7 +158,7 @@ async fn p2p_gate_does_not_signal_removed_peers() {
     }
 }
 
-// Regression #1003: queued signaling must run between deferred peer sends.
+/// Regression #1003: queued signaling must run between deferred peer sends.
 #[tokio::test]
 async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
     for unreliable in [false, true] {
@@ -222,20 +222,21 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
             .map(|label| state.engine.channel(healthy_peer, label).unwrap())
             .into();
         let (started_tx, mut started_rx) = mpsc::unbounded_channel();
-        state.exchange_send_hook = Some(Box::new(move |channel, text| {
-            let tx = started_tx.clone();
-            let healthy = healthy_channels
-                .iter()
-                .any(|other| std::sync::Arc::ptr_eq(other, &channel));
-            Box::pin(async move {
-                if healthy {
-                    channel.send_text(&text).await
-                } else {
-                    let _ = tx.send(());
-                    std::future::pending().await
-                }
-            })
-        }));
+        state.exchange_send_hook =
+            Some(shared_exchange_send_hook(Box::new(move |channel, text| {
+                let tx = started_tx.clone();
+                let healthy = healthy_channels
+                    .iter()
+                    .any(|other| std::sync::Arc::ptr_eq(other, &channel));
+                Box::pin(async move {
+                    if healthy {
+                        channel.send_text(&text).await
+                    } else {
+                        let _ = tx.send(());
+                        std::future::pending().await
+                    }
+                })
+            })));
         std::fs::write(&release, b"go").unwrap();
         state.pong_deadline = Some(Instant::now() + PONG_TIMEOUT);
         let sender = PlayerId::from_u128(20);
@@ -347,6 +348,7 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
 }
 
 // Regressions #1025/#1047: decoder-ready signaling runs between channel sends.
+/// Process queued relay input before starting the next channel's probe.
 #[tokio::test]
 async fn immediate_exchange_services_relay_before_the_next_label() {
     use tokio_tungstenite::tungstenite::protocol::{
@@ -381,10 +383,10 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
     let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
     let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let send_count = sends.clone();
-    state.exchange_send_hook = Some(Box::new(move |channel, text| {
+    state.exchange_send_hook = Some(shared_exchange_send_hook(Box::new(move |channel, text| {
         send_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move { channel.send_text(&text).await })
-    }));
+    })));
     for event in opens {
         state.handle_engine_event(event).await.unwrap();
     }
@@ -447,7 +449,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
     remote.remove_peer(state.my_id).await.unwrap();
 }
 
-// A continuously ready callback stream must still let queued exchange advance.
+/// A continuously ready callback stream must still let queued exchange advance.
 #[tokio::test]
 async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -495,7 +497,9 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
     state.connected_pairs.insert(peer);
     state.exchange_ledger.note_connected(peer);
     state.queue_exchange(peer, &[RELIABLE_LABEL]);
-    state.exchange_send_hook = Some(Box::new(|_, _| Box::pin(async { Ok(()) })));
+    state.exchange_send_hook = Some(shared_exchange_send_hook(Box::new(|_, _| {
+        Box::pin(async { Ok(()) })
+    })));
     state.run_deadline = Deadline::after(Instant::now(), Duration::from_millis(100));
     assert_eq!(
         tokio::task::unconstrained(state.run_loop()).await.unwrap(),
@@ -2257,7 +2261,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
     }
 }
 
-// Audit #826/#853/#889: the callback producer can observe loss before dispatch.
+/// Audit #826/#853/#889: the callback producer can observe loss before dispatch.
 #[tokio::test]
 async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
     let mut failures = Vec::new();
@@ -2330,10 +2334,11 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
             );
             let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let send_calls = calls.clone();
-            state.exchange_send_hook = Some(Box::new(move |channel, text| {
-                send_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Box::pin(async move { channel.send_text(&text).await })
-            }));
+            state.exchange_send_hook =
+                Some(shared_exchange_send_hook(Box::new(move |channel, text| {
+                    send_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Box::pin(async move { channel.send_text(&text).await })
+                })));
             state.process_deferred_exchange().await.unwrap();
             let sent = state
                 .exchange_ledger
@@ -2373,7 +2378,7 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
     );
 }
 
-// Regression #1097 / audit #826: incarnation changes re-arm queued sibling sends.
+/// Regression #1097 / audit #826: incarnation changes re-arm queued sibling sends.
 #[tokio::test]
 async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2419,12 +2424,14 @@ async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
             assert_eq!(state.deferred_exchange.len(), 1);
             let sends = Arc::new(AtomicUsize::new(0));
             let send_count = sends.clone();
-            state.exchange_send_hook = Some(Box::new(move |channel, text| {
-                if serde_json::from_str::<serde_json::Value>(&text).unwrap()["channel"] == label {
-                    send_count.fetch_add(1, Ordering::SeqCst);
-                }
-                Box::pin(async move { channel.send_text(&text).await })
-            }));
+            state.exchange_send_hook =
+                Some(shared_exchange_send_hook(Box::new(move |channel, text| {
+                    if serde_json::from_str::<serde_json::Value>(&text).unwrap()["channel"] == label
+                    {
+                        send_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Box::pin(async move { channel.send_text(&text).await })
+                })));
 
             state.members_seen.insert(returning);
             state

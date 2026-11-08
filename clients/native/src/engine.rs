@@ -449,6 +449,14 @@ pub enum EngineEvent {
     },
     /// All required channels passed a link-owned readiness check.
     PairReady { peer: PlayerId, generation: u64 },
+    /// A link-owned application send completed within its captured deadline.
+    ChannelSendComplete {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
+        text: String,
+        result: Result<(), String>,
+    },
     /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed {
         peer: PlayerId,
@@ -506,6 +514,9 @@ impl EngineEvent {
                 peer, generation, ..
             }
             | Self::PairReady { peer, generation }
+            | Self::ChannelSendComplete {
+                peer, generation, ..
+            }
             | Self::ChannelClosed {
                 peer, generation, ..
             }
@@ -545,12 +556,17 @@ struct PeerLink {
     /// At most one nominated-pair query belongs to this physical link.
     selected_pair_probe: Option<SelectedPairProbe>,
     readiness_check: Option<ReadinessCheck>,
+    /// At most one application send per required exchange label.
+    channel_sends: HashMap<String, Box<dyn JoinHandle>>,
 }
 
 impl PeerLink {
     /// Cancel every task that can retain this physical link.
     fn stop_tasks(&mut self) {
         for task in self.channel_tasks.drain(..) {
+            task.abort();
+        }
+        for (_, task) in self.channel_sends.drain() {
             task.abort();
         }
         self.selected_pair_probe = None;
@@ -926,6 +942,7 @@ impl Engine {
             channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
             selected_pair_probe: None,
             readiness_check: None,
+            channel_sends: HashMap::new(),
         };
         self.peers.insert(peer, link);
         self.receipt_generations
@@ -1281,6 +1298,123 @@ impl Engine {
             return None;
         }
         link.channels.get(label).cloned()
+    }
+
+    /// Capture channel selection and its deadline without borrowing the Engine.
+    pub(crate) fn channel_send_operation<Send, SendFuture>(
+        &self,
+        peer: PlayerId,
+        label: &str,
+        text: String,
+        deadline: Deadline,
+        send: Send,
+    ) -> impl Future<Output = Result<(), String>> + std::marker::Send + use<Send, SendFuture>
+    where
+        Send: FnOnce(Arc<dyn DataChannel>, String) -> SendFuture + std::marker::Send,
+        SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send,
+    {
+        let link = self.peers.get(&peer).map(|link| {
+            (
+                link.generation,
+                link.receive_admission.clone(),
+                link.channels.get(label).cloned(),
+            )
+        });
+        let events = self.events.clone();
+        let label = label.to_owned();
+        async move {
+            let expired = || format!("send on {label} to {peer} exceeded its exchange deadline");
+            if deadline.is_due(tokio::time::Instant::now()) {
+                return Err(expired());
+            }
+            let result = deadline
+                .timeout(async {
+                    let missing = || format!("pair with {peer} has no usable channel {label}");
+                    let (generation, admission, channel) = link.ok_or_else(missing)?;
+                    if !admission.allows_work(&events, peer, generation, None).await {
+                        return Err(missing());
+                    }
+                    let channel = channel.ok_or_else(missing)?;
+                    if deadline.is_due(tokio::time::Instant::now()) {
+                        return Err(expired());
+                    }
+                    send(channel, text)
+                        .await
+                        .map_err(|error| format!("send on {label} to {peer} failed: {error}"))
+                })
+                .await;
+            match result {
+                Ok(result) if !deadline.is_due(tokio::time::Instant::now()) => result,
+                _ => Err(expired()),
+            }
+        }
+    }
+
+    /// Start one exchange send without waiting on a busy RTC core. Ready sends
+    /// complete inline; pending work belongs to this physical link until its
+    /// completion callback is consumed or the link is retired.
+    pub(crate) async fn start_channel_send<Send, SendFuture>(
+        &mut self,
+        peer: PlayerId,
+        label: &str,
+        text: String,
+        deadline: Deadline,
+        send: Send,
+    ) -> Option<Result<(), String>>
+    where
+        Send: FnOnce(Arc<dyn DataChannel>, String) -> SendFuture + std::marker::Send + 'static,
+        SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send + 'static,
+    {
+        let Some(link) = self.peers.get(&peer) else {
+            return Some(Err(format!(
+                "pair with {peer} has no usable channel {label}"
+            )));
+        };
+        if link.channel_sends.contains_key(label) {
+            return None;
+        }
+        let generation = link.generation;
+        let mut operation =
+            Box::pin(self.channel_send_operation(peer, label, text.clone(), deadline, send));
+        match std::future::poll_fn(|context| {
+            std::task::Poll::Ready(operation.as_mut().poll(context))
+        })
+        .await
+        {
+            std::task::Poll::Ready(result) => Some(result),
+            std::task::Poll::Pending => {
+                let events = self.events.clone();
+                let callback_label = label.to_owned();
+                let task = self.runtime.spawn(Box::pin(async move {
+                    let result = operation.await;
+                    let _ = events.send(EngineEvent::ChannelSendComplete {
+                        peer,
+                        generation,
+                        label: callback_label,
+                        text,
+                        result,
+                    });
+                }));
+                if let Some(link) = self.peers.get_mut(&peer) {
+                    link.channel_sends.insert(label.to_owned(), task);
+                } else {
+                    task.abort();
+                }
+                None
+            }
+        }
+    }
+
+    /// Consume one pending send only on its current, nonterminal physical link.
+    pub(crate) fn accept_channel_send(&mut self, peer: PlayerId, label: &str) -> bool {
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        let Some(task) = link.channel_sends.remove(label) else {
+            return false;
+        };
+        task.abort();
+        !link.receive_admission.terminal.load(Ordering::Relaxed)
     }
 
     pub(crate) fn report_peer_loss(&self, peer: PlayerId, reason: &str) {

@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::Ordering;
 
 /// Open a real peer link, optionally retaining its owner open callbacks.
-async fn connect_owner_peer(
+pub(super) async fn connect_owner_peer(
     state: &mut Orchestrator<'_>,
     remote: &mut Engine,
     remote_events: &mut mpsc::UnboundedReceiver<EngineEvent>,

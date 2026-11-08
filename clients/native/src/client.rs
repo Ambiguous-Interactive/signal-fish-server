@@ -1322,6 +1322,14 @@ type ExchangeSendHook = Box<
         + Send,
 >;
 
+/// Share one test send hook with independently pending channel operations.
+#[cfg(test)]
+fn shared_exchange_send_hook(
+    hook: ExchangeSendHook,
+) -> std::sync::Arc<std::sync::Mutex<ExchangeSendHook>> {
+    std::sync::Arc::new(std::sync::Mutex::new(hook))
+}
+
 struct DeferredExchangeSend {
     peer: PlayerId,
     label: &'static str,
@@ -1443,7 +1451,7 @@ struct Orchestrator<'a> {
     /// Deferred work owns the channel identity so replacements cannot inherit old sends.
     deferred_exchange: VecDeque<DeferredExchangeSend>,
     #[cfg(test)]
-    exchange_send_hook: Option<ExchangeSendHook>,
+    exchange_send_hook: Option<std::sync::Arc<std::sync::Mutex<ExchangeSendHook>>>,
     /// Whether an optional harness gate has released the application exchange.
     exchange_released: bool,
     /// Whether the stable all-planned-pairs-open barrier event was emitted.
@@ -2359,6 +2367,7 @@ impl Orchestrator<'_> {
         }
     }
 
+    /// Dispatch one queued probe; pending RTC work belongs to its physical link.
     async fn process_deferred_exchange(&mut self) -> Result<(), FatalError> {
         if let Some(DeferredExchangeSend {
             peer,
@@ -2380,19 +2389,95 @@ impl Orchestrator<'_> {
                 (None, None) => true,
                 _ => false,
             };
-            if same_channel && self.connected_pairs.contains(&peer) {
-                self.send_exchange(peer, &[label]).await?;
+            if same_channel
+                && self.connected_pairs.contains(&peer)
+                && !self.exchange_ledger.has_sent_on_current_link(peer, label)
+            {
+                let text = format!(
+                    r#"{{"from":"{}","channel":"{}","seq":0}}"#,
+                    self.my_id, label
+                );
+                let deadline = self.exchange_send_deadline(peer).await?;
+                #[cfg(test)]
+                let hook = self.exchange_send_hook.clone();
+                if let Some(result) = self
+                    .engine
+                    .start_channel_send(
+                        peer,
+                        label,
+                        text.clone(),
+                        deadline,
+                        move |channel, text| {
+                            #[cfg(test)]
+                            if let Some(hook) = hook {
+                                return hook.lock().unwrap()(channel, text);
+                            }
+                            Box::pin(async move { channel.send_text(&text).await })
+                                as std::pin::Pin<
+                                    Box<dyn Future<Output = webrtc::error::Result<()>> + Send>,
+                                >
+                        },
+                    )
+                    .await
+                {
+                    self.complete_exchange_send(peer, label, text, result)
+                        .await?;
+                }
             }
         }
         Ok(())
     }
 
+    /// Capture the shortest active send, peer-operation, and exchange deadline.
+    async fn exchange_send_deadline(&mut self, peer: PlayerId) -> Result<Deadline, FatalError> {
+        let window_end = self.exchange_window_end().await?;
+        let operation = self.negotiation_deadline(peer);
+        let local = Deadline::after(Instant::now(), CHANNEL_SEND_TIMEOUT);
+        let deadline = match (operation.finite(), local.finite()) {
+            (Some(a), Some(b)) => a.min(b).into(),
+            (Some(_), None) => operation,
+            _ => local,
+        };
+        let deadline = match (deadline.finite(), window_end) {
+            (Some(local), Some(window)) => local.min(window).into(),
+            (None, Some(window)) => window.into(),
+            _ => deadline,
+        };
+        Ok(deadline)
+    }
+
+    /// Credit a successful current-link probe or retire its failed transport.
+    async fn complete_exchange_send(
+        &mut self,
+        peer: PlayerId,
+        label: &str,
+        text: String,
+        result: Result<(), String>,
+    ) -> Result<(), FatalError> {
+        if let Err(message) = result {
+            emit(&Event::Error { message });
+            return self
+                .handle_peer_transport_loss(peer, &format!("data-channel send failed on {label}"))
+                .await;
+        }
+        self.exchange_ledger.note_sent(peer, label);
+        emit(&Event::ChannelMessageSent {
+            peer,
+            label: label.to_string(),
+            text,
+        });
+        Ok(())
+    }
+
+    /// Await exchange probes through the same operation used by the scheduler.
+    #[cfg(test)]
     async fn send_exchange(&mut self, peer: PlayerId, labels: &[&str]) -> Result<(), FatalError> {
-        #[cfg(test)]
-        if let Some(mut hook) = self.exchange_send_hook.take() {
-            let result = self.send_exchange_with(peer, labels, &mut hook).await;
-            self.exchange_send_hook = Some(hook);
-            return result;
+        if let Some(hook) = self.exchange_send_hook.clone() {
+            return self
+                .send_exchange_with(peer, labels, move |channel, text| {
+                    hook.lock().unwrap()(channel, text)
+                })
+                .await;
         }
         self.send_exchange_with(peer, labels, |channel, text| async move {
             channel.send_text(&text).await
@@ -2400,6 +2485,8 @@ impl Orchestrator<'_> {
         .await
     }
 
+    /// Exercise send outcomes and deadlines with a caller-supplied test sender.
+    #[cfg(test)]
     async fn send_exchange_with<Send, SendFuture>(
         &mut self,
         peer: PlayerId,
@@ -2407,8 +2494,9 @@ impl Orchestrator<'_> {
         mut send: Send,
     ) -> Result<(), FatalError>
     where
-        Send: FnMut(std::sync::Arc<dyn webrtc::data_channel::DataChannel>, String) -> SendFuture,
-        SendFuture: Future<Output = webrtc::error::Result<()>>,
+        Send: FnMut(std::sync::Arc<dyn webrtc::data_channel::DataChannel>, String) -> SendFuture
+            + std::marker::Send,
+        SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send,
     {
         for &label in labels {
             if self.exchange_ledger.has_sent_on_current_link(peer, label) {
@@ -2419,53 +2507,13 @@ impl Orchestrator<'_> {
                 self.my_id, label
             );
             /* An admitted send keeps its captured deadline across harness release. */
-            let window_end = self.exchange_window_end().await?;
-            let operation = self.negotiation_deadline(peer);
-            let local = Deadline::after(Instant::now(), CHANNEL_SEND_TIMEOUT);
-            let deadline = match (operation.finite(), local.finite()) {
-                (Some(a), Some(b)) => a.min(b).into(),
-                (Some(_), None) => operation,
-                _ => local,
-            };
-            let deadline = match (deadline.finite(), window_end) {
-                (Some(local), Some(window)) => local.min(window).into(),
-                (None, Some(window)) => window.into(),
-                _ => deadline,
-            };
-            let expired = || format!("send on {label} to {peer} exceeded its exchange deadline");
-            let result = match deadline
-                .timeout(async {
-                    let channel =
-                        self.engine.send_channel(peer, label).await.ok_or_else(|| {
-                            format!("pair with {peer} has no usable channel {label}")
-                        })?;
-                    if deadline.is_due(Instant::now()) {
-                        return Err(expired());
-                    }
-                    send(channel, text.clone())
-                        .await
-                        .map_err(|error| format!("send on {label} to {peer} failed: {error}"))
-                })
-                .await
-            {
-                Ok(result) if !deadline.is_due(Instant::now()) => result,
-                _ => Err(expired()),
-            };
-            if let Err(message) = result {
-                emit(&Event::Error { message });
-                return self
-                    .handle_peer_transport_loss(
-                        peer,
-                        &format!("data-channel send failed on {label}"),
-                    )
-                    .await;
-            }
-            self.exchange_ledger.note_sent(peer, label);
-            emit(&Event::ChannelMessageSent {
-                peer,
-                label: label.to_string(),
-                text,
-            });
+            let deadline = self.exchange_send_deadline(peer).await?;
+            let result = self
+                .engine
+                .channel_send_operation(peer, label, text.clone(), deadline, &mut send)
+                .await;
+            self.complete_exchange_send(peer, label, text, result)
+                .await?;
         }
         Ok(())
     }
@@ -2943,6 +2991,7 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    /// Apply current-link callbacks and retain only eligible pending receipts.
     async fn handle_engine_event(&mut self, event: EngineEvent) -> Result<(), FatalError> {
         let (event_peer, generation) = event.peer_generation();
         let pending_receipt = matches!(
@@ -3013,6 +3062,18 @@ impl Orchestrator<'_> {
             EngineEvent::PairReady { peer, generation } => {
                 if self.engine.accept_pair_ready(peer, generation) {
                     self.on_pair_connected(peer).await?;
+                }
+            }
+            EngineEvent::ChannelSendComplete {
+                peer,
+                label,
+                text,
+                result,
+                ..
+            } => {
+                if self.engine.accept_channel_send(peer, &label) {
+                    self.complete_exchange_send(peer, &label, text, result)
+                        .await?;
                 }
             }
             EngineEvent::ChannelClosed {
@@ -6452,6 +6513,10 @@ mod peer_loss_tests;
 #[cfg(test)]
 #[path = "client_room_left_tests.rs"]
 mod room_left_tests;
+
+#[cfg(test)]
+#[path = "client_exchange_progress_tests.rs"]
+mod exchange_progress_tests;
 
 #[cfg(test)]
 #[path = "client_readiness_tests.rs"]
