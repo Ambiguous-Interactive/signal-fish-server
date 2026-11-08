@@ -34785,7 +34785,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 53 shards, ceil(521/53) * 29s remains 290s.
 // The shared capability negotiation adds eleven mutation sites (#1464).
 // With 55 shards, ceil(542/55) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 542;
+// 546 (was 542): the shared Authenticate transition adds four mutation sites (#1464).
+// With 55 shards, ceil(546/55) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 546;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
