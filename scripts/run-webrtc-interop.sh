@@ -89,6 +89,10 @@ echo "==> Verifying native reset retry exhaustion"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib sctp_reset_loss_ --features runtime-mock
 
+echo "==> Verifying resumed receive credit without unrelated timers"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib resumed_receive_window_ --features runtime-mock
+
 echo "==> Verifying native fatal socket recovery"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib fatal_socket_loss_ --features runtime-mock
