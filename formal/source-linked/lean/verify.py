@@ -461,24 +461,29 @@ def projection_mutations():
 
 
 def projection_mutants(crate, *, names=None):
-    """Reject version and membership faults only after extraction compiles."""
+    """Check independent projection faults in one private incremental build tree.
+
+    Reset every production input and remove the prior witness before extraction.
+    Lake reuses only unchanged inputs; no build output reaches the checkout.
+    """
     changes = projection_mutations()
     selected = changes if names is None else {name: changes[name] for name in names}
-    for name, (source, before, after) in selected.items():
-        original = (ROOT / source).read_text()
-        if original.count(before) != 1:
-            raise RuntimeError(f"Mutation anchor changed: {name}")
-        with tempfile.TemporaryDirectory(prefix=f"signal-fish-lean-{name}-") as tmp:
-            tree = Path(tmp)
+    with tempfile.TemporaryDirectory(prefix="signal-fish-lean-projection-mutants-") as tmp:
+        tree = Path(tmp)
+        copied = tree / "formal/source-linked/lean"
+        shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
+            ".lake*", "target", "llbc", "__pycache__", "*.log"))
+        project = copied / "proofs/projection/lean"
+        (project / ".lake").mkdir()
+        (project / ".lake/packages").symlink_to(
+            crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+        for name, (source, before, after) in selected.items():
+            original = (ROOT / source).read_text()
+            if original.count(before) != 1:
+                raise RuntimeError(f"Mutation anchor changed: {name}")
             copy_sources(tree)
             (tree / source).write_text(original.replace(before, after))
-            copied = tree / "formal/source-linked/lean"
-            shutil.copytree(crate, copied, ignore=shutil.ignore_patterns(
-                ".lake*", "target", "llbc", "__pycache__", "*.log"))
-            project = copied / "proofs/projection/lean"
-            (project / ".lake").mkdir()
-            (project / ".lake/packages").symlink_to(
-                crate / "proofs/negotiation/lean/.lake/packages", target_is_directory=True)
+            (project / "Counterexample.lean").unlink(missing_ok=True)
             first_run = len(RUNS)
             status = "negative control failed"
             try:
@@ -497,7 +502,10 @@ def projection_mutants(crate, *, names=None):
                 status = "proof rejected; concrete wrong result kernel-checked"
                 print(f"REJECTED {name}: {status}", flush=True)
             finally:
-                retain_proof_evidence(tree, copied, "projection", first_run, status)
+                try:
+                    retain_proof_evidence(tree, copied, "projection", first_run, status)
+                finally:
+                    copy_sources(tree)
     verify(crate, "projection")
 
 

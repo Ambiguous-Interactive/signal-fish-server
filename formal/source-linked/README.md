@@ -100,8 +100,9 @@ capability probe. Each fault still needs successful extraction/typechecking,
 the expected semantic rejection, and an audited wrong-result witness.
 Workers retain separate `source-linked-lean-INDEX` evidence artifacts.
 
-Capability faults reuse one isolated worktree per worker. Lake reuses unchanged
-modules by their source and dependency hashes. Each fault resets every production
+Capability and projection faults each reuse one isolated worktree per worker.
+Lake reuses unchanged modules by their source and dependency hashes.
+Each fault resets every production
 input, removes the prior witness, extracts again and runs the same semantic and
 witness checks. The runner snapshots each fault before restoring its inputs.
 Build output stays private to that worktree; workers share only pinned packages.
@@ -115,6 +116,14 @@ passed their audited witnesses and retained separate hashed snapshots. The
 restored positive proofs also passed. The first restored build was cold after
 source-location changes, so whole-run times are not a fair comparison. These
 samples do not establish a hosted CI speedup.
+
+A local ARM64 projection sample (`admission-version`, then `pregather-topology`)
+reduced summed fault-command time from 67.288 s to 50.613 s (24.8%). The second
+extraction build fell from 16.703 s to 5.304 s. Initial and restored proofs,
+deterministic regeneration, semantic rejections and audited wrong-result witnesses
+all passed. Total recorded tool time fell from 91.334 s to 76.320 s (16.4%).
+These are single warm-dependency samples; hosted CI must check the full inventory.
+No protocol contract, source-fault control or CI worker is removed.
 
 The required `Source-linked Lean Proofs` check waits for all four workers.
 It rejects missing, duplicate, failed or stale reports. It compares production

@@ -1251,10 +1251,10 @@ class FaultPartitions(unittest.TestCase):
                 run.assert_not_called()
 
 
-class CapabilityWorkspaceReuse(unittest.TestCase):
+class MutationWorkspaceReuse(unittest.TestCase):
     """Reuse build files without allowing one source fault to affect another."""
 
-    def exercise(self, root, failure=None):
+    def exercise(self, root, scenario, failure=None):
         """Observe isolation, retained evidence and cleanup through every failure seam."""
         originals = {name: f"{name} original\n" for name in verify.SOURCES}
         for name, content in originals.items():
@@ -1262,7 +1262,7 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
         crate = root / "formal/source-linked/lean"
-        project = crate / "proofs/capability/lean"
+        project = crate / f"proofs/{scenario}/lean"
         project.mkdir(parents=True)
         witnesses = crate / "mutation-witnesses"
         witnesses.mkdir()
@@ -1270,6 +1270,11 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
             "member-support": ("src/session_member.rs", "original", "first fault"),
             "host-topology": ("src/session_admission.rs", "original", "second fault"),
         }
+        if scenario == "projection":
+            changes = {
+                "profile-version": ("src/session_capability.rs", "original", "first fault"),
+                "pregather-topology": ("src/session_admission.rs", "original", "second fault"),
+            }
         for name in changes:
             (witnesses / f"{name}.lean").write_text(name)
         (crate / "proofs/negotiation/lean/.lake/packages").mkdir(parents=True)
@@ -1284,9 +1289,9 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
             self.assertEqual({name: (tree / name).read_text() for name in originals}, originals)
             resets.append(tree)
 
-        def extract(copied, scenario):
+        def extract(copied, extracted_scenario):
             """Require exactly one current fault and a reused isolated build directory."""
-            self.assertEqual(scenario, "capability")
+            self.assertEqual(extracted_scenario, scenario)
             index = len(visits)
             tree = copied.parents[2]
             name = list(changes)[index]
@@ -1294,7 +1299,7 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
             expected = dict(originals)
             expected[source] = expected[source].replace(before, after)
             self.assertEqual({name: (tree / name).read_text() for name in originals}, expected)
-            current = copied / "proofs/capability/lean"
+            current = copied / f"proofs/{scenario}/lean"
             self.assertFalse((current / "Counterexample.lean").exists())
             marker = current / ".lake/build/cache-marker"
             if index == 0:
@@ -1316,22 +1321,24 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
                 if len(visits) == 2 and failure == "witness":
                     raise RuntimeError("failed witness")
                 return SimpleNamespace(returncode=0, stdout=(
-                    "'Capability.mutation_returns_wrong_value' does not depend on any axioms"))
+                    f"'{scenario.title()}.mutation_returns_wrong_value' does not depend on any axioms"))
             if not expect_success:
                 module = "Members" if len(visits) == 1 else "HostValidity"
+                if scenario == "projection":
+                    module = "Profiles" if len(visits) == 1 else "Pregather"
                 return SimpleNamespace(returncode=1, stdout=(
-                    f"error: Capability/Verification/{module}.lean:1:1: unsolved goals\n"))
+                    f"error: {scenario.title()}/Verification/{module}.lean:1:1: unsolved goals\n"))
             return SimpleNamespace(returncode=0, stdout="compiled")
 
-        def retain(tree, copied, scenario, first_run, status):
+        def retain(tree, copied, retained_scenario, first_run, status):
             """Snapshot the current failed or accepted fault before restoration."""
-            self.assertEqual(scenario, "capability")
+            self.assertEqual(retained_scenario, scenario)
             archives.append((status, {name: (tree / name).read_text() for name in originals}))
             if len(visits) == 2 and failure == "archive":
                 raise RuntimeError("failed archive")
 
         with patch.object(verify, "ROOT", root), \
-                patch.object(verify, "capability_mutations", return_value=changes), \
+                patch.object(verify, f"{scenario}_mutations", return_value=changes), \
                 patch.object(verify, "copy_sources", reset), \
                 patch.object(verify, "extract", extract), \
                 patch.object(verify, "check_iterator_alias"), \
@@ -1340,11 +1347,11 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
                 patch.object(verify, "verify") as restored:
             if failure:
                 with self.assertRaisesRegex(RuntimeError, f"failed {failure if failure != 'extract' else 'extraction'}"):
-                    verify.capability_mutants(crate)
+                    getattr(verify, f"{scenario}_mutants")(crate)
                 restored.assert_not_called()
             else:
-                verify.capability_mutants(crate)
-                restored.assert_called_once_with(crate, "capability")
+                getattr(verify, f"{scenario}_mutants")(crate)
+                restored.assert_called_once_with(crate, scenario)
         self.assertEqual(len(visits), 2)
         self.assertEqual(len(resets), 4)
         self.assertEqual(len(archives), 2)
@@ -1363,15 +1370,17 @@ class CapabilityWorkspaceReuse(unittest.TestCase):
     @patch("builtins.print")
     def test_faults_share_only_build_state_and_keep_independent_evidence(self, _print):
         """Two faults in different production files must never accumulate."""
-        with tempfile.TemporaryDirectory() as tmp:
-            self.exercise(Path(tmp))
+        for scenario in ("capability", "projection"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                self.exercise(Path(tmp), scenario)
 
     @patch("builtins.print")
     def test_failed_extraction_witness_and_archive_restore_sources_and_remove_workspace(self, _print):
         """A failure keeps its fault snapshot and cannot claim restored proofs."""
-        for failure in ("extract", "witness", "archive"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
-                self.exercise(Path(tmp), failure=failure)
+        for scenario in ("capability", "projection"):
+            for failure in ("extract", "witness", "archive"):
+                with self.subTest(scenario=scenario, failure=failure), tempfile.TemporaryDirectory() as tmp:
+                    self.exercise(Path(tmp), scenario, failure=failure)
 
 
 if __name__ == "__main__":
