@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 78)
+        self.assertEqual(sum(map(len, definitions)), 83)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -630,10 +630,10 @@ class NegotiationEvidence(unittest.TestCase):
                 patch.object(verify, "run", run), patch.object(verify, "verify") as restored:
             if fail_second_witness:
                 with self.assertRaisesRegex(RuntimeError, "witness failed"):
-                    verify.mutants(crate)
+                    verify.mutants(crate, names=["lower-clamp", "ignore-server-ceiling"])
                 restored.assert_not_called()
             else:
-                verify.mutants(crate)
+                verify.mutants(crate, names=["lower-clamp", "ignore-server-ceiling"])
                 restored.assert_called_once_with(crate)
         self.assertEqual((root / "src/protocol_core.rs").read_bytes(), original)
         self.assertEqual(len(isolated), 2)
@@ -1098,13 +1098,33 @@ class FaultPartitions(unittest.TestCase):
         self.assertEqual(max(sizes), (len(full) + len(parts) - 1) // len(parts))
         self.assertLessEqual(max(sizes) - min(sizes), 1)
 
+    def test_handshake_faults_require_only_owning_semantic_failures(self):
+        """Reject tool errors and unrelated proof failures as handshake fault evidence."""
+        faults = [name for name in verify.negotiation_mutations() if name.startswith("handshake-")]
+        self.assertEqual(len(faults), 5)
+        for name in faults:
+            good = SimpleNamespace(returncode=1, stdout=
+                "error: Negotiation/Verification/Handshake.lean:25:1: unsolved goals\n")
+            verify.check_proof_rejection(good, "negotiation", name)
+            for output in (
+                "error: Negotiation/Extraction/Funs.lean:1:1: unknown constant\n",
+                "error: Negotiation/Verification/ProofObligations.lean:1:1: unsolved goals\n",
+                "error: Negotiation/Verification/Handshake.lean:1:1: unknown constant\n",
+                good.stdout + "error: Negotiation/Extraction/Types.lean:1:1: unknown constant\n",
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=output), "negotiation", name)
+            with self.subTest(name=name, accepted=True), self.assertRaises(RuntimeError):
+                verify.check_proof_rejection(SimpleNamespace(returncode=0, stdout=""), "negotiation", name)
+
     def test_local_selection_and_invalid_selection(self):
         """Accept explicit local scope and reject unknown, repeated or invalid choices."""
         self.assertEqual(verify.select_mutations(["negotiation"], ["lower-clamp"]),
                          {"negotiation": ["lower-clamp"]})
         for names, shard in ((["missing"], None), (["lower-clamp"] * 2, None),
                              (["peer-self"], None), (None, (-1, 4)),
-                             (None, (4, 4)), (None, (0, 0)), (None, (0, 3))):
+                             (None, (4, 4)), (None, (0, 0)),
+                             (None, (0, len(verify.negotiation_mutations()) + 1))):
             with self.subTest(names=names, shard=shard), self.assertRaises(ValueError):
                 verify.select_mutations(["negotiation"], names, shard)
 

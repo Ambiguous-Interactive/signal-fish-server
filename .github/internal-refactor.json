@@ -1,16 +1,16 @@
 {
-  "base": "49109cc0ae5548708105f7d88dd5734dc65420ec",
-  "reason": "Move unchanged capability negotiation and duplicate removal into the shared private production module for source-linked verification. Preserve version gates, defaults, Relay insertion, first-occurrence order and caller storage. Rust, .NET and Godot clients have no wire, API, configuration or behavior changes. Added tests and proofs provide internal verification only.",
+  "base": "ef1d23a8c4c7764c39ce5acc6a84fdbaf44be1f4",
+  "reason": "Extract the unchanged Authenticate version/default/refusal/lifecycle decision into the shared private production core. The socket consumes the same accepted version or close/retry outcome before profile commit. Wire bytes, errors, APIs, configuration and behavior are unchanged. Rust, .NET and Godot clients require no changes.",
   "files": [
     {
-      "path": "src/session_capability.rs",
-      "before": "bb8389d2623914973f058e061c7a3a55a4d14d26",
-      "after": "37c9872463065a287df359d7423494ab31eca29d"
+      "path": "src/protocol_core.rs",
+      "before": "bea7c674a411c40ae51cb1d6866e960c689f091d",
+      "after": "45f3aac227161151c2d572068287ee1055f59daa"
     },
     {
       "path": "src/websocket/connection.rs",
-      "before": "505cf7e993da4fcf483449eaeb89eab00a4f5241",
-      "after": "071fe67d85bbe59ff0b5089ef13dd67e9b357556"
+      "before": "071fe67d85bbe59ff0b5089ef13dd67e9b357556",
+      "after": "3bff9438492cb7caadc14551367c2bb4c6a57242"
     }
   ]
 }

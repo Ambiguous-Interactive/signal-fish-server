@@ -8,7 +8,7 @@ hax-lean-lib = "v0.3.30"
 
 [scenario.negotiation]
 backend = "lean"
-include = ["signal_fish_proof_core::protocol_core::negotiate_protocol_version"]
+include = ["signal_fish_proof_core::protocol_core::negotiate_protocol_version", "signal_fish_proof_core::protocol_core::decide_handshake_version"]
 
 [scenario.capability]
 backend = "lean"

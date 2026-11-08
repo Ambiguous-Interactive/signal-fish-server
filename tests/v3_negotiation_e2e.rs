@@ -527,6 +527,32 @@ async fn v3_only_server_rejects_explicit_v2_instead_of_silently_upgrading() {
     running_server.shutdown().await;
 }
 
+/// A refused pending handshake must still accept a valid route-default retry.
+#[tokio::test]
+async fn pending_v3_handshake_can_retry_after_below_floor_refusal() {
+    let running_server = start_v3_only_server(true).await;
+    let mut ws = connect(running_server.addr(), "/v3/ws").await;
+    ws.send(Message::Text(
+        serde_json::to_string(&version_only_auth(Some(2)))
+            .unwrap()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::AuthenticationError {
+            error_code: ErrorCode::UnsupportedProtocolVersion,
+            ..
+        }
+    ));
+    match authenticate(&mut ws, version_only_auth(None)).await {
+        ServerMessage::ProtocolInfo(info) => assert_eq!(info.protocol_version, Some(3)),
+        other => panic!("pending handshake must accept the route default after refusal: {other:?}"),
+    }
+    running_server.shutdown().await;
+}
+
 #[tokio::test]
 async fn open_policy_v3_only_server_rejects_v2_endpoint_default() {
     let running_server = start_v3_only_server(false).await;

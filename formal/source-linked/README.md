@@ -1259,3 +1259,84 @@ identity, profile storage, reserved extension admission and publication.
 extension; axis normalization does not prove that policy. No protocol bytes,
 errors, API, configuration or runtime outcomes changed. Rust, .NET and Godot
 clients require no changes.
+
+## Authenticate version transition (#1464)
+
+`protocol_core::decide_handshake_version` owns the complete pure version decision
+for an Authenticate frame. The WebSocket caller passes the frame's optional
+version, endpoint default, deployment bounds and current handshake-complete flag.
+Only `Accepted` yields a version to the subsequent profile/application commit.
+Both refusal outcomes retain the rejected version for the existing coded reply.
+`Close` exits the socket loop; `Retry` continues without completing the handshake.
+The existing reply-budget check can also close a pending socket.
+
+Five required Lean contracts in `Negotiation/Verification/Handshake.lean` prove
+the exact result, accepted-version bounds, admission, refusal and reachable
+outcomes. The independent specification uses the minimum of the explicit client
+or route-default ceiling and the deployment ceiling. Acceptance requires that
+result to meet the deployment floor. Below-floor values close completed sockets
+and permit pending sockets to retry. The contracts cover every `u16` input and
+both lifecycle flags without a validated-range assumption. The admission
+corollary states the ordered-range premise it needs. Failure, allocation,
+transport delivery and scheduling remain outside this pure decision.
+
+Five independent source faults replace the route default, override the client's
+explicit version, reverse the floor comparison, reverse the lifecycle flag, or
+replace the deployment ceiling. Each must compile the extracted definitions,
+fail only its owning handshake contracts, and pass an audited kernel-checked
+wrong-result witness. Restored source must pass deterministic extraction and
+axiom audits. Run the focused check with:
+
+```bash
+python3 formal/source-linked/lean/verify.py --scenario negotiation --mutations
+```
+
+An independent Rust matrix checks 2,621,480 combinations of optional requests,
+route defaults, deployment bounds and lifecycle states. A small boundary table
+remains enabled for the existing source-linked-core Miri lane. Socket regressions check
+below-floor refusal, retry of a pending handshake with an omitted version,
+closure of a completed socket, and deployment clamping. A compiled caller fault
+that swaps the socket close/retry branch fails both lifecycle assertions; restored
+source passes them. These remain caller
+tests. They do not prove configuration validation, argument identity, provisional
+endpoint admission, connection/profile commits, reply budgets, serialization,
+message delivery, cancellation or concurrency. P03 and issue #1464 remain open
+at those boundaries. Runtime decisions, wire bytes, errors, APIs and defaults
+are unchanged. Rust, .NET and Godot clients need no changes.
+
+### Reserved-string policy experiment
+
+Before this transition, extraction of the complete reserved-capability string
+list policy was attempted with the same pins. The original `Vec<String>::retain`
+closure fails Aeneas extraction with `Nested borrows are not supported yet`.
+Replacing retain with an owned-string drain/push loop also fails at the string
+comparison, including a variant using `String::as_str`. The minimal predicate
+is `capability != ROOM_OPERATION_IDS_CAPABILITY && capability !=
+SPECTATOR_RELAY_CAPABILITY`. Reproduce by extracting the production
+`protocol_info_capabilities` body from `src/websocket/connection.rs` in the
+standalone proof crate, with both string constants in the same module and that
+function in the hax include list. This is a translation failure, not a rejected
+protocol theorem. The experimental refactor was abandoned. No replacement
+string semantics, custom axiom or weaker boolean-only claim was accepted.
+Reserved-extension correspondence remains unresolved in P04.
+
+### Pinned bootstrap transport (#1504)
+
+The shared verified downloader retries the original release URL first. If that
+transport fails for a GitHub release, it can resolve the exact named asset through
+the official release API. It still checks the caller's original SHA-256 pin on
+the final bytes. An absent or ambiguous asset, invalid asset ID, API error or
+wrong hash fails setup. Python 3 is needed only for this fallback; without it,
+the original download failure remains a failure. Lychee setup, pinned elan
+bootstrap and YAML validator setup use this helper. YAML validation retains the
+existing devcontainer version and checksum. Both affected path filters include
+the helper.
+Required offline link validation and every proof/fault gate still run.
+
+Deterministic fixtures cover primary corruption without fallback, successful
+same-pin API recovery, corrupt fallback bytes, absent/duplicate assets, invalid
+IDs, API transport errors and refusal to apply GitHub fallback to another host.
+Live Lychee and elan downloads verify the unchanged pins. This transport repair
+does not add a Rust translator, model, axiom or server runtime dependency.
+Hax's internal Charon/Aeneas downloads and other checker installers retain their
+own external-service limits; #1504 tracks the remaining work.
