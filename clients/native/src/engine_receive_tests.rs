@@ -376,17 +376,17 @@ async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
     pair.cleanup().await;
 }
 
-pub(super) struct LivePair {
-    pub(super) sender: Engine,
-    pub(super) receiver: Engine,
-    pub(super) sender_events: mpsc::UnboundedReceiver<EngineEvent>,
-    pub(super) receiver_events: mpsc::UnboundedReceiver<EngineEvent>,
-    pub(super) sender_id: PlayerId,
-    pub(super) receiver_id: PlayerId,
+pub(crate) struct LivePair {
+    pub(crate) sender: Engine,
+    pub(crate) receiver: Engine,
+    pub(crate) sender_events: mpsc::UnboundedReceiver<EngineEvent>,
+    pub(crate) receiver_events: mpsc::UnboundedReceiver<EngineEvent>,
+    pub(crate) sender_id: PlayerId,
+    pub(crate) receiver_id: PlayerId,
 }
 
 impl LivePair {
-    pub(super) async fn connect() -> Self {
+    pub(crate) async fn connect() -> Self {
         let (sender_tx, sender_events) = mpsc::unbounded_channel();
         let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
         let settings = EngineSettings {
@@ -405,7 +405,7 @@ impl LivePair {
         pair
     }
 
-    pub(super) async fn negotiate(&mut self) {
+    pub(crate) async fn negotiate(&mut self) {
         let offer = self
             .sender
             .pair_with(self.receiver_id, true, &[])
@@ -459,7 +459,7 @@ impl LivePair {
         }).await.expect("local pair opens both required channels");
     }
 
-    pub(super) async fn cleanup(mut self) {
+    pub(crate) async fn cleanup(mut self) {
         self.sender.remove_peer(self.receiver_id).await.unwrap();
         self.receiver.remove_peer(self.sender_id).await.unwrap();
     }

@@ -216,6 +216,7 @@ async fn first_open_exchange(burst: bool) {
                                 None
                             }
                             EngineEvent::IceGatheringComplete { .. } => None,
+                            EngineEvent::PairReady { .. } => panic!("awaited readiness must not publish a background result"),
                         }
                     }
                 };

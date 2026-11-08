@@ -3006,7 +3006,12 @@ impl Orchestrator<'_> {
                     generation,
                     label: label.clone(),
                 });
-                if self.engine.note_channel_open(peer, &label).await {
+                if self.engine.request_channel_open_check(peer, &label).await {
+                    self.on_pair_connected(peer).await?;
+                }
+            }
+            EngineEvent::PairReady { peer, generation } => {
+                if self.engine.accept_pair_ready(peer, generation) {
                     self.on_pair_connected(peer).await?;
                 }
             }
@@ -6447,3 +6452,7 @@ mod peer_loss_tests;
 #[cfg(test)]
 #[path = "client_room_left_tests.rs"]
 mod room_left_tests;
+
+#[cfg(test)]
+#[path = "client_readiness_tests.rs"]
+mod readiness_tests;

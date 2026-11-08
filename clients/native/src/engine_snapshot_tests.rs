@@ -6,7 +6,7 @@ use webrtc::runtime::{AsyncInterval, AsyncTcpListener, AsyncTcpStream, AsyncUdpS
 type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug)]
-struct HeldClock {
+pub(crate) struct HeldClock {
     inner: Arc<dyn Runtime>,
     probe_tasks: std::sync::Mutex<Option<Arc<AtomicUsize>>>,
     hold: std::sync::Mutex<
@@ -132,7 +132,7 @@ async fn next_exact_receipt(
 }
 
 /// Construct both channel profiles with an observable receiver runtime.
-fn unconnected_pair(profile: ChannelProfile) -> (LivePair, Arc<HeldClock>) {
+pub(crate) fn unconnected_pair(profile: ChannelProfile) -> (LivePair, Arc<HeldClock>) {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
     let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
     let settings = EngineSettings {
@@ -699,4 +699,196 @@ async fn assert_fresh_selected_pair(engine: &mut Engine, peer: PlayerId) {
         assert!(!address.is_unspecified());
         assert!(!address.is_multicast());
     }
+}
+
+/// Hold a real send under the RTC core lock until explicit release.
+pub(crate) struct HeldCoreSend {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    writer: Option<std::thread::JoinHandle<webrtc::error::Result<()>>>,
+}
+
+impl HeldCoreSend {
+    pub(crate) async fn start(clock: &HeldClock, channel: Arc<dyn DataChannel>) -> Self {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *clock.hold.lock().unwrap() = Some((entered, released));
+        let writer = std::thread::Builder::new()
+            .name("snapshot-held-send".into())
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(channel.send_text("held-readiness"))
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        Self {
+            release: Some(release),
+            writer: Some(writer),
+        }
+    }
+
+    pub(crate) async fn finish(mut self) {
+        self.release.take().unwrap().send(()).unwrap();
+        let writer = self.writer.take().unwrap();
+        let _ = tokio::task::spawn_blocking(move || writer.join().unwrap())
+            .await
+            .unwrap();
+    }
+}
+
+impl Drop for HeldCoreSend {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl HeldClock {
+    pub(crate) fn observe_next_task(&self) -> Arc<AtomicUsize> {
+        let live = Arc::new(AtomicUsize::new(0));
+        *self.probe_tasks.lock().unwrap() = Some(live.clone());
+        live
+    }
+}
+
+/// #1510/#1264: pending readiness work must stop before the old core is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_links_cancel_pending_readiness_before_core_release() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for receiver_offers in [false, true] {
+            for drop_engine in [false, true] {
+                let (mut pair, clock, opens) =
+                    startup_pair_with_held_open_events(profile, receiver_offers).await;
+                let peer = pair.sender_id;
+                let generation = pair.receiver.peers[&peer].generation;
+                let held = HeldCoreSend::start(
+                    &clock,
+                    pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
+                )
+                .await;
+                let live = clock.observe_next_task();
+                for event in opens {
+                    let EngineEvent::ChannelOpen { label, .. } = event else {
+                        unreachable!()
+                    };
+                    assert!(!pair.receiver.request_channel_open_check(peer, &label).await);
+                }
+                assert_eq!(live.load(Ordering::SeqCst), 1);
+                assert!(!pair.receiver.accept_pair_ready(peer, generation));
+                if drop_engine {
+                    let (events, _) = mpsc::unbounded_channel();
+                    drop(std::mem::replace(
+                        &mut pair.receiver,
+                        Engine::new(pair.sender.settings, events).unwrap(),
+                    ));
+                } else {
+                    pair.receiver.remove_peer(peer).await.unwrap();
+                }
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while live.load(Ordering::SeqCst) != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("readiness query cancellation must not wait for the retired core");
+                loop {
+                    match pair.receiver_events.try_recv() {
+                        Ok(event) => assert!(
+                            !matches!(event, EngineEvent::PairReady { generation: old, .. } if old == generation),
+                            "pending readiness cannot publish completion after retirement"
+                        ),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            assert!(drop_engine, "retained Engine must keep its event sender");
+                            break;
+                        }
+                    }
+                }
+                held.finish().await;
+                assert!(!pair.receiver.accept_pair_ready(peer, generation));
+                pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                pair.receiver.remove_peer(peer).await.unwrap();
+            }
+        }
+    }
+}
+
+/// Complete real transport startup while retaining the receiver's actual open callbacks.
+pub(crate) async fn startup_pair_with_held_open_events(
+    profile: ChannelProfile,
+    receiver_offers: bool,
+) -> (LivePair, Arc<HeldClock>, Vec<EngineEvent>) {
+    let (mut pair, clock) = unconnected_pair(profile);
+    if receiver_offers {
+        let offer = pair
+            .receiver
+            .pair_with(pair.sender_id, true, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        pair.sender
+            .pair_with(pair.receiver_id, false, &[])
+            .await
+            .unwrap();
+        let answer = pair
+            .sender
+            .handle_offer(pair.receiver_id, offer)
+            .await
+            .unwrap();
+        pair.receiver
+            .handle_answer(pair.sender_id, answer)
+            .await
+            .unwrap();
+    } else {
+        let offer = pair
+            .sender
+            .pair_with(pair.receiver_id, true, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        pair.receiver
+            .pair_with(pair.sender_id, false, &[])
+            .await
+            .unwrap();
+        let answer = pair
+            .receiver
+            .handle_offer(pair.sender_id, offer)
+            .await
+            .unwrap();
+        pair.sender
+            .handle_answer(pair.receiver_id, answer)
+            .await
+            .unwrap();
+    }
+    let opens = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut sender_ready = false;
+        let mut opens = Vec::new();
+        while !sender_ready || opens.len() < profile.labels().len() {
+            tokio::select! {
+                event = pair.sender_events.recv() => match event.unwrap() {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => pair.receiver.handle_remote_candidate(pair.sender_id, &candidate_json).await.unwrap(),
+                    EngineEvent::RemoteChannel { label, channel, .. } => pair.sender.store_remote_channel(pair.receiver_id, label, channel).await,
+                    EngineEvent::ChannelOpen { label, .. } => sender_ready |= pair.sender.note_channel_open(pair.receiver_id, &label).await,
+                    EngineEvent::ChannelClosed { .. } | EngineEvent::ChannelReceiveRejected { .. } => panic!("startup sender must remain healthy"),
+                    _ => {}
+                },
+                event = pair.receiver_events.recv() => match event.unwrap() {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => pair.sender.handle_remote_candidate(pair.receiver_id, &candidate_json).await.unwrap(),
+                    EngineEvent::RemoteChannel { label, channel, .. } => pair.receiver.store_remote_channel(pair.sender_id, label, channel).await,
+                    event @ EngineEvent::ChannelOpen { .. } => opens.push(event),
+                    EngineEvent::ChannelClosed { .. } | EngineEvent::ChannelReceiveRejected { .. } => panic!("startup receiver must remain healthy"),
+                    _ => {}
+                },
+            }
+        }
+        opens
+    }).await.expect("all actual required-channel opens arrive before owner admission");
+    assert_eq!(pair.receiver.connected_pair_count(), 0);
+    (pair, clock, opens)
 }

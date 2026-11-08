@@ -15094,3 +15094,42 @@ This repairs a deterministic receive-resume delay. It does not explain the
 historical reliable-prefix loss, terminal Engine event or pre-resume saturation
 plateau. Those investigations remain open. The repair is confined to the local
 native WebRTC wrapper; the server and three SDK backends do not use that patch.
+
+### F293 — Keep native channel readiness off the gameplay owner
+
+Issue: #1510. Related investigations: #853, #889, #1244 and #1264.
+Baseline: `811b2b64`.
+
+The native owner awaited channel-state reads during a queued channel-open
+callback. Holding an actual send inside the RTC core made that dispatch exceed
+the new 100 ms observation bound. The control releases the core before its
+assertion. This is a reproduced first-party owner stall, not a remote failure.
+
+The CLI now polls readiness once. Ready results keep the inline path; pending
+work moves into one task owned by that physical link. It still checks every
+required channel. A queued completion can commit only once, after a successful
+query, for its current nonterminal link. Link removal and Engine drop cancel
+pending work before the old core is released.
+
+Real startup controls retain actual channel-open events before owner admission.
+Both channel profiles and receiver offer roles cover a blocked readiness query,
+duplicate observations, exact independent-peer 4 KiB traffic in both directions,
+and WebSocket Pong handling while the first peer's core stays held. Separate
+controls retain a completed readiness event through real required-channel loss,
+reject terminal and stale results, retain an exact charged reliable receipt
+through replacement, and require all 32 exact fresh 4 KiB reliable bodies plus
+reverse traffic. Existing early-admission, queued-close and authoritative-recovery
+controls retain their original assertions.
+
+This fixes the new owner stall. It does not locate the historical initial
+exchange, mesh, Godot-prefix or terminal-event causes. Those issues stay open.
+No Godot runtime or remote-network qualification follows from these local cells.
+
+The Rust SDK manifest at `da8f2d16` contains no native-reference dependency.
+The .NET SDK project at `e467c871` has no package dependencies. Godot's current
+README describes GDScript with its own native/browser WebRTC backend, and its
+source search has no native-reference dependency. The connected GitHub app
+provided these current sources. Server wire messages, channel modes and retry
+rules stay unchanged, so these three SDKs need no migration. Reference Engine
+callers with exhaustive event matches must handle `PairReady`; the original
+awaited readiness method remains available.

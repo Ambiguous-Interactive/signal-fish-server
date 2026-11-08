@@ -29,6 +29,7 @@
 //! Message permits bound pending payloads without blocking lifecycle notifications.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -446,6 +447,8 @@ pub enum EngineEvent {
         generation: u64,
         label: String,
     },
+    /// All required channels passed a link-owned readiness check.
+    PairReady { peer: PlayerId, generation: u64 },
     /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed {
         peer: PlayerId,
@@ -501,6 +504,7 @@ impl EngineEvent {
             | Self::ChannelOpen {
                 peer, generation, ..
             }
+            | Self::PairReady { peer, generation }
             | Self::ChannelClosed {
                 peer, generation, ..
             }
@@ -539,6 +543,7 @@ struct PeerLink {
     channel_tasks: Vec<Box<dyn JoinHandle>>,
     /// At most one nominated-pair query belongs to this physical link.
     selected_pair_probe: Option<SelectedPairProbe>,
+    readiness_check: Option<ReadinessCheck>,
 }
 
 impl PeerLink {
@@ -548,6 +553,18 @@ impl PeerLink {
             task.abort();
         }
         self.selected_pair_probe = None;
+        self.readiness_check = None;
+    }
+}
+
+struct ReadinessCheck {
+    task: Box<dyn JoinHandle>,
+    ready: Arc<AtomicBool>,
+}
+
+impl Drop for ReadinessCheck {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -906,6 +923,7 @@ impl Engine {
             pair_connected: false,
             channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
             selected_pair_probe: None,
+            readiness_check: None,
         };
         self.peers.insert(peer, link);
         self.receipt_generations
@@ -1152,22 +1170,87 @@ impl Engine {
         if !fully_open || link.pair_connected {
             return false;
         }
-        /*
-            Queued open callbacks can outlive their channels. Separate state
-            observations cannot prevent a later close.
-        */
-        for &label in labels {
-            let Some(channel) = link.channels.get(label) else {
-                return false;
-            };
-            if !matches!(
-                channel.ready_state().await,
-                Ok(rtc::data_channel::RTCDataChannelState::Open)
-            ) {
-                return false;
+        let Some(channels) = labels
+            .iter()
+            .map(|label| link.channels.get(*label).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        if !required_channels_open(&link.receive_admission, channels).await {
+            return false;
+        }
+        link.pair_connected = true;
+        true
+    }
+
+    /// Record a channel-open callback without waiting for the RTC core.
+    /// Ready queries complete inline. A pending query moves to one link-owned
+    /// task and publishes [`EngineEvent::PairReady`] when all states are open.
+    /// Retirement cancels the task. Call [`Self::accept_pair_ready`] for a current result.
+    pub async fn request_channel_open_check(&mut self, peer: PlayerId, label: &str) -> bool {
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        let labels = self.settings.channel_profile.labels();
+        if !labels.contains(&label)
+            || link.pair_connected
+            || link.receive_admission.terminal.load(Ordering::Relaxed)
+            || !link.open_labels.insert(label.to_owned())
+            || !labels.iter().all(|label| link.open_labels.contains(*label))
+        {
+            return false;
+        }
+        let Some(channels) = labels
+            .iter()
+            .map(|label| link.channels.get(*label).cloned())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        let admission = link.receive_admission.clone();
+        let events = self.events.clone();
+        let generation = link.generation;
+        let mut check = Box::pin(async move {
+            admission.allows_work(&events, peer, generation, None).await
+                && required_channels_open(&admission, channels).await
+        });
+        match std::future::poll_fn(|context| std::task::Poll::Ready(check.as_mut().poll(context)))
+            .await
+        {
+            std::task::Poll::Ready(ready) => {
+                link.pair_connected = ready;
+                ready
+            }
+            std::task::Poll::Pending => {
+                let events = self.events.clone();
+                let ready = Arc::new(AtomicBool::new(false));
+                let observed = ready.clone();
+                let task = self.runtime.spawn(Box::pin(async move {
+                    if check.await {
+                        observed.store(true, Ordering::Release);
+                        let _ = events.send(EngineEvent::PairReady { peer, generation });
+                    }
+                }));
+                link.readiness_check = Some(ReadinessCheck { task, ready });
+                false
             }
         }
-        if link.receive_admission.terminal.load(Ordering::Relaxed) {
+    }
+
+    /// Commit a readiness result once, only for its current nonterminal physical link.
+    pub fn accept_pair_ready(&mut self, peer: PlayerId, generation: u64) -> bool {
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        if link.generation != generation
+            || link.pair_connected
+            || link.receive_admission.terminal.load(Ordering::Relaxed)
+            || !link
+                .readiness_check
+                .as_ref()
+                .is_some_and(|check| check.ready.load(Ordering::Acquire))
+        {
             return false;
         }
         link.pair_connected = true;
@@ -2007,6 +2090,21 @@ fn route_source_addr(server: SocketAddr) -> std::io::Result<IpAddr> {
     Ok(probe.local_addr()?.ip())
 }
 
+async fn required_channels_open(
+    admission: &ChannelReceiveAdmission,
+    channels: Vec<Arc<dyn DataChannel>>,
+) -> bool {
+    for channel in channels {
+        if !matches!(
+            channel.ready_state().await,
+            Ok(rtc::data_channel::RTCDataChannelState::Open)
+        ) {
+            return false;
+        }
+    }
+    !admission.terminal.load(Ordering::Relaxed)
+}
+
 fn spawn_channel_event_loop(
     runtime: &Arc<dyn Runtime>,
     events: &mpsc::UnboundedSender<EngineEvent>,
@@ -2217,7 +2315,7 @@ mod admission_tests;
 
 #[cfg(test)]
 #[path = "engine_receive_tests.rs"]
-mod receive_tests;
+pub(crate) mod receive_tests;
 
 #[cfg(test)]
 #[path = "engine_close_tests.rs"]
@@ -4173,4 +4271,4 @@ mod channel_admission_tests;
 
 #[cfg(test)]
 #[path = "engine_snapshot_tests.rs"]
-mod snapshot_tests;
+pub(crate) mod snapshot_tests;
