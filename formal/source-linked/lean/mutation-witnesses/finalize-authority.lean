@@ -7,7 +7,8 @@ namespace Capability
 open ElectionFixtures
 /-- An absent authority is wrongly attached to a Host plan instead of an eligible member. -/
 theorem mutation_returns_wrong_value (member : SessionMember) :
-    let ready := { member with player_id := lowId,
+    let ready := { member with
+      player_id := lowId
       capabilities := (⟨3#u16, true, true, true, true, true, true⟩ : SessionCapabilities) }
     finalizePlan (.Some highId) (⟨[ready], by scalar_tac⟩ : Slice SessionMember) .Host true true =
       RustM.ok ⟨.Host, .WebRtc, .Some highId⟩ ∧ highId ≠ lowId := by

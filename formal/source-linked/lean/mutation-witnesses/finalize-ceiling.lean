@@ -5,7 +5,8 @@ noncomputable section
 namespace Capability
 /-- Kernel-checked wrong result for this isolated production-source fault. -/
 theorem mutation_returns_wrong_value (member : SessionMember) (endpoint : DirectEndpoint) :
-    let ready := { member with capabilities := (⟨3#u16, true, true, true, true, true, true⟩ : SessionCapabilities),
+    let ready := { member with
+      capabilities := (⟨3#u16, true, true, true, true, true, true⟩ : SessionCapabilities)
       direct_endpoint := .Some endpoint }
     finalizePlan .None (⟨[ready], by scalar_tac⟩ : Slice SessionMember) .Mesh true true =
       RustM.ok ⟨.Relay, .Relay, .None⟩ := by
