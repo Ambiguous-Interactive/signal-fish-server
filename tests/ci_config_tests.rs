@@ -22713,18 +22713,70 @@ fn test_ci_safety_workflow_has_required_jobs() {
     validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
 }
 
-fn miri_module_filter_violations(modules: &[String], filters: &[&str]) -> Vec<String> {
+fn miri_module_filter_violations(
+    modules: &[String],
+    lanes: &[(Vec<&str>, Vec<&str>)],
+) -> Vec<String> {
+    let valid_path = |path: &str| {
+        path.split("::").all(|segment| {
+            let mut chars = segment.chars();
+            chars
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+    };
+    let contains = |prefix: &str, path: &str| {
+        prefix == path
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with("::"))
+    };
     let mut violations = Vec::new();
-    for filter in filters {
-        if !modules.iter().any(|known| known == filter) {
-            violations.push(format!("unknown Miri root module: {filter}"));
+    let mut boundaries: std::collections::BTreeSet<String> = modules.iter().cloned().collect();
+    for (included, excluded) in lanes {
+        if included.is_empty() {
+            violations.push("Miri lane needs an included module".to_string());
+        }
+        for filters in [included, excluded] {
+            let mut seen = std::collections::HashSet::new();
+            for filter in filters {
+                if !seen.insert(filter) || !valid_path(filter) {
+                    violations.push(format!("invalid or repeated Miri module path: {filter}"));
+                }
+                if !modules
+                    .iter()
+                    .any(|root| filter.split("::").next() == Some(root.as_str()))
+                {
+                    violations.push(format!("unknown Miri root module: {filter}"));
+                }
+                boundaries.insert((*filter).to_string());
+            }
+        }
+        for excluded in excluded {
+            if !included
+                .iter()
+                .any(|prefix| prefix != excluded && contains(prefix, excluded))
+            {
+                violations.push(format!(
+                    "Miri exclusion is not an included descendant: {excluded}"
+                ));
+            }
         }
     }
-    for module in modules {
-        let count = filters.iter().filter(|filter| **filter == module).count();
+    // Prefix membership changes only at a root/include/exclude boundary.
+    // Checking each region proves every possible descendant has exactly one lane.
+    for boundary in boundaries {
+        let count = lanes
+            .iter()
+            .filter(|(included, excluded)| {
+                included.iter().any(|prefix| contains(prefix, &boundary))
+                    && !excluded.iter().any(|prefix| contains(prefix, &boundary))
+            })
+            .count();
         if count != 1 {
             violations.push(format!(
-                "Miri module {module} needs one owner, found {count}"
+                "Miri module region {boundary} needs one owner, found {count}"
             ));
         }
     }
@@ -22734,27 +22786,69 @@ fn miri_module_filter_violations(modules: &[String], filters: &[&str]) -> Vec<St
 #[test]
 fn test_ci_safety_miri_filters_require_one_qualified_owner_per_module() {
     let modules = ["protocol".to_string(), "server".to_string()];
-    for (description, filters, expected_valid) in [
-        ("one root owner each", vec!["protocol", "server"], true),
-        ("substring filter", vec!["protocol::", "server"], false),
+    for (description, lanes, expected_valid) in [
+        (
+            "one root owner each",
+            vec![(vec!["protocol", "server"], vec![])],
+            true,
+        ),
+        (
+            "qualified split",
+            vec![
+                (vec!["protocol", "server"], vec!["server::tests"]),
+                (vec!["server::tests"], vec![]),
+            ],
+            true,
+        ),
+        (
+            "missing nested owner",
+            vec![(vec!["protocol", "server"], vec!["server::tests"])],
+            false,
+        ),
+        (
+            "overlapping nested owner",
+            vec![
+                (vec!["protocol", "server"], vec![]),
+                (vec!["server::tests"], vec![]),
+            ],
+            false,
+        ),
+        (
+            "substring filter",
+            vec![(vec!["protocol::", "server"], vec![])],
+            false,
+        ),
         (
             "duplicate owner",
-            vec!["protocol", "server", "server"],
+            vec![
+                (vec!["protocol", "server"], vec![]),
+                (vec!["server"], vec![]),
+            ],
             false,
         ),
-        ("missing module", vec!["protocol"], false),
+        ("missing root", vec![(vec!["protocol"], vec![])], false),
         (
-            "unknown module",
-            vec!["protocol", "server", "unknown"],
+            "unknown root",
+            vec![(vec!["protocol", "server", "unknown"], vec![])],
             false,
         ),
         (
-            "nested substring",
-            vec!["protocol", "server::tests::"],
+            "malformed nested path",
+            vec![(vec!["protocol", "server::::tests"], vec![])],
+            false,
+        ),
+        (
+            "unrelated exclusion",
+            vec![(vec!["protocol", "server"], vec!["unknown::tests"])],
+            false,
+        ),
+        (
+            "empty lane",
+            vec![(vec!["protocol", "server"], vec![]), (vec![], vec![])],
             false,
         ),
     ] {
-        let violations = miri_module_filter_violations(&modules, &filters);
+        let violations = miri_module_filter_violations(&modules, &lanes);
         assert_eq!(
             violations.is_empty(),
             expected_valid,
@@ -22765,7 +22859,7 @@ fn test_ci_safety_miri_filters_require_one_qualified_owner_per_module() {
 
 #[test]
 fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
-    // The exact-name runner selects the compiled tests for each root module.
+    // The exact-name runner partitions every compiled test by qualified module prefix.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_live_file(&workflow_path);
@@ -22788,13 +22882,20 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
         "the #424 split must keep at least two parallel Miri lanes"
     );
 
-    let mut filter_tokens: Vec<&str> = Vec::new();
+    let mut lane_filters = Vec::new();
     for lane in lanes {
         let filters = lane
             .as_mapping_get("modules")
             .and_then(|value| value.as_str())
-            .expect("every Miri lane must define root modules");
-        filter_tokens.extend(filters.split_whitespace());
+            .expect("every Miri lane must define qualified module prefixes");
+        let exclusions = lane
+            .as_mapping_get("exclude_modules")
+            .map(|value| value.as_str().expect("Miri exclusions must be a string"))
+            .unwrap_or("");
+        lane_filters.push((
+            filters.split_whitespace().collect(),
+            exclusions.split_whitespace().collect(),
+        ));
     }
 
     let lib_rs = read_file(&root.join("src/lib.rs"));
@@ -22819,9 +22920,10 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
     );
     assert!(content.contains("python3 scripts/run-miri-lane.py --toolchain nightly-2026-08-01"));
     assert!(content.contains("--modules ${{ matrix.lane.modules }}"));
+    assert!(content.contains("--exclude-modules ${{ matrix.lane.exclude_modules }}"));
     assert!(content.contains("python3 -m unittest discover -s scripts -p test_run_miri_lane.py"));
     assert!(content.contains("miri-selected-tests.json"));
-    let violations = miri_module_filter_violations(&modules, &filter_tokens);
+    let violations = miri_module_filter_violations(&modules, &lane_filters);
     assert!(
         violations.is_empty(),
         "Miri lane coverage is invalid: {violations:?}"
