@@ -15119,7 +15119,8 @@ controls retain a completed readiness event through real required-channel loss,
 reject terminal and stale results, retain an exact charged reliable receipt
 through replacement, and require all 32 exact fresh 4 KiB reliable bodies plus
 reverse traffic. Existing early-admission, queued-close and authoritative-recovery
-controls retain their original assertions.
+controls retain their original assertions. Removing the generation guard fails
+the direct old-generation assertion while fresh readiness is eligible but unconsumed.
 
 This fixes the new owner stall. It does not locate the historical initial
 exchange, mesh, Godot-prefix or terminal-event causes. Those issues stay open.

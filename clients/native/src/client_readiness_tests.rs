@@ -5,12 +5,14 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::Ordering;
 
+/// Open a real peer link, optionally retaining its owner open callbacks.
 async fn connect_owner_peer(
     state: &mut Orchestrator<'_>,
     remote: &mut Engine,
     remote_events: &mut mpsc::UnboundedReceiver<EngineEvent>,
     peer: PlayerId,
     owner_offers: bool,
+    mut held_open_events: Option<&mut Vec<EngineEvent>>,
 ) {
     state.connected_pairs.remove(&peer);
     if owner_offers {
@@ -33,9 +35,16 @@ async fn connect_owner_peer(
         let answer = state.engine.handle_offer(peer, offer).await.unwrap();
         remote.handle_answer(state.my_id, answer).await.unwrap();
     }
+    let required_channels = state.engine.diagnostic_snapshot(peer)["channels"]
+        .as_object()
+        .unwrap()
+        .len();
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut remote_ready = false;
-        while !remote_ready || !state.connected_pairs.contains(&peer) {
+        while !remote_ready || match held_open_events.as_ref() {
+            Some(opens) => opens.len() < required_channels,
+            None => !state.connected_pairs.contains(&peer),
+        } {
             tokio::select! {
                 event = state.engine_rx.recv() => {
                     let event = event.unwrap();
@@ -43,6 +52,9 @@ async fn connect_owner_peer(
                     match event {
                     EngineEvent::LocalCandidate { peer: target, candidate_json, .. } if target == peer => {
                         remote.handle_remote_candidate(state.my_id, &candidate_json).await.unwrap();
+                    }
+                    event @ EngineEvent::ChannelOpen { peer: target, .. } if target == peer && held_open_events.is_some() => {
+                        held_open_events.as_mut().unwrap().push(event);
                     }
                     event => state.handle_engine_event(event).await.unwrap(),
                     }
@@ -70,6 +82,7 @@ async fn connect_owner_peer(
     }).await.expect("production owner and remote open every required channel");
 }
 
+/// Retain one exact reliable payload and its receive permit.
 async fn exact_receipt(
     events: &mut mpsc::UnboundedReceiver<EngineEvent>,
     peer: PlayerId,
@@ -147,6 +160,7 @@ async fn channel_open_callback_does_not_wait_for_the_rtc_core_on_the_owner() {
                 &mut other_events,
                 other_peer,
                 !receiver_offers,
+                None,
             )
             .await;
             let generation = state.engine.diagnostic_snapshot(peer)["generation"]
@@ -340,23 +354,62 @@ async fn queued_readiness_respects_terminal_channels_and_exact_fresh_startup() {
                 serde_json::Value::Null
             );
             pair.sender.remove_peer(state.my_id).await.unwrap();
+            let mut replacement_opens = Vec::new();
             connect_owner_peer(
                 &mut state,
                 &mut pair.sender,
                 &mut pair.sender_events,
                 peer,
                 receiver_offers,
+                Some(&mut replacement_opens),
             )
             .await;
             let fresh_generation = state.engine.diagnostic_snapshot(peer)["generation"]
                 .as_u64()
                 .unwrap();
             assert_ne!(fresh_generation, generation);
+            let held =
+                HeldCoreSend::start(&clock, state.engine.channel(peer, RELIABLE_LABEL).unwrap())
+                    .await;
+            for event in replacement_opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            held.finish().await;
+            drop(exact_receipt(&mut pair.sender_events, state.my_id, b"held-readiness").await);
+            let fresh_ready = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = state.engine_rx.recv().await.unwrap();
+                    if matches!(event, EngineEvent::PairReady { .. }) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .expect("fresh readiness succeeds before its result is consumed");
+            assert_eq!(fresh_ready.peer_generation(), (peer, fresh_generation));
+            assert!(!state.connected_pairs.contains(&peer));
             state
                 .handle_engine_event(EngineEvent::PairReady { peer, generation })
                 .await
                 .unwrap();
+            assert!(
+                !state.connected_pairs.contains(&peer),
+                "stale readiness cannot connect a replacement waiting for its own result"
+            );
+            assert!(
+                !state.engine.accept_pair_ready(peer, generation),
+                "the Engine rejects old generation even when the current readiness query succeeded"
+            );
+            state.handle_engine_event(fresh_ready).await.unwrap();
             assert!(state.connected_pairs.contains(&peer));
+            state
+                .handle_engine_event(EngineEvent::PairReady { peer, generation })
+                .await
+                .unwrap();
+            assert!(
+                !state.p2p_reconnected_pairs.contains(&peer),
+                "stale readiness cannot report the fresh link again"
+            );
             assert_eq!(
                 state.engine.diagnostic_snapshot(peer)["receive_budget"]["pending_messages"],
                 1,

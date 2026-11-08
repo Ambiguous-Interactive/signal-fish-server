@@ -489,6 +489,7 @@ pub enum EngineEvent {
 }
 
 impl EngineEvent {
+    /// Identify the peer and physical link that produced this event.
     pub fn peer_generation(&self) -> (PlayerId, u64) {
         match self {
             Self::LocalCandidate {
@@ -563,6 +564,7 @@ struct ReadinessCheck {
 }
 
 impl Drop for ReadinessCheck {
+    /// Cancel pending core access when the physical link releases this query.
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -2090,6 +2092,7 @@ fn route_source_addr(server: SocketAddr) -> std::io::Result<IpAddr> {
     Ok(probe.local_addr()?.ip())
 }
 
+/// Check each retained channel and reject an observed terminal link.
 async fn required_channels_open(
     admission: &ChannelReceiveAdmission,
     channels: Vec<Arc<dyn DataChannel>>,

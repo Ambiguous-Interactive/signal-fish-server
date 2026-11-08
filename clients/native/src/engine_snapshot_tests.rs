@@ -708,6 +708,7 @@ pub(crate) struct HeldCoreSend {
 }
 
 impl HeldCoreSend {
+    /// Suspend a real channel send while it owns the RTC core.
     pub(crate) async fn start(clock: &HeldClock, channel: Arc<dyn DataChannel>) -> Self {
         let (entered, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
@@ -732,6 +733,7 @@ impl HeldCoreSend {
         }
     }
 
+    /// Release the core and join the captured sender thread.
     pub(crate) async fn finish(mut self) {
         self.release.take().unwrap().send(()).unwrap();
         let writer = self.writer.take().unwrap();
@@ -742,6 +744,7 @@ impl HeldCoreSend {
 }
 
 impl Drop for HeldCoreSend {
+    /// Release the core even when a test fails before explicit cleanup.
     fn drop(&mut self) {
         if let Some(release) = self.release.take() {
             let _ = release.send(());
@@ -750,6 +753,7 @@ impl Drop for HeldCoreSend {
 }
 
 impl HeldClock {
+    /// Count captures retained by the next spawned query.
     pub(crate) fn observe_next_task(&self) -> Arc<AtomicUsize> {
         let live = Arc::new(AtomicUsize::new(0));
         *self.probe_tasks.lock().unwrap() = Some(live.clone());
