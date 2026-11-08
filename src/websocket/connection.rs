@@ -12,6 +12,7 @@ use crate::protocol::{
 };
 #[cfg(test)]
 use crate::protocol::{Topology, Transport};
+use crate::protocol_core::{decide_handshake_version, HandshakeVersionDecision};
 use crate::server::{ClientLifecycle, EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 #[cfg(test)]
 use crate::session_capability::dedup_preserving_order;
@@ -2620,64 +2621,60 @@ async fn handle_socket_supervised(
                                         }
                                     };
 
-                                    // Protocol version + capability negotiation (P1).
-                                    // A missing `protocol_version` uses the endpoint
-                                    // default. Explicit client values take precedence,
-                                    // and are never raised above what the client claims.
                                     let cfg = server_clone.protocol_config();
-                                    let client_max =
-                                        protocol_version.or(Some(default_protocol_version));
-                                    let negotiated_version =
-                                        cfg.negotiate_protocol_version(client_max);
-                                    if negotiated_version < cfg.min_protocol_version {
-                                        let error_message = format!(
+                                    let version_decision = decide_handshake_version(
+                                        protocol_version,
+                                        default_protocol_version,
+                                        cfg.min_protocol_version,
+                                        cfg.max_protocol_version,
+                                        app_handshake_complete,
+                                    );
+                                    let negotiated_version = match version_decision {
+                                        HandshakeVersionDecision::Accepted(version) => version,
+                                        HandshakeVersionDecision::Retry(negotiated_version)
+                                        | HandshakeVersionDecision::Close(negotiated_version) => {
+                                            let error_message = format!(
                                             "Client protocol version {negotiated_version} is below the server minimum {}",
                                             cfg.min_protocol_version
                                         );
-                                        tracing::warn!(
-                                            %active_player_id,
-                                            client_protocol_version = negotiated_version,
-                                            server_min_protocol_version = cfg.min_protocol_version,
-                                            "Protocol version negotiation failed"
-                                        );
-                                        // Charged like the SDK-refusal above
-                                        // (issue #518): a retryable refusal is
-                                        // still a one-write-one-reply channel.
-                                        if !server_clone.charge_error_reply(&active_player_id).await
-                                        {
-                                            break;
+                                            tracing::warn!(
+                                                %active_player_id,
+                                                client_protocol_version = negotiated_version,
+                                                server_min_protocol_version = cfg.min_protocol_version,
+                                                "Protocol version negotiation failed"
+                                            );
+                                            // Charged like the SDK-refusal above
+                                            // (issue #518): a retryable refusal is
+                                            // still a one-write-one-reply channel.
+                                            if !server_clone
+                                                .charge_error_reply(&active_player_id)
+                                                .await
+                                            {
+                                                break;
+                                            }
+                                            let _ = enqueue_connection_message(
+                                                &tx_clone,
+                                                &close_signal,
+                                                &server_clone,
+                                                slow_consumer_timeout,
+                                                &active_player_id,
+                                                ServerMessage::AuthenticationError {
+                                                    error: error_message,
+                                                    error_code:
+                                                        ErrorCode::UnsupportedProtocolVersion,
+                                                },
+                                                "protocol version compatibility error",
+                                            )
+                                            .await;
+                                            if matches!(
+                                                version_decision,
+                                                HandshakeVersionDecision::Close(_)
+                                            ) {
+                                                break;
+                                            }
+                                            continue;
                                         }
-                                        let _ = enqueue_connection_message(
-                                            &tx_clone,
-                                            &close_signal,
-                                            &server_clone,
-                                            slow_consumer_timeout,
-                                            &active_player_id,
-                                            ServerMessage::AuthenticationError {
-                                                error: error_message,
-                                                error_code: ErrorCode::UnsupportedProtocolVersion,
-                                            },
-                                            "protocol version compatibility error",
-                                        )
-                                        .await;
-                                        // Only sockets that provisionally completed
-                                        // the handshake from the endpoint default
-                                        // (open policy, enforcement disarmed) are
-                                        // usable without an explicit
-                                        // `Authenticate`; once their optional
-                                        // Authenticate contradicts that default
-                                        // below the deployment floor, continuing
-                                        // would leave a declared-v2 client usable
-                                        // as v3. Handshake-pending sockets
-                                        // (allowlist mode, or open mode with
-                                        // tenant-credential enforcement, issue
-                                        // #574) may retry their incomplete
-                                        // handshake.
-                                        if app_handshake_complete {
-                                            break;
-                                        }
-                                        continue;
-                                    }
+                                    };
 
                                     app_handshake_complete = true;
                                     authenticate_processed = true;

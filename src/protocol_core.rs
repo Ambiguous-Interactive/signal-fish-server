@@ -22,6 +22,37 @@ pub(crate) fn negotiate_protocol_version(
     }
 }
 
+/// Version decision for an Authenticate frame and the socket's current handshake state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandshakeVersionDecision {
+    Accepted(u16),
+    Retry(u16),
+    Close(u16),
+}
+
+/// Apply the endpoint default, deployment ceiling, and refusal lifecycle policy.
+/// A completed socket must close after a below-floor declaration. A pending
+/// socket may retry; neither refusal may install the rejected version.
+pub(crate) fn decide_handshake_version(
+    client_max: Option<u16>,
+    endpoint_default: u16,
+    minimum: u16,
+    maximum: u16,
+    handshake_complete: bool,
+) -> HandshakeVersionDecision {
+    let requested = client_max.or(Some(endpoint_default));
+    let version = negotiate_protocol_version(requested, minimum, maximum);
+    if version < minimum {
+        if handshake_complete {
+            HandshakeVersionDecision::Close(version)
+        } else {
+            HandshakeVersionDecision::Retry(version)
+        }
+    } else {
+        HandshakeVersionDecision::Accepted(version)
+    }
+}
+
 /// Require at least one member and support from every member.
 ///
 /// The caller supplies the capability predicate and its mapping from
@@ -77,6 +108,32 @@ mod tests {
                     nonempty_all_support(&members, |supported| *supported),
                     expected
                 );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn handshake_version_exhausts_requests_routes_and_lifecycle_states() {
+        use super::{decide_handshake_version, HandshakeVersionDecision};
+        for (minimum, maximum) in [(2, 2), (2, 3), (3, 3), (0, u16::MAX), (3, 2)] {
+            for endpoint in [0, 2, 3, u16::MAX] {
+                for client in std::iter::once(None).chain((0..=u16::MAX).map(Some)) {
+                    for complete in [false, true] {
+                        let requested = client.unwrap_or(endpoint);
+                        let version = std::cmp::min(requested, maximum);
+                        let expected = match (version >= minimum, complete) {
+                            (true, _) => HandshakeVersionDecision::Accepted(version),
+                            (false, false) => HandshakeVersionDecision::Retry(version),
+                            (false, true) => HandshakeVersionDecision::Close(version),
+                        };
+                        assert_eq!(
+                            decide_handshake_version(client, endpoint, minimum, maximum, complete),
+                            expected,
+                            "client={client:?} endpoint={endpoint} range={minimum}..={maximum} complete={complete}"
+                        );
+                    }
+                }
             }
         }
     }

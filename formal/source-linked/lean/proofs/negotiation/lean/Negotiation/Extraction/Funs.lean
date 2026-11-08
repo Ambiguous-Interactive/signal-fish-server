@@ -41,4 +41,22 @@ def protocol_core.negotiate_protocol_version
   then ok requested
   else ok maximum
 
+/-- [signal_fish_proof_core::protocol_core::decide_handshake_version]:
+    Source: 'src/../../../../src/protocol_core.rs', lines 36:0-54:1 -/
+def protocol_core.decide_handshake_version
+  (client_max : core.option.Option Std.U16) (endpoint_default : Std.U16)
+  (minimum : Std.U16) (maximum : Std.U16) (handshake_complete : Bool) :
+  RustM protocol_core.HandshakeVersionDecision
+  := do
+  let requested ←
+    core.option.Option.or client_max (core.option.Option.Some endpoint_default)
+  let version ←
+    protocol_core.negotiate_protocol_version requested minimum maximum
+  if version < minimum
+  then
+    if handshake_complete
+    then ok (protocol_core.HandshakeVersionDecision.Close version)
+    else ok (protocol_core.HandshakeVersionDecision.Retry version)
+  else ok (protocol_core.HandshakeVersionDecision.Accepted version)
+
 end signal_fish_proof_core

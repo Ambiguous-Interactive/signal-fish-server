@@ -20,6 +20,11 @@ THEOREMS = {"negotiation": (
     "Negotiation.explicit_client_contract",
     "Negotiation.omitted_client_contract",
     "Negotiation.below_floor_preserved",
+    "Negotiation.handshake_contract",
+    "Negotiation.handshake_safety_contract",
+    "Negotiation.handshake_accepts_contract",
+    "Negotiation.handshake_refuses_contract",
+    "Negotiation.handshake_outcomes",
 ), "capability": (
     "Capability.empty_contract",
     "Capability.all_members_contract",
@@ -300,6 +305,8 @@ def check_proof_rejection(result, scenario, name):
         raise RuntimeError(f"Proof accepted source mutation: {name}")
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
+    if scenario == "negotiation":
+        targets += ("Negotiation/Verification/Handshake.lean:",)
     if scenario == "projection":
         targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:", "Projection/Verification/TransportStatus.lean:", "Projection/Verification/CapabilityNegotiation.lean:", "Projection/Verification/NegotiatedAxes.lean:",)
     if scenario == "capability":
@@ -318,6 +325,11 @@ def check_proof_rejection(result, scenario, name):
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
         raise RuntimeError(f"Mutation failed outside the proof: {name}\n{result.stdout}")
+    if name.startswith("handshake-") and not all(
+            error.startswith("Negotiation/Verification/Handshake.lean:")
+            and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
+            for error in locations):
+        raise RuntimeError(f"Mutation did not fail the handshake contract: {name}\n{result.stdout}")
     if name == "extra-callback" and not any(
             error.startswith("Capability/Verification/CallbackSemantics.lean:")
             for error in locations):
@@ -570,6 +582,11 @@ def negotiation_mutations():
         "lower-clamp": ("src/protocol_core.rs", "Some(version) => version,",
                         "Some(version) => if version < minimum { minimum } else { version },"),
         "ignore-server-ceiling": ("src/protocol_core.rs", "if requested < maximum {", "if true {"),
+        "handshake-default": ("src/protocol_core.rs", "client_max.or(Some(endpoint_default))", "client_max.or(Some(minimum))"),
+        "handshake-client": ("src/protocol_core.rs", "client_max.or(Some(endpoint_default))", "Some(endpoint_default).or(client_max)"),
+        "handshake-floor": ("src/protocol_core.rs", "if version < minimum {", "if version > minimum {"),
+        "handshake-lifecycle": ("src/protocol_core.rs", "if handshake_complete {", "if !handshake_complete {"),
+        "handshake-ceiling": ("src/protocol_core.rs", "negotiate_protocol_version(requested, minimum, maximum)", "negotiate_protocol_version(requested, minimum, endpoint_default)"),
     }
 
 
@@ -599,15 +616,25 @@ def mutants(crate, *, names=None):
                 run(["lake", "build", "Negotiation.Extraction"], project)
                 result = run(["lake", "build"], project, expect_success=False)
                 check_proof_rejection(result, "negotiation", name)
-                client, minimum, maximum = (2, 3, 3) if name == "lower-clamp" else (3, 2, 2)
                 witness = "import Negotiation.Extraction\nopen CoreModels Aeneas Aeneas.Std\nopen signal_fish_proof_core\n"
-                witness += f"theorem mutation_returns_wrong_value : protocol_core.negotiate_protocol_version (.Some (U16.ofNat {client})) (U16.ofNat {minimum}) (U16.ofNat {maximum}) = RustM.ok (U16.ofNat 3) := by rfl\n"
+                if name.startswith("handshake-"):
+                    call, wrong = {
+                        "handshake-default": (".None 3#u16 2#u16 3#u16 false", ".Accepted 2#u16"),
+                        "handshake-client": ("(.Some 2#u16) 3#u16 2#u16 3#u16 false", ".Accepted 3#u16"),
+                        "handshake-floor": ("(.Some 2#u16) 3#u16 3#u16 3#u16 true", ".Accepted 2#u16"),
+                        "handshake-lifecycle": ("(.Some 2#u16) 3#u16 3#u16 3#u16 true", ".Retry 2#u16"),
+                        "handshake-ceiling": ("(.Some 3#u16) 3#u16 2#u16 2#u16 false", ".Accepted 3#u16"),
+                    }[name]
+                    witness += f"theorem mutation_returns_wrong_value : protocol_core.decide_handshake_version {call} = RustM.ok ({wrong}) := by rfl\n"
+                else:
+                    client, minimum, maximum = (2, 3, 3) if name == "lower-clamp" else (3, 2, 2)
+                    witness += f"theorem mutation_returns_wrong_value : protocol_core.negotiate_protocol_version (.Some (U16.ofNat {client})) (U16.ofNat {minimum}) (U16.ofNat {maximum}) = RustM.ok (U16.ofNat 3) := by rfl\n"
                 witness += "\n#print axioms mutation_returns_wrong_value\n"
                 (project / "Counterexample.lean").write_text(witness)
                 report = run(["lake", "env", "lean", "Counterexample.lean"], project)
                 check_axiom_reports(report.stdout, ("mutation_returns_wrong_value",))
                 status = "proof rejected; concrete wrong result kernel-checked"
-                print(f"REJECTED {name}: proof failed and extracted result is 3 where contract requires 2", flush=True)
+                print(f"REJECTED {name}: semantic contract failed; concrete wrong result kernel-checked", flush=True)
             finally:
                 retain_proof_evidence(tree, copied, "negotiation", first_run, status)
     verify(crate)

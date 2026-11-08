@@ -21,4 +21,12 @@ set_option maxRecDepth 2048
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::protocol_core::HandshakeVersionDecision]
+    Source: 'src/../../../../src/protocol_core.rs', lines 27:0-31:1 -/
+@[discriminant isize]
+inductive protocol_core.HandshakeVersionDecision where
+| Accepted : Std.U16 → protocol_core.HandshakeVersionDecision
+| Retry : Std.U16 → protocol_core.HandshakeVersionDecision
+| Close : Std.U16 → protocol_core.HandshakeVersionDecision
+
 end signal_fish_proof_core
