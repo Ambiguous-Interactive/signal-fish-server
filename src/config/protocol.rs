@@ -8,18 +8,11 @@ use super::defaults::{
     default_min_protocol_version, default_room_code_length, default_sdk_enforce,
 };
 use crate::protocol::GameDataEncoding;
+use crate::protocol_core::{validate_protocol_version_bounds, ProtocolBoundsDecision};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Highest protocol version this server build implements. Single source of truth
-/// for the `max_protocol_version` default and validation ceiling. v3 is the
-/// single unshipped/mutable "current" protocol: it adds the WebRTC signaling
-/// surface (`Signal`/`NewPeer`/`SessionPlan`/`TransportStatus`) AND the delivery
-/// reliability surface (server-stamped `GameData.seq` + incarnation `epoch` and
-/// the opt-in `RelayStats` frame) over the frozen v2 floor. Deployments can clamp
-/// back to 2 (pure v2) via `protocol.max_protocol_version`.
-pub const SERVER_MAX_PROTOCOL_VERSION: u16 = 3;
-pub use crate::protocol_core::SERVER_MIN_PROTOCOL_VERSION;
+pub use crate::protocol_core::{SERVER_MAX_PROTOCOL_VERSION, SERVER_MIN_PROTOCOL_VERSION};
 
 /// Protocol configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -138,27 +131,24 @@ impl ProtocolConfig {
         if self.room_code_length == 0 {
             anyhow::bail!("protocol.room_code_length must be greater than 0");
         }
-        if self.min_protocol_version < SERVER_MIN_PROTOCOL_VERSION {
-            anyhow::bail!(
+        match validate_protocol_version_bounds(self.min_protocol_version, self.max_protocol_version)
+        {
+            ProtocolBoundsDecision::Valid => Ok(()),
+            ProtocolBoundsDecision::BelowFloor => anyhow::bail!(
                 "protocol.min_protocol_version ({}) must be >= {SERVER_MIN_PROTOCOL_VERSION}",
                 self.min_protocol_version
-            );
-        }
-        if self.max_protocol_version < self.min_protocol_version {
-            anyhow::bail!(
+            ),
+            ProtocolBoundsDecision::Reversed => anyhow::bail!(
                 "protocol.max_protocol_version ({}) must be >= protocol.min_protocol_version ({})",
                 self.max_protocol_version,
                 self.min_protocol_version
-            );
-        }
-        if self.max_protocol_version > SERVER_MAX_PROTOCOL_VERSION {
-            anyhow::bail!(
+            ),
+            ProtocolBoundsDecision::AboveCeiling => anyhow::bail!(
                 "protocol.max_protocol_version ({}) must be <= {SERVER_MAX_PROTOCOL_VERSION} \
                  (the highest version this server build implements)",
                 self.max_protocol_version
-            );
+            ),
         }
-        Ok(())
     }
 
     /// Validate that automatic room-code generation can only produce codes
@@ -660,6 +650,90 @@ mod protocol_version_tests {
             2,
             "negotiation must never raise a client above its declared maximum"
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn protocol_bounds_validation_exhausts_each_u16_axis_against_legal_ranges() {
+        let mut cfg = ProtocolConfig::default();
+        for version in 0..=u16::MAX {
+            for boundary in [0, 1, 2, 3, 4, u16::MAX] {
+                for (minimum, maximum) in [(version, boundary), (boundary, version)] {
+                    cfg.min_protocol_version = minimum;
+                    cfg.max_protocol_version = maximum;
+                    assert_eq!(
+                        cfg.validate().is_ok(),
+                        matches!((minimum, maximum), (2, 2) | (2, 3) | (3, 3)),
+                        "range={minimum}..={maximum}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_bounds_validation_preserves_error_text_and_priority() {
+        let mut cfg = ProtocolConfig::default();
+        for (minimum, maximum, expected) in [
+            (0, 0, "protocol.min_protocol_version (0) must be >= 2"),
+            (1, 4, "protocol.min_protocol_version (1) must be >= 2"),
+            (3, 2, "protocol.max_protocol_version (2) must be >= protocol.min_protocol_version (3)"),
+            (5, 4, "protocol.max_protocol_version (4) must be >= protocol.min_protocol_version (5)"),
+            (2, 4, "protocol.max_protocol_version (4) must be <= 3 (the highest version this server build implements)"),
+            (4, 4, "protocol.max_protocol_version (4) must be <= 3 (the highest version this server build implements)"),
+        ] {
+            cfg.min_protocol_version = minimum;
+            cfg.max_protocol_version = maximum;
+            assert_eq!(cfg.validate().unwrap_err().to_string(), expected);
+            cfg.room_code_length = 0;
+            assert_eq!(
+                cfg.validate().unwrap_err().to_string(),
+                "protocol.room_code_length must be greater than 0"
+            );
+            cfg.room_code_length = 6;
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn protocol_bounds_validated_deployments_preserve_negotiation_and_handshake_safety() {
+        use crate::protocol_core::{decide_handshake_version, HandshakeVersionDecision};
+
+        for (minimum, maximum) in [(2, 2), (2, 3), (3, 3)] {
+            let cfg = ProtocolConfig {
+                min_protocol_version: minimum,
+                max_protocol_version: maximum,
+                ..ProtocolConfig::default()
+            };
+            cfg.validate().unwrap();
+            assert_eq!(cfg.negotiate_protocol_version(None), minimum);
+            for client in 0..=u16::MAX {
+                let version = cfg.negotiate_protocol_version(Some(client));
+                assert_eq!(version, client.min(maximum));
+                for complete in [false, true] {
+                    let decision =
+                        decide_handshake_version(Some(client), 3, minimum, maximum, complete);
+                    match decision {
+                        HandshakeVersionDecision::Accepted(accepted) => {
+                            assert_eq!(accepted, version);
+                            assert!((minimum..=maximum).contains(&accepted));
+                            assert!((2..=3).contains(&accepted));
+                            assert!(accepted <= client);
+                        }
+                        HandshakeVersionDecision::Retry(rejected) => {
+                            assert_eq!(rejected, client);
+                            assert!(client < minimum);
+                            assert!(!complete);
+                        }
+                        HandshakeVersionDecision::Close(rejected) => {
+                            assert_eq!(rejected, client);
+                            assert!(client < minimum);
+                            assert!(complete);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

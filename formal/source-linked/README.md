@@ -17,7 +17,7 @@ change the server's dependencies or public API.
 
 | Backend and target | Checked property | Boundary |
 | --- | --- | --- |
-| Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; configuration validation and handshake refusal remain outside |
+| Lean negotiation | Explicit requests respect both ceilings and preserve values below the server ceiling; ordered server bounds give the correct `None` default and preserve below-floor requests | All `u16` inputs; deployment validation and Authenticate decisions have separate contracts below; caller/state identity remains outside |
 | Lean aggregation result | Empty slices return false; every representable finite nonempty slice returns the conjunction of member predicates under the total callback contract below | Callback must terminate successfully and preserve its invariant; the concrete support callback is covered separately below |
 | Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and arbitrary Rust callbacks remain outside; the concrete support callback is covered below |
 | Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup and room-state correspondence remain outside; actual member access has the contract below; lookup-result/default resolution has the separate contract below |
@@ -1340,3 +1340,42 @@ Live Lychee and elan downloads verify the unchanged pins. This transport repair
 does not add a Rust translator, model, axiom or server runtime dependency.
 Hax's internal Charon/Aeneas downloads and other checker installers retain their
 own external-service limits; #1504 tracks the remaining work.
+
+## Deployment protocol bounds (#1464)
+
+`protocol_core::validate_protocol_version_bounds` is the production decision
+called by `ProtocolConfig::validate`. It returns the first bounds refusal:
+below the implemented floor, a reversed range, or above the implemented ceiling.
+Both build constants are extracted from production. The config adapter retains
+its room-code check first and preserves every bounds error message.
+
+Five Lean contracts in `Negotiation/Verification/Bounds.lean` establish the
+exact decision and refusal priority, acceptance equivalence, totality, reachable
+outcomes, and composition with the extracted Authenticate decision. They cover
+all pairs of `u16` deployment bounds. The independent policy requires
+`2 <= minimum <= maximum <= 3`; it deliberately fixes the implemented wire
+versions so changing a build constant requires contract review. The composed
+contract covers every optional client version, route default and lifecycle flag:
+accepted versions stay within the implementation and deployment, and never exceed
+the client or route-default ceiling. Refusal retains the existing retry/close rule.
+No premise requires invalid bounds to be absent from the validator's domain.
+
+Four compiled source faults reverse the floor, range-order or ceiling comparison,
+or exclude the implemented ceiling itself. The runner requires an owning semantic
+proof failure after extraction compiles, then audits a kernel-checked concrete
+wrong-result witness. Restored source must pass deterministic extraction and the
+required theorem axiom audit. The focused command is the negotiation command above.
+The source-linked CI lane includes these contracts and faults in its existing
+complete shard inventory.
+
+Rust caller tests compare 786,432 cases against the independent legal range set,
+check exact diagnostics and refusal priority, and check 393,216 explicit-client
+handshake/lifecycle cases through valid deployment configurations. Small bounds
+and diagnostic tables remain enabled under Miri. A compiled config caller fault
+that supplies the floor as both bounds fails the legal-range assertion at
+`2..=0`; restored source passes. These are adapter tests, not a
+proof of the config object, startup constructors or socket argument acquisition.
+Room-code validation, endpoint reachability, profile commit, publication and
+concurrent correspondence remain separate open obligations in P03/P31/Q01–Q04.
+This internal refactor preserves wire behavior, errors, public constant paths,
+defaults and configuration. Rust, .NET and Godot clients need no changes.

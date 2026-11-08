@@ -3,6 +3,40 @@
 /// Lowest protocol version this server build still accepts (the v2 floor).
 pub const SERVER_MIN_PROTOCOL_VERSION: u16 = 2;
 
+/// Highest protocol version this server build implements. Single source of truth
+/// for the `max_protocol_version` default and validation ceiling. v3 is the
+/// single unshipped/mutable "current" protocol: it adds the WebRTC signaling
+/// surface (`Signal`/`NewPeer`/`SessionPlan`/`TransportStatus`) AND the delivery
+/// reliability surface (server-stamped `GameData.seq` + incarnation `epoch` and
+/// the opt-in `RelayStats` frame) over the frozen v2 floor. Deployments can clamp
+/// back to 2 (pure v2) via `protocol.max_protocol_version`.
+pub const SERVER_MAX_PROTOCOL_VERSION: u16 = 3;
+
+/// First refusal reason when validating deployment protocol bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProtocolBoundsDecision {
+    Valid,
+    BelowFloor,
+    Reversed,
+    AboveCeiling,
+}
+
+/// Admit only ordered deployment bounds within this build's implemented versions.
+pub(crate) fn validate_protocol_version_bounds(
+    minimum: u16,
+    maximum: u16,
+) -> ProtocolBoundsDecision {
+    if minimum < SERVER_MIN_PROTOCOL_VERSION {
+        ProtocolBoundsDecision::BelowFloor
+    } else if maximum < minimum {
+        ProtocolBoundsDecision::Reversed
+    } else if maximum > SERVER_MAX_PROTOCOL_VERSION {
+        ProtocolBoundsDecision::AboveCeiling
+    } else {
+        ProtocolBoundsDecision::Valid
+    }
+}
+
 /// Negotiate without raising an explicit client ceiling.
 ///
 /// A result below `minimum` remains below it for the caller to reject.
@@ -64,6 +98,28 @@ pub(crate) fn nonempty_all_support<T>(members: &[T], supports: impl FnMut(&T) ->
 #[cfg(test)]
 mod tests {
     use super::{negotiate_protocol_version, nonempty_all_support};
+
+    #[test]
+    fn protocol_bounds_decisions_preserve_boundaries_and_refusal_priority() {
+        use super::{validate_protocol_version_bounds, ProtocolBoundsDecision};
+        for (minimum, maximum, expected) in [
+            (0, 0, ProtocolBoundsDecision::BelowFloor),
+            (1, u16::MAX, ProtocolBoundsDecision::BelowFloor),
+            (2, 1, ProtocolBoundsDecision::Reversed),
+            (2, 2, ProtocolBoundsDecision::Valid),
+            (2, 3, ProtocolBoundsDecision::Valid),
+            (3, 3, ProtocolBoundsDecision::Valid),
+            (2, 4, ProtocolBoundsDecision::AboveCeiling),
+            (u16::MAX, 4, ProtocolBoundsDecision::Reversed),
+            (u16::MAX, u16::MAX, ProtocolBoundsDecision::AboveCeiling),
+        ] {
+            assert_eq!(
+                validate_protocol_version_bounds(minimum, maximum),
+                expected,
+                "range={minimum}..={maximum}"
+            );
+        }
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

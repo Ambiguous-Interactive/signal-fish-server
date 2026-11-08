@@ -27,7 +27,7 @@ noncomputable section
 namespace signal_fish_proof_core
 
 /-- [signal_fish_proof_core::protocol_core::nonempty_all_support]:
-    Source: 'src/../../../../src/protocol_core.rs', lines 60:0-62:1 -/
+    Source: 'src/../../../../src/protocol_core.rs', lines 94:0-96:1 -/
 def protocol_core.nonempty_all_support
   {T : Type} {T1 : Type} (coreopsfunctionFnMutT1TupleShared0TBoolInst :
   core.ops.function.FnMut T1 T Bool) (members : Slice T) (supports : T1) :

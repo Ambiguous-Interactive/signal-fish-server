@@ -1,16 +1,26 @@
 {
-  "base": "ef1d23a8c4c7764c39ce5acc6a84fdbaf44be1f4",
-  "reason": "Extract the unchanged Authenticate version/default/refusal/lifecycle decision into the shared private production core. The socket consumes the same accepted version or close/retry outcome before profile commit. Wire bytes, errors, APIs, configuration and behavior are unchanged. Rust, .NET and Godot clients require no changes.",
+  "base": "f34dbb3477b9096ca9e18f940f7d577ef5871e88",
+  "reason": "Extract the unchanged deployment protocol bounds decision into the private production proof core. Preserve the room-code-first check, refusal order, exact errors, supported versions, defaults, wire behavior and public constant paths. Documentation records source-linked contracts and explicit remaining boundaries. Rust, .NET and Godot clients require no changes.",
   "files": [
     {
       "path": "src/protocol_core.rs",
-      "before": "bea7c674a411c40ae51cb1d6866e960c689f091d",
-      "after": "45f3aac227161151c2d572068287ee1055f59daa"
+      "before": "45f3aac227161151c2d572068287ee1055f59daa",
+      "after": "ab451ccfdcd4c6808ac4f65b0af27618269525cb"
     },
     {
-      "path": "src/websocket/connection.rs",
-      "before": "071fe67d85bbe59ff0b5089ef13dd67e9b357556",
-      "after": "3bff9438492cb7caadc14551367c2bb4c6a57242"
+      "path": "src/config/protocol.rs",
+      "before": "6ea0c338f8a1c8f18913bcc164c1470d5fb53ca6",
+      "after": "ba154e38236b33697057aeac851332988060f012"
+    },
+    {
+      "path": "formal/source-linked/README.md",
+      "before": "3b58239ead915d36f05e9bea4bf6d65b10d03ebe",
+      "after": "9ba2134b319343af5ad6361a30d9bbd70f18ebea"
+    },
+    {
+      "path": "formal/source-linked/obligations.md",
+      "before": "d4562452d9240d5610370303ae8d38f2843bcd74",
+      "after": "bf4a4232186995224cf19f0250032c10589e50bf"
     }
   ]
 }
