@@ -551,9 +551,14 @@ negotiation timeout, and ordinary retry.
 A newer authoritative plan, departure, or fresh incarnation invalidates queued
 old-link receipts. The original receipt cutoff still applies.
 
-Deferred exchange sends let the client read signaling between channel attempts.
-A stalled send keeps its unmet exchange criteria and triggers relay fallback
-for its peer. The run deadline still applies.
+Exchange sends that can finish immediately complete on the main event loop.
+A pending channel check or send runs in one task per label on its physical link.
+The client continues other peers, relay input, and keepalive while that task waits.
+The original one-second limit and shorter operation or run deadline still apply.
+A failed send keeps its unmet exchange criteria and triggers relay fallback for its peer.
+Link retirement cancels pending sends. Queued results cannot affect a replacement link.
+`EngineEvent::ChannelSendComplete` carries the pending result back to the CLI.
+Exhaustive `EngineEvent` matches must handle this variant.
 
 ## Signal payload convention (matchbox `PeerSignal`)
 

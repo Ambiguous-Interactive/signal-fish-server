@@ -217,6 +217,7 @@ async fn first_open_exchange(burst: bool) {
                             }
                             EngineEvent::IceGatheringComplete { .. } => None,
                             EngineEvent::PairReady { .. } => panic!("awaited readiness must not publish a background result"),
+                            EngineEvent::ChannelSendComplete { .. } => panic!("direct channel sends must not publish CLI exchange results"),
                         }
                     }
                 };
