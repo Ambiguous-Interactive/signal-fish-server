@@ -97,7 +97,8 @@ async fn resumed_receive_window_case(receiver_offers: bool) {
     // Negotiated SID 42 sends no DCEP DATA. Each 1024-byte payload fits one
     // default-MTU DATA chunk, so accepted DATA counts name an exact prefix.
     const COUNT: u32 = 640;
-    for sequence in 0..COUNT {
+    const INITIAL_BURST: u32 = 512;
+    for sequence in 0..INITIAL_BURST {
         let mut body = vec![0x5a; 1024];
         body[..4].copy_from_slice(&sequence.to_be_bytes());
         channels[source]
@@ -111,6 +112,7 @@ async fn resumed_receive_window_case(receiver_offers: bool) {
         .await
         .unwrap();
     let mut full = None;
+    let mut offered = INITIAL_BURST;
     for _ in 0..1000 {
         let stats = transport.association_stats().await.unwrap().unwrap();
         if stats.flow_control.as_ref().unwrap().receive_window == 0 && stats.data_chunks_refused > 0
@@ -118,16 +120,47 @@ async fn resumed_receive_window_case(receiver_offers: bool) {
             full = Some(stats);
             break;
         }
+        // Add one probe only after all previously offered messages reached
+        // SCTP. Stop at the first refusal, leaving no unsent tail to consume
+        // reopened credit before the sender's window can be inspected.
+        if stats.data_chunks_accepted == u64::from(offered) && offered < COUNT {
+            let mut body = vec![0x5a; 1024];
+            body[..4].copy_from_slice(&offered.to_be_bytes());
+            channels[source]
+                .send(bytes::BytesMut::from(body.as_slice()))
+                .await
+                .unwrap();
+            offered += 1;
+        }
         advance_both(&a.rt, &b.rt, Duration::from_millis(25));
     }
     let full = full
         .expect("held callback queue must close the actual SCTP receive window and refuse a probe");
-    let initial_sacks = sender_transport
-        .association_stats()
-        .await
-        .unwrap()
-        .unwrap()
-        .sack_chunks_received;
+    let mut initial_sacks = None;
+    let mut stable_samples = 0;
+    for _ in 0..1000 {
+        let sender = sender_transport.association_stats().await.unwrap().unwrap();
+        let flow = sender.flow_control.unwrap();
+        assert_eq!(
+            flow.pending_chunks, 0,
+            "the refused probe leaves no unsent tail"
+        );
+        if flow.peer_receive_window == 0 && initial_sacks == Some(sender.sack_chunks_received) {
+            stable_samples += 1;
+        } else {
+            stable_samples = 0;
+        }
+        initial_sacks = Some(sender.sack_chunks_received);
+        if stable_samples == 8 {
+            break;
+        }
+        settle();
+    }
+    assert_eq!(
+        stable_samples, 8,
+        "pre-resume SACKs must settle at a zero sender window"
+    );
+    let initial_sacks = initial_sacks.unwrap();
     let frozen = [a.rt.now(), b.rt.now()];
     let mut received = 0u32;
     for _ in 0..1000 {
@@ -161,29 +194,35 @@ async fn resumed_receive_window_case(receiver_offers: bool) {
         u64::from(received) >= full.data_chunks_accepted,
         "all already accepted reliable messages must drain with protocol timers frozen: received={received} initial={full:?} sender={sender:?} receiver={receiver:?}"
     );
+    let mut reopened = None;
     for _ in 0..100 {
-        if sender_transport
-            .association_stats()
-            .await
-            .unwrap()
-            .unwrap()
-            .sack_chunks_received
-            > initial_sacks
+        let sender = sender_transport.association_stats().await.unwrap().unwrap();
+        if sender.sack_chunks_received > initial_sacks
+            && sender.flow_control.unwrap().peer_receive_window > 0
         {
+            reopened = Some(sender);
             break;
         }
         settle();
     }
     assert!(
-        sender_transport
-            .association_stats()
-            .await
-            .unwrap()
-            .unwrap()
-            .sack_chunks_received
-            > initial_sacks,
-        "the reopened receive window must be advertised before an unrelated timer"
+        reopened.is_some(),
+        "a new SACK must reopen sender credit before an unrelated timer: sender={:?}",
+        sender_transport.association_stats().await.unwrap()
     );
+    assert_eq!(
+        [a.rt.now(), b.rt.now()],
+        frozen,
+        "credit reopening must use the frozen clocks"
+    );
+    for sequence in offered..COUNT {
+        let mut body = vec![0x5a; 1024];
+        body[..4].copy_from_slice(&sequence.to_be_bytes());
+        channels[source]
+            .send(bytes::BytesMut::from(body.as_slice()))
+            .await
+            .unwrap();
+    }
     // The refused probe was never accepted. Normal DATA recovery may now
     // retransmit it; frozen timers above cannot be relaxed for accepted DATA.
     for _ in 0..1000 {
@@ -204,6 +243,40 @@ async fn resumed_receive_window_case(receiver_offers: bool) {
         received, COUNT,
         "normal retransmission must recover the refused probe and exact suffix"
     );
+    channels[source].close().await.unwrap();
+    let mut closed = [false; 2];
+    for _ in 0..400 {
+        for (side, channel) in channels.iter().enumerate() {
+            while let Some(Some(event)) = channel.poll().now_or_never() {
+                match event {
+                    DataChannelEvent::OnClose => closed[side] = true,
+                    DataChannelEvent::OnMessage(_) => {
+                        panic!("reset must not duplicate reliable input")
+                    }
+                    DataChannelEvent::OnError => panic!("channel error cannot qualify clean reset"),
+                    _ => {}
+                }
+            }
+        }
+        if closed == [true; 2] {
+            break;
+        }
+        advance_both(&a.rt, &b.rt, Duration::from_millis(25));
+    }
+    assert_eq!(
+        closed, [true; 2],
+        "reciprocal reset must close both saturated channel handles"
+    );
+    for channel in &channels {
+        assert!(matches!(
+            channel.ready_state().await,
+            Ok(rtc::data_channel::RTCDataChannelState::Closed) | Err(Error::ErrDataChannelClosed)
+        ));
+        assert!(matches!(
+            channel.send_text("late-gameplay").await,
+            Err(Error::ErrDataChannelClosed)
+        ));
+    }
     a.pc.close().await.unwrap();
     b.pc.close().await.unwrap();
 }
