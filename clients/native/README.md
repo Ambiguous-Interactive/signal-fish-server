@@ -115,6 +115,20 @@ remote networks, and the historical Godot 4.3 loss remain open in
 [server #1240](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1240)
 and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
 
+The CLI checks channel readiness without waiting for a busy peer's RTC core on
+its main event loop. Ready checks complete inline. A pending check runs in one
+task owned by the physical link, so other peers and relay input can continue.
+Link removal and Engine drop cancel that task.
+
+Engine callers can await `request_channel_open_check(peer, label)` for each
+current open callback. It returns `true` when all required channels pass the
+check immediately. A pending check sends `EngineEvent::PairReady` only if it succeeds.
+Pass that event's peer and physical generation to `accept_pair_ready`; only a
+`true` result reports a newly connected pair. Partial, duplicate, stale, and
+terminal observations cannot report another connection. Exhaustive `EngineEvent`
+matches must handle the new variant. `note_channel_open` keeps its existing
+awaited behavior for callers that choose to wait on that peer.
+
 For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
 All RTC, SCTP, channel-setting, and send-debt queries share one 250 ms wait budget.
 If a query times out, the snapshot keeps local callback and receive-budget evidence
