@@ -161,6 +161,141 @@ console.error(
   'ok - remote required channels reject invalid modes before storage and accept valid followups',
 );
 
+// Investigation #853/#889: distinguish missing announcements from rejected channels.
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  let connection!: Connection;
+  class Connection {
+    ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+    constructor() {
+      connection = this;
+    }
+    close(): void {}
+  }
+  class Channel {
+    readyState = 'connecting';
+    maxPacketLifeTime = null;
+    closes = 0;
+    constructor(
+      readonly label: string,
+      readonly ordered = true,
+      readonly maxRetransmits: number | null = null,
+    ) {}
+    close(): void {
+      this.closes += 1;
+      this.readyState = 'closed';
+    }
+  }
+  interface Announcements {
+    received: number;
+    accepted: number;
+    invalidMode: number;
+    duplicate: number;
+    terminal: number;
+    lastInvalidMode: {
+      label: string;
+      ordered: boolean;
+      maxRetransmits: number | null;
+      maxPacketLifeTime: number | null;
+    } | null;
+  }
+  let terminalEvidence: Announcements | null = null;
+  const engine = new Engine(false, {
+    onLocalCandidate() {},
+    onPcState() {},
+    onChannelOpen() {},
+    onChannelClosed() {
+      terminalEvidence = snapshot();
+    },
+    onChannelMessage() {},
+  });
+  const snapshot = () =>
+    (engine.diagnosticSnapshot('peer') as { remoteChannelAnnouncements: Announcements })
+      .remoteChannelAnnouncements;
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    await engine.pairWith('peer', false, []);
+    assert(
+      snapshot()?.received === 0 && snapshot().lastInvalidMode === null,
+      'missing announcements have no fabricated rejection',
+    );
+    connection.ondatachannel?.({ channel: new Channel('reliable', false, 0) });
+    const invalid = snapshot();
+    assert(
+      invalid.received === 1 &&
+        invalid.invalidMode === 1 &&
+        invalid.accepted === 0 &&
+        invalid.lastInvalidMode?.label === 'reliable' &&
+        invalid.lastInvalidMode.ordered === false &&
+        invalid.lastInvalidMode.maxRetransmits === 0,
+      'retain rejected required-channel mode',
+    );
+    const oversizedLabel = 'custom-label'.repeat(10000);
+    for (let index = 0; index < 100; index++)
+      connection.ondatachannel?.({ channel: new Channel(oversizedLabel) });
+    assert(
+      snapshot().lastInvalidMode?.label === 'other' && JSON.stringify(snapshot()).length < 400,
+      'unknown labels and repeated rejections retain bounded evidence',
+    );
+    const reliable = new Channel('reliable');
+    connection.ondatachannel?.({ channel: reliable });
+    const acceptedLink = engine.diagnosticSnapshot('peer') as {
+      channels: Record<string, { readyState: string; openObserved: boolean } | null>;
+    };
+    assert(
+      snapshot().accepted === 1 &&
+        acceptedLink.channels['reliable']?.readyState === 'connecting' &&
+        acceptedLink.channels['reliable']?.openObserved === false &&
+        acceptedLink.channels['unreliable'] === null,
+      'accepted but unopened channels remain distinct from absent required channels',
+    );
+    const duplicate = new Channel('reliable');
+    connection.ondatachannel?.({ channel: duplicate });
+    assert(
+      snapshot().accepted === 1 &&
+        snapshot().duplicate === 1 &&
+        duplicate.closes === 1 &&
+        reliable.closes === 0,
+      'duplicate announcements cannot replace the retained required channel',
+    );
+    snapshot().lastInvalidMode!.label = 'mutated';
+    assert(
+      snapshot().lastInvalidMode?.label === 'other',
+      'snapshot cannot mutate retained mode evidence',
+    );
+    reliable.readyState = 'closed';
+    const terminal = new Channel('unreliable', false, 0);
+    connection.ondatachannel?.({ channel: terminal });
+    const final = snapshot();
+    assert(
+      (terminalEvidence as Announcements | null)?.terminal === 1,
+      'a terminal observer sees its rejection before it can retire the link',
+    );
+    assert(
+      final.terminal === 1 &&
+        terminal.closes === 1 &&
+        final.received ===
+          final.accepted + final.invalidMode + final.duplicate + final.terminal,
+      'terminal link rejection stays distinct from admission and mode mismatch',
+    );
+    const retired = connection;
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    const stale = new Channel('reliable', false, 0);
+    retired.ondatachannel?.({ channel: stale });
+    assert(
+      stale.closes === 1 && snapshot().received === 0 && snapshot().lastInvalidMode === null,
+      'retired announcements cannot contaminate a fresh link',
+    );
+  } finally {
+    engine.removePeer('peer');
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - browser announcement diagnostics distinguish missing, rejected, and accepted channels',
+);
+
 // Pin the browser defaults and the initiator settings used by the remote gate.
 {
   const originalPc = globalThis.RTCPeerConnection;

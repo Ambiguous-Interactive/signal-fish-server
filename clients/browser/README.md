@@ -330,6 +330,15 @@ DTLS transport is `null`. `localIceCandidateErrors` reports the count and latest
 code from browser `icecandidateerror` events. These events can identify local
 STUN or TURN failures while another path remains usable. The summary does not
 change transport decisions or prove the cause of a failed link.
+`remoteChannelAnnouncements` counts current-link remote channel announcements:
+`received`, `accepted`, `invalidMode`, `duplicate`, and `terminal`. Each counter
+stops at the largest safe integer. `lastInvalidMode` records only the last
+rejected delivery mode. Its label is `reliable`, `unreliable`, or `other`; it
+never retains custom labels. A missing announcement has no rejection count.
+An accepted channel can still be `connecting` with `openObserved: false`.
+These counts do not prove channel opening or gameplay receipt. Locally created
+offerer channels are not remote announcements. A fresh physical link resets
+the counters and ignores callbacks from the retired link.
 `transportStateHistory` retains the newest 32 observed
 changes to signaling, ICE gathering, ICE connection, and peer-connection states.
 Each entry includes `elapsedMs`, measured from creation of this physical link

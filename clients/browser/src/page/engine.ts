@@ -53,6 +53,20 @@ interface ChannelDiagnostics {
   error: { errorDetail: RTCErrorDetailType; sctpCauseCode: number | null } | null;
 }
 
+interface RemoteChannelAnnouncements {
+  received: number;
+  accepted: number;
+  invalidMode: number;
+  duplicate: number;
+  terminal: number;
+  lastInvalidMode: {
+    label: 'reliable' | 'unreliable' | 'other';
+    ordered: boolean;
+    maxRetransmits: number | null;
+    maxPacketLifeTime: number | null;
+  } | null;
+}
+
 interface DataChannelTotals {
   id: number;
   state: string;
@@ -162,6 +176,7 @@ interface PeerLink {
   observedDtls: RTCDtlsTransport | null;
   dataChannelStats: DataChannelStats;
   channels: Map<string, RTCDataChannel>;
+  remoteChannelAnnouncements: RemoteChannelAnnouncements;
   openLabels: Set<string>;
   pendingCandidates: RTCIceCandidateInit[];
   remoteCandidateCount: number;
@@ -253,6 +268,14 @@ export class Engine {
         selectedCandidatePair: null,
       },
       channels: new Map(),
+      remoteChannelAnnouncements: {
+        received: 0,
+        accepted: 0,
+        invalidMode: 0,
+        duplicate: 0,
+        terminal: 0,
+        lastInvalidMode: null,
+      },
       openLabels: new Set(),
       pendingCandidates: [],
       remoteCandidateCount: 0,
@@ -528,6 +551,13 @@ export class Engine {
       dtlsState: link.pc.sctp?.transport?.state ?? null,
       sctpState: link.pc.sctp?.state ?? null,
       remoteDescriptionSet: link.remoteDescriptionSet,
+      remoteChannelAnnouncements: {
+        ...link.remoteChannelAnnouncements,
+        lastInvalidMode:
+          link.remoteChannelAnnouncements.lastInvalidMode === null
+            ? null
+            : { ...link.remoteChannelAnnouncements.lastInvalidMode },
+      },
       iceCandidateFailures: {
         count: link.iceCandidateFailures.count,
         last:
@@ -713,6 +743,17 @@ export class Engine {
       // Require the same delivery modes as our locally created channels.
       // Reject invalid announcements before retaining labels or callbacks.
       const channel = event.channel;
+      if (this.peers.get(peer) !== link) {
+        channel.close();
+        return;
+      }
+      const announcements = link.remoteChannelAnnouncements;
+      const count = (
+        kind: 'received' | 'accepted' | 'invalidMode' | 'duplicate' | 'terminal',
+      ) => {
+        announcements[kind] = Math.min(Number.MAX_SAFE_INTEGER, announcements[kind] + 1);
+      };
+      count('received');
       const requiredMode =
         channel.maxPacketLifeTime === null &&
         ((channel.label === RELIABLE_LABEL &&
@@ -722,26 +763,39 @@ export class Engine {
             channel.ordered === false &&
             channel.maxRetransmits === 0));
       if (!requiredMode) {
-        event.channel.close();
-        return;
-      }
-      if (this.peers.get(peer) !== link) {
+        count('invalidMode');
+        // Keep the last mode, never arbitrary labels or one record per rejection.
+        announcements.lastInvalidMode = {
+          label:
+            channel.label === RELIABLE_LABEL || channel.label === UNRELIABLE_LABEL
+              ? channel.label
+              : 'other',
+          ordered: channel.ordered,
+          maxRetransmits: channel.maxRetransmits,
+          maxPacketLifeTime: channel.maxPacketLifeTime,
+        };
         channel.close();
         return;
       }
+      // A terminal observer can snapshot and retire the link synchronously.
+      const previousTerminal = announcements.terminal;
+      count('terminal');
       if (!this.usableLink(peer, link)) {
         channel.close();
         return;
       }
+      announcements.terminal = previousTerminal;
       // Labels are application names, not unique WebRTC channel identifiers.
       // Preserve the first channel, including locally created initiator channels.
       const existing = link.channels.get(event.channel.label);
       if (existing !== undefined) {
+        count('duplicate');
         if (existing !== event.channel) event.channel.close();
         return;
       }
       // Responder path: store the channel BEFORE wiring its handlers so the
       // orchestrator's bookkeeping exists before any open/message callback.
+      count('accepted');
       link.channels.set(event.channel.label, event.channel);
       this.registerChannelHandlers(peer, link, event.channel);
     };
