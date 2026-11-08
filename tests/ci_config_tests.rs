@@ -22982,6 +22982,11 @@ fn test_ci_safety_miri_filters_require_one_qualified_owner_per_module() {
             true,
         ),
         (
+            "separate root lanes",
+            vec![(vec!["protocol"], vec![]), (vec!["server"], vec![])],
+            true,
+        ),
+        (
             "qualified split",
             vec![
                 (vec!["protocol", "server"], vec!["server::tests"]),
