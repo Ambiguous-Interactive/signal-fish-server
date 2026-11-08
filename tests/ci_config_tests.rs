@@ -35002,7 +35002,11 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 55 shards, ceil(542/55) * 29s remains 290s.
 // 546 (was 542): the shared Authenticate transition adds four mutation sites (#1464).
 // With 55 shards, ceil(546/55) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 546;
+/*
+    556 (was 546): shared deployment bounds validation adds ten mutation sites (#1464).
+    With 56 shards, ceil(556/56) * 29s remains 290s.
+*/
+const MUTATION_TOTAL_MUTANTS: u32 = 556;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -35270,12 +35274,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/55"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/56"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/55` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/56` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -35426,7 +35430,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/55 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/56 --print-cmd",
         violations.join("\n")
     );
 }
