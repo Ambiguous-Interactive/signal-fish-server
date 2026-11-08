@@ -6235,8 +6235,9 @@ fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
     }
     for required in [
         "containerd-snapshotter",
-        "qemu-user-static binfmt-support",
-        "update-binfmts --enable",
+        "apt-cache policy qemu-user-static",
+        "qemu_package=qemu-user-binfmt",
+        "systemctl restart systemd-binfmt",
         "qemu-aarch64 qemu-arm",
         "flags:.*F",
         "Docker Engine 28",
@@ -6256,6 +6257,194 @@ fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
         merge < install,
         "{workflow}: validate JSON before replacing the live daemon configuration"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_docker_builder_qemu_package_layouts_and_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let action = read_file(&repo_root().join(".github/actions/setup-docker-builder/action.yml"));
+    let documents = Yaml::load_from_str(&action).expect("builder action YAML");
+    let run = documents[0]["runs"]["steps"][0]["run"]
+        .as_str()
+        .expect("builder shell");
+    let (_, installation) = run
+        .split_once("static_candidate=")
+        .expect("QEMU installation seam");
+    let shell = format!("set -euo pipefail\nstatic_candidate={installation}");
+    for (
+        case,
+        policy,
+        policy_status,
+        install_status,
+        service_status,
+        flags_status,
+        package,
+        success,
+    ) in [
+        (
+            "concrete static package",
+            "  Candidate: 1:8.2.2",
+            0,
+            0,
+            0,
+            0,
+            "qemu-user-static",
+            true,
+        ),
+        (
+            "virtual package",
+            "  Candidate: (none)",
+            0,
+            0,
+            0,
+            0,
+            "qemu-user-binfmt",
+            true,
+        ),
+        (
+            "no static package record",
+            "",
+            0,
+            0,
+            0,
+            0,
+            "qemu-user-binfmt",
+            true,
+        ),
+        ("policy failure", "", 17, 0, 0, 0, "", false),
+        (
+            "install failure",
+            "  Candidate: (none)",
+            0,
+            23,
+            0,
+            0,
+            "qemu-user-binfmt",
+            false,
+        ),
+        (
+            "registration failure",
+            "  Candidate: (none)",
+            0,
+            0,
+            29,
+            0,
+            "qemu-user-binfmt",
+            false,
+        ),
+        (
+            "missing fix-binary flag",
+            "  Candidate: (none)",
+            0,
+            0,
+            0,
+            1,
+            "qemu-user-binfmt",
+            false,
+        ),
+    ] {
+        let fixture = tempfile::tempdir().expect("QEMU command fixture");
+        let bin = fixture.path().join("bin");
+        fs::create_dir(&bin).expect("fixture binaries");
+        for (name, body) in [
+            (
+                "apt-cache",
+                r#"printf '%s\n' "$QEMU_POLICY"
+exit "$QEMU_POLICY_STATUS"
+"#,
+            ),
+            (
+                "sudo",
+                r#"printf '%s\n' "$*" >> "$QEMU_COMMAND_LOG"
+case "$1" in
+apt-get) exit "$QEMU_INSTALL_STATUS";;
+systemctl) exit "$QEMU_SERVICE_STATUS";;
+*) exit 99;;
+esac
+"#,
+            ),
+            (
+                "grep",
+                r#"printf 'check %s\n' "$*" >> "$QEMU_COMMAND_LOG"
+exit "$QEMU_FLAGS_STATUS"
+"#,
+            ),
+            (
+                "cat",
+                r#"printf 'read %s\n' "$*" >> "$QEMU_COMMAND_LOG"
+printf 'flags: POF\n'
+"#,
+            ),
+        ] {
+            let path = bin.join(name);
+            write_file(&path, &format!("#!/usr/bin/env bash\n{body}"));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("executable fixture");
+        }
+        let log = fixture.path().join("commands.log");
+        write_file(&log, "");
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH"),
+        ));
+        let output = bash_command()
+            .args(["-c", &shell])
+            .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
+            .env("QEMU_POLICY", policy)
+            .env("QEMU_POLICY_STATUS", policy_status.to_string())
+            .env("QEMU_INSTALL_STATUS", install_status.to_string())
+            .env("QEMU_SERVICE_STATUS", service_status.to_string())
+            .env("QEMU_FLAGS_STATUS", flags_status.to_string())
+            .env("QEMU_COMMAND_LOG", &log)
+            .output()
+            .expect("run actual QEMU setup shell");
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let commands = read_file(&log);
+        if policy_status != 0 {
+            assert!(
+                commands.is_empty(),
+                "{case}: no installation after policy failure"
+            );
+            continue;
+        }
+        assert!(
+            commands.starts_with(&format!(
+                "apt-get install -y --no-install-recommends {package}\n"
+            )),
+            "{case}: {commands}"
+        );
+        assert_eq!(
+            commands.contains("systemctl restart systemd-binfmt"),
+            install_status == 0,
+            "{case}: {commands}"
+        );
+        assert_eq!(
+            commands.contains("check "),
+            install_status == 0 && service_status == 0,
+            "{case}: {commands}"
+        );
+        if success {
+            for emulator in ["qemu-aarch64", "qemu-arm"] {
+                assert!(
+                    commands.contains(&format!(
+                        "check -q ^flags:.*F /proc/sys/fs/binfmt_misc/{emulator}"
+                    )),
+                    "{case}: {commands}"
+                );
+                assert!(
+                    commands.contains(&format!("read /proc/sys/fs/binfmt_misc/{emulator}")),
+                    "{case}: {commands}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
