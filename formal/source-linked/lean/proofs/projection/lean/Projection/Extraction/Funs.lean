@@ -168,8 +168,171 @@ def session_capability.NegotiatedProtocol.Insts.CoreDefaultDefault.default
       topologies := ret1
     }
 
+/-- [signal_fish_proof_core::session_capability::dedup_preserving_order]: loop body 0:
+    Source: 'src/../../../../src/session_capability.rs', lines 107:4-111:5 -/
+@[rust_loop_body]
+def session_capability.dedup_preserving_order_loop.body
+  {T : Type} (corecmpPartialEqInst : core.cmp.PartialEq T T)
+  (iter : alloc.vec.drain.Drain T alloc.alloc.Global)
+  (unique : alloc.vec.Vec T) :
+  RustM (ControlFlow ((alloc.vec.drain.Drain T alloc.alloc.Global) ×
+    (alloc.vec.Vec T)) (alloc.vec.Vec T))
+  := do
+  let (o, iter1) ←
+    alloc.vec.drain.Drain.Insts.CoreIterTraitsIteratorIterator.next iter
+  match o with
+  | core.option.Option.None => ok (done unique)
+  | core.option.Option.Some item =>
+    let s ← alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref unique
+    let b ← core.slice.Slice.contains corecmpPartialEqInst s item
+    if b
+    then ok (cont (iter1, unique))
+    else
+      let unique1 ← alloc.vec.Vec.push unique item
+      ok (cont (iter1, unique1))
+
+/-- [signal_fish_proof_core::session_capability::dedup_preserving_order]: loop 0:
+    Source: 'src/../../../../src/session_capability.rs', lines 107:4-111:5 -/
+@[rust_loop]
+def session_capability.dedup_preserving_order_loop
+  {T : Type} (corecmpPartialEqInst : core.cmp.PartialEq T T)
+  (iter : alloc.vec.drain.Drain T alloc.alloc.Global)
+  (unique : alloc.vec.Vec T) :
+  RustM (alloc.vec.Vec T)
+  := do
+  loop
+    (fun (iter1, unique1) =>
+      session_capability.dedup_preserving_order_loop.body corecmpPartialEqInst
+      iter1 unique1)
+    (iter, unique)
+
+/-- [signal_fish_proof_core::session_capability::dedup_preserving_order]:
+    Source: 'src/../../../../src/session_capability.rs', lines 105:0-113:1 -/
+def session_capability.dedup_preserving_order
+  {T : Type} (corecmpPartialEqInst : core.cmp.PartialEq T T)
+  (items : alloc.vec.Vec T) :
+  RustM (alloc.vec.Vec T)
+  := do
+  let i ← alloc.vec.Vec.len items
+  let unique ← alloc.vec.Vec.with_capacity T i
+  let (iter, _) ←
+    alloc.vec.Vec.drain alloc.alloc.Global
+      (core.ops.range.RangeFull.Insts.CoreOpsRangeRangeBounds Std.Usize) items
+      ()
+  session_capability.dedup_preserving_order_loop corecmpPartialEqInst iter
+    unique
+
+/-- [signal_fish_proof_core::session_capability::negotiate_capabilities::{impl core::ops::function::FnOnce<(), alloc::vec::Vec<signal_fish_proof_core::session_capability::Topology>> for signal_fish_proof_core::session_capability::negotiate_capabilities::closure#1}::call_once]:
+    Source: 'src/../../../../src/session_capability.rs', lines 89:61-89:85 -/
+def
+  session_capability.negotiate_capabilities.closure_1.Insts.CoreOpsFunctionFnOnceTupleVecTopology.call_once
+  (c : session_capability.negotiate_capabilities.closure_1) (_ : Unit) :
+  RustM (alloc.vec.Vec session_capability.Topology)
+  := do
+  let y ←
+    lift (Std.Array.to_slice
+      (Array.make 1#usize [ session_capability.Topology.Relay ] : Array
+      session_capability.Topology 1#usize))
+  alloc.slice.Slice.into_vec y
+
+/-- Trait implementation: [signal_fish_proof_core::session_capability::negotiate_capabilities::{impl core::ops::function::FnOnce<(), alloc::vec::Vec<signal_fish_proof_core::session_capability::Topology>> for signal_fish_proof_core::session_capability::negotiate_capabilities::closure#1}]
+    Source: 'src/../../../../src/session_capability.rs', lines 89:61-89:85 -/
+@[reducible]
+def
+  session_capability.negotiate_capabilities.closure_1.Insts.CoreOpsFunctionFnOnceTupleVecTopology
+  : core.ops.function.FnOnce
+  session_capability.negotiate_capabilities.closure_1 Unit (alloc.vec.Vec
+  session_capability.Topology) := {
+  call_once :=
+    session_capability.negotiate_capabilities.closure_1.Insts.CoreOpsFunctionFnOnceTupleVecTopology.call_once
+}
+
+/-- [signal_fish_proof_core::session_capability::negotiate_capabilities::{impl core::ops::function::FnOnce<(), alloc::vec::Vec<signal_fish_proof_core::session_capability::Transport>> for signal_fish_proof_core::session_capability::negotiate_capabilities::closure}::call_once]:
+    Source: 'src/../../../../src/session_capability.rs', lines 83:61-83:86 -/
+def
+  session_capability.negotiate_capabilities.closure.Insts.CoreOpsFunctionFnOnceTupleVecTransport.call_once
+  (c : session_capability.negotiate_capabilities.closure) (_ : Unit) :
+  RustM (alloc.vec.Vec session_capability.Transport)
+  := do
+  let y ←
+    lift (Std.Array.to_slice
+      (Array.make 1#usize [ session_capability.Transport.Relay ] : Array
+      session_capability.Transport 1#usize))
+  alloc.slice.Slice.into_vec y
+
+/-- Trait implementation: [signal_fish_proof_core::session_capability::negotiate_capabilities::{impl core::ops::function::FnOnce<(), alloc::vec::Vec<signal_fish_proof_core::session_capability::Transport>> for signal_fish_proof_core::session_capability::negotiate_capabilities::closure}]
+    Source: 'src/../../../../src/session_capability.rs', lines 83:61-83:86 -/
+@[reducible]
+def
+  session_capability.negotiate_capabilities.closure.Insts.CoreOpsFunctionFnOnceTupleVecTransport
+  : core.ops.function.FnOnce session_capability.negotiate_capabilities.closure
+  Unit (alloc.vec.Vec session_capability.Transport) := {
+  call_once :=
+    session_capability.negotiate_capabilities.closure.Insts.CoreOpsFunctionFnOnceTupleVecTransport.call_once
+}
+
+/-- [signal_fish_proof_core::session_capability::negotiate_capabilities]:
+    Source: 'src/../../../../src/session_capability.rs', lines 74:0-96:1 -/
+def session_capability.negotiate_capabilities
+  (negotiated_version : Std.U16)
+  (supported_transports : core.option.Option (alloc.vec.Vec
+  session_capability.Transport))
+  (supported_topologies : core.option.Option (alloc.vec.Vec
+  session_capability.Topology)) :
+  RustM ((alloc.vec.Vec session_capability.Transport) × (alloc.vec.Vec
+    session_capability.Topology))
+  := do
+  if negotiated_version < 3#u16
+  then
+    let y ←
+      lift (Std.Array.to_slice
+        (Array.make 1#usize [ session_capability.Transport.Relay ] : Array
+        session_capability.Transport 1#usize))
+    let ret ← alloc.slice.Slice.into_vec y
+    let y1 ←
+      lift (Std.Array.to_slice
+        (Array.make 1#usize [ session_capability.Topology.Relay ] : Array
+        session_capability.Topology 1#usize))
+    let ret1 ← alloc.slice.Slice.into_vec y1
+    ok (ret, ret1)
+  else
+    let transports ←
+      core.option.Option.unwrap_or_else
+        session_capability.negotiate_capabilities.closure.Insts.CoreOpsFunctionFnOnceTupleVecTransport
+        supported_transports ()
+    let s ← alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref transports
+    let b ←
+      core.slice.Slice.contains
+        session_capability.Transport.Insts.CoreCmpPartialEqTransport s
+        session_capability.Transport.Relay
+    let transports1 ←
+      if b
+      then ok transports
+      else alloc.vec.Vec.push transports session_capability.Transport.Relay
+    let transports2 ←
+      session_capability.dedup_preserving_order
+        session_capability.Transport.Insts.CoreCmpPartialEqTransport
+        transports1
+    let topologies ←
+      core.option.Option.unwrap_or_else
+        session_capability.negotiate_capabilities.closure_1.Insts.CoreOpsFunctionFnOnceTupleVecTopology
+        supported_topologies ()
+    let s1 ← alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref topologies
+    let b1 ←
+      core.slice.Slice.contains
+        session_capability.Topology.Insts.CoreCmpPartialEqTopology s1
+        session_capability.Topology.Relay
+    let topologies1 ←
+      if b1
+      then ok topologies
+      else alloc.vec.Vec.push topologies session_capability.Topology.Relay
+    let topologies2 ←
+      session_capability.dedup_preserving_order
+        session_capability.Topology.Insts.CoreCmpPartialEqTopology topologies1
+    ok (transports2, topologies2)
+
 /-- [signal_fish_proof_core::session_capability::update_transport_status]:
-    Source: 'src/../../../../src/session_capability.rs', lines 78:0-104:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 127:0-153:1 -/
 def session_capability.update_transport_status
   (protocol : session_capability.NegotiatedProtocol)
   (membership_generation : uuid.Uuid)
@@ -226,7 +389,7 @@ def session_capability.update_transport_status
         transport_status)
 
 /-- [signal_fish_proof_core::session_capability::resolve_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 153:0-169:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 202:0-218:1 -/
 def session_capability.resolve_capabilities
   (capabilities : core.option.Option session_capability.SessionCapabilities)
   (minimum : Std.U16) :
@@ -247,7 +410,7 @@ def session_capability.resolve_capabilities
   | core.option.Option.Some capabilities1 => ok capabilities1
 
 /-- [signal_fish_proof_core::session_capability::resolve_connection_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 172:0-179:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 221:0-228:1 -/
 def session_capability.resolve_connection_capabilities
   (capabilities : core.option.Option session_capability.SessionCapabilities) :
   RustM session_capability.SessionCapabilities
@@ -256,14 +419,14 @@ def session_capability.resolve_connection_capabilities
     protocol_core.SERVER_MIN_PROTOCOL_VERSION
 
 /-- [signal_fish_proof_core::session_capability::{impl core::default::Default for signal_fish_proof_core::session_capability::SessionCapabilities}::default]:
-    Source: 'src/../../../../src/session_capability.rs', lines 119:4-121:5
+    Source: 'src/../../../../src/session_capability.rs', lines 168:4-170:5
     Visibility: public -/
 def session_capability.SessionCapabilities.Insts.CoreDefaultDefault.default
   : RustM session_capability.SessionCapabilities := do
   session_capability.resolve_connection_capabilities core.option.Option.None
 
 /-- [signal_fish_proof_core::session_capability::project_capabilities]:
-    Source: 'src/../../../../src/session_capability.rs', lines 193:0-207:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 242:0-256:1 -/
 def session_capability.project_capabilities
   (version : Std.U16) (transports : Slice session_capability.Transport)
   (topologies : Slice session_capability.Topology) :
@@ -305,7 +468,7 @@ def session_capability.project_capabilities
     }
 
 /-- [signal_fish_proof_core::session_capability::{impl core::convert::From<&'_0 signal_fish_proof_core::session_capability::NegotiatedProtocol> for signal_fish_proof_core::session_capability::SessionCapabilities}::from]:
-    Source: 'src/../../../../src/session_capability.rs', lines 125:4-131:5
+    Source: 'src/../../../../src/session_capability.rs', lines 174:4-180:5
     Visibility: public -/
 def
   session_capability.SessionCapabilities.Insts.CoreConvertFromShared0NegotiatedProtocol.from
@@ -319,7 +482,7 @@ def
   session_capability.project_capabilities protocol.version s s1
 
 /-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
-    Source: 'src/../../../../src/session_capability.rs', lines 135:4-141:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 184:4-190:5 -/
 def session_capability.SessionCapabilities.supports_transport
   (self : session_capability.SessionCapabilities)
   (transport : session_capability.Transport) :
@@ -331,7 +494,7 @@ def session_capability.SessionCapabilities.supports_transport
   | session_capability.Transport.WebRtc => ok self.webrtc_transport
 
 /-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
-    Source: 'src/../../../../src/session_capability.rs', lines 143:4-149:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 192:4-198:5 -/
 def session_capability.SessionCapabilities.supports_topology
   (self : session_capability.SessionCapabilities)
   (topology : session_capability.Topology) :
@@ -343,7 +506,7 @@ def session_capability.SessionCapabilities.supports_topology
   | session_capability.Topology.Mesh => ok self.mesh_topology
 
 /-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 182:0-190:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 231:0-239:1 -/
 def session_capability.supports_session
   (capabilities : session_capability.SessionCapabilities)
   (topology : session_capability.Topology)

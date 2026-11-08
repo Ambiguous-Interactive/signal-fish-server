@@ -7,10 +7,15 @@ use crate::coordination::{
 };
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, GameDataLimitPayload, PlayerId,
-    PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
+    PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, ServerMessage,
     PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY, SPECTATOR_RELAY_CAPABILITY,
 };
+#[cfg(test)]
+use crate::protocol::{Topology, Transport};
 use crate::server::{ClientLifecycle, EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
+#[cfg(test)]
+use crate::session_capability::dedup_preserving_order;
+use crate::session_capability::negotiate_capabilities;
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use rand::RngExt;
@@ -1245,55 +1250,6 @@ fn record_abandoned_by_class(rx: &OutboundReceiver, batcher: &MessageBatcher) {
             rx.record_abandoned(class, count);
         }
     }
-}
-
-/// Resolve the negotiated transport/topology capability sets for a connection.
-///
-/// Relay is the universal floor, so it is always present in both sets. A
-/// connection negotiated below v3 is **relay-only** regardless of what it
-/// advertised — peer-to-peer transports/topologies are a v3+ upgrade and must
-/// never be recorded for a v2 peer. For v3+, the client's advertised sets are
-/// used with `Relay` forced in (if the client omitted it) and duplicates
-/// removed while preserving the client's stated preference order.
-fn negotiate_capabilities(
-    negotiated_version: u16,
-    supported_transports: Option<Vec<Transport>>,
-    supported_topologies: Option<Vec<Topology>>,
-) -> (Vec<Transport>, Vec<Topology>) {
-    if negotiated_version < 3 {
-        return (vec![Transport::Relay], vec![Topology::Relay]);
-    }
-
-    let mut transports = supported_transports.unwrap_or_else(|| vec![Transport::Relay]);
-    if !transports.contains(&Transport::Relay) {
-        transports.push(Transport::Relay);
-    }
-    dedup_preserving_order(&mut transports);
-
-    let mut topologies = supported_topologies.unwrap_or_else(|| vec![Topology::Relay]);
-    if !topologies.contains(&Topology::Relay) {
-        topologies.push(Topology::Relay);
-    }
-    dedup_preserving_order(&mut topologies);
-
-    (transports, topologies)
-}
-
-/// Remove duplicate entries while preserving the first occurrence of each.
-///
-/// Unlike [`Vec::dedup`], which only collapses *consecutive* duplicates, this
-/// drops every later repeat regardless of position. The lists it operates on
-/// (negotiated transports/topologies) have at most three variants, so the
-/// quadratic scan is trivially cheap and keeps the relative ordering the client
-/// advertised (which conveys preference for the P3 selection logic).
-fn dedup_preserving_order<T: PartialEq>(items: &mut Vec<T>) {
-    let mut unique = Vec::with_capacity(items.len());
-    for item in items.drain(..) {
-        if !unique.contains(&item) {
-            unique.push(item);
-        }
-    }
-    *items = unique;
 }
 
 /// Merge SDK compatibility capabilities with negotiated wire extensions.
@@ -4406,6 +4362,71 @@ mod tests {
         let (transports, topologies) = negotiate_capabilities(3, None, None);
         assert_eq!(transports, vec![Transport::Relay]);
         assert_eq!(topologies, vec![Topology::Relay]);
+    }
+
+    /// #1464: check version isolation, relay insertion, first occurrence, and axis wiring.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn negotiate_capabilities_matches_first_occurrence_contract() {
+        let mut offers = vec![None];
+        for length in 0_u32..=4 {
+            for mut encoded in 0..3_usize.pow(length) {
+                let mut offer = Vec::new();
+                for _ in 0..length {
+                    offer.push(encoded % 3);
+                    encoded /= 3;
+                }
+                offers.push(Some(offer));
+            }
+        }
+        let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+        let topologies = [Topology::Relay, Topology::Host, Topology::Mesh];
+        let expected_indices = |version: u16, offer: &Option<Vec<usize>>| {
+            if version < 3 {
+                return vec![0];
+            }
+            let input = offer.as_deref().unwrap_or_default();
+            let mut positions: Vec<_> = (0..3)
+                .filter_map(|axis| {
+                    input
+                        .iter()
+                        .position(|value| *value == axis)
+                        .or_else(|| (axis == 0).then_some(input.len()))
+                        .map(|position| (position, axis))
+                })
+                .collect();
+            positions.sort_unstable();
+            positions.into_iter().map(|(_, axis)| axis).collect()
+        };
+        for version in [0, 1, 2, 3, 4, u16::MAX] {
+            for transport_offer in &offers {
+                for topology_offer in &offers {
+                    let actual = negotiate_capabilities(
+                        version,
+                        transport_offer
+                            .as_ref()
+                            .map(|items| items.iter().map(|index| transports[*index]).collect()),
+                        topology_offer
+                            .as_ref()
+                            .map(|items| items.iter().map(|index| topologies[*index]).collect()),
+                    );
+                    let expected = (
+                        expected_indices(version, transport_offer)
+                            .into_iter()
+                            .map(|index| transports[index])
+                            .collect::<Vec<_>>(),
+                        expected_indices(version, topology_offer)
+                            .into_iter()
+                            .map(|index| topologies[index])
+                            .collect::<Vec<_>>(),
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "version={version} transports={transport_offer:?} topologies={topology_offer:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

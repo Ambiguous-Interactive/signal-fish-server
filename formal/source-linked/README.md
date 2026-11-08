@@ -9,7 +9,7 @@ second implementation. The source-linked checks use production helpers in
 [`src/session_member.rs`](../../src/session_member.rs).
 
 The standalone Lean crate imports all four files with `#[path]`. The Kani crate
-imports `protocol_core.rs`. Production version negotiation, capability projection,
+imports `protocol_core.rs`. Production version negotiation, capability normalization and projection,
 support checks, aggregation, and sticky admission call the same helpers. The proof crates do not
 change the server's dependencies or public API.
 
@@ -22,6 +22,7 @@ change the server's dependencies or public API.
 | Lean callback semantics | For every representable finite slice and modeled callback, the production result agrees with the ordered callback-step relation, including state-dependent results, errors, and divergence | The model threads private state but discards final state; external effects and arbitrary Rust callbacks remain outside; the concrete support callback is covered below |
 | Lean capability projection | Preserve version and all six enum membership bits for every representable capability slice; session support requires version >= 3 and both requested axes | Actual production enums and fields are extracted; connection lookup and room-state correspondence remain outside; actual member access has the contract below; lookup-result/default resolution has the separate contract below |
 | Lean concrete capability aggregation | The extracted support callback requires version >= 3 and both requested axes for every member of every representable nonempty slice; empty input returns false | Requires a total, fixed capability getter; the actual production member-field getter is proved below; connection lookup and room state remain tested boundaries |
+| Lean capability normalization | Below v3, both axes are Relay-only; v3+ preserves first occurrences, removes every duplicate, and adds only the Relay floor | Actual production normalization and drain loop; dedup covers every model-representable vector with truthful total equality; v3+ normalization requires raw-list append headroom; caller/version selection, reserved extensions, storage and async correspondence remain outside |
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
@@ -1189,3 +1190,72 @@ room recipient selection and delivery still have test evidence. Modeled totality
 is not a Tokio scheduling or end-to-end delivery theorem. This refactor changes
 no protocol bytes, errors, API, configuration or runtime outcome; Rust, .NET and
 Godot clients require no changes.
+
+## Capability normalization (#1464)
+
+The WebSocket handshake calls the private production
+`session_capability::negotiate_capabilities`. Its implementation and generic
+`dedup_preserving_order` helper moved unchanged from the connection module.
+The production caller still passes the negotiated version and stores both axes
+under its existing lifecycle guard. The standalone proof crate imports the same
+source file. No copied Rust implementation or new library model was added.
+
+[`CapabilityNegotiation.lean`](lean/proofs/projection/lean/Projection/Verification/CapabilityNegotiation.lean)
+proves the extracted drain loop and actual mutable-vector deduplication.
+The equality dictionary must terminate successfully and agree with equality.
+The normalization proof uses the actual extracted Transport/Topology dictionaries
+and their checked equality contracts.
+[`CapabilityOrder.lean`](lean/proofs/projection/lean/Projection/Verification/CapabilityOrder.lean)
+connects the specification to Lean's first-occurrence `List.eraseDups`, proves
+exact membership and no duplicates, and composes these facts with the extracted
+production helper in `dedup_protocol_contract`. Deduplication covers every
+model-representable vector, including maximum modeled length.
+
+[`NegotiatedAxes.lean`](lean/proofs/projection/lean/Projection/Verification/NegotiatedAxes.lean)
+checks both normalized axes against their advertised values and the Relay floor.
+Versions below three return only Relay, regardless of advertised P2P values.
+For v3+, omitted and empty offers become Relay-only. Other offers retain the
+first occurrence of every advertised value; Relay is appended if absent.
+The two axes remain independent. `negotiated_axes_outcomes` checks reachable
+legacy Relay-only output, omitted/empty defaults and ordered offers at the maximum
+version. The runner audits thirteen new contract names and their axioms.
+
+The successful v3+ normalization theorem requires `axisHasRoom` for each raw
+advertised vector: a present vector has length strictly below `Usize.max`.
+Production appends a missing Relay before deduplication, so the pinned vector
+model cannot append at its maximum length. The proof does not establish a
+frame-size-to-vector-length correspondence or totality for every modeled raw
+vector. The separate below-v3 theorem needs no append-room premise. Allocator
+failures and the implementations of the pinned Rust library models remain
+outside, as in the other source-linked contracts.
+
+Seven source faults lower the version gate, omit either Relay insertion, replace
+either omitted-axis default, retain duplicates, or reverse preference order.
+Each must extract and typecheck, reject only its owning semantic contract, and
+pass a separate kernel-checked wrong-result witness. Tool errors do not count
+as proof rejection. The first duplicate-retention fault used a constant branch,
+which removed the loop's unused equality argument during extraction. Its type
+mismatch was rejected as invalid evidence. The final fault still evaluates
+`contains` and forces the branch true, so the loop keeps its interface and the
+semantic contract must detect the duplicate. Restored source must pass
+deterministic extraction, proofs and axiom audits. The focused command is:
+
+```bash
+python3 formal/source-linked/lean/verify.py --scenario projection --mutations \
+  --mutation axes-version --mutation axes-transport-floor \
+  --mutation axes-topology-floor --mutation axes-transport-default \
+  --mutation axes-topology-default --mutation axes-dedup --mutation axes-order
+```
+
+The independent Rust oracle sorts first-occurrence positions and checks 89,304
+combinations of both optional axes and version boundaries. A real WebSocket
+test requests v3/P2P features and the operation envelope against a deployment
+ceiling of v2; the frozen v2 response omits the reserved extension and rejects
+its use. These are caller tests, not caller proofs.
+
+P04 remains open for negotiated-version argument correspondence, connection
+identity, profile storage, reserved extension admission and publication.
+`protocol_info_capabilities` relies on its caller to gate the reserved operation
+extension; axis normalization does not prove that policy. No protocol bytes,
+errors, API, configuration or runtime outcomes changed. Rust, .NET and Godot
+clients require no changes.

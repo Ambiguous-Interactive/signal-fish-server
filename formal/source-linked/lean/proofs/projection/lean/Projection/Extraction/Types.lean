@@ -54,8 +54,18 @@ structure session_admission.ActiveSessionPlan where
   transport : session_capability.Transport
   host : core.option.Option uuid.Uuid
 
+/-- [signal_fish_proof_core::session_capability::negotiate_capabilities::closure#1]
+    Source: 'src/../../../../src/session_capability.rs', lines 89:61-89:85 -/
+@[reducible]
+def session_capability.negotiate_capabilities.closure_1 := Unit
+
+/-- [signal_fish_proof_core::session_capability::negotiate_capabilities::closure]
+    Source: 'src/../../../../src/session_capability.rs', lines 83:61-83:86 -/
+@[reducible]
+def session_capability.negotiate_capabilities.closure := Unit
+
 /-- [signal_fish_proof_core::session_capability::TransportStatusUpdate]
-    Source: 'src/../../../../src/session_capability.rs', lines 68:0-74:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 117:0-123:1 -/
 @[discriminant isize]
 inductive session_capability.TransportStatusUpdate where
 | Changed : session_capability.TransportStatusUpdate
@@ -65,7 +75,7 @@ inductive session_capability.TransportStatusUpdate where
 | UnsupportedTransport : session_capability.TransportStatusUpdate
 
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
-    Source: 'src/../../../../src/session_capability.rs', lines 108:0-116:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 157:0-165:1 -/
 structure session_capability.SessionCapabilities where
   version : Std.U16
   relay_transport : Bool

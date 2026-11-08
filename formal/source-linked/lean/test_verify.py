@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 71)
+        self.assertEqual(sum(map(len, definitions)), 78)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -278,6 +278,23 @@ class RequiredAggregation(unittest.TestCase):
                 with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
                     verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
                                                  "projection", name)
+
+    def test_axis_faults_require_only_owning_semantic_failures(self):
+        """Compiler failures and failures outside the changed rule never count as evidence."""
+        names = [name for name in verify.projection_mutations() if name.startswith("axes-")]
+        self.assertEqual(len(names), 7)
+        for name in names:
+            module = "CapabilityNegotiation" if name in ("axes-dedup", "axes-order") else "NegotiatedAxes"
+            diagnostic = f"error: Projection/Verification/{module}.lean:42:6: unsolved goals\n"
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic), "projection", name)
+            verify.check_proof_rejection(SimpleNamespace(returncode=1,
+                stdout=diagnostic.replace("unsolved goals", "Tactic `rfl` failed")), "projection", name)
+            for code, output in ((0, diagnostic), (1, diagnostic.replace(module, "Admission")),
+                                 (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                                 (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                                 (1, diagnostic + "error: dependency unavailable\n"), (1, "")):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output), "projection", name)
 
     def test_host_faults_require_only_semantic_host_contract_rejection(self):
         """A UUID mapping/compiler error cannot count as a host-validity rejection."""
