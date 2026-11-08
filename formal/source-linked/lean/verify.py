@@ -25,6 +25,11 @@ THEOREMS = {"negotiation": (
     "Negotiation.handshake_accepts_contract",
     "Negotiation.handshake_refuses_contract",
     "Negotiation.handshake_outcomes",
+    "Negotiation.bounds_contract",
+    "Negotiation.bounds_valid_contract",
+    "Negotiation.bounds_total_contract",
+    "Negotiation.bounds_outcomes",
+    "Negotiation.validated_handshake_contract",
 ), "capability": (
     "Capability.empty_contract",
     "Capability.all_members_contract",
@@ -306,7 +311,7 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "negotiation":
-        targets += ("Negotiation/Verification/Handshake.lean:",)
+        targets += ("Negotiation/Verification/Handshake.lean:", "Negotiation/Verification/Bounds.lean:",)
     if scenario == "projection":
         targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:", "Projection/Verification/TransportStatus.lean:", "Projection/Verification/CapabilityNegotiation.lean:", "Projection/Verification/NegotiatedAxes.lean:",)
     if scenario == "capability":
@@ -330,6 +335,11 @@ def check_proof_rejection(result, scenario, name):
             and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
             for error in locations):
         raise RuntimeError(f"Mutation did not fail the handshake contract: {name}\n{result.stdout}")
+    if name.startswith("bounds-") and not all(
+            error.startswith("Negotiation/Verification/Bounds.lean:")
+            and ("unsolved goals" in error or "Tactic `rfl` failed" in error)
+            for error in locations):
+        raise RuntimeError(f"Mutation did not fail the bounds contract: {name}\n{result.stdout}")
     if name == "extra-callback" and not any(
             error.startswith("Capability/Verification/CallbackSemantics.lean:")
             for error in locations):
@@ -582,6 +592,10 @@ def negotiation_mutations():
         "lower-clamp": ("src/protocol_core.rs", "Some(version) => version,",
                         "Some(version) => if version < minimum { minimum } else { version },"),
         "ignore-server-ceiling": ("src/protocol_core.rs", "if requested < maximum {", "if true {"),
+        "bounds-floor": ("src/protocol_core.rs", "minimum < SERVER_MIN_PROTOCOL_VERSION", "minimum > SERVER_MIN_PROTOCOL_VERSION"),
+        "bounds-order": ("src/protocol_core.rs", "maximum < minimum", "maximum > minimum"),
+        "bounds-ceiling": ("src/protocol_core.rs", "maximum > SERVER_MAX_PROTOCOL_VERSION", "maximum < SERVER_MAX_PROTOCOL_VERSION"),
+        "bounds-inclusive": ("src/protocol_core.rs", "maximum > SERVER_MAX_PROTOCOL_VERSION", "maximum >= SERVER_MAX_PROTOCOL_VERSION"),
         "handshake-default": ("src/protocol_core.rs", "client_max.or(Some(endpoint_default))", "client_max.or(Some(minimum))"),
         "handshake-client": ("src/protocol_core.rs", "client_max.or(Some(endpoint_default))", "Some(endpoint_default).or(client_max)"),
         "handshake-floor": ("src/protocol_core.rs", "if version < minimum {", "if version > minimum {"),
@@ -617,7 +631,15 @@ def mutants(crate, *, names=None):
                 result = run(["lake", "build"], project, expect_success=False)
                 check_proof_rejection(result, "negotiation", name)
                 witness = "import Negotiation.Extraction\nopen CoreModels Aeneas Aeneas.Std\nopen signal_fish_proof_core\n"
-                if name.startswith("handshake-"):
+                if name.startswith("bounds-"):
+                    call, wrong = {
+                        "bounds-floor": ("0#u16 2#u16", ".Valid"),
+                        "bounds-order": ("3#u16 2#u16", ".Valid"),
+                        "bounds-ceiling": ("2#u16 65535#u16", ".Valid"),
+                        "bounds-inclusive": ("2#u16 3#u16", ".AboveCeiling"),
+                    }[name]
+                    witness += f"theorem mutation_returns_wrong_value : protocol_core.validate_protocol_version_bounds {call} = RustM.ok ({wrong}) := by simp [protocol_core.validate_protocol_version_bounds, protocol_core.SERVER_MIN_PROTOCOL_VERSION, protocol_core.SERVER_MAX_PROTOCOL_VERSION]\n"
+                elif name.startswith("handshake-"):
                     call, wrong = {
                         "handshake-default": (".None 3#u16 2#u16 3#u16 false", ".Accepted 2#u16"),
                         "handshake-client": ("(.Some 2#u16) 3#u16 2#u16 3#u16 false", ".Accepted 3#u16"),

@@ -26,8 +26,36 @@ noncomputable section
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::protocol_core::SERVER_MIN_PROTOCOL_VERSION]
+    Source: 'src/../../../../src/protocol_core.rs', lines 4:0-4:47
+    Visibility: public -/
+@[global_simps, irreducible]
+def protocol_core.SERVER_MIN_PROTOCOL_VERSION : Std.U16 := 2#u16
+
+/-- [signal_fish_proof_core::protocol_core::SERVER_MAX_PROTOCOL_VERSION]
+    Source: 'src/../../../../src/protocol_core.rs', lines 13:0-13:47
+    Visibility: public -/
+@[global_simps, irreducible]
+def protocol_core.SERVER_MAX_PROTOCOL_VERSION : Std.U16 := 3#u16
+
+/-- [signal_fish_proof_core::protocol_core::validate_protocol_version_bounds]:
+    Source: 'src/../../../../src/protocol_core.rs', lines 25:0-38:1 -/
+def protocol_core.validate_protocol_version_bounds
+  (minimum : Std.U16) (maximum : Std.U16) :
+  RustM protocol_core.ProtocolBoundsDecision
+  := do
+  if minimum < protocol_core.SERVER_MIN_PROTOCOL_VERSION
+  then ok protocol_core.ProtocolBoundsDecision.BelowFloor
+  else
+    if maximum < minimum
+    then ok protocol_core.ProtocolBoundsDecision.Reversed
+    else
+      if maximum > protocol_core.SERVER_MAX_PROTOCOL_VERSION
+      then ok protocol_core.ProtocolBoundsDecision.AboveCeiling
+      else ok protocol_core.ProtocolBoundsDecision.Valid
+
 /-- [signal_fish_proof_core::protocol_core::negotiate_protocol_version]:
-    Source: 'src/../../../../src/protocol_core.rs', lines 9:0-23:1 -/
+    Source: 'src/../../../../src/protocol_core.rs', lines 43:0-57:1 -/
 def protocol_core.negotiate_protocol_version
   (client_max : core.option.Option Std.U16) (minimum : Std.U16)
   (maximum : Std.U16) :
@@ -42,7 +70,7 @@ def protocol_core.negotiate_protocol_version
   else ok maximum
 
 /-- [signal_fish_proof_core::protocol_core::decide_handshake_version]:
-    Source: 'src/../../../../src/protocol_core.rs', lines 36:0-54:1 -/
+    Source: 'src/../../../../src/protocol_core.rs', lines 70:0-88:1 -/
 def protocol_core.decide_handshake_version
   (client_max : core.option.Option Std.U16) (endpoint_default : Std.U16)
   (minimum : Std.U16) (maximum : Std.U16) (handshake_complete : Bool) :

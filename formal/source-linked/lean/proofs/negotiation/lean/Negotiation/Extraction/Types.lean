@@ -21,8 +21,17 @@ set_option maxRecDepth 2048
 
 namespace signal_fish_proof_core
 
+/-- [signal_fish_proof_core::protocol_core::ProtocolBoundsDecision]
+    Source: 'src/../../../../src/protocol_core.rs', lines 17:0-22:1 -/
+@[discriminant isize]
+inductive protocol_core.ProtocolBoundsDecision where
+| Valid : protocol_core.ProtocolBoundsDecision
+| BelowFloor : protocol_core.ProtocolBoundsDecision
+| Reversed : protocol_core.ProtocolBoundsDecision
+| AboveCeiling : protocol_core.ProtocolBoundsDecision
+
 /-- [signal_fish_proof_core::protocol_core::HandshakeVersionDecision]
-    Source: 'src/../../../../src/protocol_core.rs', lines 27:0-31:1 -/
+    Source: 'src/../../../../src/protocol_core.rs', lines 61:0-65:1 -/
 @[discriminant isize]
 inductive protocol_core.HandshakeVersionDecision where
 | Accepted : Std.U16 → protocol_core.HandshakeVersionDecision
