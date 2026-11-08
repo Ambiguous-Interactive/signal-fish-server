@@ -29,13 +29,11 @@
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
 #     (ubuntu per pull request; macOS + Windows on the daily schedule; all
 #     three OS lanes on manual runs).
-#     The ubuntu leg also enforces the deterministic relay allocation
-#     ceilings — issue #558 moved the standalone relay-allocations job here
-#     so one runner setup covers both, and the bench compile graph reuses
-#     this job's target dir and cache — and runs the H14 equal-fault
+#     The ubuntu leg also runs the H14 equal-fault
 #     amplification experiment — issue #512 retired the standalone h14-pr.yml
 #     workflow, whose runner duplicated this job's checkout, toolchain, and
 #     test-graph build for one already-compiled test
+#   - relay-allocations: Optimized allocation ceilings run beside nextest.
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Supply-chain job (issue #512): cargo-deny policy over every
 #     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
@@ -411,26 +409,13 @@ jobs:
           --no-tests fail
           -E 'test(=validate_config_rejects_tls_for_a_binary_without_tls_support)'
 
-      # Relay allocation ceilings (#558): the deterministic production-seam
-      # allocation budgets run inside this job so one runner setup covers
-      # both (the standalone relay-allocations job was 2.2 billed minutes
-      # plus a runner startup per event), and the bench compile graph reuses
-      # this job's target dir and cache. ubuntu-only, and implicitly
-      # cron-excluded: the schedule cohort is macOS/Windows only (see
-      # ci-matrix), matching the standalone job's schedule exclusion.
-      - name: Enforce deterministic relay allocation ceilings
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cargo bench --locked --bench relay_allocations --features allocation-tracking
-          cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
-
       # H14 equal-fault relay accountability (#512): the nightly-only
       # throttled amplification experiment runs inside this job so a
       # production change keeps its pre-merge signal without the retired
       # h14-pr.yml workflow duplicating this runner's checkout, toolchain
       # install, and test-graph build. ubuntu-only and implicit cron-excluded
-      # (the schedule cohort is macOS/Windows), mirroring the relay-allocation
-      # benches above; the test binary is already part of this job's compiled
+      # (the schedule cohort is macOS/Windows); the test binary is already
+      # part of this job's compiled
       # suite graph, so the marginal per-event cost is the experiment itself.
       # Full H14 attempt evidence artifacts stay on the daily
       # scenario-profiles cron leg (verification-nightly.yml).
@@ -463,6 +448,47 @@ jobs:
         if: always()
         shell: bash
         run: mkdir -p "${CARGO_TARGET_DIR:-target}/tests/target"
+
+  # These optimized builds have a separate graph from the unoptimized test
+  # suite. Run them beside nextest; serial execution added 224 seconds to the
+  # cold #1495 lane. Keep both allocation checks and their release profile.
+  relay-allocations:
+    name: Relay Allocation Ceilings
+    needs: quick-check
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require fast-fail gate success
+        env:
+          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
+        run: test "$QUICK_CHECK_RESULT" = success
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$CHANNEL" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          save-if: >-
+            ${{ github.event_name != 'pull_request' ||
+                github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Enforce deterministic relay allocation ceilings
+        run: |
+          cargo bench --locked --bench relay_allocations --features allocation-tracking
+          cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
 
   doc-consistency:
     name: Doc Consistency

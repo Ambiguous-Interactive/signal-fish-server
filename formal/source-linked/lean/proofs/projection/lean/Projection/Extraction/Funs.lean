@@ -122,7 +122,7 @@ def session_admission.ice_pregather_eligible
   else ok false
 
 /-- [signal_fish_proof_core::session_admission::joiner_supports_sticky_plan]:
-    Source: 'src/../../../../src/session_admission.rs', lines 150:0-157:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 178:0-185:1 -/
 def session_admission.joiner_supports_sticky_plan
   (protocol : session_capability.NegotiatedProtocol)
   (stored : session_admission.ActiveSessionPlan) :

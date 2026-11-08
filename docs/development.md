@@ -238,6 +238,11 @@ Run the owning target during edits:
 scripts/dev-loop.sh <test-name> --clippy
 ```
 
+The development and CI Cargo profiles optimize the `syn` and `proc-macro2`
+dependencies used by source-policy tests. The server stays unoptimized.
+Changing these parser settings causes one dependency rebuild; later scoped
+runs reuse it and check the same source inputs.
+
 The editor keeps automatic save checks off so a full Clippy sweep cannot hold
 Cargo's build lock during scoped agent checks. Editor analysis and completion
 stay enabled. Use the Rust Analyzer `Run flycheck` command for a manual full

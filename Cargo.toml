@@ -331,6 +331,14 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = 0
 
+# Repository policy tests parse every test source. Optimize their parser without
+# optimizing the server or changing which inputs the guards check.
+[profile.dev.package.syn]
+opt-level = 2
+
+[profile.dev.package.proc-macro2]
+opt-level = 2
+
 [profile.ci]
 inherits = "dev"
 debug = 0

@@ -74,3 +74,14 @@ import Capability
 #print axioms Capability.peer_edge_outcomes
 #print axioms Capability.peer_mesh_pair_contract
 #print axioms Capability.peer_host_no_client_edges
+#print axioms Capability.finalize_contract
+#print axioms Capability.finalize_legal_pair
+#print axioms Capability.finalize_member_support
+#print axioms Capability.finalize_no_host
+#print axioms Capability.finalize_host_eligible
+#print axioms Capability.finalize_host_election
+#print axioms Capability.finalize_authority_contract
+#print axioms Capability.finalize_minimum_contract
+#print axioms Capability.finalize_host_exists
+#print axioms Capability.finalize_total_contract
+#print axioms Capability.finalize_outcomes

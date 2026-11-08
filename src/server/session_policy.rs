@@ -23,7 +23,7 @@
 //! intersection can only widen when members depart — a mid-game data-path
 //! migration would disrupt gameplay for zero correctness gain.
 //!
-//! The selection core ([`choose_session_plan`], [`elect_eligible_host`],
+//! The selection core ([`choose_session_plan`], [`crate::session_member::elect_eligible_host`],
 //! `SessionPlanDecision::plan_for`) is pure and unit-testable; the thin
 //! [`EnhancedGameServer::emit_session_plan`] method gathers per-member
 //! capabilities, runs the core, and best-effort delivers the result — gated on
@@ -78,7 +78,6 @@ pub(crate) use crate::session_capability::SessionCapabilities;
 #[cfg(all(test, signal_fish_repository_tests))]
 pub(crate) use crate::session_member::elect_host;
 pub(crate) use crate::session_member::SessionMember;
-use crate::session_member::{elect_eligible_host, select_session_pair};
 #[cfg(all(test, signal_fish_repository_tests))]
 pub(crate) use crate::session_member::{RELAY_FLOOR, UPGRADE_LADDER};
 
@@ -286,17 +285,17 @@ pub(crate) fn choose_session_plan(
 ) -> SessionPlanDecision {
     let desired = desired_topology_for(game_name, cfg);
 
-    // Walk the richest-first ladder and settle on the first rung that fits the
-    // `desired` ceiling, has its transport enabled, and is supported by *every*
-    // member; otherwise fall to the universal relay floor (ADR-0001 §1/§3).
-    let (topology, transport) =
-        select_session_pair(&members, desired, cfg.enable_direct, cfg.enable_webrtc);
-
-    let host = if topology == Topology::Host {
-        elect_eligible_host(authority, members.as_slice(), topology, transport)
-    } else {
-        None
-    };
+    let ActiveSessionPlan {
+        topology,
+        transport,
+        host,
+    } = crate::session_admission::finalize_session_plan(
+        authority,
+        members.as_slice(),
+        desired,
+        cfg.enable_direct,
+        cfg.enable_webrtc,
+    );
 
     SessionPlanDecision {
         generation: SessionGeneration::new_v4(),
@@ -1037,7 +1036,7 @@ impl EnhancedGameServer {
     /// `RequestAuthority` has no version gate), but it must never be named host
     /// of a session it cannot run — the v3 members would receive a failover
     /// plan naming a host that cannot anchor the selected transport.
-    /// [`elect_eligible_host`] applies the capability and Direct endpoint gates
+    /// [`crate::session_member::elect_eligible_host`] applies the capability and Direct endpoint gates
     /// before authority preference. Finalize-time [`choose_session_plan`] uses
     /// the same gate because `all_support` does not require Direct endpoints.
     ///

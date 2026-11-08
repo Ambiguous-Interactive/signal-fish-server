@@ -89,6 +89,17 @@ THEOREMS = {"negotiation": (
     "Capability.peer_edge_outcomes",
     "Capability.peer_mesh_pair_contract",
     "Capability.peer_host_no_client_edges",
+    "Capability.finalize_contract",
+    "Capability.finalize_legal_pair",
+    "Capability.finalize_member_support",
+    "Capability.finalize_no_host",
+    "Capability.finalize_host_eligible",
+    "Capability.finalize_host_election",
+    "Capability.finalize_authority_contract",
+    "Capability.finalize_minimum_contract",
+    "Capability.finalize_host_exists",
+    "Capability.finalize_total_contract",
+    "Capability.finalize_outcomes",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",
@@ -281,7 +292,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/Election.lean:",
                     "Capability/Verification/EligibleElection.lean:",
                     "Capability/Verification/Membership.lean:",
-                    "Capability/Verification/PeerEdges.lean:")
+                    "Capability/Verification/PeerEdges.lean:",
+                    "Capability/Verification/Finalize.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -311,6 +323,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/PeerEdges.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the peer-edge contract: {name}\n{result.stdout}")
+    if name.startswith("finalize-") and not all(
+            error.startswith("Capability/Verification/Finalize.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the finalize contract: {name}\n{result.stdout}")
     if name.startswith("membership-") and not all(
             error.startswith("Capability/Verification/Membership.lean:")
             and "unsolved goals" in error for error in locations):
@@ -620,6 +636,17 @@ def capability_mutations():
         "peer-host": ("Some(host) if recipient.player_id == host => Some(false)", "Some(host) if recipient.player_id == host => Some(true)"),
         "peer-relay": ("Topology::Relay => None,", "Topology::Relay => Some(false),"),
     })
+    changes.update({
+        "finalize-ceiling": ("members.as_ref(),\n        desired,", "members.as_ref(),\n        Topology::Relay,"),
+        "finalize-switch": ("enable_direct,\n        enable_webrtc,", "enable_direct,\n        enable_direct,"),
+        "finalize-host-gate": ("let host = if topology == Topology::Host {\n        crate::session_member::elect_eligible_host", "let host = if topology != Topology::Host {\n        crate::session_member::elect_eligible_host"),
+        "finalize-authority": (
+            "crate::session_member::elect_eligible_host(authority, members, topology, transport)",
+            "if authority.is_some() { authority } else { crate::session_member::elect_eligible_host(authority, members, topology, transport) }"),
+        "finalize-host-transport": (
+            "crate::session_member::elect_eligible_host(authority, members, topology, transport)",
+            "crate::session_member::elect_eligible_host(authority, members, topology, Transport::Direct)"),
+    })
     return {
         name: (capability_mutation_source(name), before, after)
         for name, (before, after) in changes.items()
@@ -628,7 +655,7 @@ def capability_mutations():
 
 def capability_mutation_source(name):
     """Resolve the production file for each capability fault family."""
-    if name.startswith(("host-", "membership-")):
+    if name.startswith(("host-", "membership-", "finalize-")):
         return "src/session_admission.rs"
     if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-", "peer-")):
         return "src/session_member.rs"
@@ -680,7 +707,8 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.PeerEdges"] if name.startswith("peer-") else
+                }.get(name, ["Capability.Verification.Finalize"] if name.startswith("finalize-") else
+                      ["Capability.Verification.PeerEdges"] if name.startswith("peer-") else
                       ["Capability.Verification.Membership"] if name.startswith("membership-") else
                       ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
                       ["Capability.Verification.Election"] if name.startswith("election-") else
@@ -690,7 +718,8 @@ def capability_mutants(crate, *, names=None):
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.Members"] if name.startswith("peer-") else
+                run(["lake", "build", "Capability.Verification.FinalizeInputs", "Capability.Verification.ElectionFixtures"] if name.startswith("finalize-") else
+                    ["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.Members"] if name.startswith("peer-") else
                     ["lake", "build", "Capability.Verification.MembershipInputs"] if name.startswith("membership-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
@@ -1007,13 +1036,31 @@ def main():
             capability_probe_status = probe_capability(HERE)
         completed = True
     finally:
-        unchanged = all(path.read_bytes() == value for path, value in sources_before.items())
-        locks_unchanged = all(path.read_bytes() == value for path, value in locks_before.items())
+        changed_source_inputs = []
+        changed_protected_inputs = []
+        missing_inputs = []
+        for before, changed in ((sources_before, changed_source_inputs),
+                                (locks_before, changed_protected_inputs)):
+            for path, value in before.items():
+                relative = path.relative_to(ROOT).as_posix()
+                try:
+                    current = path.read_bytes()
+                except FileNotFoundError:
+                    changed.append(relative)
+                    missing_inputs.append(relative)
+                else:
+                    if current != value:
+                        changed.append(relative)
+        unchanged = not changed_source_inputs
+        locks_unchanged = not changed_protected_inputs
         LOGS.mkdir(parents=True, exist_ok=True)
         (LOGS / "results.json").write_text(json.dumps({
             "hax_version": VERSION, "source_sha256": digest,
             "completed": completed and unchanged and locks_unchanged,
             "source_unchanged": unchanged, "locks_unchanged": locks_unchanged,
+            "changed_source_inputs": changed_source_inputs,
+            "changed_protected_inputs": changed_protected_inputs,
+            "missing_inputs": missing_inputs,
             "source_hashes": {str(path.relative_to(ROOT)): hashlib.sha256(value).hexdigest()
                               for path, value in sources_before.items()},
             "proved_scenarios": proved_scenarios, "capability_probe_status": capability_probe_status,
@@ -1024,9 +1071,13 @@ def main():
             "runs": RUNS,
         }, indent=2) + "\n")
         if not unchanged:
-            raise RuntimeError("Production source changed during verification")
+            paths = ", ".join(f"{path} (missing)" if path in missing_inputs else path
+                              for path in changed_source_inputs)
+            raise RuntimeError(f"Production source changed during verification: {paths}")
         if not locks_unchanged:
-            raise RuntimeError("Verification changed a pinned tool or dependency file")
+            paths = ", ".join(f"{path} (missing)" if path in missing_inputs else path
+                              for path in changed_protected_inputs)
+            raise RuntimeError(f"Verification changed protected inputs: {paths}")
     print("PASS: current production source verified; source unchanged", flush=True)
 
 

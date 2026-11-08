@@ -71,6 +71,34 @@ impl ActiveSessionPlan {
     }
 }
 
+/// Resolve a finalized session over one member snapshot.
+/// AsRef and IntoIterator must expose the same members in the same order.
+/// Production supplies a shared slice, which preserves both views.
+pub(crate) fn finalize_session_plan<'a>(
+    authority: Option<Uuid>,
+    members: impl AsRef<[SessionMember]> + IntoIterator<Item = &'a SessionMember>,
+    desired: Topology,
+    enable_direct: bool,
+    enable_webrtc: bool,
+) -> ActiveSessionPlan {
+    let (topology, transport) = crate::session_member::select_session_pair(
+        members.as_ref(),
+        desired,
+        enable_direct,
+        enable_webrtc,
+    );
+    let host = if topology == Topology::Host {
+        crate::session_member::elect_eligible_host(authority, members, topology, transport)
+    } else {
+        None
+    };
+    ActiveSessionPlan {
+        topology,
+        transport,
+        host,
+    }
+}
+
 /// Deterministic sticky plan update after a membership or endpoint change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MembershipPlan {
@@ -159,6 +187,137 @@ pub(crate) fn joiner_supports_sticky_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1464: compare the complete plan with the ADR table and sorted candidates.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn finalized_plan_matches_protocol_and_sorted_host_oracle() {
+        use crate::session_capability::SessionCapabilities;
+        use crate::session_member::DirectEndpoint;
+
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let capability = |version, mask: u8| SessionCapabilities {
+            version,
+            relay_transport: mask & 1 != 0,
+            direct_transport: mask & 2 != 0,
+            webrtc_transport: mask & 4 != 0,
+            relay_topology: mask & 8 != 0,
+            host_topology: mask & 16 != 0,
+            mesh_topology: mask & 32 != 0,
+        };
+        let supports = |member: &SessionMember, topology, transport| {
+            let c = member.capabilities;
+            c.version >= 3
+                && match topology {
+                    Topology::Relay => c.relay_topology,
+                    Topology::Host => c.host_topology,
+                    Topology::Mesh => c.mesh_topology,
+                }
+                && match transport {
+                    Transport::Relay => c.relay_transport,
+                    Transport::Direct => c.direct_transport,
+                    Transport::WebRtc => c.webrtc_transport,
+                }
+        };
+        for version in [0, 2, 3, 4, u16::MAX] {
+            for mask in 0_u8..64 {
+                for endpoint in [false, true] {
+                    let candidate = SessionMember {
+                        player_id: second,
+                        player_name: "candidate".into(),
+                        is_authority: true,
+                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        direct_endpoint: endpoint.then(|| DirectEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: 9000,
+                        }),
+                        capabilities: capability(version, mask),
+                    };
+                    let ready = SessionMember {
+                        player_id: first,
+                        player_name: "ready".into(),
+                        is_authority: false,
+                        direct_endpoint: Some(DirectEndpoint {
+                            host: "127.0.0.1".into(),
+                            port: 9001,
+                        }),
+                        capabilities: capability(3, 63),
+                        ..candidate.clone()
+                    };
+                    for members in [
+                        vec![],
+                        vec![candidate.clone()],
+                        vec![candidate.clone(), ready.clone()],
+                        vec![ready, candidate.clone()],
+                    ] {
+                        for desired in [Topology::Relay, Topology::Host, Topology::Mesh] {
+                            for direct in [false, true] {
+                                for webrtc in [false, true] {
+                                    for authority in
+                                        [None, Some(first), Some(second), Some(Uuid::nil())]
+                                    {
+                                        let rank = |topology| match topology {
+                                            Topology::Relay => 0,
+                                            Topology::Host => 1,
+                                            Topology::Mesh => 2,
+                                        };
+                                        let (topology, transport) = [
+                                            (Topology::Mesh, Transport::WebRtc),
+                                            (Topology::Host, Transport::WebRtc),
+                                            (Topology::Host, Transport::Direct),
+                                        ]
+                                        .into_iter()
+                                        .find(|&(topology, transport)| {
+                                            !members.is_empty()
+                                                && rank(topology) <= rank(desired)
+                                                && match transport {
+                                                    Transport::Direct => direct,
+                                                    Transport::WebRtc => webrtc,
+                                                    Transport::Relay => true,
+                                                }
+                                                && members
+                                                    .iter()
+                                                    .all(|m| supports(m, topology, transport))
+                                                && (transport != Transport::Direct
+                                                    || members.iter().any(|m| {
+                                                        supports(m, topology, transport)
+                                                            && m.direct_endpoint.is_some()
+                                                    }))
+                                        })
+                                        .unwrap_or((Topology::Relay, Transport::Relay));
+                                        let mut eligible: Vec<_> = members
+                                            .iter()
+                                            .filter(|m| {
+                                                supports(m, topology, transport)
+                                                    && (transport != Transport::Direct
+                                                        || m.direct_endpoint.is_some())
+                                            })
+                                            .collect();
+                                        eligible.sort_by_key(|m| (m.joined_at, m.player_id));
+                                        let host = if topology == Topology::Host {
+                                            authority
+                                                .filter(|id| {
+                                                    eligible.iter().any(|m| m.player_id == *id)
+                                                })
+                                                .or_else(|| eligible.first().map(|m| m.player_id))
+                                        } else {
+                                            None
+                                        };
+                                        assert_eq!(
+                                            finalize_session_plan(authority, members.as_slice(), desired, direct, webrtc),
+                                            ActiveSessionPlan { topology, transport, host },
+                                            "version={version} mask={mask} endpoint={endpoint} desired={desired:?} direct={direct} webrtc={webrtc} authority={authority:?} members={members:?}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// #1464: independent protocol oracle covers every branch and stored pair.
     #[test]
