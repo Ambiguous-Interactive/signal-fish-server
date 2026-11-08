@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 65)
+        self.assertEqual(sum(map(len, definitions)), 71)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -249,6 +249,27 @@ class RequiredAggregation(unittest.TestCase):
                 (0, diagnostic),
                 (1, diagnostic.replace("Pregather.lean", "Admission.lean")),
                 (1, diagnostic.replace("Verification/Pregather", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "projection", name)
+
+    def test_transport_status_faults_require_only_semantic_gate_failures(self):
+        """Each changed state rule must reject its own contract, after successful extraction."""
+        diagnostic = "error: Projection/Verification/TransportStatus.lean:42:6: unsolved goals\n"
+        names = [name for name in verify.projection_mutations() if name.startswith("status-")]
+        self.assertEqual(len(names), 6)
+        for name in names:
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "projection", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("TransportStatus.lean", "Admission.lean")),
+                (1, diagnostic.replace("Verification/TransportStatus", "Extraction/Funs")),
                 (1, diagnostic.replace("unsolved goals", "unknown identifier")),
                 (1, diagnostic.replace("unsolved goals", "Type mismatch")),
                 (1, diagnostic + "error: dependency unavailable\n"),

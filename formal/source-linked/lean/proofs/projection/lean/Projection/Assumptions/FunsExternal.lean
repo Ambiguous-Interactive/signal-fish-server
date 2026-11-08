@@ -22,3 +22,14 @@ set_option maxHeartbeats 1000000
 /- You can set the `maxRecDepth` value with the `-max-recdepth` CLI option -/
 set_option maxRecDepth 2048
 open signal_fish_proof_core
+
+/-- Trusted UUID 1.29.0 equality mapping, shared with the capability scenario.
+The locked dependency derives PartialEq on its sole [u8; 16] field. This is
+an interpretation of that dependency, not a proof of its Rust implementation. -/
+noncomputable def uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq (left right : uuid.Uuid) : RustM Bool :=
+  RustM.ok (decide (left = right))
+
+noncomputable def uuid.Uuid.Insts.CoreCmpPartialEqUuid : core.cmp.PartialEq uuid.Uuid uuid.Uuid := {
+  eq := uuid.Uuid.Insts.CoreCmpPartialEqUuid.eq
+  ne := fun left right => RustM.ok (decide (left ≠ right))
+}

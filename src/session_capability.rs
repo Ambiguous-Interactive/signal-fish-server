@@ -1,6 +1,7 @@
-//! Pure session capability decisions shared with source-linked proofs.
+//! Session capability decisions and transport-status updates shared with source-linked proofs.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Data-path transport a client can use for game traffic.
 ///
@@ -60,6 +61,46 @@ impl Default for NegotiatedProtocol {
             topologies: vec![Topology::Relay],
         }
     }
+}
+
+/// Result of a negotiated transport-status report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportStatusUpdate {
+    Changed,
+    Duplicate,
+    MissingConnection,
+    UnsupportedProtocolVersion,
+    UnsupportedTransport,
+}
+
+/// Validate a report and update only the current membership's transport state.
+/// The caller owns the connection lookup and holds its mutation guard.
+pub(crate) fn update_transport_status(
+    protocol: &NegotiatedProtocol,
+    membership_generation: Uuid,
+    transport_status: &mut Option<(Uuid, Transport, bool)>,
+    transport: Transport,
+    connected: bool,
+) -> TransportStatusUpdate {
+    if protocol.version < 3 {
+        return TransportStatusUpdate::UnsupportedProtocolVersion;
+    }
+    if !protocol.transports.contains(&transport) {
+        return TransportStatusUpdate::UnsupportedTransport;
+    }
+    let duplicate = match *transport_status {
+        Some((generation, previous_transport, previous_connected)) => {
+            generation == membership_generation
+                && previous_transport == transport
+                && previous_connected == connected
+        }
+        None => false,
+    };
+    if duplicate {
+        return TransportStatusUpdate::Duplicate;
+    }
+    *transport_status = Some((membership_generation, transport, connected));
+    TransportStatusUpdate::Changed
 }
 
 /// Version and set membership used by live session selection.
@@ -182,6 +223,78 @@ mod tests {
     use std::cell::RefCell;
 
     use super::{all_support, NegotiatedProtocol, SessionCapabilities, Topology, Transport};
+
+    /// #1464: every rejection preserves state; accepted reports belong to the current generation.
+    #[test]
+    fn transport_status_update_matches_negotiation_and_membership_contract() {
+        use super::{update_transport_status, TransportStatusUpdate};
+
+        let current = uuid::Uuid::nil();
+        let previous = uuid::Uuid::from_u128(u128::MAX);
+        let transports = [Transport::Relay, Transport::Direct, Transport::WebRtc];
+        let mut prior_states = vec![None];
+        for generation in [current, previous] {
+            for transport in transports {
+                for connected in [false, true] {
+                    prior_states.push(Some((generation, transport, connected)));
+                }
+            }
+        }
+        for version in [0, 2, 3, 4, u16::MAX] {
+            for mask in 0_u8..8 {
+                let protocol = NegotiatedProtocol {
+                    version,
+                    transports: transports
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) != 0)
+                        .flat_map(|(_, transport)| [*transport, *transport])
+                        .collect(),
+                    // Transport reports do not require a negotiated topology.
+                    topologies: vec![],
+                };
+                for (index, transport) in transports.into_iter().enumerate() {
+                    for connected in [false, true] {
+                        for &prior in &prior_states {
+                            let accepted = version >= 3 && mask & (1 << index) != 0;
+                            let report = Some((current, transport, connected));
+                            let expected_outcome = match (version >= 3, accepted, prior == report) {
+                                (false, _, _) => TransportStatusUpdate::UnsupportedProtocolVersion,
+                                (true, false, _) => TransportStatusUpdate::UnsupportedTransport,
+                                (true, true, true) => TransportStatusUpdate::Duplicate,
+                                (true, true, false) => TransportStatusUpdate::Changed,
+                            };
+                            let expected_state = if accepted { report } else { prior };
+                            let mut state = prior;
+                            let outcome = update_transport_status(
+                                &protocol, current, &mut state, transport, connected,
+                            );
+                            assert_eq!(
+                                (outcome, state),
+                                (expected_outcome, expected_state),
+                                "version={version} mask={mask} prior={prior:?} transport={transport:?} connected={connected}"
+                            );
+                            let repeated = update_transport_status(
+                                &protocol, current, &mut state, transport, connected,
+                            );
+                            assert_eq!(
+                                (repeated, state),
+                                (
+                                    if accepted {
+                                        TransportStatusUpdate::Duplicate
+                                    } else {
+                                        expected_outcome
+                                    },
+                                    expected_state
+                                ),
+                                "repeat version={version} mask={mask} prior={prior:?} transport={transport:?} connected={connected}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// The server floor and both live default representations retain the v2 contract.
     #[test]

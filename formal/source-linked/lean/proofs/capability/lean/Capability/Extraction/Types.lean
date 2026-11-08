@@ -23,7 +23,7 @@ set_option maxRecDepth 2048
 namespace signal_fish_proof_core
 
 /-- [signal_fish_proof_core::session_capability::Topology]
-    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
+    Source: 'src/../../../../src/session_capability.rs', lines 34:0-41:1
     Visibility: public -/
 @[discriminant isize]
 inductive session_capability.Topology where
@@ -32,7 +32,7 @@ inductive session_capability.Topology where
 | Mesh : session_capability.Topology
 
 /-- [signal_fish_proof_core::session_capability::Transport]
-    Source: 'src/../../../../src/session_capability.rs', lines 13:0-24:1
+    Source: 'src/../../../../src/session_capability.rs', lines 14:0-25:1
     Visibility: public -/
 @[discriminant isize]
 inductive session_capability.Transport where
@@ -55,7 +55,7 @@ structure session_member.DirectEndpoint where
   port : Std.U16
 
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
-    Source: 'src/../../../../src/session_capability.rs', lines 67:0-75:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 108:0-116:1 -/
 structure session_capability.SessionCapabilities where
   version : Std.U16
   relay_transport : Bool
@@ -124,7 +124,7 @@ def session_member.rung_is_executable.closure :=
 def session_member.all_support.closure := Unit
 
 /-- [signal_fish_proof_core::session_capability::all_support::closure]
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
 def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 

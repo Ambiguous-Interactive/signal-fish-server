@@ -25,6 +25,7 @@ change the server's dependencies or public API.
 | Lean production profiles | Actual `From<&NegotiatedProtocol>` reads the stored version and both vectors; the live resolver uses the fixed v2 floor; both actual defaults agree after projection and reject all session pairs | All representable stored profiles; actual server constant extracted; map selection, locking, member construction, and async correspondence remain outside |
 | Lean profile resolution | Present lookup results preserve all fields; absent results use the supplied floor and exact relay-only fields; projection and support compose through resolution | Every `u16` version/floor and arbitrary representable capability slices; map lookup and room state remain outside; the fixed floor and actual member getter have separate contracts |
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
+| Lean transport-status mutation | Reject without changing state; classify exact current-generation repeats; write the full accepted report; refresh stale generations; modeled totality | Extracted production mutation for all versions, negotiated vectors, UUID generations and prior reports; lookup, locking, lifecycle, routing, metrics and delivery remain outside |
 | Lean peer edges | Both members support the pair; no self edges; complete mesh with UUID glare order; Host star with client offers; Relay has no edges; exact result and modeled termination | Extracted production helper for arbitrary member fields, all pairs and optional hosts; UUID equality/order use the existing trusted mappings; roster enumeration, host lookup, metadata, endpoint/ICE projection and publication remain outside |
 | Lean membership repair | Preserve a usable saved plan; otherwise replace only its host with the eligible election result or remove it and publish relay; exact stored-state update and replan flag; finite modeled termination | Every representable finite member slice, all stored pairs, profiles and authorities; pinned slice enumeration and shared-reference clone; generation, snapshots, endpoint validity, commits and delivery remain outside |
 | Lean ICE pre-gather | Before finalization, allow ICE exactly when both policy switches, non-relay desired topology, v3+ and both requested capability axes hold; agree with production profile projection and support | All switches, desired topologies, finalized flags, `u16` versions and representable capability vectors; configuration/state lookup, ICE composition, credentials and publication remain outside |
@@ -1140,3 +1141,51 @@ endpoint validity/reachability, dependency implementation, generation freshness,
 sticky-state commit, per-recipient plans, serialization, publication and concurrent
 state correspondence remain tested or pending. This stage leaves issue #1464
 open. The existing formal trigger covers the helper and its server caller.
+
+## Transport-status mutation (#1464)
+
+`ConnectionManager::set_transport_status` calls the private production
+`session_capability::update_transport_status` while holding its existing
+connection write guard. The helper receives the actual stored profile,
+membership generation and mutable report. It rejects versions below three
+before checking transport membership. Both rejections preserve the prior
+report. Only an exact `(generation, transport, connected)` repeat is a duplicate.
+Every other admitted report writes that complete tuple for the current generation.
+
+`Projection.transport_status_contract` proves the result and final mutable state
+against an independent tuple-level specification. Six derived contracts check
+rejection preservation, duplicates, accepted writes, stale-generation refresh,
+modeled totality and all four reachable outcomes. Inputs include every `u16`,
+representable capability vector, prior report and UUID value. No topology,
+nonempty-list, current-generation or valid-profile assumption restricts them.
+The Rust matrix independently checks 3,120 initial reports and their repeats.
+Existing manager/router tests cover missing connections and room transitions.
+
+The first extraction used standard-library three-field tuple equality. The
+pinned backend emitted the missing `core.TupleVUT.Insts.CoreCmpPartialEqTupleVUT`
+name. This was an extraction typecheck failure, not a proof rejection. Production
+now compares the three fields explicitly with the same semantics. UUID equality
+uses the same disclosed interpretation of locked uuid 1.29.0 as the capability
+scenario: its sole sixteen-byte field determines equality. The dependency's
+implementation is not proved. No new tool version, custom axiom or tuple model
+was introduced.
+
+Six isolated production-source faults bypass version/transport rejection,
+ignore generation/transport/connected during duplicate detection, or omit the
+state write. Each must compile, fail only its transport-state semantic contract,
+and pass a separately audited wrong-result or wrong-state witness. Restored
+source must pass deterministic extraction, proofs and axiom audits. Run:
+
+```bash
+python3 formal/source-linked/lean/verify.py --scenario projection --mutations \
+  --mutation status-version --mutation status-axis --mutation status-generation \
+  --mutation status-transport --mutation status-connected --mutation status-write
+```
+
+P24 remains open at the caller and concurrent boundaries. The helper does not
+look up the connection or prove that its supplied generation/profile is current.
+Missing-connection handling, DashMap locking, lifecycle checks, router metrics,
+room recipient selection and delivery still have test evidence. Modeled totality
+is not a Tokio scheduling or end-to-end delivery theorem. This refactor changes
+no protocol bytes, errors, API, configuration or runtime outcome; Rust, .NET and
+Godot clients require no changes.

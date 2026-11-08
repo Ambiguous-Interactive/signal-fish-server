@@ -44,7 +44,7 @@ def protocol_core.nonempty_all_support
     ok b1
 
 /-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Topology> for signal_fish_proof_core::session_capability::Topology}::eq]:
-    Source: 'src/../../../../src/session_capability.rs', lines 31:53-31:62
+    Source: 'src/../../../../src/session_capability.rs', lines 32:53-32:62
     Visibility: public -/
 def session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
   (self : session_capability.Topology) (other : session_capability.Topology) :
@@ -55,7 +55,7 @@ def session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
   ok (self1 = other1)
 
 /-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
-    Source: 'src/../../../../src/session_capability.rs', lines 102:4-108:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 143:4-149:5 -/
 def session_capability.SessionCapabilities.supports_topology
   (self : session_capability.SessionCapabilities)
   (topology : session_capability.Topology) :
@@ -67,7 +67,7 @@ def session_capability.SessionCapabilities.supports_topology
   | session_capability.Topology.Mesh => ok self.mesh_topology
 
 /-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
-    Source: 'src/../../../../src/session_capability.rs', lines 94:4-100:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 135:4-141:5 -/
 def session_capability.SessionCapabilities.supports_transport
   (self : session_capability.SessionCapabilities)
   (transport : session_capability.Transport) :
@@ -79,7 +79,7 @@ def session_capability.SessionCapabilities.supports_transport
   | session_capability.Transport.WebRtc => ok self.webrtc_transport
 
 /-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 141:0-149:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 182:0-190:1 -/
 def session_capability.supports_session
   (capabilities : session_capability.SessionCapabilities)
   (topology : session_capability.Topology)
@@ -109,7 +109,7 @@ def session_member.SessionMember.supports_session
   session_capability.supports_session self.capabilities topology transport
 
 /-- [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Transport> for signal_fish_proof_core::session_capability::Transport}::eq]:
-    Source: 'src/../../../../src/session_capability.rs', lines 11:53-11:62
+    Source: 'src/../../../../src/session_capability.rs', lines 12:53-12:62
     Visibility: public -/
 def session_capability.Transport.Insts.CoreCmpPartialEqTransport.eq
   (self : session_capability.Transport) (other : session_capability.Transport)
@@ -121,7 +121,7 @@ def session_capability.Transport.Insts.CoreCmpPartialEqTransport.eq
   ok (self1 = other1)
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::{impl core::cmp::PartialEq<signal_fish_proof_core::session_capability::Transport> for signal_fish_proof_core::session_capability::Transport}]
-    Source: 'src/../../../../src/session_capability.rs', lines 11:53-11:62 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 12:53-12:62 -/
 @[reducible]
 impl_def session_capability.Transport.Insts.CoreCmpPartialEqTransport :
   core.cmp.PartialEq session_capability.Transport session_capability.Transport
@@ -710,7 +710,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_mut]:
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool.call_mut
   {T : Type} {T1 : Type}
@@ -726,7 +726,7 @@ def
   ok (b, c)
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnOnce<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_once]:
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTBool.call_once
   {T : Type} {T1 : Type}
@@ -741,7 +741,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnOnce<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}]
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
 @[reducible]
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTBool
@@ -756,7 +756,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}]
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
 @[reducible]
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool
@@ -774,7 +774,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_capability::all_support]:
-    Source: 'src/../../../../src/session_capability.rs', lines 169:0-178:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 210:0-219:1 -/
 def session_capability.all_support
   {T : Type} {T1 : Type}
   (coreopsfunctionFnT1TupleShared0TSessionCapabilitiesInst :

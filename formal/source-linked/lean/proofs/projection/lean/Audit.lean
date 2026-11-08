@@ -25,3 +25,10 @@ import Projection
 #print axioms Projection.pregather_contract
 #print axioms Projection.pregather_support_contract
 #print axioms Projection.pregather_outcomes
+#print axioms Projection.transport_status_contract
+#print axioms Projection.transport_status_rejection_preserves
+#print axioms Projection.transport_status_duplicate_contract
+#print axioms Projection.transport_status_changed_contract
+#print axioms Projection.transport_status_stale_generation
+#print axioms Projection.transport_status_total_contract
+#print axioms Projection.transport_status_outcomes
