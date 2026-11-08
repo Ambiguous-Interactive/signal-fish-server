@@ -249,18 +249,19 @@ a green rerun alone does not establish a CI time improvement. See
 
 #### Relay Allocation Ceilings
 
-The CI workflow runs the production-seam relay allocation harness on Linux for
-every push and pull request. The harness checks allocation operations,
-reallocations, and allocated bytes for JSON, direct MessagePack, and mixed
-relay projections at room sizes 2, 8, and 16. Since the #558 job
-consolidation, the ceiling commands run as ubuntu-gated steps of the `Nextest
-(ubuntu-latest)` job: the bench compile graph shares the nextest runner's
-toolchain, cache, and target dir instead of paying a second full runner setup.
-Serializer, allocator accounting, or ceiling changes therefore make the CI
-workflow fail when the deterministic gate fails. External branch policy is
-configured separately. The daily security schedule does not run the ceilings
-because it does not inspect newly published advisories: the cron cohort is
-macOS/Windows only, so the ubuntu-gated steps never materialize there.
+The CI workflow runs both production relay allocation harnesses on Linux for
+pull requests and manual verification. The harnesses check allocation operations,
+reallocations, and allocated bytes for JSON, direct MessagePack, and mixed relay
+projections at room sizes 2, 8, and 16. The `Relay Allocation Ceilings` job waits
+on Quick Check, then runs both unchanged optimized benchmarks beside Nextest.
+It has its own Rust dependency cache. The optimized build no longer delays
+Nextest, which uses a separate unoptimized build graph.
+
+Both ceiling commands block the job on failure. External branch policy is
+configured separately. The daily dependency-audit schedule excludes this job.
+A cold run of the prior combined job spent 224 seconds on the allocation
+builds and checks. This is a single baseline sample; hosted runs must measure
+the new job and the full pipeline before claiming a CI speedup.
 
 **Tests that enforce this:** `test_ci_enforces_relay_allocation_ceilings`,
 `test_ci_workflow_has_required_jobs`, and `test_ci_schedule_only_runs_security_jobs`.

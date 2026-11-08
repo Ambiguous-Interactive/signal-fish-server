@@ -1,16 +1,21 @@
 {
-  "base": "a4cc2678ae14bd7603710d6c21abdc1aefb06aab",
-  "reason": "Move the unchanged ICE pre-gather decision into a private source-linked helper. Preserve both switches, desired topology lookup, finalized-room exclusion, version floor, capability membership and ICE emission. Rust, .NET and Godot clients see no behavior, wire, API or configuration changes. Configuration and room/profile lookup, ICE construction and async delivery remain outside the pure proof.",
+  "base": "7666bed37e305edf704e6b54ce265b6aa3176bad",
+  "reason": "Move unchanged finalize-time pair selection and eligible host election into one private source-linked helper. Preserve the configured ceiling, transport switches, authority, member snapshot and order, generation creation and member-vector move. Rust, .NET and Godot clients see no behavior, wire, API or configuration changes. Snapshot lookup, generation freshness, state commit and async publication remain separate obligations. Optimize only the development and CI parser dependencies and keep release runtime profiles unchanged; this changes verification cost only.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "580ff603fcdd0ac2c156d918f66b8a5f74a334d9",
-      "after": "12adcde80f7f9303825fbf075227c3284dde19f6"
+      "before": "12adcde80f7f9303825fbf075227c3284dde19f6",
+      "after": "d48cb2f87fba99f576e52737ff61204742cd6af5"
     },
     {
       "path": "src/session_admission.rs",
-      "before": "cb52c9ad0753308d9490b2d83f5d913a9a370812",
-      "after": "d62f1916571b3d782344ab88ceabb6e601e71992"
+      "before": "d62f1916571b3d782344ab88ceabb6e601e71992",
+      "after": "227aba40a73a243959a6656de09a224f3a2f2f8b"
+    },
+    {
+      "path": "Cargo.toml",
+      "before": "ba96c6328b03119c7abe53315abcf117e42de8df",
+      "after": "aa422758462dbc133206c0773f0c4f9844fec554"
     }
   ]
 }

@@ -1084,3 +1084,50 @@ per-recipient TURN credentials, clocks, serialization, emission, publication or
 concurrent state correspondence. Those P14 and shared caller obligations remain
 tested or pending. This stage does not close issue #1464. The existing formal
 CI trigger covers the helper and server caller and retains the proof evidence.
+
+## Complete production finalize decision (P09)
+
+`session_admission::finalize_session_plan` composes the production pair selector
+and eligible host election. `choose_session_plan` supplies the unchanged resolved
+game ceiling, transport switches, authority and shared member slice. It creates
+the generation after that decision and moves the original vector into the result.
+Rust, .NET and Godot clients have no behavior, wire, API or configuration changes
+and need no updates.
+
+Eleven required contracts in `Capability/Verification/Finalize.lean` check the
+extracted helper. `finalize_contract` gives the exact result under the independent
+ADR waterfall and the checked eligible-election specification. Corollaries check
+all four legal pairs, nonempty/unanimous support for upgrades, absence of a host
+outside Host topology, eligible host membership, authority preference, minimum
+timestamp/UUID fallback, successful termination and reachable outcomes. Host
+existence is derived from the selected rung's nonempty support or Direct-readiness
+witness; it is not an assumed precondition. Duplicate identities and arbitrary
+member metadata remain in the domain. Every `u16` version, capability assignment,
+ceiling, switch, optional authority and representable finite slice is covered.
+
+The natural concrete-slice helper reproduces the pinned Aeneas failure on
+`core::slice::Iter::find` because a higher-ranked lifetime relates to a free
+lifetime. The accepted helper uses one generic argument with `AsRef` and
+`IntoIterator`. Its contract requires both views to expose the same snapshot
+and order. Production passes a shared slice. Lean specializes the actual generic
+helper to the pinned slice `AsRef` identity and slice iterator dictionaries.
+No new mapping, handwritten production replacement or axiom is added. Arbitrary
+custom implementations of those traits are not proved. Rust standard-library
+correspondence, extraction and the existing Chrono/UUID mappings remain trusted.
+
+Five independent compiled production faults change the ceiling, transport switch
+wiring, Host condition, authority gating or election transport. Each must fail
+only the combined finalize semantic contract and pass an audited kernel witness
+of its wrong result. The authority witness names a distinct absent authority.
+Required checks retain source/pin hashes, generated output, logs and timings,
+and require restored-green proofs and deterministic regeneration. The independent
+122,880-case Rust oracle checks the complete pair/host result against the ADR
+table and sorted eligible candidates, including empty rooms, every capability
+subset, old/future versions, missing Direct endpoints, authority IDs and both
+member orders. Existing caller properties remain separate adapter evidence.
+
+Configuration lookup, current room/profile identity, member construction,
+endpoint validity/reachability, dependency implementation, generation freshness,
+sticky-state commit, per-recipient plans, serialization, publication and concurrent
+state correspondence remain tested or pending. This stage leaves issue #1464
+open. The existing formal trigger covers the helper and its server caller.

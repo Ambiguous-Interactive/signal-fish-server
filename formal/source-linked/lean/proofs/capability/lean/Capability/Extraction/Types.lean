@@ -88,14 +88,6 @@ def session_admission.ActiveSessionPlan.host_invalid.closure.closure (T1 :
   Type) (Clause0_IntoIter : Type) :=
   uuid.Uuid × session_admission.ActiveSessionPlan
 
-/-- [signal_fish_proof_core::session_admission::MembershipPlan]
-    Source: 'src/../../../../src/session_admission.rs', lines 76:0-81:1 -/
-structure session_admission.MembershipPlan where
-  plan : session_admission.ActiveSessionPlan
-  active_plan_update : core.option.Option (core.option.Option
-    session_admission.ActiveSessionPlan)
-  is_replan : Bool
-
 /-- [signal_fish_proof_core::session_member::elect_eligible_host::closure]
     Source: 'src/../../../../src/session_member.rs', lines 221:20-221:70 -/
 def session_member.elect_eligible_host.closure (T1 : Type) (Clause0_IntoIter :
@@ -115,25 +107,33 @@ Unit
 def session_member.elect_host.closure (T1 : Type) (Clause0_IntoIter : Type) :=
   session_member.SessionMember
 
-/-- [signal_fish_proof_core::session_capability::all_support::closure]
-    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
-def session_capability.all_support.closure (T : Type) (T1 : Type) :=
-  T1 × session_capability.Topology × session_capability.Transport
-
-/-- [signal_fish_proof_core::session_member::all_support::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
-@[reducible]
-def session_member.all_support.closure := Unit
+/-- [signal_fish_proof_core::session_member::select_session_pair::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
+def session_member.select_session_pair.closure :=
+  session_capability.Topology × Bool × Bool × Slice
+  session_member.SessionMember
 
 /-- [signal_fish_proof_core::session_member::rung_is_executable::closure]
     Source: 'src/../../../../src/session_member.rs', lines 121:17-121:62 -/
 def session_member.rung_is_executable.closure :=
   session_capability.Topology × session_capability.Transport
 
-/-- [signal_fish_proof_core::session_member::select_session_pair::closure]
-    Source: 'src/../../../../src/session_member.rs', lines 177:14-182:9 -/
-def session_member.select_session_pair.closure :=
-  session_capability.Topology × Bool × Bool × Slice
-  session_member.SessionMember
+/-- [signal_fish_proof_core::session_member::all_support::closure]
+    Source: 'src/../../../../src/session_member.rs', lines 104:8-104:36 -/
+@[reducible]
+def session_member.all_support.closure := Unit
+
+/-- [signal_fish_proof_core::session_capability::all_support::closure]
+    Source: 'src/../../../../src/session_capability.rs', lines 175:56-177:5 -/
+def session_capability.all_support.closure (T : Type) (T1 : Type) :=
+  T1 × session_capability.Topology × session_capability.Transport
+
+/-- [signal_fish_proof_core::session_admission::MembershipPlan]
+    Source: 'src/../../../../src/session_admission.rs', lines 104:0-109:1 -/
+structure session_admission.MembershipPlan where
+  plan : session_admission.ActiveSessionPlan
+  active_plan_update : core.option.Option (core.option.Option
+    session_admission.ActiveSessionPlan)
+  is_replan : Bool
 
 end signal_fish_proof_core

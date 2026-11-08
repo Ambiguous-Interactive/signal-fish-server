@@ -1355,12 +1355,9 @@ fn validate_workflow_has_required_jobs(
 // The cargo-audit and SBOM lanes joined the Dependency Audit job for the same
 // reason (#512): the "CI / Audit (cargo-audit)" and "CI / SBOM (CycloneDX)"
 // check names were consolidated into "CI / Dependency Audit".
-// The panic-policy check and the relay-allocation ceilings joined the lint and
-// nextest jobs, respectively (#558), for the same one-runner-setup reason:
-// the "CI / Panic Policy" and "CI / Relay Allocation Ceilings" check names
-// were retired; the checks themselves are pinned by
-// test_ci_lint_job_runs_panic_policy_check and
-// test_ci_enforces_relay_allocation_ceilings. The H14 amplification selector
+// The panic-policy check remains inside lint (#558). The optimized allocation
+// graph now runs beside nextest to remove its compile time from the suite's
+// critical path; both ceilings remain required. The H14 amplification selector
 // joined the nextest job the same way (#512), retiring the "H14 Relay
 // Integrity" check name and the standalone h14-pr.yml workflow; the selector
 // is pinned by test_h14_selector_runs_in_ci_nextest_and_the_standalone_gate_stays_retired.
@@ -1382,11 +1379,8 @@ const REQUIRED_WORKFLOW_NAMES: &[(&str, &str)] = &[
 
 /// Required CI workflow jobs: (job_key, display_name, description)
 ///
-/// The panic-policy and relay-allocation checks are deliberately absent
-/// (issue #558): they are steps inside the `lint` and `nextest` jobs rather
-/// than standalone jobs, so they produce no check names of their own. The
-/// checks themselves are pinned by `test_ci_lint_job_runs_panic_policy_check`
-/// and `test_ci_enforces_relay_allocation_ceilings`.
+/// The panic-policy check stays inside lint. Allocation ceilings have their
+/// own check because their optimized build now runs beside the test suite.
 const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
     (
         "lint",
@@ -1396,7 +1390,12 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
     (
         "nextest",
         "Nextest (${{ matrix.os }})",
-        "Cross-OS test execution via cargo-nextest; ubuntu leg adds the relay-allocation ceilings (#558)",
+        "Cross-OS test execution via cargo-nextest; ubuntu leg adds H14",
+    ),
+    (
+        "relay-allocations",
+        "Relay Allocation Ceilings",
+        "Optimized production relay and serialization allocation ceilings",
     ),
     (
         "deny",
@@ -1534,6 +1533,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
     "CI / Nextest (ubuntu-latest)",
     "CI / Nextest (windows-latest)",
     "CI / Nextest (macos-latest)",
+    "CI / Relay Allocation Ceilings",
     "CI / Dependency Audit",
     "CI / MSRV Verification",
     "CI / Docker Build",
@@ -1557,7 +1557,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
 const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "ci.yml",
-        "Main CI pipeline (lint+panic-policy, nextest+relay-allocations+H14, deny/audit/SBOM, MSRV, Docker, coverage)",
+        "Main CI pipeline (lint+panic-policy, nextest+H14, relay-allocations, deny/audit/SBOM, MSRV, Docker, coverage)",
     ),
     (
         "doc-validation.yml",
@@ -2127,8 +2127,8 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // cron and manual verification via their event guards. Coverage duplicates
     // the per-event nextest suite; msrv checks compilation on pull requests
     // and runs its full test suite on cron and manual verification. The
-    // panic-policy and relay-allocation checks are steps of the lint and
-    // nextest jobs (#558), so the jobs pinned here cover them transitively.
+    // panic-policy check is a step of lint. Allocation ceilings have their
+    // own optimized build and must also wait on the fast-fail gate.
     // The cron/manual lanes (lint, nextest, msrv, coverage) also wait
     // on the verified-head guard (issue #702): it is their one permitted
     // scheduled skip path. `docker` never runs on schedule, so it needs no
@@ -2139,6 +2139,10 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         (
             "msrv",
             "${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}",
+        ),
+        (
+            "relay-allocations",
+            "${{ !cancelled() && github.event_name != 'schedule' }}",
         ),
         (
             "docker",
@@ -2382,53 +2386,66 @@ fn test_doc_validation_uses_prebuilt_taplo() {
 
 #[test]
 fn test_ci_enforces_relay_allocation_ceilings() {
-    // Issue #558: the deterministic production-seam allocation ceilings are
-    // steps of the `nextest` job (ubuntu leg) rather than a standalone
-    // `relay-allocations` job, so the bench compile graph shares the nextest
-    // runner's toolchain, cache, and target dir. Pin the commands, their
-    // ubuntu-only guard, and their placement after the suite inside the job.
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
-    let job = extract_workflow_job_block(&workflow, "nextest")
-        .expect("ci.yml must define the nextest job");
-
-    assert!(
-        extract_workflow_job_block(&workflow, "relay-allocations").is_none(),
-        "the standalone `relay-allocations` job was consolidated into `nextest` \
-         (issue #558); do not reintroduce it as a separate runner setup"
+    let documents = Yaml::load_from_str(&workflow).expect("valid CI workflow");
+    let job = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("relay-allocations"))
+        .expect("allocation ceilings must have a separate job beside nextest");
+    assert_eq!(
+        job.as_mapping_get("needs").and_then(Yaml::as_str),
+        Some("quick-check"),
+        "allocation builds must wait on quick-check, without serializing behind nextest"
     );
-
-    let step_start = job
-        .find("- name: Enforce deterministic relay allocation ceilings")
-        .expect("ci.yml `nextest` must enforce the relay allocation ceilings on its ubuntu leg");
-    let step_end = step_start
-        + job[step_start..]
-            .find("\n      - name:")
-            .unwrap_or(job.len() - step_start);
-    let step = &job[step_start..step_end];
-
-    assert!(
-        step.contains("if: matrix.os == 'ubuntu-latest'"),
-        "ci.yml `nextest` relay-allocation steps must stay ubuntu-only: the \
-         cron cohort is macOS/Windows only, which is what keeps the ceilings \
-         off the daily schedule"
+    assert_eq!(
+        job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("ubuntu-latest")
     );
-
-    for (benchmark, purpose) in [
-        ("relay_allocations", "production relay path"),
-        (
-            "relay_serialization_allocations",
-            "exact serialization projection",
-        ),
-    ] {
-        let command =
-            format!("cargo bench --locked --bench {benchmark} --features allocation-tracking");
-        assert!(
-            step.contains(&command),
-            "ci.yml `nextest` must enforce the {purpose} ceiling. \
-             Fix: add `{command}` as an ubuntu-gated step of that job."
-        );
-    }
+    assert_ne!(
+        job.as_mapping_get("continue-on-error")
+            .and_then(Yaml::as_bool),
+        Some(true),
+        "allocation ceilings must block failed changes"
+    );
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("allocation job steps");
+    let check = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Enforce deterministic relay allocation ceilings")
+        })
+        .expect("allocation check step");
+    assert!(
+        check.as_mapping_get("if").is_none(),
+        "both ceilings must always run in the admitted job"
+    );
+    assert_ne!(
+        check
+            .as_mapping_get("continue-on-error")
+            .and_then(Yaml::as_bool),
+        Some(true),
+        "allocation failures cannot be informational"
+    );
+    let commands = check
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("allocation check commands")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            "cargo bench --locked --bench relay_allocations --features allocation-tracking",
+            "cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking",
+        ],
+        "keep both complete optimized allocation budgets; do not add filters or change profiles"
+    );
 }
 
 #[test]
@@ -29150,10 +29167,10 @@ const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 /// trigger (for CVE detection). The `lint` and `nextest` jobs are also
 /// absent: their per-leg guards (`CI_MATRIX_GUARD`, issues #513 and #512)
 /// admit only their macOS + Windows legs on the schedule and are pinned
-/// separately, and their ubuntu legs (with the #558 panic-policy and
-/// relay-allocation steps) never materialize on the cron cohort.
+/// separately, and their ubuntu legs (with the #558 panic-policy and H14
+/// steps) never materialize on the cron cohort.
 /// `quick-check` is absent by design: it gates the cron legs.
-const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &["doc-consistency", "docker"];
+const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &["doc-consistency", "docker", "relay-allocations"];
 
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
@@ -34468,7 +34485,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // 520 (was 517): the shared ICE pre-gather gate adds two return-value sites,
 // and its finalized-state adapter adds one net predicate site (#1464).
 // With 52 shards, ceil(520/52) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 520;
+// 521 (was 520): shared final plan assembly adds one return-value site (#1464).
+// With 53 shards, ceil(521/53) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 521;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -34736,12 +34755,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/52"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/53"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/52` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/53` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -34892,7 +34911,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/52 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/53 --print-cmd",
         violations.join("\n")
     );
 }

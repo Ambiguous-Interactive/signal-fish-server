@@ -11,3 +11,4 @@ import Capability.Verification.ElectionOrder
 import Capability.Verification.EligibleElection
 import Capability.Verification.Membership
 import Capability.Verification.PeerEdges
+import Capability.Verification.Finalize

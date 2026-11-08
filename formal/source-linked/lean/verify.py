@@ -89,6 +89,17 @@ THEOREMS = {"negotiation": (
     "Capability.peer_edge_outcomes",
     "Capability.peer_mesh_pair_contract",
     "Capability.peer_host_no_client_edges",
+    "Capability.finalize_contract",
+    "Capability.finalize_legal_pair",
+    "Capability.finalize_member_support",
+    "Capability.finalize_no_host",
+    "Capability.finalize_host_eligible",
+    "Capability.finalize_host_election",
+    "Capability.finalize_authority_contract",
+    "Capability.finalize_minimum_contract",
+    "Capability.finalize_host_exists",
+    "Capability.finalize_total_contract",
+    "Capability.finalize_outcomes",
     "Capability.timestamp_key_order",
     "Capability.timestamp_key_equal",
     "Capability.uuid_key_equal",
@@ -281,7 +292,8 @@ def check_proof_rejection(result, scenario, name):
                     "Capability/Verification/Election.lean:",
                     "Capability/Verification/EligibleElection.lean:",
                     "Capability/Verification/Membership.lean:",
-                    "Capability/Verification/PeerEdges.lean:")
+                    "Capability/Verification/PeerEdges.lean:",
+                    "Capability/Verification/Finalize.lean:")
     errors = re.findall(r"^error: (.+)$", result.stdout, re.MULTILINE)
     locations = [error for error in errors if error not in ("Lean exited with code 1", "build failed")]
     if not locations or any(not error.startswith(targets) for error in locations):
@@ -311,6 +323,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Capability/Verification/PeerEdges.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the peer-edge contract: {name}\n{result.stdout}")
+    if name.startswith("finalize-") and not all(
+            error.startswith("Capability/Verification/Finalize.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the finalize contract: {name}\n{result.stdout}")
     if name.startswith("membership-") and not all(
             error.startswith("Capability/Verification/Membership.lean:")
             and "unsolved goals" in error for error in locations):
@@ -620,6 +636,17 @@ def capability_mutations():
         "peer-host": ("Some(host) if recipient.player_id == host => Some(false)", "Some(host) if recipient.player_id == host => Some(true)"),
         "peer-relay": ("Topology::Relay => None,", "Topology::Relay => Some(false),"),
     })
+    changes.update({
+        "finalize-ceiling": ("members.as_ref(),\n        desired,", "members.as_ref(),\n        Topology::Relay,"),
+        "finalize-switch": ("enable_direct,\n        enable_webrtc,", "enable_direct,\n        enable_direct,"),
+        "finalize-host-gate": ("let host = if topology == Topology::Host {\n        crate::session_member::elect_eligible_host", "let host = if topology != Topology::Host {\n        crate::session_member::elect_eligible_host"),
+        "finalize-authority": (
+            "crate::session_member::elect_eligible_host(authority, members, topology, transport)",
+            "if authority.is_some() { authority } else { crate::session_member::elect_eligible_host(authority, members, topology, transport) }"),
+        "finalize-host-transport": (
+            "crate::session_member::elect_eligible_host(authority, members, topology, transport)",
+            "crate::session_member::elect_eligible_host(authority, members, topology, Transport::Direct)"),
+    })
     return {
         name: (capability_mutation_source(name), before, after)
         for name, (before, after) in changes.items()
@@ -628,7 +655,7 @@ def capability_mutations():
 
 def capability_mutation_source(name):
     """Resolve the production file for each capability fault family."""
-    if name.startswith(("host-", "membership-")):
+    if name.startswith(("host-", "membership-", "finalize-")):
         return "src/session_admission.rs"
     if name.startswith(("member-", "executable-", "selection-", "election-", "eligible-", "peer-")):
         return "src/session_member.rs"
@@ -680,7 +707,8 @@ def capability_mutants(crate, *, names=None):
                 target = {
                     "extra-callback": ["Capability.Verification.CallbackSemantics"],
                     "wrong-callback-transport": ["Capability.Verification.ConcreteCallbacks"],
-                }.get(name, ["Capability.Verification.PeerEdges"] if name.startswith("peer-") else
+                }.get(name, ["Capability.Verification.Finalize"] if name.startswith("finalize-") else
+                      ["Capability.Verification.PeerEdges"] if name.startswith("peer-") else
                       ["Capability.Verification.Membership"] if name.startswith("membership-") else
                       ["Capability.Verification.EligibleElection"] if name.startswith("eligible-") else
                       ["Capability.Verification.Election"] if name.startswith("election-") else
@@ -690,7 +718,8 @@ def capability_mutants(crate, *, names=None):
                       ["Capability.Verification.Members"] if name.startswith("member-") else [])
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "capability", name)
-                run(["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.Members"] if name.startswith("peer-") else
+                run(["lake", "build", "Capability.Verification.FinalizeInputs", "Capability.Verification.ElectionFixtures"] if name.startswith("finalize-") else
+                    ["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.Members"] if name.startswith("peer-") else
                     ["lake", "build", "Capability.Verification.MembershipInputs"] if name.startswith("membership-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures", "Capability.Verification.ConcreteCallbacks"] if name.startswith("eligible-") else
                     ["lake", "build", "Capability.Verification.ElectionFixtures"] if name.startswith("election-") else
