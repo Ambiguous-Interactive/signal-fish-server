@@ -27,6 +27,7 @@ change the server's dependencies or public API.
 | Lean stored-host validity | A Host plan is invalid exactly when its saved identity has no eligible matching current member; non-Host plans need no host | Every representable finite member slice and all stored pairs; UUID byte equality is a trusted external mapping; election, plan updates and publication remain outside |
 | Lean peer edges | Both members support the pair; no self edges; complete mesh with UUID glare order; Host star with client offers; Relay has no edges; exact result and modeled termination | Extracted production helper for arbitrary member fields, all pairs and optional hosts; UUID equality/order use the existing trusted mappings; roster enumeration, host lookup, metadata, endpoint/ICE projection and publication remain outside |
 | Lean membership repair | Preserve a usable saved plan; otherwise replace only its host with the eligible election result or remove it and publish relay; exact stored-state update and replan flag; finite modeled termination | Every representable finite member slice, all stored pairs, profiles and authorities; pinned slice enumeration and shared-reference clone; generation, snapshots, endpoint validity, commits and delivery remain outside |
+| Lean ICE pre-gather | Before finalization, allow ICE exactly when both policy switches, non-relay desired topology, v3+ and both requested capability axes hold; agree with production profile projection and support | All switches, desired topologies, finalized flags, `u16` versions and representable capability vectors; configuration/state lookup, ICE composition, credentials and publication remain outside |
 | Lean sticky admission | Admit exactly protocol v3+ profiles containing both stored axes; agree with production profile support; ignore stored host presence and identity | Every `u16`, representable vector, and stored pair, including illegal pairs; UUID is an external type interpretation; map lookup and room admission/publication remain outside |
 | Lean session pair selection | Select the first permitted, unanimously supported and executable ADR rung; otherwise Relay/Relay | Every representable finite member slice, all capability fields, ceilings and switches; configuration lookup, endpoint validation, election, state and publication remain outside |
 | Lean host election | A seated authority wins; otherwise elect the least timestamp/UUID key; only input identities can win; empty input alone returns no host; finite modeled iteration terminates and permutations preserve the winner | Extracted generic production loop instantiated with the pinned slice iterator; Chrono/UUID field interpretations and tuple comparison are trusted mappings; the eligible-filter contracts below cover the shared filter; caller arguments and state remain tested/pending |
@@ -98,6 +99,22 @@ disjoint source faults, restored proofs for each affected scenario, and the
 capability probe. Each fault still needs successful extraction/typechecking,
 the expected semantic rejection, and an audited wrong-result witness.
 Workers retain separate `source-linked-lean-INDEX` evidence artifacts.
+
+Capability faults reuse one isolated worktree per worker. Lake reuses unchanged
+modules by their source and dependency hashes. Each fault resets every production
+input, removes the prior witness, extracts again and runs the same semantic and
+witness checks. The runner snapshots each fault before restoring its inputs.
+Build output stays private to that worktree; workers share only pinned packages.
+A failed extraction, proof, witness or archive still removes the isolated tree.
+
+One local two-fault sample (`member-support`, then `host-topology`) reduced summed
+fault-command time from 79.854 s to 64.882 s (18.7%). The second extraction build
+fell from 18.712 s to 6.061 s; its log rebuilt only the changed function module
+and extraction entry point. Both controls compiled, rejected their contracts,
+passed their audited witnesses and retained separate hashed snapshots. The
+restored positive proofs also passed. The first restored build was cold after
+source-location changes, so whole-run times are not a fair comparison. These
+samples do not establish a hosted CI speedup.
 
 The required `Source-linked Lean Proofs` check waits for all four workers.
 It rejects missing, duplicate, failed or stale reports. It compares production
@@ -1027,3 +1044,43 @@ endpoint/ICE projection, state commit, serialization, delivery or concurrency.
 Those P13 and shared caller obligations remain tested or pending. This stage
 does not close issue #1464. Source and proof inputs use the existing formal CI
 trigger and retained evidence pipeline.
+
+## Production ICE pre-gather gate (P14)
+
+`session_admission::ice_pregather_eligible` owns the production conjunction used
+by the server's pre-gather wrapper. The wrapper supplies the two configuration
+switches, resolved desired topology, finalized-room flag and actual negotiated
+profile. This is an internal refactor. Rust, .NET and Godot clients have no
+protocol, API, configuration or observable behavior changes and need no updates.
+
+`Projection.pregather_contract` checks that ICE is eligible exactly when both
+switches are on, the desired topology is non-relay, the room is not finalized,
+the version is at least three, and the profile contains WebRTC and the desired
+topology. It covers all boolean inputs, all desired topologies, every `u16`
+version and arbitrary representable vectors, including empty, duplicate and
+reordered axes. The exact `RustM.ok` result includes termination in the extracted
+model. `pregather_support_contract` connects this decision to the actual
+`From<&NegotiatedProtocol>` projection and `supports_session` decision.
+`pregather_outcomes` proves reachable Mesh and Host acceptance, future-version
+and duplicate-axis acceptance, and old-version and missing-transport refusal.
+The required proofs live in `Projection/Verification/Pregather.lean` and their
+axiom reports are mandatory in the existing projection gate.
+
+Seven compiled production faults bypass the pre-gather switch, WebRTC switch,
+relay-desired exclusion, finalized-room exclusion, version floor, transport
+membership or topology membership. Only semantic failures in the owning
+pre-gather proof count as rejections. Each fault also requires an audited kernel
+witness that the extracted function returns true for a profile that the omitted
+gate must reject. The runner retains source, extraction, proof, pins, hashes,
+commands and timings and requires restored-green deterministic regeneration.
+An independent Rust wrapper matrix checks 110,592 cases, including every
+capability subset, all lobby states, old/future versions, mapped and default
+desired topologies, both switches, reordered vectors and duplicate axes.
+Existing pre-gather adapter and socket tests remain separate evidence.
+
+These are pure gate proofs. They do not prove configuration lookup, current
+room/profile identity, finalized-state acquisition, ICE server composition,
+per-recipient TURN credentials, clocks, serialization, emission, publication or
+concurrent state correspondence. Those P14 and shared caller obligations remain
+tested or pending. This stage does not close issue #1464. The existing formal
+CI trigger covers the helper and server caller and retains the proof evidence.

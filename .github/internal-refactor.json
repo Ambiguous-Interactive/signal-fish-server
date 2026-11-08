@@ -1,21 +1,16 @@
 {
-  "base": "56f87ede5503199485c0f08c720e327d0497ed33",
-  "reason": "Share the unchanged per-peer session decision between mesh and host projection for source-linked verification. Preserve capability filtering on both sides, self exclusion, roster order, UUID glare order, host-star direction, peer metadata, endpoint and ICE projection, generation, relay floor and public APIs. Move the glare helper with its production caller. Rust, .NET and Godot clients are unaffected. List construction, snapshot and host lookup, state and delivery correspondence remain outside the per-edge proof.",
+  "base": "a4cc2678ae14bd7603710d6c21abdc1aefb06aab",
+  "reason": "Move the unchanged ICE pre-gather decision into a private source-linked helper. Preserve both switches, desired topology lookup, finalized-room exclusion, version floor, capability membership and ICE emission. Rust, .NET and Godot clients see no behavior, wire, API or configuration changes. Configuration and room/profile lookup, ICE construction and async delivery remain outside the pure proof.",
   "files": [
     {
       "path": "src/server/session_policy.rs",
-      "before": "f49c64f910fbc0d76e08e7394355489efe4f65cf",
-      "after": "580ff603fcdd0ac2c156d918f66b8a5f74a334d9"
+      "before": "580ff603fcdd0ac2c156d918f66b8a5f74a334d9",
+      "after": "12adcde80f7f9303825fbf075227c3284dde19f6"
     },
     {
-      "path": "src/server/signaling.rs",
-      "before": "eb45e3d750954b133b424ae53a9f7922a01e9a27",
-      "after": "35d10f5b161e38d1858e1171528d5fd613da9ae4"
-    },
-    {
-      "path": "src/session_member.rs",
-      "before": "07033c07b75352cde24084205eaa34b80a21ff79",
-      "after": "30e4e655abfb54eabfe3149395bfee46800ca5d9"
+      "path": "src/session_admission.rs",
+      "before": "cb52c9ad0753308d9490b2d83f5d913a9a370812",
+      "after": "d62f1916571b3d782344ab88ceabb6e601e71992"
     }
   ]
 }

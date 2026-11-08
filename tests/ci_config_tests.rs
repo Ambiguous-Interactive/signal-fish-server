@@ -34465,7 +34465,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 51 shards, ceil(505/51) * 29s remains 290s.
 // 517 (was 505): shared peer-edge decisions add twelve mutation sites (#1464).
 // With 52 shards, ceil(517/52) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 517;
+// 520 (was 517): the shared ICE pre-gather gate adds two return-value sites,
+// and its finalized-state adapter adds one net predicate site (#1464).
+// With 52 shards, ceil(520/52) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 520;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

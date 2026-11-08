@@ -17,4 +17,4 @@ include = ["signal_fish_proof_core::protocol_core::nonempty_all_support", "signa
 [scenario.projection]
 backend = "lean"
 charon-args = ["--include=uuid::Uuid"]
-include = [ "signal_fish_proof_core::session_admission::joiner_supports_sticky_plan", "signal_fish_proof_core::session_capability::supports_session", "signal_fish_proof_core::session_capability::project_capabilities", "signal_fish_proof_core::session_capability::resolve_capabilities", "signal_fish_proof_core::negotiated_profile_capabilities", "{impl core::default::Default for signal_fish_proof_core::session_capability::*}::default"]
+include = [ "signal_fish_proof_core::session_admission::ice_pregather_eligible", "signal_fish_proof_core::session_admission::joiner_supports_sticky_plan", "signal_fish_proof_core::session_capability::supports_session", "signal_fish_proof_core::session_capability::project_capabilities", "signal_fish_proof_core::session_capability::resolve_capabilities", "signal_fish_proof_core::negotiated_profile_capabilities", "{impl core::default::Default for signal_fish_proof_core::session_capability::*}::default"]

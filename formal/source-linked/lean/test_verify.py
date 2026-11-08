@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 53)
+        self.assertEqual(sum(map(len, definitions)), 60)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -207,6 +207,27 @@ class RequiredAggregation(unittest.TestCase):
                 (0, diagnostic),
                 (1, diagnostic.replace("Admission.lean", "Profiles.lean")),
                 (1, diagnostic.replace("Verification/Admission", "Extraction/Funs")),
+                (1, diagnostic.replace("unsolved goals", "unknown identifier")),
+                (1, diagnostic.replace("unsolved goals", "Type mismatch")),
+                (1, diagnostic + "error: dependency unavailable\n"),
+                (1, ""),
+            ):
+                with self.subTest(name=name, output=output), self.assertRaises(RuntimeError):
+                    verify.check_proof_rejection(SimpleNamespace(returncode=code, stdout=output),
+                                                 "projection", name)
+
+    def test_pregather_faults_require_only_semantic_gate_failures(self):
+        """Each omitted gate must reject its own contract, after successful extraction."""
+        diagnostic = "error: Projection/Verification/Pregather.lean:42:6: unsolved goals\n"
+        names = [name for name in verify.projection_mutations() if name.startswith("pregather-")]
+        self.assertEqual(len(names), 7)
+        for name in names:
+            verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
+                                         "projection", name)
+            for code, output in (
+                (0, diagnostic),
+                (1, diagnostic.replace("Pregather.lean", "Admission.lean")),
+                (1, diagnostic.replace("Verification/Pregather", "Extraction/Funs")),
                 (1, diagnostic.replace("unsolved goals", "unknown identifier")),
                 (1, diagnostic.replace("unsolved goals", "Type mismatch")),
                 (1, diagnostic + "error: dependency unavailable\n"),
@@ -1014,7 +1035,9 @@ class FaultPartitions(unittest.TestCase):
         combined = [name for part in parts for names in part.values() for name in names]
         self.assertCountEqual(combined, full)
         self.assertEqual(len(combined), len(set(combined)))
-        self.assertLessEqual(max(sum(map(len, p.values())) for p in parts), 14)
+        sizes = [sum(map(len, part.values())) for part in parts]
+        self.assertEqual(max(sizes), (len(full) + len(parts) - 1) // len(parts))
+        self.assertLessEqual(max(sizes) - min(sizes), 1)
 
     def test_local_selection_and_invalid_selection(self):
         """Accept explicit local scope and reject unknown, repeated or invalid choices."""
@@ -1153,6 +1176,129 @@ class FaultPartitions(unittest.TestCase):
                     verify.main()
                 self.assertEqual(error.exception.code, 2)
                 run.assert_not_called()
+
+
+class CapabilityWorkspaceReuse(unittest.TestCase):
+    """Reuse build files without allowing one source fault to affect another."""
+
+    def exercise(self, root, failure=None):
+        """Observe isolation, retained evidence and cleanup through every failure seam."""
+        originals = {name: f"{name} original\n" for name in verify.SOURCES}
+        for name, content in originals.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        crate = root / "formal/source-linked/lean"
+        project = crate / "proofs/capability/lean"
+        project.mkdir(parents=True)
+        witnesses = crate / "mutation-witnesses"
+        witnesses.mkdir()
+        changes = {
+            "member-support": ("src/session_member.rs", "original", "first fault"),
+            "host-topology": ("src/session_admission.rs", "original", "second fault"),
+        }
+        for name in changes:
+            (witnesses / f"{name}.lean").write_text(name)
+        (crate / "proofs/negotiation/lean/.lake/packages").mkdir(parents=True)
+        visits = []
+        archives = []
+        resets = []
+        copy_sources = verify.copy_sources
+
+        def reset(tree):
+            """Check that all inputs are restored, including the previous fault's file."""
+            copy_sources(tree)
+            self.assertEqual({name: (tree / name).read_text() for name in originals}, originals)
+            resets.append(tree)
+
+        def extract(copied, scenario):
+            """Require exactly one current fault and a reused isolated build directory."""
+            self.assertEqual(scenario, "capability")
+            index = len(visits)
+            tree = copied.parents[2]
+            name = list(changes)[index]
+            source, before, after = changes[name]
+            expected = dict(originals)
+            expected[source] = expected[source].replace(before, after)
+            self.assertEqual({name: (tree / name).read_text() for name in originals}, expected)
+            current = copied / "proofs/capability/lean"
+            self.assertFalse((current / "Counterexample.lean").exists())
+            marker = current / ".lake/build/cache-marker"
+            if index == 0:
+                self.assertFalse(marker.exists())
+                marker.parent.mkdir()
+                marker.write_text("build output")
+            else:
+                self.assertEqual(copied, visits[0])
+                self.assertEqual(marker.read_text(), "build output")
+            visits.append(copied)
+            if index == 1 and failure == "extract":
+                raise RuntimeError("failed extraction")
+
+        def run(command, current, *, expect_success=True):
+            """Preserve semantic rejection and witness checks after extraction builds."""
+            if command[:3] == ["lake", "env", "lean"]:
+                self.assertEqual((current / "Counterexample.lean").read_text().splitlines()[0],
+                                 list(changes)[len(visits) - 1])
+                if len(visits) == 2 and failure == "witness":
+                    raise RuntimeError("failed witness")
+                return SimpleNamespace(returncode=0, stdout=(
+                    "'Capability.mutation_returns_wrong_value' does not depend on any axioms"))
+            if not expect_success:
+                module = "Members" if len(visits) == 1 else "HostValidity"
+                return SimpleNamespace(returncode=1, stdout=(
+                    f"error: Capability/Verification/{module}.lean:1:1: unsolved goals\n"))
+            return SimpleNamespace(returncode=0, stdout="compiled")
+
+        def retain(tree, copied, scenario, first_run, status):
+            """Snapshot the current failed or accepted fault before restoration."""
+            self.assertEqual(scenario, "capability")
+            archives.append((status, {name: (tree / name).read_text() for name in originals}))
+            if len(visits) == 2 and failure == "archive":
+                raise RuntimeError("failed archive")
+
+        with patch.object(verify, "ROOT", root), \
+                patch.object(verify, "capability_mutations", return_value=changes), \
+                patch.object(verify, "copy_sources", reset), \
+                patch.object(verify, "extract", extract), \
+                patch.object(verify, "check_iterator_alias"), \
+                patch.object(verify, "run", run), \
+                patch.object(verify, "retain_proof_evidence", retain), \
+                patch.object(verify, "verify") as restored:
+            if failure:
+                with self.assertRaisesRegex(RuntimeError, f"failed {failure if failure != 'extract' else 'extraction'}"):
+                    verify.capability_mutants(crate)
+                restored.assert_not_called()
+            else:
+                verify.capability_mutants(crate)
+                restored.assert_called_once_with(crate, "capability")
+        self.assertEqual(len(visits), 2)
+        self.assertEqual(len(resets), 4)
+        self.assertEqual(len(archives), 2)
+        self.assertEqual(archives[0][0], "proof rejected; concrete wrong result kernel-checked")
+        self.assertEqual(archives[1][0], "negative control failed" if failure in ("extract", "witness")
+                         else "proof rejected; concrete wrong result kernel-checked")
+        for index, (_status, inputs) in enumerate(archives):
+            name = list(changes)[index]
+            source, before, after = changes[name]
+            expected = dict(originals)
+            expected[source] = expected[source].replace(before, after)
+            self.assertEqual(inputs, expected)
+        self.assertEqual({name: (root / name).read_text() for name in originals}, originals)
+        self.assertTrue(all(not copied.exists() for copied in visits))
+
+    @patch("builtins.print")
+    def test_faults_share_only_build_state_and_keep_independent_evidence(self, _print):
+        """Two faults in different production files must never accumulate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.exercise(Path(tmp))
+
+    @patch("builtins.print")
+    def test_failed_extraction_witness_and_archive_restore_sources_and_remove_workspace(self, _print):
+        """A failure keeps its fault snapshot and cannot claim restored proofs."""
+        for failure in ("extract", "witness", "archive"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                self.exercise(Path(tmp), failure=failure)
 
 
 if __name__ == "__main__":

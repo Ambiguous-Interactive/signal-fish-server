@@ -22,3 +22,6 @@ import Projection
 #print axioms Projection.admission_support_contract
 #print axioms Projection.admission_host_independent
 #print axioms Projection.admission_outcomes
+#print axioms Projection.pregather_contract
+#print axioms Projection.pregather_support_contract
+#print axioms Projection.pregather_outcomes

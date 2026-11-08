@@ -77,8 +77,52 @@ impl_def session_capability.Transport.Insts.CoreCmpPartialEqTransport :
     session_capability.Transport.Insts.CoreCmpPartialEqTransport
 }
 
+/-- [signal_fish_proof_core::session_admission::ice_pregather_eligible]:
+    Source: 'src/../../../../src/session_admission.rs', lines 10:0-24:1 -/
+def session_admission.ice_pregather_eligible
+  (enable_pregather : Bool) (enable_webrtc : Bool)
+  (desired : session_capability.Topology) (finalized : Bool)
+  (recipient : session_capability.NegotiatedProtocol) :
+  RustM Bool
+  := do
+  if enable_pregather
+  then
+    if enable_webrtc
+    then
+      let b ←
+        core.cmp.PartialEq.ne.default
+          session_capability.Topology.Insts.CoreCmpPartialEqTopology desired
+          session_capability.Topology.Relay
+      if b
+      then
+        if finalized
+        then ok false
+        else
+          if recipient.version >= 3#u16
+          then
+            let s ←
+              alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref
+                recipient.transports
+            let b1 ←
+              core.slice.Slice.contains
+                session_capability.Transport.Insts.CoreCmpPartialEqTransport s
+                session_capability.Transport.WebRtc
+            if b1
+            then
+              let s1 ←
+                alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref
+                  recipient.topologies
+              core.slice.Slice.contains
+                session_capability.Topology.Insts.CoreCmpPartialEqTopology s1
+                desired
+            else ok false
+          else ok false
+      else ok false
+    else ok false
+  else ok false
+
 /-- [signal_fish_proof_core::session_admission::joiner_supports_sticky_plan]:
-    Source: 'src/../../../../src/session_admission.rs', lines 132:0-139:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 150:0-157:1 -/
 def session_admission.joiner_supports_sticky_plan
   (protocol : session_capability.NegotiatedProtocol)
   (stored : session_admission.ActiveSessionPlan) :
