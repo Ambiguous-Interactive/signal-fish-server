@@ -43,6 +43,7 @@ on:
       - "requirements-docs.txt"
       - "rust-toolchain.toml"
       - "scripts/read-toml-string.sh"
+      - "scripts/download-verified.sh"
       - ".github/workflows/doc-validation.yml"
       - ".github/scripts/**"
       - ".github/test-fixtures/**"
@@ -61,6 +62,7 @@ env:
   # Enforced by scripts/check-tooling-parity.sh.
   TAPLO_CLI_VERSION: 0.10.0
   YQ_VERSION: v4.54.1
+  YQ_AMD64_SHA256: 8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
   # Enforce strict rustdoc validation
   RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
 
@@ -314,8 +316,10 @@ jobs:
           trap 'rm -rf "$TEMP_DIR"' EXIT
 
           # Install yq for YAML validation
-          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
-          sudo chmod +x /usr/local/bin/yq
+          bash scripts/download-verified.sh \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            "$YQ_AMD64_SHA256" "$TEMP_DIR/yq"
+          sudo install -m 0755 "$TEMP_DIR/yq" /usr/local/bin/yq
 
           # Use files to accumulate counters (avoids bash subshell scope issues)
           COUNTER_FILE="$TEMP_DIR/counters"

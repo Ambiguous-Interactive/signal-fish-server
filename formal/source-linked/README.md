@@ -1327,8 +1327,10 @@ transport fails for a GitHub release, it can resolve the exact named asset throu
 the official release API. It still checks the caller's original SHA-256 pin on
 the final bytes. An absent or ambiguous asset, invalid asset ID, API error or
 wrong hash fails setup. Python 3 is needed only for this fallback; without it,
-the original download failure remains a failure. Both Lychee setup and the
-pinned elan bootstrap use this helper. The formal path filter includes it.
+the original download failure remains a failure. Lychee setup, pinned elan
+bootstrap and YAML validator setup use this helper. YAML validation retains the
+existing devcontainer version and checksum. Both affected path filters include
+the helper.
 Required offline link validation and every proof/fault gate still run.
 
 Deterministic fixtures cover primary corruption without fallback, successful

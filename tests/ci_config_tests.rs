@@ -32379,6 +32379,66 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+/// Keep YAML validation on the same verified tool bytes as the devcontainer.
+#[test]
+fn test_doc_yaml_bootstrap_uses_pinned_verified_download() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
+    let dockerfile = read_live_file(&root.join(".devcontainer/Dockerfile"));
+    assert_eq!(
+        extract_yaml_version(&workflow, "YQ_AMD64_SHA256"),
+        extract_toml_version(&dockerfile, "ARG YQ_AMD64_SHA256"),
+        "Keep the YAML validator checksum equal to the existing devcontainer pin"
+    );
+    assert!(extract_yaml_version(&workflow, "YQ_AMD64_SHA256").is_some());
+    assert_workflow_triggers_on_paths(
+        &workflow,
+        "doc-validation.yml",
+        &["pull_request"],
+        &[
+            "docs/**",
+            "**/*.md",
+            "**/*.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+            "mkdocs.yml",
+            "requirements-docs.txt",
+            "rust-toolchain.toml",
+            "scripts/read-toml-string.sh",
+            "scripts/download-verified.sh",
+            ".github/workflows/doc-validation.yml",
+            ".github/scripts/**",
+            ".github/test-fixtures/**",
+        ],
+    );
+    let documents = Yaml::load_from_str(&workflow).expect("valid documentation workflow");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("markdown-code-samples"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("documentation validator steps");
+    let step = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Validate YAML code blocks")
+        })
+        .expect("required YAML validation step");
+    let command = step
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("YAML validation command");
+    assert!(
+        command.contains("bash scripts/download-verified.sh")
+            && command.contains("$YQ_AMD64_SHA256")
+            && command.contains("${YQ_VERSION}/yq_linux_amd64")
+            && command.contains("yq eval"),
+        "Use the verified downloader with both pins and retain YAML validation"
+    );
+    assert!(step.as_mapping_get("if").is_none());
+    assert!(step.as_mapping_get("continue-on-error").is_none());
+}
+
 /// Recheck formal evidence when any source or tool-download input changes.
 #[test]
 fn test_formal_verification_triggers_cover_modeled_sources() {
