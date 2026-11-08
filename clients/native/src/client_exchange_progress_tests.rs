@@ -127,6 +127,50 @@ async fn pending_exchange_send_leaves_owner_available() {
                 .await
                 .unwrap();
             assert!(state.pong_deadline.is_none());
+            state.negotiated_version = 3;
+            state.accountability = DeliveryAccountability::new(true);
+            let sender: PlayerInfo = serde_json::from_value(json!({
+                "id": other_peer, "name": "mesh-peer", "is_authority": false,
+                "is_ready": true, "epoch": 1, "seq": 0,
+            }))
+            .unwrap();
+            state.accountability.rebaseline_snapshot(&[sender]).unwrap();
+            let relay = ServerMessage::GameData {
+                from_player: other_peer,
+                data: json!({"relay_msg": "held-core-gameplay", "position": [12, 34]}),
+                seq: Some(1),
+                epoch: Some(1),
+                class: None,
+                key: None,
+            };
+            let relay_handled = tokio::time::timeout(Duration::from_millis(100), async {
+                server_ws
+                    .send(Message::Text(serde_json::to_string(&relay).unwrap().into()))
+                    .await
+                    .unwrap();
+                let frame = state
+                    .ws
+                    .next()
+                    .await
+                    .expect("relay stream stays live")
+                    .expect("relay frame is valid");
+                state
+                    .handle_server_input(Some(Ok(frame)), Instant::now())
+                    .await
+                    .unwrap();
+            })
+            .await;
+            relay_handled
+                .expect("relay GameData reaches the owner before the held RTC core is released");
+            assert!(state.relay_received_from.contains(&other_peer));
+            let duplicate = state
+                .accountability
+                .record_game_data(other_peer, Some(1), Some(1), None, None)
+                .unwrap_err();
+            assert!(
+                duplicate.contains("duplicate/backward"),
+                "the owner applies the relay packet exactly once: {duplicate}"
+            );
             // Both independent sends must reach their remote endpoint before release.
             let mut received = BTreeSet::new();
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -206,6 +250,57 @@ async fn next_send_result(state: &mut Orchestrator<'_>) -> EngineEvent {
     })
     .await
     .expect("link-owned send publishes its completion")
+}
+
+/// Check the exact non-probe body and physical generation at the public Engine boundary.
+async fn expect_gameplay(
+    events: &mut mpsc::UnboundedReceiver<EngineEvent>,
+    expected_peer: PlayerId,
+    expected_generation: u64,
+    expected: &[u8],
+    profile: ChannelProfile,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (peer, generation, label, body, queue_permit) = match events.recv().await.unwrap() {
+                EngineEvent::ChannelMessage {
+                    peer,
+                    generation,
+                    label,
+                    text,
+                    queue_permit,
+                    ..
+                } => {
+                    assert_eq!(profile, ChannelProfile::Reference);
+                    (peer, generation, label, text.into_bytes(), queue_permit)
+                }
+                EngineEvent::ChannelBinaryMessage {
+                    peer,
+                    generation,
+                    label,
+                    data,
+                    queue_permit,
+                    ..
+                } => {
+                    assert_eq!(profile, ChannelProfile::Godot);
+                    (peer, generation, label, data, queue_permit)
+                }
+                EngineEvent::ChannelClosed { .. } | EngineEvent::ChannelReceiveRejected { .. } => {
+                    panic!("fresh gameplay must not terminate the link")
+                }
+                _ => continue,
+            };
+            assert_eq!(
+                (peer, generation, label.as_str()),
+                (expected_peer, expected_generation, RELIABLE_LABEL)
+            );
+            assert_eq!(body, expected, "the fresh link retains every gameplay byte");
+            drop(queue_permit);
+            break;
+        }
+    })
+    .await
+    .expect("exact gameplay crosses the recovered physical link");
 }
 
 /// #1512/#1264: receive refusal and closure fence completed sends before owner dispatch.
@@ -414,6 +509,49 @@ async fn completed_exchange_send_cannot_revive_a_terminal_or_replaced_link() {
                 })
                 .await
                 .expect("fresh generation starts with the exact reliable probe");
+                let gameplay = vec![
+                    if profile == ChannelProfile::Godot {
+                        0xff
+                    } else {
+                        b'G'
+                    };
+                    4096
+                ];
+                state
+                    .engine
+                    .send_channel(peer, RELIABLE_LABEL)
+                    .await
+                    .unwrap()
+                    .send(gameplay.as_slice().into())
+                    .await
+                    .unwrap();
+                let remote_generation = pair.sender.diagnostic_snapshot(state.my_id)["generation"]
+                    .as_u64()
+                    .unwrap();
+                expect_gameplay(
+                    &mut pair.sender_events,
+                    state.my_id,
+                    remote_generation,
+                    &gameplay,
+                    profile,
+                )
+                .await;
+                let reverse = vec![
+                    if profile == ChannelProfile::Godot {
+                        0xfe
+                    } else {
+                        b'R'
+                    };
+                    4096
+                ];
+                pair.sender
+                    .send_channel(state.my_id, RELIABLE_LABEL)
+                    .await
+                    .unwrap()
+                    .send(reverse.as_slice().into())
+                    .await
+                    .unwrap();
+                expect_gameplay(&mut state.engine_rx, peer, fresh, &reverse, profile).await;
                 state.engine.remove_peer(peer).await.unwrap();
                 pair.sender.remove_peer(state.my_id).await.unwrap();
             }
