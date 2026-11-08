@@ -5,12 +5,12 @@
     {
       "path": "src/protocol_core.rs",
       "before": "45f3aac227161151c2d572068287ee1055f59daa",
-      "after": "ab451ccfdcd4c6808ac4f65b0af27618269525cb"
+      "after": "c1a180b6f8302e7b6cc61d1e5393b0b7b18aec2d"
     },
     {
       "path": "src/config/protocol.rs",
       "before": "6ea0c338f8a1c8f18913bcc164c1470d5fb53ca6",
-      "after": "ba154e38236b33697057aeac851332988060f012"
+      "after": "9c7ceaf368dd742a482fa62e0548c6c61e7e79b2"
     },
     {
       "path": "formal/source-linked/README.md",

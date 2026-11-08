@@ -99,6 +99,7 @@ pub(crate) fn nonempty_all_support<T>(members: &[T], supports: impl FnMut(&T) ->
 mod tests {
     use super::{negotiate_protocol_version, nonempty_all_support};
 
+    /// Exercise supported bounds, each refusal, and overlapping invalid conditions under Miri.
     #[test]
     fn protocol_bounds_decisions_preserve_boundaries_and_refusal_priority() {
         use super::{validate_protocol_version_bounds, ProtocolBoundsDecision};

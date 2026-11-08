@@ -652,6 +652,7 @@ mod protocol_version_tests {
         );
     }
 
+    /// Check both full-u16 axes against the three implemented deployment ranges.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn protocol_bounds_validation_exhausts_each_u16_axis_against_legal_ranges() {
@@ -671,6 +672,7 @@ mod protocol_version_tests {
         }
     }
 
+    /// Keep exact diagnostics and reject room-code errors before protocol bounds.
     #[test]
     fn protocol_bounds_validation_preserves_error_text_and_priority() {
         let mut cfg = ProtocolConfig::default();
@@ -694,6 +696,7 @@ mod protocol_version_tests {
         }
     }
 
+    /// Check every explicit u16 client ceiling and both handshake states under each valid deployment.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn protocol_bounds_validated_deployments_preserve_negotiation_and_handshake_safety() {
