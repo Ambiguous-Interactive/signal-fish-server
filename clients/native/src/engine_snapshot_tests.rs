@@ -8,6 +8,7 @@ type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Debug)]
 struct HeldClock {
     inner: Arc<dyn Runtime>,
+    probe_tasks: std::sync::Mutex<Option<Arc<AtomicUsize>>>,
     hold: std::sync::Mutex<
         Option<(
             tokio::sync::oneshot::Sender<()>,
@@ -16,7 +17,17 @@ struct HeldClock {
     >,
 }
 
+struct ProbeTaskGuard(Arc<AtomicUsize>);
+
+impl Drop for ProbeTaskGuard {
+    /// Record capture release when the observed query exits or is cancelled.
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl Runtime for HeldClock {
+    /// Hold one real RTC send inside its core lock until the test releases it.
     fn now(&self) -> std::time::Instant {
         if std::thread::current().name() == Some("snapshot-held-send") {
             if let Some((started, release)) = self.hold.lock().unwrap().take() {
@@ -27,8 +38,19 @@ impl Runtime for HeldClock {
         self.inner.now()
     }
 
+    /// Observe only the next query task so teardown tasks cannot affect its count.
     fn spawn(&self, future: RuntimeFuture<'static, ()>) -> Box<dyn JoinHandle> {
-        self.inner.spawn(future)
+        let observed = self.probe_tasks.lock().unwrap().take();
+        if let Some(observed) = observed {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let guard = ProbeTaskGuard(observed);
+            self.inner.spawn(Box::pin(async move {
+                let _guard = guard;
+                future.await;
+            }))
+        } else {
+            self.inner.spawn(future)
+        }
     }
 
     fn spawn_reactor(
@@ -109,6 +131,7 @@ async fn next_exact_receipt(
     .unwrap()
 }
 
+/// Construct both channel profiles with an observable receiver runtime.
 fn unconnected_pair(profile: ChannelProfile) -> (LivePair, Arc<HeldClock>) {
     let (sender_tx, sender_events) = mpsc::unbounded_channel();
     let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
@@ -120,6 +143,7 @@ fn unconnected_pair(profile: ChannelProfile) -> (LivePair, Arc<HeldClock>) {
     let clock = Arc::new(HeldClock {
         inner: default_runtime().unwrap(),
         hold: Default::default(),
+        probe_tasks: Default::default(),
     });
     let mut receiver = Engine::new(settings, receiver_tx).unwrap();
     receiver.runtime = clock.clone();
@@ -400,5 +424,279 @@ async fn stalled_transport_snapshot_keeps_real_closure_and_receive_refusal_disti
             );
             pair.cleanup().await;
         }
+    }
+}
+
+/// Regression #1507: retire a blocked query, then qualify the fresh link and route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_links_cancel_blocked_selected_pair_queries_before_fresh_gameplay() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for receiver_offers in [false, true] {
+            let (mut pair, clock) = unconnected_pair(profile);
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            let peer = pair.sender_id;
+            let old_generation = pair.receiver.peers[&peer].generation;
+            let live_probes = Arc::new(AtomicUsize::new(0));
+            *clock.probe_tasks.lock().unwrap() = Some(live_probes.clone());
+            let (entered, waiting) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            *clock.hold.lock().unwrap() = Some((entered, released));
+            let channel = pair.receiver.channel(peer, RELIABLE_LABEL).unwrap();
+            let writer = std::thread::Builder::new()
+                .name("snapshot-held-send".into())
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(channel.send_text("held-before-retirement"))
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .unwrap()
+                .unwrap();
+            let (results, mut received) = mpsc::unbounded_channel();
+            assert!(pair
+                .receiver
+                .start_selected_candidate_pair_probe(peer, results));
+            assert_eq!(live_probes.load(Ordering::SeqCst), 1);
+            let early = received.try_recv();
+            assert!(
+                matches!(early, Err(mpsc::error::TryRecvError::Empty)),
+                "actual RTC core keeps query pending"
+            );
+            let (duplicate_results, mut duplicate_received) = mpsc::unbounded_channel();
+            *clock.probe_tasks.lock().unwrap() = Some(live_probes.clone());
+            assert!(pair
+                .receiver
+                .start_selected_candidate_pair_probe(peer, duplicate_results));
+            *clock.probe_tasks.lock().unwrap() = None;
+            let duplicate_bounded = live_probes.load(Ordering::SeqCst) == 1;
+            let duplicate_result = duplicate_received.try_recv();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            let cancelled = tokio::time::timeout(Duration::from_secs(1), async {
+                while live_probes.load(Ordering::SeqCst) != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            release.send(()).unwrap();
+            let _ = tokio::task::spawn_blocking(move || writer.join().unwrap())
+                .await
+                .unwrap();
+            cancelled.expect("retiring the physical link must cancel its blocked query");
+            assert!(
+                duplicate_bounded,
+                "a running link keeps one transport query"
+            );
+            assert!(
+                matches!(
+                    duplicate_result,
+                    Err(mpsc::error::TryRecvError::Disconnected)
+                ),
+                "coalesced calls keep the first result sender"
+            );
+            let after_cancel = received.try_recv();
+            assert!(
+                matches!(after_cancel, Err(mpsc::error::TryRecvError::Disconnected)),
+                "cancelled query cannot publish stale completion"
+            );
+            *clock.probe_tasks.lock().unwrap() = None;
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            assert_ne!(pair.receiver.peers[&peer].generation, old_generation);
+            assert_fresh_selected_pair(&mut pair.receiver, peer).await;
+            assert_fresh_selected_pair(&mut pair.sender, pair.receiver_id).await;
+            let expected = vec![b'F'; 4096];
+            pair.sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap()
+                .send(expected.as_slice().into())
+                .await
+                .unwrap();
+            drop(next_exact_receipt(&mut pair.receiver_events, &expected, profile).await);
+            let reverse = vec![b'R'; 4096];
+            pair.receiver
+                .channel(peer, RELIABLE_LABEL)
+                .unwrap()
+                .send(reverse.as_slice().into())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = pair.sender_events.recv().await.unwrap();
+                    if !pair.sender.is_current_event(&event) {
+                        continue;
+                    }
+                    match event {
+                        EngineEvent::ChannelMessage { text, .. } => {
+                            assert_eq!(profile, ChannelProfile::Reference);
+                            assert_eq!(text.as_bytes(), reverse);
+                            break;
+                        }
+                        EngineEvent::ChannelBinaryMessage { data, .. } => {
+                            assert_eq!(profile, ChannelProfile::Godot);
+                            assert_eq!(data, reverse);
+                            break;
+                        }
+                        EngineEvent::ChannelClosed { .. }
+                        | EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("fresh reverse traffic cannot lose its physical link");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("fresh physical generation preserves exact reverse reliable traffic");
+            pair.cleanup().await;
+        }
+    }
+}
+
+/// Engine destruction cancels pending work; replacement keeps published evidence.
+#[tokio::test]
+async fn dropped_engine_cancels_its_pending_query_and_replacement_preserves_published_rows() {
+    for drop_engine in [false, true] {
+        let (events, _received_events) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(
+            EngineSettings {
+                crippled: true,
+                ..EngineSettings::default()
+            },
+            events,
+        )
+        .unwrap();
+        let peer = PlayerId::from_u128(0x1507);
+        engine.pair_with(peer, false, &[]).await.unwrap();
+        let generation = engine.peers[&peer].generation;
+        let retained = Arc::new(());
+        let weak = Arc::downgrade(&retained);
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (results, mut rows) = mpsc::unbounded_channel();
+        let query = spawn_selected_pair_probe(
+            engine.runtime.clone(),
+            results,
+            peer,
+            generation,
+            async move {
+                let _retained = retained;
+                started.send(()).unwrap();
+                let _ = released.await;
+                None
+            },
+        );
+        engine.peers.get_mut(&peer).unwrap().selected_pair_probe = Some(query);
+        tokio::time::timeout(Duration::from_secs(1), entered)
+            .await
+            .unwrap()
+            .unwrap();
+        if drop_engine {
+            drop(engine);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while weak.strong_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropping the Engine releases pending query captures");
+            assert!(
+                release.send(()).is_err(),
+                "the cancelled query cannot resume"
+            );
+            let row = rows.try_recv();
+            assert!(matches!(row, Err(mpsc::error::TryRecvError::Disconnected)));
+        } else {
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !*engine.peers[&peer]
+                    .selected_pair_probe
+                    .as_ref()
+                    .unwrap()
+                    .completed
+                    .lock()
+                    .unwrap()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("completed query publishes before replacement");
+            let (next_results, mut next_rows) = mpsc::unbounded_channel();
+            assert!(engine.start_selected_candidate_pair_probe(peer, next_results));
+            let next = tokio::time::timeout(Duration::from_secs(1), next_rows.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(next.peer, peer);
+            assert_eq!(next.generation, generation);
+            engine.remove_peer(peer).await.unwrap();
+            let published = rows
+                .try_recv()
+                .expect("replacing the query and retiring its link preserves its published row");
+            assert_eq!(published.peer, peer);
+            assert_eq!(published.generation, generation);
+            assert!(published.completed_at <= next.completed_at);
+            assert!(published.selected.is_none());
+        }
+    }
+}
+
+/// Both fresh endpoints must publish their actual nominated route and generation.
+async fn assert_fresh_selected_pair(engine: &mut Engine, peer: PlayerId) {
+    let generation = engine.peers[&peer].generation;
+    let (results, mut rows) = mpsc::unbounded_channel();
+    let selected = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(engine.start_selected_candidate_pair_probe(peer, results.clone()));
+            let row = rows.recv().await.expect("fresh query publishes its result");
+            assert_eq!(row.peer, peer);
+            assert_eq!(row.generation, generation);
+            assert!(engine.is_current_generation(row.peer, row.generation));
+            if let Some(selected) = row.selected {
+                break selected;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fresh physical link publishes nominated transport evidence");
+    assert_eq!(selected.local_candidate_type, "host");
+    assert!(matches!(
+        selected.remote_candidate_type.as_str(),
+        "host" | "prflx"
+    ));
+    for address in [
+        selected.local_candidate_address,
+        selected.remote_candidate_address,
+    ] {
+        let address: IpAddr = address
+            .expect("nominated candidate keeps its actual address")
+            .parse()
+            .expect("nominated candidate has a concrete IP address");
+        assert!(!address.is_unspecified());
+        assert!(!address.is_multicast());
     }
 }

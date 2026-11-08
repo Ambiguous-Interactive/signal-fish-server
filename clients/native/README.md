@@ -15,6 +15,14 @@ The default reference profile accepts only `reliable` and `unreliable` data chan
 The engine closes channels with other delivery settings before admission.
 **Migration:** Custom peers must use these settings for the required labels.
 The engine cancels their polling tasks when it removes a peer or stops.
+It also cancels pending selected-candidate queries for that physical link.
+Only one selected-candidate query may run per link; repeated starts reuse it.
+Completed results keep their original generation and completion time.
+**Migration:** Native library callers must use a mutable `Engine` to call
+`start_selected_candidate_pair_probe`.
+When channel polling resumes, the transport drains accepted SCTP input and sends
+receive-credit replies without waiting for unrelated packets or protocol timers.
+Packets refused at a full receive window still need normal retransmission.
 Remote channel resets follow earlier queued input before reporting closure.
 A remote close or a stopped channel event stream triggers link cleanup and
 relay fallback. A missing channel, failed send, or stalled exchange send uses

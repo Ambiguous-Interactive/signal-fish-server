@@ -1874,6 +1874,7 @@ mod tests {
 #[cfg(all(test, feature = "runtime-mock"))]
 mod virtual_clock_tests {
     mod handshake_failure_tests;
+    mod receive_progress_tests;
 
     use super::*;
     use crate::runtime::mock::{MockRuntime, MockUDPNetwork};
