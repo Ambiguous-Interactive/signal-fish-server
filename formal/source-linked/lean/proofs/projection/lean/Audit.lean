@@ -32,3 +32,17 @@ import Projection
 #print axioms Projection.transport_status_stale_generation
 #print axioms Projection.transport_status_total_contract
 #print axioms Projection.transport_status_outcomes
+
+#print axioms Projection.dedup_contract
+#print axioms Projection.first_occurrences_order
+#print axioms Projection.first_occurrences_membership
+#print axioms Projection.first_occurrences_nodup
+#print axioms Projection.negotiated_axes_contract
+#print axioms Projection.dedup_protocol_contract
+#print axioms Projection.first_occurrences_loop
+#print axioms Projection.negotiated_axes_legacy
+#print axioms Projection.negotiated_axis_membership
+#print axioms Projection.negotiated_axis_unique
+#print axioms Projection.negotiated_axes_protocol_contract
+#print axioms Projection.negotiated_axes_values
+#print axioms Projection.negotiated_axes_outcomes

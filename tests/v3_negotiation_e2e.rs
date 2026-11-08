@@ -597,7 +597,18 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
     let addr = running_server.addr();
 
     let mut ws = connect(addr, "/v2/ws").await;
-    match authenticate(&mut ws, version_only_auth(Some(3))).await {
+    let auth = ClientMessage::Authenticate {
+        app_id: APP_ID.to_string(),
+        connect_token: None,
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version: Some(3),
+        supported_transports: Some(vec![Transport::WebRtc, Transport::Direct]),
+        supported_topologies: Some(vec![Topology::Mesh, Topology::Host]),
+        requested_capabilities: Some(vec![ROOM_OPERATION_IDS_CAPABILITY.to_string()]),
+    };
+    match authenticate(&mut ws, auth).await {
         ServerMessage::ProtocolInfo(info) => {
             // Clamped down to 2 (< 3), so the client is served the frozen v2
             // ProtocolInfo with no version fields — observably distinct from an
@@ -608,9 +619,32 @@ async fn v3_client_is_clamped_to_v2_when_deployment_caps_at_v2() {
             );
             assert_eq!(info.max_protocol_version, None);
             assert_eq!(info.transports, None);
+            assert!(
+                !info
+                    .capabilities
+                    .iter()
+                    .any(|value| value == ROOM_OPERATION_IDS_CAPABILITY),
+                "the negotiated version must gate extensions even when the client requests v3"
+            );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
+    let operation = ClientMessage::RoomOperation {
+        operation_id: uuid::Uuid::from_u128(1),
+        operation: Box::new(RoomOperationRequest::LeaveRoom),
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&operation).unwrap().into(),
+    ))
+    .await
+    .expect("send unnegotiated operation");
+    assert!(matches!(
+        next_server_message(&mut ws).await,
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::UnsupportedProtocolVersion),
+            ..
+        }
+    ));
     running_server.shutdown().await;
 }
 

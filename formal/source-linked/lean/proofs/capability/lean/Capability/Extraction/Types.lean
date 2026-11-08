@@ -55,7 +55,7 @@ structure session_member.DirectEndpoint where
   port : Std.U16
 
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
-    Source: 'src/../../../../src/session_capability.rs', lines 108:0-116:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 157:0-165:1 -/
 structure session_capability.SessionCapabilities where
   version : Std.U16
   relay_transport : Bool
@@ -124,7 +124,7 @@ def session_member.rung_is_executable.closure :=
 def session_member.all_support.closure := Unit
 
 /-- [signal_fish_proof_core::session_capability::all_support::closure]
-    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 265:56-267:5 -/
 def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 

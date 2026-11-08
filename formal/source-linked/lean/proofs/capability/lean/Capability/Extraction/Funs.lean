@@ -55,7 +55,7 @@ def session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
   ok (self1 = other1)
 
 /-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_topology]:
-    Source: 'src/../../../../src/session_capability.rs', lines 143:4-149:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 192:4-198:5 -/
 def session_capability.SessionCapabilities.supports_topology
   (self : session_capability.SessionCapabilities)
   (topology : session_capability.Topology) :
@@ -67,7 +67,7 @@ def session_capability.SessionCapabilities.supports_topology
   | session_capability.Topology.Mesh => ok self.mesh_topology
 
 /-- [signal_fish_proof_core::session_capability::{signal_fish_proof_core::session_capability::SessionCapabilities}::supports_transport]:
-    Source: 'src/../../../../src/session_capability.rs', lines 135:4-141:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 184:4-190:5 -/
 def session_capability.SessionCapabilities.supports_transport
   (self : session_capability.SessionCapabilities)
   (transport : session_capability.Transport) :
@@ -79,7 +79,7 @@ def session_capability.SessionCapabilities.supports_transport
   | session_capability.Transport.WebRtc => ok self.webrtc_transport
 
 /-- [signal_fish_proof_core::session_capability::supports_session]:
-    Source: 'src/../../../../src/session_capability.rs', lines 182:0-190:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 231:0-239:1 -/
 def session_capability.supports_session
   (capabilities : session_capability.SessionCapabilities)
   (topology : session_capability.Topology)
@@ -710,7 +710,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_mut]:
-    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 265:56-267:5 -/
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool.call_mut
   {T : Type} {T1 : Type}
@@ -726,7 +726,7 @@ def
   ok (b, c)
 
 /-- [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnOnce<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}::call_once]:
-    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 265:56-267:5 -/
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTBool.call_once
   {T : Type} {T1 : Type}
@@ -741,7 +741,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnOnce<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}]
-    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 265:56-267:5 -/
 @[reducible]
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnOnceTupleSharedTBool
@@ -756,7 +756,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_capability::all_support::{impl core::ops::function::FnMut<(&'_ T,), bool> for signal_fish_proof_core::session_capability::all_support::closure<'_0, '_1, '_2, T, T1>}]
-    Source: 'src/../../../../src/session_capability.rs', lines 216:56-218:5 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 265:56-267:5 -/
 @[reducible]
 def
   session_capability.all_support.closure.Insts.CoreOpsFunctionFnMutTupleSharedTBool
@@ -774,7 +774,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_capability::all_support]:
-    Source: 'src/../../../../src/session_capability.rs', lines 210:0-219:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 259:0-268:1 -/
 def session_capability.all_support
   {T : Type} {T1 : Type}
   (coreopsfunctionFnT1TupleShared0TSessionCapabilitiesInst :

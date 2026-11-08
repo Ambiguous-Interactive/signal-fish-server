@@ -34783,9 +34783,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 52 shards, ceil(520/52) * 29s remains 290s.
 // 521 (was 520): shared final plan assembly adds one return-value site (#1464).
 // With 53 shards, ceil(521/53) * 29s remains 290s.
-// 531 (was 521): the shared transport-status update adds ten mutation sites (#1464).
-// With 54 shards, ceil(531/54) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 531;
+// The shared capability negotiation adds eleven mutation sites (#1464).
+// With 55 shards, ceil(542/55) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 542;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -35053,12 +35053,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/54"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/55"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/54` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/55` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -35209,7 +35209,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/54 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/55 --print-cmd",
         violations.join("\n")
     );
 }

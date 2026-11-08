@@ -5,3 +5,5 @@ import Projection.Verification.Profiles
 import Projection.Verification.Admission
 import Projection.Verification.Pregather
 import Projection.Verification.TransportStatus
+import Projection.Verification.NegotiatedAxes
+import Projection.Verification.CapabilityOrder

@@ -131,6 +131,19 @@ THEOREMS = {"negotiation": (
     "Projection.pregather_contract",
     "Projection.pregather_support_contract",
     "Projection.pregather_outcomes",
+    "Projection.dedup_contract",
+    "Projection.dedup_protocol_contract",
+    "Projection.first_occurrences_loop",
+    "Projection.first_occurrences_order",
+    "Projection.first_occurrences_membership",
+    "Projection.first_occurrences_nodup",
+    "Projection.negotiated_axes_contract",
+    "Projection.negotiated_axes_values",
+    "Projection.negotiated_axes_outcomes",
+    "Projection.negotiated_axes_legacy",
+    "Projection.negotiated_axis_membership",
+    "Projection.negotiated_axis_unique",
+    "Projection.negotiated_axes_protocol_contract",
     "Projection.transport_status_contract",
     "Projection.transport_status_rejection_preserves",
     "Projection.transport_status_duplicate_contract",
@@ -288,7 +301,7 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "projection":
-        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:", "Projection/Verification/TransportStatus.lean:",)
+        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:", "Projection/Verification/TransportStatus.lean:", "Projection/Verification/CapabilityNegotiation.lean:", "Projection/Verification/NegotiatedAxes.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:",
@@ -367,6 +380,11 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Projection/Verification/Pregather.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the pregather contract: {name}\n{result.stdout}")
+    if name.startswith("axes-") and not all(
+            error.startswith("Projection/Verification/CapabilityNegotiation.lean:" if name in
+                ("axes-dedup", "axes-order") else "Projection/Verification/NegotiatedAxes.lean:")
+            and ("unsolved goals" in error or "Tactic `rfl` failed" in error) for error in locations):
+        raise RuntimeError(f"Mutation did not fail the negotiated-axes contract: {name}\n{result.stdout}")
     if name.startswith("status-") and not all(
             error.startswith("Projection/Verification/TransportStatus.lean:")
             and "unsolved goals" in error for error in locations):
@@ -468,6 +486,13 @@ def projection_mutations():
         "pregather-version": ("src/session_admission.rs", "recipient.version >= 3", "recipient.version >= 2"),
         "pregather-transport": ("src/session_admission.rs", "recipient.transports.contains(&Transport::WebRtc)", "true"),
         "pregather-topology": ("src/session_admission.rs", "recipient.topologies.contains(&desired)", "true"),
+        "axes-version": ("src/session_capability.rs", "if negotiated_version < 3 {", "if negotiated_version < 2 {"),
+        "axes-transport-floor": ("src/session_capability.rs", "transports.push(Transport::Relay);", "let _ = &mut transports;"),
+        "axes-topology-floor": ("src/session_capability.rs", "topologies.push(Topology::Relay);", "let _ = &mut topologies;"),
+        "axes-transport-default": ("src/session_capability.rs", "supported_transports.unwrap_or_else(|| vec![Transport::Relay])", "supported_transports.unwrap_or_else(|| vec![Transport::WebRtc])"),
+        "axes-topology-default": ("src/session_capability.rs", "supported_topologies.unwrap_or_else(|| vec![Topology::Relay])", "supported_topologies.unwrap_or_else(|| vec![Topology::Mesh])"),
+        "axes-dedup": ("src/session_capability.rs", "if !unique.contains(&item) {", "if unique.contains(&item) || true {"),
+        "axes-order": ("src/session_capability.rs", "unique.push(item);", "unique.insert(0, item);"),
         "status-version": ("src/session_capability.rs", "if protocol.version < 3 {", "if protocol.version < 2 {"),
         "status-axis": ("src/session_capability.rs", "if !protocol.transports.contains(&transport) {", "if false {"),
         "status-generation": ("src/session_capability.rs", "generation == membership_generation", "true"),
@@ -507,7 +532,10 @@ def projection_mutants(crate, *, names=None):
             try:
                 extract(copied, "projection")
                 run(["lake", "build", "Projection.Extraction"], project)
-                if name.startswith("status-"):
+                if name.startswith("axes-"):
+                    target = ["Projection.Verification.CapabilityNegotiation" if name in
+                        ("axes-dedup", "axes-order") else "Projection.Verification.NegotiatedAxes"]
+                elif name.startswith("status-"):
                     target = ["Projection.Verification.TransportStatus"]
                 elif name.startswith("pregather-"):
                     target = ["Projection.Verification.Pregather"]
