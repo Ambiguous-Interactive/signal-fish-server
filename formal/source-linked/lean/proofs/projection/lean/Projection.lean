@@ -4,3 +4,4 @@ import Projection.Verification.Defaults
 import Projection.Verification.Profiles
 import Projection.Verification.Admission
 import Projection.Verification.Pregather
+import Projection.Verification.TransportStatus

@@ -23,7 +23,7 @@ set_option maxRecDepth 2048
 namespace signal_fish_proof_core
 
 /-- [signal_fish_proof_core::session_capability::Topology]
-    Source: 'src/../../../../src/session_capability.rs', lines 33:0-40:1
+    Source: 'src/../../../../src/session_capability.rs', lines 34:0-41:1
     Visibility: public -/
 @[discriminant isize]
 inductive session_capability.Topology where
@@ -32,7 +32,7 @@ inductive session_capability.Topology where
 | Mesh : session_capability.Topology
 
 /-- [signal_fish_proof_core::session_capability::Transport]
-    Source: 'src/../../../../src/session_capability.rs', lines 13:0-24:1
+    Source: 'src/../../../../src/session_capability.rs', lines 14:0-25:1
     Visibility: public -/
 @[discriminant isize]
 inductive session_capability.Transport where
@@ -41,7 +41,7 @@ inductive session_capability.Transport where
 | WebRtc : session_capability.Transport
 
 /-- [signal_fish_proof_core::session_capability::NegotiatedProtocol]
-    Source: 'src/../../../../src/session_capability.rs', lines 47:0-53:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 48:0-54:1 -/
 structure session_capability.NegotiatedProtocol where
   version : Std.U16
   transports : alloc.vec.Vec session_capability.Transport
@@ -54,8 +54,18 @@ structure session_admission.ActiveSessionPlan where
   transport : session_capability.Transport
   host : core.option.Option uuid.Uuid
 
+/-- [signal_fish_proof_core::session_capability::TransportStatusUpdate]
+    Source: 'src/../../../../src/session_capability.rs', lines 68:0-74:1 -/
+@[discriminant isize]
+inductive session_capability.TransportStatusUpdate where
+| Changed : session_capability.TransportStatusUpdate
+| Duplicate : session_capability.TransportStatusUpdate
+| MissingConnection : session_capability.TransportStatusUpdate
+| UnsupportedProtocolVersion : session_capability.TransportStatusUpdate
+| UnsupportedTransport : session_capability.TransportStatusUpdate
+
 /-- [signal_fish_proof_core::session_capability::SessionCapabilities]
-    Source: 'src/../../../../src/session_capability.rs', lines 67:0-75:1 -/
+    Source: 'src/../../../../src/session_capability.rs', lines 108:0-116:1 -/
 structure session_capability.SessionCapabilities where
   version : Std.U16
   relay_transport : Bool

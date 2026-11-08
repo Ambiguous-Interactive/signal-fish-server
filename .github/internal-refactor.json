@@ -1,21 +1,26 @@
 {
-  "base": "7666bed37e305edf704e6b54ce265b6aa3176bad",
-  "reason": "Move unchanged finalize-time pair selection and eligible host election into one private source-linked helper. Preserve the configured ceiling, transport switches, authority, member snapshot and order, generation creation and member-vector move. Rust, .NET and Godot clients see no behavior, wire, API or configuration changes. Snapshot lookup, generation freshness, state commit and async publication remain separate obligations. Optimize only the development and CI parser dependencies and keep release runtime profiles unchanged; this changes verification cost only.",
+  "base": "6426ad4b6a0e1145ad5953ff8ab509c8b0bd0573",
+  "reason": "Extract the unchanged transport-status mutation into a private shared production helper and prove its result and final stored state. Explicit per-field comparisons preserve the previous tuple equality. Connection lookup, mutation guard, rejection order and report outcomes stay unchanged. Proofs and documentation add internal verification only. Rust, .NET and Godot clients have no wire, API, configuration or behavior changes.",
   "files": [
     {
-      "path": "src/server/session_policy.rs",
-      "before": "12adcde80f7f9303825fbf075227c3284dde19f6",
-      "after": "d48cb2f87fba99f576e52737ff61204742cd6af5"
+      "path": "src/session_capability.rs",
+      "before": "38c07bd1ce8714a34fdce741492d7175f5a0828a",
+      "after": "bb8389d2623914973f058e061c7a3a55a4d14d26"
     },
     {
-      "path": "src/session_admission.rs",
-      "before": "d62f1916571b3d782344ab88ceabb6e601e71992",
-      "after": "227aba40a73a243959a6656de09a224f3a2f2f8b"
+      "path": "src/server/connection_manager.rs",
+      "before": "71d4cfbb80394df25df26721c98e88b1ec525217",
+      "after": "0afe9d95882efecef7d08099764f42ea85d6f30b"
     },
     {
-      "path": "Cargo.toml",
-      "before": "ba96c6328b03119c7abe53315abcf117e42de8df",
-      "after": "aa422758462dbc133206c0773f0c4f9844fec554"
+      "path": "formal/source-linked/README.md",
+      "before": "7d9664f313fc433cabf02ca651ff70668cf0fee1",
+      "after": "d6e42fb6bd98be3939e9baef8480612bdd5e59dc"
+    },
+    {
+      "path": "formal/source-linked/obligations.md",
+      "before": "8c9c544b5795dbc3cfe76115ee5c0c17a8dfaa82",
+      "after": "84a0aab148fe62d91910864fec0f9479bf076117"
     }
   ]
 }

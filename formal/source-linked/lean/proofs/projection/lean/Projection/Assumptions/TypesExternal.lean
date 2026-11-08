@@ -22,6 +22,9 @@ set_option maxHeartbeats 1000000
 set_option maxRecDepth 2048
 
 /-- External UUID type interpretation: the locked Rust crate stores 16 bytes.
-    Admission never reads these bytes. No UUID operation or identity law is modeled. -/
+    Admission never reads these bytes. Transport status uses the explicit
+    trusted UUID equality mapping in FunsExternal.lean. -/
 structure uuid.Uuid where
   bytes : Aeneas.Std.Array Aeneas.Std.U8 16#usize
+
+noncomputable instance : DecidableEq uuid.Uuid := Classical.decEq _

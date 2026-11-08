@@ -6235,8 +6235,9 @@ fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
     }
     for required in [
         "containerd-snapshotter",
-        "qemu-user-static binfmt-support",
-        "update-binfmts --enable",
+        "apt-cache policy qemu-user-static",
+        "qemu_package=qemu-user-binfmt",
+        "systemctl restart systemd-binfmt",
         "qemu-aarch64 qemu-arm",
         "flags:.*F",
         "Docker Engine 28",
@@ -6256,6 +6257,194 @@ fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
         merge < install,
         "{workflow}: validate JSON before replacing the live daemon configuration"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_docker_builder_qemu_package_layouts_and_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let action = read_file(&repo_root().join(".github/actions/setup-docker-builder/action.yml"));
+    let documents = Yaml::load_from_str(&action).expect("builder action YAML");
+    let run = documents[0]["runs"]["steps"][0]["run"]
+        .as_str()
+        .expect("builder shell");
+    let (_, installation) = run
+        .split_once("static_candidate=")
+        .expect("QEMU installation seam");
+    let shell = format!("set -euo pipefail\nstatic_candidate={installation}");
+    for (
+        case,
+        policy,
+        policy_status,
+        install_status,
+        service_status,
+        flags_status,
+        package,
+        success,
+    ) in [
+        (
+            "concrete static package",
+            "  Candidate: 1:8.2.2",
+            0,
+            0,
+            0,
+            0,
+            "qemu-user-static",
+            true,
+        ),
+        (
+            "virtual package",
+            "  Candidate: (none)",
+            0,
+            0,
+            0,
+            0,
+            "qemu-user-binfmt",
+            true,
+        ),
+        (
+            "no static package record",
+            "",
+            0,
+            0,
+            0,
+            0,
+            "qemu-user-binfmt",
+            true,
+        ),
+        ("policy failure", "", 17, 0, 0, 0, "", false),
+        (
+            "install failure",
+            "  Candidate: (none)",
+            0,
+            23,
+            0,
+            0,
+            "qemu-user-binfmt",
+            false,
+        ),
+        (
+            "registration failure",
+            "  Candidate: (none)",
+            0,
+            0,
+            29,
+            0,
+            "qemu-user-binfmt",
+            false,
+        ),
+        (
+            "missing fix-binary flag",
+            "  Candidate: (none)",
+            0,
+            0,
+            0,
+            1,
+            "qemu-user-binfmt",
+            false,
+        ),
+    ] {
+        let fixture = tempfile::tempdir().expect("QEMU command fixture");
+        let bin = fixture.path().join("bin");
+        fs::create_dir(&bin).expect("fixture binaries");
+        for (name, body) in [
+            (
+                "apt-cache",
+                r#"printf '%s\n' "$QEMU_POLICY"
+exit "$QEMU_POLICY_STATUS"
+"#,
+            ),
+            (
+                "sudo",
+                r#"printf '%s\n' "$*" >> "$QEMU_COMMAND_LOG"
+case "$1" in
+apt-get) exit "$QEMU_INSTALL_STATUS";;
+systemctl) exit "$QEMU_SERVICE_STATUS";;
+*) exit 99;;
+esac
+"#,
+            ),
+            (
+                "grep",
+                r#"printf 'check %s\n' "$*" >> "$QEMU_COMMAND_LOG"
+exit "$QEMU_FLAGS_STATUS"
+"#,
+            ),
+            (
+                "cat",
+                r#"printf 'read %s\n' "$*" >> "$QEMU_COMMAND_LOG"
+printf 'flags: POF\n'
+"#,
+            ),
+        ] {
+            let path = bin.join(name);
+            write_file(&path, &format!("#!/usr/bin/env bash\n{body}"));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("executable fixture");
+        }
+        let log = fixture.path().join("commands.log");
+        write_file(&log, "");
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").expect("PATH"),
+        ));
+        let output = bash_command()
+            .args(["-c", &shell])
+            .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
+            .env("QEMU_POLICY", policy)
+            .env("QEMU_POLICY_STATUS", policy_status.to_string())
+            .env("QEMU_INSTALL_STATUS", install_status.to_string())
+            .env("QEMU_SERVICE_STATUS", service_status.to_string())
+            .env("QEMU_FLAGS_STATUS", flags_status.to_string())
+            .env("QEMU_COMMAND_LOG", &log)
+            .output()
+            .expect("run actual QEMU setup shell");
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let commands = read_file(&log);
+        if policy_status != 0 {
+            assert!(
+                commands.is_empty(),
+                "{case}: no installation after policy failure"
+            );
+            continue;
+        }
+        assert!(
+            commands.starts_with(&format!(
+                "apt-get install -y --no-install-recommends {package}\n"
+            )),
+            "{case}: {commands}"
+        );
+        assert_eq!(
+            commands.contains("systemctl restart systemd-binfmt"),
+            install_status == 0,
+            "{case}: {commands}"
+        );
+        assert_eq!(
+            commands.contains("check "),
+            install_status == 0 && service_status == 0,
+            "{case}: {commands}"
+        );
+        if success {
+            for emulator in ["qemu-aarch64", "qemu-arm"] {
+                assert!(
+                    commands.contains(&format!(
+                        "check -q ^flags:.*F /proc/sys/fs/binfmt_misc/{emulator}"
+                    )),
+                    "{case}: {commands}"
+                );
+                assert!(
+                    commands.contains(&format!("read /proc/sys/fs/binfmt_misc/{emulator}")),
+                    "{case}: {commands}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -22713,18 +22902,70 @@ fn test_ci_safety_workflow_has_required_jobs() {
     validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
 }
 
-fn miri_module_filter_violations(modules: &[String], filters: &[&str]) -> Vec<String> {
+fn miri_module_filter_violations(
+    modules: &[String],
+    lanes: &[(Vec<&str>, Vec<&str>)],
+) -> Vec<String> {
+    let valid_path = |path: &str| {
+        path.split("::").all(|segment| {
+            let mut chars = segment.chars();
+            chars
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+    };
+    let contains = |prefix: &str, path: &str| {
+        prefix == path
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with("::"))
+    };
     let mut violations = Vec::new();
-    for filter in filters {
-        if !modules.iter().any(|known| known == filter) {
-            violations.push(format!("unknown Miri root module: {filter}"));
+    let mut boundaries: std::collections::BTreeSet<String> = modules.iter().cloned().collect();
+    for (included, excluded) in lanes {
+        if included.is_empty() {
+            violations.push("Miri lane needs an included module".to_string());
+        }
+        for filters in [included, excluded] {
+            let mut seen = std::collections::HashSet::new();
+            for filter in filters {
+                if !seen.insert(filter) || !valid_path(filter) {
+                    violations.push(format!("invalid or repeated Miri module path: {filter}"));
+                }
+                if !modules
+                    .iter()
+                    .any(|root| filter.split("::").next() == Some(root.as_str()))
+                {
+                    violations.push(format!("unknown Miri root module: {filter}"));
+                }
+                boundaries.insert((*filter).to_string());
+            }
+        }
+        for excluded in excluded {
+            if !included
+                .iter()
+                .any(|prefix| prefix != excluded && contains(prefix, excluded))
+            {
+                violations.push(format!(
+                    "Miri exclusion is not an included descendant: {excluded}"
+                ));
+            }
         }
     }
-    for module in modules {
-        let count = filters.iter().filter(|filter| **filter == module).count();
+    // Prefix membership changes only at a root/include/exclude boundary.
+    // Checking each region proves every possible descendant has exactly one lane.
+    for boundary in boundaries {
+        let count = lanes
+            .iter()
+            .filter(|(included, excluded)| {
+                included.iter().any(|prefix| contains(prefix, &boundary))
+                    && !excluded.iter().any(|prefix| contains(prefix, &boundary))
+            })
+            .count();
         if count != 1 {
             violations.push(format!(
-                "Miri module {module} needs one owner, found {count}"
+                "Miri module region {boundary} needs one owner, found {count}"
             ));
         }
     }
@@ -22734,27 +22975,74 @@ fn miri_module_filter_violations(modules: &[String], filters: &[&str]) -> Vec<St
 #[test]
 fn test_ci_safety_miri_filters_require_one_qualified_owner_per_module() {
     let modules = ["protocol".to_string(), "server".to_string()];
-    for (description, filters, expected_valid) in [
-        ("one root owner each", vec!["protocol", "server"], true),
-        ("substring filter", vec!["protocol::", "server"], false),
+    for (description, lanes, expected_valid) in [
+        (
+            "one root owner each",
+            vec![(vec!["protocol", "server"], vec![])],
+            true,
+        ),
+        (
+            "separate root lanes",
+            vec![(vec!["protocol"], vec![]), (vec!["server"], vec![])],
+            true,
+        ),
+        (
+            "qualified split",
+            vec![
+                (vec!["protocol", "server"], vec!["server::tests"]),
+                (vec!["server::tests"], vec![]),
+            ],
+            true,
+        ),
+        (
+            "missing nested owner",
+            vec![(vec!["protocol", "server"], vec!["server::tests"])],
+            false,
+        ),
+        (
+            "overlapping nested owner",
+            vec![
+                (vec!["protocol", "server"], vec![]),
+                (vec!["server::tests"], vec![]),
+            ],
+            false,
+        ),
+        (
+            "substring filter",
+            vec![(vec!["protocol::", "server"], vec![])],
+            false,
+        ),
         (
             "duplicate owner",
-            vec!["protocol", "server", "server"],
+            vec![
+                (vec!["protocol", "server"], vec![]),
+                (vec!["server"], vec![]),
+            ],
             false,
         ),
-        ("missing module", vec!["protocol"], false),
+        ("missing root", vec![(vec!["protocol"], vec![])], false),
         (
-            "unknown module",
-            vec!["protocol", "server", "unknown"],
+            "unknown root",
+            vec![(vec!["protocol", "server", "unknown"], vec![])],
             false,
         ),
         (
-            "nested substring",
-            vec!["protocol", "server::tests::"],
+            "malformed nested path",
+            vec![(vec!["protocol", "server::::tests"], vec![])],
+            false,
+        ),
+        (
+            "unrelated exclusion",
+            vec![(vec!["protocol", "server"], vec!["unknown::tests"])],
+            false,
+        ),
+        (
+            "empty lane",
+            vec![(vec!["protocol", "server"], vec![]), (vec![], vec![])],
             false,
         ),
     ] {
-        let violations = miri_module_filter_violations(&modules, &filters);
+        let violations = miri_module_filter_violations(&modules, &lanes);
         assert_eq!(
             violations.is_empty(),
             expected_valid,
@@ -22765,7 +23053,7 @@ fn test_ci_safety_miri_filters_require_one_qualified_owner_per_module() {
 
 #[test]
 fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
-    // The exact-name runner selects the compiled tests for each root module.
+    // The exact-name runner partitions every compiled test by qualified module prefix.
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
     let content = read_live_file(&workflow_path);
@@ -22788,13 +23076,20 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
         "the #424 split must keep at least two parallel Miri lanes"
     );
 
-    let mut filter_tokens: Vec<&str> = Vec::new();
+    let mut lane_filters = Vec::new();
     for lane in lanes {
         let filters = lane
             .as_mapping_get("modules")
             .and_then(|value| value.as_str())
-            .expect("every Miri lane must define root modules");
-        filter_tokens.extend(filters.split_whitespace());
+            .expect("every Miri lane must define qualified module prefixes");
+        let exclusions = lane
+            .as_mapping_get("exclude_modules")
+            .map(|value| value.as_str().expect("Miri exclusions must be a string"))
+            .unwrap_or("");
+        lane_filters.push((
+            filters.split_whitespace().collect(),
+            exclusions.split_whitespace().collect(),
+        ));
     }
 
     let lib_rs = read_file(&root.join("src/lib.rs"));
@@ -22819,9 +23114,10 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
     );
     assert!(content.contains("python3 scripts/run-miri-lane.py --toolchain nightly-2026-08-01"));
     assert!(content.contains("--modules ${{ matrix.lane.modules }}"));
+    assert!(content.contains("--exclude-modules ${{ matrix.lane.exclude_modules }}"));
     assert!(content.contains("python3 -m unittest discover -s scripts -p test_run_miri_lane.py"));
     assert!(content.contains("miri-selected-tests.json"));
-    let violations = miri_module_filter_violations(&modules, &filter_tokens);
+    let violations = miri_module_filter_violations(&modules, &lane_filters);
     assert!(
         violations.is_empty(),
         "Miri lane coverage is invalid: {violations:?}"
@@ -34487,7 +34783,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // With 52 shards, ceil(520/52) * 29s remains 290s.
 // 521 (was 520): shared final plan assembly adds one return-value site (#1464).
 // With 53 shards, ceil(521/53) * 29s remains 290s.
-const MUTATION_TOTAL_MUTANTS: u32 = 521;
+// 531 (was 521): the shared transport-status update adds ten mutation sites (#1464).
+// With 54 shards, ceil(531/54) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 531;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -34755,12 +35053,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/53"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/54"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/53` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/54` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -34911,7 +35209,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/53 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/54 --print-cmd",
         violations.join("\n")
     );
 }

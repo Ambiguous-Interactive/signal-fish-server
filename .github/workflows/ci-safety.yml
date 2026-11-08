@@ -27,7 +27,7 @@
 #   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
-#   - miri: Five parallel lanes interpret every root library module once.
+#   - miri: Eight parallel lanes partition the compiled library test list.
 #     Exact test paths prevent nested modules from duplicating expensive
 #     work in other lanes. Coordination, session policy, server, WebSocket,
 #     and the remaining modules have separate budgets.
@@ -126,12 +126,21 @@ jobs:
       fail-fast: false
       matrix:
         lane:
+          # The protocol root took about 30 minutes in run 42447791674.
+          # Keep it separate from the session decision matrices.
+          - name: protocol
+            modules: "protocol"
           - name: core
-            modules: "protocol protocol_core session_capability session_admission session_member"
+            modules: "protocol_core session_capability session_admission session_member"
           - name: coordination
             modules: "coordination"
           - name: server
             modules: "server"
+            exclude_modules: "server::session_policy_tests server::ready_state_tests"
+          - name: session-policy
+            modules: "server::session_policy_tests"
+          - name: ready-state
+            modules: "server::ready_state_tests"
           - name: websocket
             modules: "websocket"
           - name: remaining
@@ -181,7 +190,8 @@ jobs:
           echo "CARGO_TARGET_DIR: ${CARGO_TARGET_DIR:-<default>}"
           python3 -m unittest discover -s scripts -p test_run_miri_lane.py
           python3 scripts/run-miri-lane.py --toolchain nightly-2026-08-01 \
-            --modules ${{ matrix.lane.modules }} 2>&1 | tee miri-output.txt
+            --modules ${{ matrix.lane.modules }} \
+            --exclude-modules ${{ matrix.lane.exclude_modules }} 2>&1 | tee miri-output.txt
           echo "Miri analysis complete."
 
       - name: Diagnose Miri failures

@@ -27,9 +27,17 @@ runs:
         fi
         sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+        # Ubuntu 26.04 makes qemu-user-static virtual. Older releases need
+        # its concrete static package; their qemu-user-binfmt uses dynamic QEMU.
+        static_candidate=$(LC_ALL=C apt-cache policy qemu-user-static | awk '/Candidate:/ { print $2 }')
+        qemu_package=qemu-user-static
+        if [ -z "$static_candidate" ] || [ "$static_candidate" = '(none)' ]; then
+          qemu_package=qemu-user-binfmt
+        fi
+        sudo apt-get install -y --no-install-recommends "$qemu_package"
+        # Both package layouts supply systemd binfmt.d entries.
+        sudo systemctl restart systemd-binfmt
         for emulator in qemu-aarch64 qemu-arm; do
-          sudo update-binfmts --enable "$emulator"
           if ! grep -q '^flags:.*F' "/proc/sys/fs/binfmt_misc/$emulator"; then
             echo "ERROR: $emulator must register the fix-binary flag for containers."
             exit 1

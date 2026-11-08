@@ -28,7 +28,7 @@ use crate::rate_limit::ErrorReplyGate;
 
 use super::RegisterClientError;
 
-pub(crate) use crate::session_capability::NegotiatedProtocol;
+pub(crate) use crate::session_capability::{NegotiatedProtocol, TransportStatusUpdate};
 
 #[derive(Debug)]
 pub(crate) struct ClientConnection {
@@ -252,15 +252,6 @@ impl ClientConnection {
             close: self.close.clone(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TransportStatusUpdate {
-    Changed,
-    Duplicate,
-    MissingConnection,
-    UnsupportedProtocolVersion,
-    UnsupportedTransport,
 }
 
 /// Result of the atomic reconnect identity swap.
@@ -933,21 +924,14 @@ impl ConnectionManager {
         connected: bool,
     ) -> TransportStatusUpdate {
         if let Some(mut connection) = self.clients.get_mut(player_id) {
-            if connection.protocol.version < 3 {
-                return TransportStatusUpdate::UnsupportedProtocolVersion;
-            }
-
-            if !connection.protocol.transports.contains(&transport) {
-                return TransportStatusUpdate::UnsupportedTransport;
-            }
-
-            let new_status = Some((connection.membership_generation, transport, connected));
-            if connection.transport_status == new_status {
-                return TransportStatusUpdate::Duplicate;
-            }
-
-            connection.transport_status = new_status;
-            return TransportStatusUpdate::Changed;
+            let connection = &mut *connection;
+            return crate::session_capability::update_transport_status(
+                &connection.protocol,
+                connection.membership_generation,
+                &mut connection.transport_status,
+                transport,
+                connected,
+            );
         }
 
         TransportStatusUpdate::MissingConnection

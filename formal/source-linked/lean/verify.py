@@ -131,6 +131,13 @@ THEOREMS = {"negotiation": (
     "Projection.pregather_contract",
     "Projection.pregather_support_contract",
     "Projection.pregather_outcomes",
+    "Projection.transport_status_contract",
+    "Projection.transport_status_rejection_preserves",
+    "Projection.transport_status_duplicate_contract",
+    "Projection.transport_status_changed_contract",
+    "Projection.transport_status_stale_generation",
+    "Projection.transport_status_total_contract",
+    "Projection.transport_status_outcomes",
 )}
 CAPABILITY_LIMIT = "Unknown constant `CoreModels.core.slice.iter.Iter.Insts.CoreIterTraitsIteratorIteratorSharedAT.all`"
 ALLOWED_AXIOMS = {"propext", "Quot.sound", "Classical.choice"}
@@ -281,7 +288,7 @@ def check_proof_rejection(result, scenario, name):
     module = scenario.title()
     targets = (f"{module}/Verification/ProofObligations.lean:",)
     if scenario == "projection":
-        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:",)
+        targets += ("Projection/Verification/Defaults.lean:", "Projection/Verification/Profiles.lean:", "Projection/Verification/Admission.lean:", "Projection/Verification/Pregather.lean:", "Projection/Verification/TransportStatus.lean:",)
     if scenario == "capability":
         targets += ("Capability/Verification/CallbackSemantics.lean:",
                     "Capability/Verification/ConcreteCallbacks.lean:",
@@ -360,6 +367,10 @@ def check_proof_rejection(result, scenario, name):
             error.startswith("Projection/Verification/Pregather.lean:")
             and "unsolved goals" in error for error in locations):
         raise RuntimeError(f"Mutation did not fail the pregather contract: {name}\n{result.stdout}")
+    if name.startswith("status-") and not all(
+            error.startswith("Projection/Verification/TransportStatus.lean:")
+            and "unsolved goals" in error for error in locations):
+        raise RuntimeError(f"Mutation did not fail the transport-state contract: {name}\n{result.stdout}")
     if not any(marker in result.stdout for marker in (
             "unsolved goals", "Type mismatch", "type mismatch", "Tactic `")):
         raise RuntimeError(f"Mutation did not fail a proof obligation: {name}\n{result.stdout}")
@@ -457,6 +468,13 @@ def projection_mutations():
         "pregather-version": ("src/session_admission.rs", "recipient.version >= 3", "recipient.version >= 2"),
         "pregather-transport": ("src/session_admission.rs", "recipient.transports.contains(&Transport::WebRtc)", "true"),
         "pregather-topology": ("src/session_admission.rs", "recipient.topologies.contains(&desired)", "true"),
+        "status-version": ("src/session_capability.rs", "if protocol.version < 3 {", "if protocol.version < 2 {"),
+        "status-axis": ("src/session_capability.rs", "if !protocol.transports.contains(&transport) {", "if false {"),
+        "status-generation": ("src/session_capability.rs", "generation == membership_generation", "true"),
+        "status-transport": ("src/session_capability.rs", "previous_transport == transport", "true"),
+        "status-connected": ("src/session_capability.rs", "previous_connected == connected", "true"),
+        "status-write": ("src/session_capability.rs", "*transport_status = Some((membership_generation, transport, connected));",
+                         "let _ = (membership_generation, transport, connected);"),
     }
 
 
@@ -489,9 +507,18 @@ def projection_mutants(crate, *, names=None):
             try:
                 extract(copied, "projection")
                 run(["lake", "build", "Projection.Extraction"], project)
-                target = ["Projection.Verification.Pregather"] if name.startswith("pregather-") else (["Projection.Verification.Admission"] if name.startswith("admission-") else (["Projection.Verification.Defaults"] if name in (
-                    "default-version", "overwrite-profile-version") else (["Projection.Verification.Profiles"] if name in (
-                    "server-floor", "profile-version", "profile-transports") else [])))
+                if name.startswith("status-"):
+                    target = ["Projection.Verification.TransportStatus"]
+                elif name.startswith("pregather-"):
+                    target = ["Projection.Verification.Pregather"]
+                elif name.startswith("admission-"):
+                    target = ["Projection.Verification.Admission"]
+                elif name in ("default-version", "overwrite-profile-version"):
+                    target = ["Projection.Verification.Defaults"]
+                elif name in ("server-floor", "profile-version", "profile-transports"):
+                    target = ["Projection.Verification.Profiles"]
+                else:
+                    target = []
                 result = run(["lake", "build", *target], project, expect_success=False)
                 check_proof_rejection(result, "projection", name)
                 witness = (crate / f"mutation-witnesses/{name}.lean").read_text()
