@@ -40,6 +40,7 @@ async fn fragmented_first_open_burst_transport_diagnostic() {
     first_open_exchange(true).await;
 }
 
+/// Exchange exact fragmented payloads at the first open callback in both roles.
 async fn first_open_exchange(burst: bool) {
     let _serial = super::acquire_serial().await;
     for (browser_initiates, binary_mode) in

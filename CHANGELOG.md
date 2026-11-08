@@ -61,8 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep native P2P gameplay and relay input responsive while busy peers check channel readiness or send
-  exchange messages (#1510, #1512).
+- Keep live native P2P gameplay, relay input, and keepalive responsive while busy peers check channel readiness
+  or send exchange messages (#1510, #1512).
 - Resume accepted native P2P messages and receive-credit replies when callback polling restarts (#1508).
 - Cancel native P2P candidate queries when their link retires so retries release old connections (#1507).
 - Preserve accepted P2P transport reports and WebRTC signals after caller cancellation (#1428, #1429).

@@ -2991,6 +2991,7 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    /// Apply current-link callbacks and retain only eligible pending receipts.
     async fn handle_engine_event(&mut self, event: EngineEvent) -> Result<(), FatalError> {
         let (event_peer, generation) = event.peer_generation();
         let pending_receipt = matches!(
