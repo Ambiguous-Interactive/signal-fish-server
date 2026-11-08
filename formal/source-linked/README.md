@@ -1292,7 +1292,8 @@ python3 formal/source-linked/lean/verify.py --scenario negotiation --mutations
 ```
 
 An independent Rust matrix checks 2,621,480 combinations of optional requests,
-route defaults, deployment bounds and lifecycle states. Socket regressions check
+route defaults, deployment bounds and lifecycle states. A small boundary table
+remains enabled for the existing source-linked-core Miri lane. Socket regressions check
 below-floor refusal, retry of a pending handshake with an omitted version,
 closure of a completed socket, and deployment clamping. A compiled caller fault
 that swaps the socket close/retry branch fails both lifecycle assertions; restored

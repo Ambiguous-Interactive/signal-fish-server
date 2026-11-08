@@ -113,6 +113,55 @@ mod tests {
     }
 
     #[test]
+    fn handshake_version_boundaries_preserve_refusal_and_client_precedence() {
+        use super::{decide_handshake_version, HandshakeVersionDecision};
+        for (client, endpoint, minimum, maximum, complete, expected) in [
+            (None, 3, 2, 3, false, HandshakeVersionDecision::Accepted(3)),
+            (
+                Some(2),
+                3,
+                2,
+                3,
+                true,
+                HandshakeVersionDecision::Accepted(2),
+            ),
+            (
+                Some(u16::MAX),
+                2,
+                2,
+                3,
+                false,
+                HandshakeVersionDecision::Accepted(3),
+            ),
+            (Some(2), 3, 3, 3, false, HandshakeVersionDecision::Retry(2)),
+            (Some(2), 3, 3, 3, true, HandshakeVersionDecision::Close(2)),
+            (None, 0, 2, 3, true, HandshakeVersionDecision::Close(0)),
+            (
+                None,
+                u16::MAX,
+                3,
+                2,
+                false,
+                HandshakeVersionDecision::Retry(2),
+            ),
+            (
+                Some(u16::MAX),
+                0,
+                u16::MAX,
+                u16::MAX,
+                true,
+                HandshakeVersionDecision::Accepted(u16::MAX),
+            ),
+        ] {
+            assert_eq!(
+                decide_handshake_version(client, endpoint, minimum, maximum, complete),
+                expected,
+                "client={client:?} endpoint={endpoint} range={minimum}..={maximum} complete={complete}"
+            );
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn handshake_version_exhausts_requests_routes_and_lifecycle_states() {
         use super::{decide_handshake_version, HandshakeVersionDecision};

@@ -5,7 +5,7 @@
     {
       "path": "src/protocol_core.rs",
       "before": "bea7c674a411c40ae51cb1d6866e960c689f091d",
-      "after": "7d82a420a9279b5752929048e1a4cfbb4a78a922"
+      "after": "9e24dd007d5a92dddc30b7bb764b4b3ab77536a9"
     },
     {
       "path": "src/websocket/connection.rs",
