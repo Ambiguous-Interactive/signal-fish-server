@@ -54,6 +54,7 @@ on:
       - "scripts/generate-sequenced-relay-trace.py"
       - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
+      - "scripts/download-verified.sh"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -127,10 +128,10 @@ jobs:
       - name: Install pinned elan
         shell: bash
         run: |
-          curl --fail --location --silent --show-error \
+          bash scripts/download-verified.sh \
             https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz \
-            -o "$RUNNER_TEMP/elan.tar.gz"
-          echo "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63  $RUNNER_TEMP/elan.tar.gz" | sha256sum --check
+            42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63 \
+            "$RUNNER_TEMP/elan.tar.gz"
           tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/elan-init" -y --default-toolchain none --no-modify-path
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"

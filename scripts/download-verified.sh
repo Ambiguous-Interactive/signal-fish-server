@@ -22,20 +22,43 @@ case "$protocol" in
 esac
 
 mkdir -p "$(dirname "$output")"
-curl \
-    --fail \
-    --silent \
-    --show-error \
-    --location \
-    --proto "=${protocol}" \
-    --tlsv1.2 \
-    --retry 5 \
-    --retry-all-errors \
-    --retry-delay 2 \
-    --connect-timeout 20 \
-    --max-time 60 \
-    --output "$output" \
-    "$url"
+curl_options=(
+    --fail
+    --silent
+    --show-error
+    --location
+    --proto "=${protocol}"
+    --tlsv1.2
+    --retry 5
+    --retry-all-errors
+    --retry-delay 2
+    --connect-timeout 20
+    --max-time 60
+)
+if ! curl "${curl_options[@]}" --output "$output" "$url"; then
+    if [[ "$protocol" != https || ! "$url" =~ ^https://github.com/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/?#]+)$ ]] \
+        || ! command -v python3 >/dev/null 2>&1; then
+        exit 1
+    fi
+    release_api="https://api.github.com/repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/releases"
+    release_tag="${BASH_REMATCH[3]}"
+    asset_name="${BASH_REMATCH[4]}"
+    echo "Retrying the pinned release through the GitHub API" >&2
+    asset_api="$(
+        curl "${curl_options[@]}" --header 'Accept: application/vnd.github+json' \
+            "${release_api}/tags/${release_tag}" |
+            python3 -c '
+import json, sys, urllib.parse
+name = urllib.parse.unquote(sys.argv[1])
+assets = [asset for asset in json.load(sys.stdin)["assets"] if asset["name"] == name]
+if len(assets) != 1 or type(assets[0]["id"]) is not int or assets[0]["id"] <= 0:
+    raise ValueError("Expected one release asset with a positive integer ID: " + name)
+print(sys.argv[2] + "/assets/" + str(assets[0]["id"]))
+' "$asset_name" "$release_api"
+    )"
+    curl "${curl_options[@]}" --header 'Accept: application/octet-stream' \
+        --output "$output" "$asset_api"
+fi
 
 output_dir="$(dirname "$output")"
 output_name="$(basename "$output")"

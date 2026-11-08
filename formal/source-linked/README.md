@@ -1319,3 +1319,22 @@ function in the hax include list. This is a translation failure, not a rejected
 protocol theorem. The experimental refactor was abandoned. No replacement
 string semantics, custom axiom or weaker boolean-only claim was accepted.
 Reserved-extension correspondence remains unresolved in P04.
+
+### Pinned bootstrap transport (#1504)
+
+The shared verified downloader retries the original release URL first. If that
+transport fails for a GitHub release, it can resolve the exact named asset through
+the official release API. It still checks the caller's original SHA-256 pin on
+the final bytes. An absent or ambiguous asset, invalid asset ID, API error or
+wrong hash fails setup. Python 3 is needed only for this fallback; without it,
+the original download failure remains a failure. Both Lychee setup and the
+pinned elan bootstrap use this helper. The formal path filter includes it.
+Required offline link validation and every proof/fault gate still run.
+
+Deterministic fixtures cover primary corruption without fallback, successful
+same-pin API recovery, corrupt fallback bytes, absent/duplicate assets, invalid
+IDs, API transport errors and refusal to apply GitHub fallback to another host.
+Live Lychee and elan downloads verify the unchanged pins. This transport repair
+does not add a Rust translator, model, axiom or server runtime dependency.
+Hax's internal Charon/Aeneas downloads and other checker installers retain their
+own external-service limits; #1504 tracks the remaining work.

@@ -19706,6 +19706,135 @@ fn test_verified_downloader_retries_transient_http_and_rejects_corruption() {
     );
 }
 
+/// Keep official release fallback downloads subject to the original byte pin.
+#[test]
+#[cfg(unix)]
+fn test_verified_downloader_github_api_fallback_requires_exact_asset_and_hash() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = unique_temp_dir("verified-api-download");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create fixture binaries");
+    let curl = bin.join("curl");
+    write_file(
+        &curl,
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+url = args[-1]
+mode = os.environ['DOWNLOAD_FIXTURE_MODE']
+with open(os.environ['DOWNLOAD_FIXTURE_LOG'], 'a') as log:
+    log.write(json.dumps(args) + '\n')
+if url.startswith('https://github.com/') or url.startswith('https://example.com/'):
+    if mode == 'primary-corrupt':
+        pathlib.Path(args[args.index('--output') + 1]).write_bytes(b'corrupt\n')
+        sys.exit(0)
+    sys.exit(22)
+if '/releases/tags/' in url:
+    if mode == 'metadata-error':
+        sys.exit(22)
+    asset = {'name': 'checker.tar.gz', 'id': 7}
+    if mode == 'bad-id':
+        asset['id'] = True
+    assets = [] if mode == 'missing' else [asset, asset] if mode == 'duplicate' else [asset]
+    print(json.dumps({'assets': assets}))
+    sys.exit(0)
+assert url == 'https://api.github.com/repos/owner/checker/releases/assets/7', url
+assert 'Accept: application/octet-stream' in args
+if mode == 'asset-error':
+    sys.exit(22)
+payload = b'corrupt\n' if mode == 'corrupt' else b'verified payload\n'
+pathlib.Path(args[args.index('--output') + 1]).write_bytes(payload)
+"#,
+    );
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755))
+        .expect("make fixture curl executable");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    for (mode, url, expected_success, expected_requests) in [
+        (
+            "primary-corrupt",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            1,
+        ),
+        (
+            "bad-id",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            2,
+        ),
+        (
+            "asset-error",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            3,
+        ),
+        (
+            "success",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            true,
+            3,
+        ),
+        (
+            "corrupt",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            3,
+        ),
+        (
+            "missing",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            2,
+        ),
+        (
+            "duplicate",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            2,
+        ),
+        (
+            "metadata-error",
+            "https://github.com/owner/checker/releases/download/v1/checker.tar.gz",
+            false,
+            2,
+        ),
+        ("other-host", "https://example.com/checker.tar.gz", false, 1),
+    ] {
+        let log = temp.path().join(format!("{mode}.jsonl"));
+        let output = temp.path().join(format!("{mode}.bin"));
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/download-verified.sh"))
+            .args([
+                url,
+                "62d33f34d79dd4a4590a760d9f6c6926834eadc87e48b9409e029c61e8aa37dc",
+            ])
+            .arg(&output)
+            .env("PATH", &path)
+            .env("DOWNLOAD_FIXTURE_MODE", mode)
+            .env("DOWNLOAD_FIXTURE_LOG", &log)
+            .output()
+            .expect("run download fixture");
+        assert_eq!(
+            result.status.success(),
+            expected_success,
+            "mode={mode}: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let requests = fs::read_to_string(log).expect("read fixture requests");
+        assert_eq!(
+            requests.lines().count(),
+            expected_requests,
+            "mode={mode}: {requests}"
+        );
+        if expected_success {
+            assert_eq!(fs::read(output).unwrap(), b"verified payload\n");
+            assert!(requests.contains("Accept: application/vnd.github+json"));
+        }
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn test_lychee_runner_fails_closed_for_empty_and_failed_checks() {
@@ -32250,6 +32379,7 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     );
 }
 
+/// Recheck formal evidence when any source or tool-download input changes.
 #[test]
 fn test_formal_verification_triggers_cover_modeled_sources() {
     let root = repo_root();
@@ -32266,6 +32396,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "scripts/generate-sequenced-relay-trace.py",
             "scripts/run-sequenced-relay-trace-validation.sh",
             "scripts/run-z3-proofs.sh",
+            "scripts/download-verified.sh",
             "src/**",
             "Cargo.toml",
             "Cargo.lock",
@@ -32278,6 +32409,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
     );
 }
 
+/// Require pinned tools, full source checks, fault controls and retained evidence.
 #[test]
 fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
     let root = repo_root();
@@ -32314,6 +32446,29 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
             .is_none());
         assert!(verification_step.as_mapping_get("if").is_none());
         if backend == "lean" {
+            let install = steps
+                .iter()
+                .find(|step| {
+                    step.as_mapping_get("name").and_then(Yaml::as_str)
+                        == Some("Install pinned elan")
+                })
+                .expect("Lean requires its pinned elan installer");
+            let command = install
+                .as_mapping_get("run")
+                .and_then(Yaml::as_str)
+                .expect("elan install command");
+            assert!(
+                command.contains("bash scripts/download-verified.sh")
+                    && command
+                        .contains("releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz")
+                    && command.contains(
+                        "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63"
+                    ),
+                "Keep elan 4.2.4 and its exact checksum on the shared verified downloader"
+            );
+            assert!(install.as_mapping_get("if").is_none());
+            assert!(install.as_mapping_get("continue-on-error").is_none());
+
             assert_eq!(
                 verification_step
                     .as_mapping_get("env")
