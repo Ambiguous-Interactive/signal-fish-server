@@ -1183,6 +1183,58 @@ class FaultPartitions(unittest.TestCase):
                 self.assertEqual(report["completed_mutations"], selected)
                 self.assertEqual(report["proved_scenarios"], scenarios)
 
+    @patch("builtins.print")
+    def test_main_reports_changed_and_missing_protected_inputs(self, _print):
+        """Keep fail-closed verdicts and name the exact protected input that drifted."""
+        for case in ("unchanged", "generated", "tool-pin", "missing-generated", "source", "missing-source"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                crate = root / "formal/source-linked/lean"
+                generated = crate / "proofs/projection/lean/Projection/Extraction/Funs.lean"
+                pin = crate / "hax.toml"
+                for name in verify.SOURCES:
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("original production source\n")
+                generated.parent.mkdir(parents=True)
+                generated.write_text("original generated source location\n")
+                pin.write_text("original pinned tool\n")
+                changed = (root / "src/protocol_core.rs" if "source" in case else
+                           pin if case == "tool-pin" else generated)
+                expected = [] if case == "unchanged" else [changed.relative_to(root).as_posix()]
+                missing = case.startswith("missing-")
+
+                def proof(_crate, _scenario):
+                    if missing:
+                        changed.unlink()
+                    elif case != "unchanged":
+                        changed.write_text("changed during extraction or proof work\n")
+
+                logs = crate / "target/verification-logs"
+                with patch.object(verify, "ROOT", root), patch.object(verify, "HERE", crate), \
+                        patch.object(verify, "LOGS", logs), patch.object(verify, "RUNS", []), \
+                        patch.object(verify, "lock_inputs", return_value=[pin, generated]), \
+                        patch.object(verify, "run", return_value=SimpleNamespace(stdout="version=0.4.2")), \
+                        patch.object(verify, "verify", side_effect=proof) as checked, \
+                        patch("sys.argv", ["verify.py", "--scenario", "projection"]):
+                    if case == "unchanged":
+                        verify.main()
+                    else:
+                        with self.assertRaises(RuntimeError) as error:
+                            verify.main()
+                        self.assertIn(expected[0], str(error.exception))
+                        if missing:
+                            self.assertIn("(missing)", str(error.exception))
+                    checked.assert_called_once_with(crate, "projection")
+                report = json.loads((logs / "results.json").read_text())
+                source_changed = "source" in case
+                self.assertEqual(report["completed"], case == "unchanged")
+                self.assertEqual(report["source_unchanged"], not source_changed)
+                self.assertEqual(report["locks_unchanged"], case == "unchanged" or source_changed)
+                self.assertEqual(report["changed_source_inputs"], expected if source_changed else [])
+                self.assertEqual(report["changed_protected_inputs"], [] if source_changed else expected)
+                self.assertEqual(report["missing_inputs"], expected if missing else [])
+
     def test_invalid_cli_selection_fails_before_proof_tools(self):
         """Reject invalid CLI scope before any external proof command starts."""
         for arguments in (["--mutation", "lower-clamp"], ["--mutation-shard", "0/4"],

@@ -1036,13 +1036,31 @@ def main():
             capability_probe_status = probe_capability(HERE)
         completed = True
     finally:
-        unchanged = all(path.read_bytes() == value for path, value in sources_before.items())
-        locks_unchanged = all(path.read_bytes() == value for path, value in locks_before.items())
+        changed_source_inputs = []
+        changed_protected_inputs = []
+        missing_inputs = []
+        for before, changed in ((sources_before, changed_source_inputs),
+                                (locks_before, changed_protected_inputs)):
+            for path, value in before.items():
+                relative = path.relative_to(ROOT).as_posix()
+                try:
+                    current = path.read_bytes()
+                except FileNotFoundError:
+                    changed.append(relative)
+                    missing_inputs.append(relative)
+                else:
+                    if current != value:
+                        changed.append(relative)
+        unchanged = not changed_source_inputs
+        locks_unchanged = not changed_protected_inputs
         LOGS.mkdir(parents=True, exist_ok=True)
         (LOGS / "results.json").write_text(json.dumps({
             "hax_version": VERSION, "source_sha256": digest,
             "completed": completed and unchanged and locks_unchanged,
             "source_unchanged": unchanged, "locks_unchanged": locks_unchanged,
+            "changed_source_inputs": changed_source_inputs,
+            "changed_protected_inputs": changed_protected_inputs,
+            "missing_inputs": missing_inputs,
             "source_hashes": {str(path.relative_to(ROOT)): hashlib.sha256(value).hexdigest()
                               for path, value in sources_before.items()},
             "proved_scenarios": proved_scenarios, "capability_probe_status": capability_probe_status,
@@ -1053,9 +1071,13 @@ def main():
             "runs": RUNS,
         }, indent=2) + "\n")
         if not unchanged:
-            raise RuntimeError("Production source changed during verification")
+            paths = ", ".join(f"{path} (missing)" if path in missing_inputs else path
+                              for path in changed_source_inputs)
+            raise RuntimeError(f"Production source changed during verification: {paths}")
         if not locks_unchanged:
-            raise RuntimeError("Verification changed a pinned tool or dependency file")
+            paths = ", ".join(f"{path} (missing)" if path in missing_inputs else path
+                              for path in changed_protected_inputs)
+            raise RuntimeError(f"Verification changed protected inputs: {paths}")
     print("PASS: current production source verified; source unchanged", flush=True)
 
 
