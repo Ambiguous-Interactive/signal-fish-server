@@ -23,6 +23,14 @@ CI scans all tracked graphs with the existing supply-chain policy.
 The signaling server package does not use these patches.
 Git dependencies remain prohibited.
 
+The driver repeats its I/O pass after reads make progress (#1508). This flushes
+read-induced SCTP replies and resumes parked accepted input before waiting for
+an unrelated packet or timer. Core batch and callback queue limits stay intact.
+A virtual-clock control fills the real receive window and drains every accepted
+reliable message with timers frozen. Normal retransmission then recovers the
+refused probe and exact suffix. Both offer roles and fresh peer pairs pass.
+Replacement qualification in #912 must retain this receive-progress behavior.
+
 The driver releases undeliverable event queues after channel closure.
 It preserves messages queued before registration while the core channel exists,
 and preserves message-before-close ordering for registered slow receivers.

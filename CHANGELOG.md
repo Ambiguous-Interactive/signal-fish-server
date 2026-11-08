@@ -58,6 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resume accepted native P2P messages and receive-credit replies when callback polling restarts (#1508).
+- Cancel native P2P candidate queries when their link retires so retries release old connections (#1507).
 - Preserve accepted P2P transport reports and WebRTC signals after caller cancellation (#1428, #1429).
 - Stop unrelated connection logs from inheriting room-departure fields (#1425).
 - Count each reserved control frame once when room publication or P2P status delivery is canceled

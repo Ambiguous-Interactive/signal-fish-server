@@ -375,6 +375,15 @@ bytes include protocol traffic and do not prove channel message receipt.
 The same sample age and query state apply. A successful refresh without a route
 clears prior route evidence. A failed refresh retains the aged prior sample.
 
+`npm run test:channel-modes` also runs two local Chromium UDP loss controls.
+Each control sends one selected probe through a UDP proxy and drops its first
+large DTLS datagram before other application sends begin. The reliable control
+requires exact delivery after retransmission. The unreliable control requires
+zero receiver stack and callback receipts and keeps the production exchange
+ledger failed with missing unreliable input. Both controls compare actual stream
+IDs, message totals, byte totals, and exact surviving payloads. They distinguish
+these injected histories; they do not identify the cause of #853 or #889.
+
 With `--exchange`, timeout snapshots also retain `received_probes` checks for
 each required label. `valid` counts admitted probes with the expected sender,
 label, and sequence. Other counters name the first mismatch: `invalid_json`,

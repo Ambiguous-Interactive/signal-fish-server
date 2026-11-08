@@ -537,13 +537,16 @@ struct PeerLink {
     pair_connected: bool,
     /// One poller per admitted required channel, owned by this physical link.
     channel_tasks: Vec<Box<dyn JoinHandle>>,
+    /// At most one nominated-pair query belongs to this physical link.
+    selected_pair_probe: Option<SelectedPairProbe>,
 }
 
 impl PeerLink {
-    fn stop_channel_tasks(&mut self) {
+    fn stop_tasks(&mut self) {
         for task in self.channel_tasks.drain(..) {
             task.abort();
         }
+        self.selected_pair_probe = None;
     }
 }
 
@@ -551,7 +554,7 @@ impl Drop for PeerLink {
     fn drop(&mut self) {
         // Runtime handles detach on drop. Explicit cancellation also covers
         // failed pairing, cancelled teardown, and destruction of the engine.
-        self.stop_channel_tasks();
+        self.stop_tasks();
     }
 }
 
@@ -771,7 +774,7 @@ impl Engine {
     /// Close and forget a departed peer so a later directive can pair it anew.
     pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
         if let Some(mut link) = self.peers.remove(&peer) {
-            link.stop_channel_tasks();
+            link.stop_tasks();
             #[cfg(test)]
             let negotiation_hold = self.negotiation_hold.clone();
             let result = crate::deadline::timeout(Duration::from_millis(250), async {
@@ -900,6 +903,7 @@ impl Engine {
             remote_description_set: false,
             pair_connected: false,
             channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
+            selected_pair_probe: None,
         };
         self.peers.insert(peer, link);
         self.receipt_generations
@@ -953,7 +957,7 @@ impl Engine {
         .await;
         if result.is_err() {
             if let Some(mut link) = self.peers.remove(&peer) {
-                link.stop_channel_tasks();
+                link.stop_tasks();
                 let _ = link.pc.close().await;
             }
         }
@@ -1398,21 +1402,32 @@ impl Engine {
         snapshot
     }
 
-    /// Start a detached nominated-pair probe for the current physical
-    /// link. Results use a dedicated channel so the orchestrator can arbitrate
+    /// Start a nominated-pair probe owned by the current physical link.
+    /// Repeated calls share a running query and its first result sender.
+    /// Retirement cancels the query.
+    /// Results use a dedicated channel so the orchestrator can arbitrate
     /// already-completed evidence at its soft deadline without consuming or
     /// reordering ordinary engine callbacks.
     pub fn start_selected_candidate_pair_probe(
-        &self,
+        &mut self,
         peer: PlayerId,
         results: mpsc::UnboundedSender<SelectedPairProbeResult>,
     ) -> bool {
-        let Some(link) = self.peers.get(&peer) else {
+        let Some(link) = self.peers.get_mut(&peer) else {
             return false;
         };
+        if link.selected_pair_probe.as_ref().is_some_and(|probe| {
+            !*probe
+                .completed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                && !probe.task.is_finished()
+        }) {
+            return true;
+        }
         let pc = link.pc.clone();
         let generation = link.generation;
-        spawn_selected_pair_probe(
+        link.selected_pair_probe = Some(spawn_selected_pair_probe(
             self.runtime.clone(),
             results,
             peer,
@@ -1429,8 +1444,19 @@ impl Engine {
                     .flatten();
                 selected_candidate_pair_details(nominated.as_ref())
             },
-        );
+        ));
         true
+    }
+}
+
+struct SelectedPairProbe {
+    task: Box<dyn JoinHandle>,
+    completed: Arc<std::sync::Mutex<bool>>,
+}
+
+impl Drop for SelectedPairProbe {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -1440,16 +1466,25 @@ fn spawn_selected_pair_probe(
     peer: PlayerId,
     generation: u64,
     probe: impl std::future::Future<Output = Option<SelectedCandidatePair>> + Send + 'static,
-) {
-    runtime.spawn(Box::pin(async move {
+) -> SelectedPairProbe {
+    let completed = Arc::new(std::sync::Mutex::new(false));
+    let publication_complete = completed.clone();
+    let task = runtime.spawn(Box::pin(async move {
         let selected = probe.await;
+        // Publish and mark completion under one short, synchronous lock. A
+        // consumer may request another query before the JoinHandle is finished.
+        let mut completed = publication_complete
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let _ = results.send(SelectedPairProbeResult {
             peer,
             generation,
             completed_at: tokio::time::Instant::now(),
             selected,
         });
+        *completed = true;
     }));
+    SelectedPairProbe { task, completed }
 }
 
 /// Read the nominated pair itself, including dynamically learned candidates.
@@ -2452,7 +2487,7 @@ mod tests {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let peer = PlayerId::from_u128(0x05E1_EC7E_D006);
 
-        spawn_selected_pair_probe(runtime, result_tx, peer, 9, async move {
+        let _probe = spawn_selected_pair_probe(runtime, result_tx, peer, 9, async move {
             started_tx
                 .send(())
                 .expect("test observes the probe reaching its pending point");

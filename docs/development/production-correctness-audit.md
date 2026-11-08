@@ -15022,3 +15022,75 @@ channel settings, generations and gameplay decisions do not change. Only the
 standalone browser reference client's diagnostic snapshot gains fields; the
 native changes are investigation fixtures. These controls do not establish
 remote-network qualification or complete the broader #826 audit.
+
+### F290 — Retire native selected-pair queries with their physical link
+
+Issue: #1507. Related investigations: #853, #889 and #1264.
+Baseline: `e9fd96b7`.
+
+The native Engine discarded each selected-pair query's runtime handle. A blocked
+query retained its peer connection after link removal. The real-core regression
+fails on the original source because the task remains live after removal.
+Each physical link now owns one query. Repeated starts share that query and its
+first result sender. Removal, failed pairing, query replacement and Engine drop
+cancel owned tasks. Publication and completion share a short synchronous lock;
+already published rows retain their generation and completion time.
+
+Live controls hold the actual RTC core through retirement in both channel
+profiles and offer roles. They require cancellation before releasing the core,
+no stale completion, one pending query, and exact 4 KiB reliable gameplay on a
+fresh physical generation. Separate controls retain completed rows across
+replacement and verify that Engine drop releases pending query captures.
+This repairs task lifetime; it does not explain historical establishment,
+callback or receipt failures.
+
+### F291 — Separate browser wire loss from missing callbacks
+
+Issues: #853 and #889. Baseline: `e9fd96b7`.
+
+Two real Chromium controls route the only advertised IPv4 ICE path through a
+local UDP proxy. Each fresh pairing opens both channels before the proxy drops
+one large DTLS datagram from the sole application send. The reliable-loss cell
+requires retransmission and exact receipt. The zero-retransmit cell requires
+zero stack receipts and zero raw/admitted callbacks for the lost unreliable
+probe. Reverse traffic and both reliable directions retain their exact bodies.
+
+Actual channel IDs, message and byte totals, proxy forwarding/drop evidence,
+and live route state remain separate observations. The production exchange
+ledger retains exactly the missing unreliable obligation. It does not accept
+that cell as a complete exchange. These are controlled local packet-loss causes,
+not attribution of either historical failure or remote-network qualification.
+The controls run in the existing browser channel-mode command and hosted lane.
+
+Rust and .NET SDKs own signaling and relay, not this WebRTC implementation.
+Godot uses its own native or browser WebRTC backend. Their current READMEs were
+inspected through the connected GitHub app; Godot has no call to the changed
+selected-pair method. Server messages, negotiation, channel modes and retry
+protocols stay unchanged. No SDK migration is required. Standalone native
+Engine callers must use a mutable Engine to start a selected-pair query, as
+recorded in the native reference README.
+
+### F292 — Continue native receive progress before the driver sleeps
+
+Issue: #1508. Related investigations: #1244, #1264 and #1319.
+Baseline: `e9fd96b7`.
+
+The async driver flushed writes before draining reads, then waited for external
+input or a protocol timer. Application reads could reopen SCTP receive credit
+and unblock more accepted input without requesting another driver pass. The
+new virtual-clock control fails on the original driver at 514 delivered messages
+while SCTP has already accepted 516. The driver now continues after read progress
+so its next pass flushes replies and drains the accepted tail. No-progress passes
+retain the existing wait path. Core read batches and receive limits stay unchanged.
+
+The control holds callbacks until the actual SCTP window closes and a probe is
+refused. With both protocol clocks frozen, it resumes callbacks and requires the
+complete accepted reliable prefix and a new SACK at the sender. It then permits
+normal protocol-clock progress for the refused probe and requires all 640 exact
+ordered 1 KiB payloads. Both receiver offer roles and two fresh pairings run.
+A temporary RTC pipeline-pump change was not needed and was removed.
+
+This repairs a deterministic receive-resume delay. It does not explain the
+historical reliable-prefix loss, terminal Engine event or pre-resume saturation
+plateau. Those investigations remain open. The repair is confined to the local
+native WebRTC wrapper; the server and three SDK backends do not use that patch.

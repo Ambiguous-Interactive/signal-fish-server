@@ -911,7 +911,7 @@ where
             self.inner.write_pending.store(false, Ordering::Release);
             self.poll_writes().await?;
             self.poll_events().await;
-            self.poll_reads().await?;
+            let read_progress = self.poll_reads().await?;
 
             // Wake senders blocked in `DataChannel::writable()`: the poll_* passes above
             // applied any SCTP buffer releases (acked/abandoned bytes) to the per-channel
@@ -921,6 +921,12 @@ where
             // (throughput-sensitive) hot loop free of the per-iteration `Notify` lock.
             if self.inner.data_channel_send_buffer_limit != usize::MAX {
                 self.inner.data_channel_backpressure.notify_waiters();
+            }
+
+            // Application reads can reopen receive credit or complete resets.
+            // Flush their output before waiting for unrelated input or a timer.
+            if read_progress {
+                continue;
             }
 
             // 4.a poll next timeout
@@ -2262,7 +2268,8 @@ where
         }
     }
 
-    async fn poll_reads(&mut self) -> Result<()> {
+    async fn poll_reads(&mut self) -> Result<bool> {
+        let mut progressed = false;
         // 3.a turn_relayer poll_read() - deliver decapsulated relay data,
         // but no need for stun_gatherer poll_read()
         let mut turn_messages = Vec::new();
@@ -2270,6 +2277,7 @@ where
             turn_messages.push(message);
         }
         if !turn_messages.is_empty() {
+            progressed = true;
             let mut core = self.inner.core.lock().await;
             for message in turn_messages {
                 core.handle_read(message)?;
@@ -2280,6 +2288,7 @@ where
         // gating it on that was a real defect: a slow signalling consumer froze video on the
         // same connection for as long as it stalled.
         for message in Self::drain_core_media(self.inner.clone()).await {
+            progressed = true;
             self.handle_rtc_message(message).await;
         }
 
@@ -2290,7 +2299,7 @@ where
         // `a_rwnd` falls, and the peer slows down. Draining regardless would move the backlog
         // into this process's heap and throttle nobody.
         if self.flush_pending_data_channel_events().await {
-            return Ok(());
+            return Ok(progressed);
         }
 
         loop {
@@ -2298,6 +2307,7 @@ where
             if messages.is_empty() {
                 break;
             }
+            progressed = true;
             for message in messages {
                 self.handle_rtc_message(message).await;
             }
@@ -2306,7 +2316,7 @@ where
             }
         }
 
-        Ok(())
+        Ok(progressed)
     }
 
     async fn poll_timeout(&mut self) -> Instant {
@@ -2531,6 +2541,10 @@ mod tests {
             assert!(first_rx.try_recv().is_err());
             assert!(second_rx.try_recv().is_err());
             assert!(driver.pending_data_channel_events.is_empty());
+            assert!(
+                !driver.poll_reads().await.unwrap(),
+                "an idle read pass must return to socket and timer polling"
+            );
             // Missing receivers retain a pending registration but must not
             // trigger the registered-blockage retry at the late flush.
             driver
