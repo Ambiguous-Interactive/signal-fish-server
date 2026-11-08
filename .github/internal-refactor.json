@@ -5,12 +5,12 @@
     {
       "path": "src/protocol_core.rs",
       "before": "bea7c674a411c40ae51cb1d6866e960c689f091d",
-      "after": "9e24dd007d5a92dddc30b7bb764b4b3ab77536a9"
+      "after": "45f3aac227161151c2d572068287ee1055f59daa"
     },
     {
       "path": "src/websocket/connection.rs",
       "before": "071fe67d85bbe59ff0b5089ef13dd67e9b357556",
-      "after": "156fb2c74eb880b9350ea064aa6350be5080e05f"
+      "after": "3bff9438492cb7caadc14551367c2bb4c6a57242"
     }
   ]
 }

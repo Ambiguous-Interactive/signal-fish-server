@@ -1395,6 +1395,8 @@ async fn handle_socket_owned(
     }
 }
 
+/// Serve one socket and record its child tasks for supervised cleanup.
+/// Enqueue Authenticate refusal replies before applying the checked close/retry action.
 async fn handle_socket_supervised(
     socket: WebSocket,
     server: Arc<EnhancedGameServer>,

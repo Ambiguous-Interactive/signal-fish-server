@@ -112,6 +112,7 @@ mod tests {
         }
     }
 
+    /// Keep handshake boundary cases enabled in the Miri core lane.
     #[test]
     fn handshake_version_boundaries_preserve_refusal_and_client_precedence() {
         use super::{decide_handshake_version, HandshakeVersionDecision};
@@ -161,6 +162,7 @@ mod tests {
         }
     }
 
+    /// Check both handshake states against the protocol table for every client version.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn handshake_version_exhausts_requests_routes_and_lifecycle_states() {

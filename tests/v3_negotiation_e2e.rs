@@ -527,6 +527,7 @@ async fn v3_only_server_rejects_explicit_v2_instead_of_silently_upgrading() {
     running_server.shutdown().await;
 }
 
+/// A refused pending handshake must still accept a valid route-default retry.
 #[tokio::test]
 async fn pending_v3_handshake_can_retry_after_below_floor_refusal() {
     let running_server = start_v3_only_server(true).await;
