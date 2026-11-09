@@ -6620,7 +6620,7 @@ fn assert_plan_queue_empty(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
 /// Require maintenance to repair failed host changes without new membership actions.
 #[tokio::test(start_paused = true)]
 async fn maintenance_retries_failed_host_departure_without_another_membership_change() {
-    for failure in ["read", "publication", "routing"] {
+    for failure in ["read", "publication", "routing", "busy_detach"] {
         let server = create_server_with_session(host_config()).await;
         let (host, mut host_rx) = register_client(&server).await;
         let (successor, mut successor_rx) = register_client(&server).await;
@@ -6649,7 +6649,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
         match failure {
-            "read" => database.fail_get_room_by_id_for_test(true),
+            "read" | "busy_detach" => database.fail_get_room_by_id_for_test(true),
             "publication" => server
                 .message_coordinator
                 .fail_room_transactions_for_test(true),
@@ -6674,6 +6674,37 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         server
             .message_coordinator
             .fail_room_transactions_for_test(false);
+        let busy_room = if failure == "busy_detach" {
+            let player = PlayerId::new_v4();
+            let room = server
+                .database
+                .create_room(
+                    "busy-maintenance".into(),
+                    None,
+                    4,
+                    false,
+                    player,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .id;
+            server
+                .pending_durable_player_detaches
+                .insert((room, player), None);
+            Some((
+                room,
+                player,
+                server
+                    .message_coordinator
+                    .lock_room_event_mutation(&room)
+                    .await,
+            ))
+        } else {
+            None
+        };
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let maintenance_server = Arc::clone(&server);
         let maintenance = tokio::spawn(async move {
@@ -6703,6 +6734,13 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         assert_plan_queue_empty(&mut host_rx);
         assert_plan_queue_empty(&mut successor_rx);
         assert!(server.pending_session_replans.is_empty());
+        if let Some((room, player, guard)) = busy_room {
+            assert!(server
+                .pending_durable_player_detaches
+                .contains_key(&(room, player)));
+            drop(guard);
+            assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+        }
         server.retry_pending_session_replans().await;
         assert_plan_queue_empty(&mut successor_rx);
     }
