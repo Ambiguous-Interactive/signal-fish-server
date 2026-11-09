@@ -167,6 +167,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         connect_token_required: std::sync::atomic::AtomicBool::new(false),
         room_applications,
         active_session_plans: Arc::new(DashMap::new()),
+        pending_session_replans: DashMap::new(),
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         moderation_lifecycle_gate: tokio::sync::Mutex::new(()),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),

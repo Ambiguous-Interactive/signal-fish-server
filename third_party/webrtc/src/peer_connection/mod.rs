@@ -311,15 +311,15 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
     /// Once set, a channel's outstanding send bytes (handed to `send`/`send_text` but
     /// not yet acknowledged or abandoned by SCTP) are bounded by this limit:
     ///
-    /// - [`DataChannel::send`] / [`DataChannel::send_text`] **block** until the buffer
-    ///   is below the limit, then enqueue — mirroring `tokio::mpsc::Sender::send`.
+    /// - [`DataChannel::send`] / [`DataChannel::send_text`] **block** until the whole
+    ///   message fits. One oversized message can enter an empty buffer.
     /// - [`DataChannel::try_send`] / [`DataChannel::try_send_text`] instead **fail fast**
     ///   with [`Error::ErrSendBufferFull`] — mirroring `tokio::mpsc::Sender::try_send`.
     /// - [`DataChannel::writable`] resolves once the buffer is below the limit.
     ///
     /// The limit is applied to **each data channel independently**, so a connection with
-    /// `N` channels can hold up to `N × limit` outstanding across all of them — size it
-    /// for a per-channel budget, not a whole-connection cap.
+    /// `N` channels can hold up to `N × limit` outstanding across all of them, except
+    /// for one oversized message per empty channel. Size it for a per-channel budget.
     ///
     /// **Default: `usize::MAX` (unbounded)** — no back-pressure, and `send`/`send_text`
     /// never block, matching the historical behaviour and Safari/Firefox (which impose no
@@ -796,7 +796,7 @@ pub(crate) struct PeerConnectionRef {
     pub(crate) closing: AtomicBool,
     /// Per-channel data-channel send-buffer limit in bytes (`usize::MAX` = unbounded,
     /// the default). When a limit is configured, [`DataChannel::send`]/[`send_text`](DataChannel::send_text)
-    /// block until a channel's `outstanding_bytes` drops below it, and
+    /// block until the whole message fits (or an oversized message has an empty buffer), and
     /// [`DataChannel::try_send`]/[`try_send_text`](DataChannel::try_send_text) fail fast with
     /// `ErrSendBufferFull` — an opt-in bound on send-side memory. Set once at build time via
     /// [`PeerConnectionBuilder::with_data_channel_send_buffer_limit`].

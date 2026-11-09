@@ -57,6 +57,19 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 
 pub(crate) use crate::session_admission::{joiner_supports_sticky_plan, ActiveSessionPlan};
 
+/// Maximum concurrent room checks owned by one maintenance sweep.
+pub(super) const SESSION_REPAIR_CONCURRENCY: usize = 8;
+/// Limit maintenance waiting; already enqueued publications keep their owned room guard.
+const SESSION_REPAIR_SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Latest failed or unfinished room repair, ordered by its last attempt.
+#[derive(Clone, Copy)]
+pub(super) struct PendingSessionReplan {
+    departed: PlayerId,
+    revision: uuid::Uuid,
+    attempted_at: tokio::time::Instant,
+}
+
 impl ActiveSessionPlan {
     /// Rehydrate a full [`SessionPlanDecision`] from this sticky decision plus
     /// the room's *current* member list. The ladder is **not** re-run — the
@@ -841,8 +854,9 @@ impl EnhancedGameServer {
     /// whose host was already gone or downgraded (an insert-after-departure
     /// race at finalize, concurrent host + candidate departures, an earlier
     /// hook skipped by a transient storage error, or a reconnect that shrank
-    /// the host's negotiated capabilities) on the next departure. Any other
-    /// departure changes no plan parameter, so nothing is re-emitted —
+    /// the host's negotiated capabilities). Failed checks and publications remain
+    /// queued for the next maintenance sweep, without requiring another departure.
+    /// Any other departure changes no plan parameter, so nothing is re-emitted —
     /// `PlayerLeft` already tells peers to prune the departed member.
     ///
     /// Concurrency: one shared room-mutation guard is intentionally held across
@@ -860,15 +874,92 @@ impl EnhancedGameServer {
         // snapshot stable through host election, stored-plan replacement, and
         // all exact-membership deliveries so a pending join/reconnect cannot
         // wedge the plan on a host that nobody was told about.
+        let revision = uuid::Uuid::new_v4();
+        self.pending_session_replans.insert(
+            *room_id,
+            PendingSessionReplan {
+                departed: *departed,
+                revision,
+                attempted_at: tokio::time::Instant::now(),
+            },
+        );
         let room_event_guard = self
             .message_coordinator
             .lock_room_event_mutation(room_id)
             .await;
 
+        if self
+            .repair_session_after_departure(room_id, departed, room_event_guard)
+            .await
+        {
+            self.pending_session_replans
+                .remove_if(room_id, |_, pending| pending.revision == revision);
+        }
+    }
+
+    /// Retry older rooms first, with bounded workers and one shared maintenance wait.
+    pub(crate) async fn retry_pending_session_replans(self: &Arc<Self>) {
+        let mut pending: Vec<_> = self
+            .pending_session_replans
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        pending.sort_unstable_by_key(|(room, repair)| (repair.attempted_at, *room));
+        let mut pending = pending.into_iter();
+        let mut workers = tokio::task::JoinSet::new();
+        let mut draining = self.shutdown_drain_receiver();
+        let deadline =
+            crate::deadline::after(tokio::time::Instant::now(), SESSION_REPAIR_SWEEP_BUDGET);
+        loop {
+            if self.is_draining() {
+                workers.shutdown().await;
+                return;
+            }
+            while workers.len() < SESSION_REPAIR_CONCURRENCY {
+                let Some((room, repair)) = pending.next() else {
+                    break;
+                };
+                let server = Arc::clone(self);
+                workers.spawn(async move {
+                    server
+                        .handle_session_member_departure(&room, &repair.departed)
+                        .await;
+                });
+            }
+            if workers.is_empty() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = draining.changed() => {
+                    workers.shutdown().await;
+                    return;
+                }
+                _ = crate::deadline::wait_until(deadline) => {
+                    workers.shutdown().await;
+                    tracing::debug!("Session repairs remain pending after the maintenance wait");
+                    return;
+                }
+                result = workers.join_next() => {
+                    if let Some(Err(error)) = result {
+                        tracing::warn!(%error, "Session repair task failed; retaining it for retry");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Revalidate one departure and report whether its repair obligation is resolved.
+    async fn repair_session_after_departure(
+        &self,
+        room_id: &RoomId,
+        departed: &PlayerId,
+        room_event_guard: RoomEventMutationGuard,
+    ) -> bool {
         // No stored decision ⇒ the room runs the relay floor (or pre-dates v3):
         // pure v2 semantics, `PlayerLeft` suffices.
         let Some(stored) = self.active_session_plan(room_id) else {
-            return;
+            return true;
         };
 
         if stored.topology == Topology::Mesh {
@@ -887,10 +978,11 @@ impl EnhancedGameServer {
                 }
                 Ok(Some(_)) => {}
                 Err(error) => {
-                    tracing::warn!(%room_id, %departed, %error, "Failed to fetch room for departure re-planning")
+                    tracing::warn!(%room_id, %departed, %error, "Failed to fetch room for departure re-planning");
+                    return false;
                 }
             }
-            return;
+            return true;
         }
 
         if let Some(host_id) = stored.host.filter(|host| host != departed) {
@@ -915,11 +1007,11 @@ impl EnhancedGameServer {
                                 .routed_player_pair(room_id, &host_id, &host_id)
                                 .await
                             {
-                                Ok(None | Some([true, true])) => return,
+                                Ok(None | Some([true, true])) => return true,
                                 Ok(Some(_)) => {}
                                 Err(error) => {
                                     tracing::warn!(%room_id, %departed, %error, "Failed to resolve host routing for departure re-planning");
-                                    return;
+                                    return false;
                                 }
                             }
                         }
@@ -928,7 +1020,7 @@ impl EnhancedGameServer {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(%room_id, %departed, %error, "Failed to fetch host for departure re-planning");
-                    return;
+                    return false;
                 }
             }
         }
@@ -945,7 +1037,7 @@ impl EnhancedGameServer {
             Ok(None) => {
                 // The room itself is gone; drop the stale decision.
                 self.active_session_plans.remove(room_id);
-                return;
+                return true;
             }
             Err(err) => {
                 tracing::warn!(
@@ -954,14 +1046,14 @@ impl EnhancedGameServer {
                     error = %err,
                     "Failed to fetch room for departure re-planning"
                 );
-                return;
+                return false;
             }
         };
 
         // A stored decision exists only for a finalized session; anything else
         // is anomalous and there is no live session to re-plan.
         if room.lobby_state != LobbyState::Finalized {
-            return;
+            return true;
         }
 
         let routed_player_ids = match self.message_coordinator.routed_player_ids(room_id).await {
@@ -973,7 +1065,7 @@ impl EnhancedGameServer {
                     %error,
                     "Failed to resolve published room membership for departure re-planning"
                 );
-                return;
+                return false;
             }
         };
         let stored_players_empty = room.players.is_empty();
@@ -996,14 +1088,14 @@ impl EnhancedGameServer {
             if stored_players_empty {
                 self.active_session_plans.remove(room_id);
             }
-            return;
+            return true;
         }
 
         // Sticky topology/transport: only an invalid *host* invalidates a plan
         // parameter. Mesh departures, and host-topology departures that leave
         // a still-capable stored host in place, re-emit nothing.
         if !stored.host_invalid(&members) {
-            return;
+            return true;
         }
 
         tracing::info!(
@@ -1020,7 +1112,7 @@ impl EnhancedGameServer {
             members,
             room_event_guard,
         )
-        .await;
+        .await
     }
 
     /// Re-elect the host of a stored `host`-topology session over `members`
@@ -1067,9 +1159,9 @@ impl EnhancedGameServer {
         authority: Option<PlayerId>,
         members: Vec<SessionMember>,
         room_event_guard: RoomEventMutationGuard,
-    ) {
+    ) -> bool {
         self.publish_host_session(room_id, stored, authority, members, room_event_guard, None)
-            .await;
+            .await
     }
 
     pub(super) async fn prepare_direct_endpoint_refresh(

@@ -1534,6 +1534,14 @@ impl InMemoryDatabase {
         self.rooms.read().await
     }
 
+    /// Hold room storage exclusively to test cancellation before a snapshot read.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn hold_room_reads_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<RoomId, Room>> {
+        self.rooms.write().await
+    }
+
     pub fn new() -> Self {
         Self {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),

@@ -520,6 +520,7 @@ fn reassembly_tail_first_gameplay_preserves_exact_payload_and_release() -> Resul
 }
 
 #[test]
+/// Outbound evidence separates unsent expiry, retries and exact reliable delivery.
 fn outbound_evidence_separates_unsent_expiry_retries_and_reliable_delivery() -> Result<()> {
     for unordered in [false, true] {
         for fragmented in [false, true] {
@@ -568,9 +569,7 @@ fn outbound_evidence_separates_unsent_expiry_retries_and_reliable_delivery() -> 
             assert_eq!(a.stats().get_num_abandoned_messages(), 1);
             assert_eq!(a.stats().last_abandoned_message(), Some(queued));
 
-            for c in &chunks {
-                a.inflight_queue.get_mut(c.tsn).unwrap().retransmit = true;
-            }
+            a.inflight_queue.mark_all_to_retrasmit();
             let mut retry = vec![];
             a.get_data_packets_to_retransmit(expired_at + Duration::from_secs(2), &mut retry)?;
             let retried = transmitted_data(&retry);

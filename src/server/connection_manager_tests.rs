@@ -2229,3 +2229,67 @@ async fn test_concurrent_release_ip_slot_no_underflow() {
         );
     }
 }
+
+/// Keep connection liveness updates independent of a blocked metrics queue read.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn blocked_queue_scrape_does_not_hold_the_live_connection_registry() {
+    let manager = Arc::new(ConnectionManager::new(
+        usize::MAX,
+        4,
+        Arc::new(ServerMetrics::new()),
+        Arc::new(TestCoordinator::default()),
+        false,
+        (2, tokio::time::Duration::from_secs(60)),
+    ));
+    let (sender, _receiver) = crate::coordination::outbound_queue::channel(4, 4);
+    let player = manager
+        .register_classified_client(
+            DeliverySender::classified(sender.clone()),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:5046".parse().unwrap(),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+    sender
+        .try_enqueue_control(Arc::new(ServerMessage::Pong))
+        .unwrap();
+    let (held, acquired) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let (sample_started, sampling) = std::sync::mpsc::channel();
+    sender.sample_started_for_test(sample_started);
+    let holder = std::thread::spawn(move || {
+        sender.with_state_locked_for_test(|| {
+            held.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        });
+    });
+    acquired
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    let scrape_manager = Arc::clone(&manager);
+    let scrape = std::thread::spawn(move || scrape_manager.outbound_queue_sample());
+    sampling
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    let registry_available = matches!(
+        manager.clients.try_get_mut(&player),
+        dashmap::try_result::TryResult::Present(_)
+    );
+    if registry_available {
+        manager.record_ping(&player);
+    }
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    let sample = scrape.join().unwrap();
+    assert_eq!(sample.total_depth, 1);
+    assert!(sample.oldest_enqueued_at.is_some());
+    assert!(
+        registry_available,
+        "a queue scrape must release registry guards before waiting on a queue"
+    );
+    assert!(manager.has_client(&player));
+}

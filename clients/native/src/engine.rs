@@ -212,8 +212,10 @@ pub struct ChannelClosure {
 
 /// Holds receive capacity until a message is handled or discarded.
 pub struct MessageQueuePermit {
-    _message: OwnedSemaphorePermit,
+    // Drop payload credit first. A concurrent packet must not acquire the
+    // message slot while this handled packet still holds its payload bytes.
     _bytes: OwnedSemaphorePermit,
+    _message: OwnedSemaphorePermit,
     pending: Option<PendingChannelMessage>,
 }
 

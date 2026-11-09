@@ -1797,6 +1797,96 @@ fn assert_channel_closed(result: webrtc::error::Result<()>) {
     );
 }
 
+// Regression #1538: blocking sends reserve whole packets under one enqueue lock.
+/// Blocking sends reserve the whole packet before entering a bounded channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blocking_channel_sends_wait_for_packet_capacity() {
+    for initiator_sends in [true, false] {
+        for binary in [false, true] {
+            let (mut pair, remote, local) =
+                backpressure_pair_with_runtimes(Some(8), initiator_sends).await;
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            remote.pause().await;
+            local.pause().await;
+            channel.send_text("1234567").await.unwrap();
+            let pending = async {
+                if binary {
+                    channel.send(b"tail".as_slice().into()).await
+                } else {
+                    channel.send_text("tail").await
+                }
+            };
+            tokio::pin!(pending);
+            assert!(futures_util::poll!(&mut pending).is_pending(),
+                "packet must fit available bytes: initiator_sends={initiator_sends}, binary={binary}");
+            assert_eq!(channel.outstanding_bytes().await.unwrap(), 7);
+            channel.writable().await.unwrap();
+            channel.send_text("8").await.unwrap();
+            assert_eq!(channel.outstanding_bytes().await.unwrap(), 8);
+            assert!(futures_util::poll!(&mut pending).is_pending());
+            local.resume();
+            remote.resume();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                pending.await.unwrap();
+                let mut bodies = Vec::new();
+                while bodies.len() != 3 {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage { text, .. } => bodies.push(text),
+                        EngineEvent::ChannelClosed { .. }
+                        | EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("capacity recovery preserves the live channel")
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(bodies, ["1234567", "8", "tail"]);
+                while channel.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
+                }
+            })
+            .await
+            .expect("capacity release preserves every exact accepted packet");
+            remote.pause().await;
+            local.pause().await;
+            if binary {
+                channel.send(b"oversized".as_slice().into()).await.unwrap();
+            } else {
+                channel.send_text("oversized").await.unwrap();
+            }
+            assert_eq!(channel.outstanding_bytes().await.unwrap(), 9);
+            let empty = channel.send_text("");
+            tokio::pin!(empty);
+            assert!(futures_util::poll!(&mut empty).is_pending());
+            local.resume();
+            remote.resume();
+            let oversized_recovery = tokio::time::timeout(Duration::from_secs(5), async {
+                empty.await.unwrap();
+                let mut bodies = Vec::new();
+                while bodies.len() != 2 {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage { text, .. } => bodies.push(text),
+                        EngineEvent::ChannelClosed { .. }
+                        | EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("oversized recovery preserves the live channel")
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(bodies, ["oversized", ""]);
+                while channel.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
+                }
+            })
+            .await;
+            oversized_recovery.expect("oversized and empty messages retire their exact debt");
+            pair.cleanup().await;
+        }
+    }
+}
+
 // Regression #1088: a full channel must release every kind of sender on local close.
 /// Local closure releases blocked senders while the remote reset is held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

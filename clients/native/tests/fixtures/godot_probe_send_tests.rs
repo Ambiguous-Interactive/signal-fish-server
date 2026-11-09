@@ -293,21 +293,41 @@ async fn packet_commands_refuse_actual_receive_limits_before_terminal_event_drai
             pair.negotiate(offerer).await;
             let incoming = pair.engines[1].channel(pair.peers[1], "reliable").unwrap();
             let mut payload = vec![0xfe; packet_bytes];
-            for sequence in 0..=admitted {
-                if packet_bytes >= 4 {
-                    payload[..4].copy_from_slice(&u32::try_from(sequence).unwrap().to_be_bytes());
+            // Observe callback admission while retaining every application event. This
+            // fills the Engine budget without an unrelated loopback UDP burst backlog.
+            let exhaustion = tokio::time::timeout(Duration::from_secs(5), async {
+                for sequence in 0..=admitted {
+                    if packet_bytes >= 4 {
+                        payload[..4]
+                            .copy_from_slice(&u32::try_from(sequence).unwrap().to_be_bytes());
+                    }
+                    incoming.send(payload.as_slice().into()).await.unwrap();
+                    if sequence < admitted {
+                        while pair.engines[0].diagnostic_snapshot(pair.peers[0])["receive_budget"]
+                            ["pending_messages"]
+                            != sequence + 1
+                        {
+                            assert!(
+                                pair.engines[0].diagnostic_snapshot(pair.peers[0])
+                                    ["receive_failure"]
+                                    .is_null(),
+                                "the exact prefix must be admitted"
+                            );
+                            tokio::task::yield_now().await;
+                        }
+                    }
                 }
-                incoming.send(payload.as_slice().into()).await.unwrap();
-            }
-            tokio::time::timeout(Duration::from_secs(5), async {
                 while pair.engines[0].diagnostic_snapshot(pair.peers[0])["receive_rejection"]
                     != reason
                 {
                     tokio::task::yield_now().await;
                 }
             })
-            .await
-            .expect("held Engine events exhaust the actual unchanged receive budget");
+            .await;
+            assert!(exhaustion.is_ok(),
+                "held Engine events must exhaust the unchanged budget within five seconds: offerer={offerer}, bytes={packet_bytes}, receiver={}, sender={}",
+                pair.engines[0].transport_diagnostic_snapshot(pair.peers[0]).await,
+                pair.engines[1].transport_diagnostic_snapshot(pair.peers[1]).await);
             let (output, mut rows) = mpsc::unbounded_channel();
             let snapshot = pair.engines[0].diagnostic_snapshot(pair.peers[0]);
             assert_eq!(snapshot["receive_failure"]["pending_messages"], admitted);

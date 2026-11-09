@@ -1777,6 +1777,7 @@ impl Association {
         self.handle_peer_last_tsn_and_acknowledgement(immediate_sack)
     }
 
+    /// Apply acknowledged payload release and refresh credit before marking new retries.
     fn handle_sack(&mut self, d: &ChunkSelectiveAck, now: Instant) -> Result<Vec<Packet>> {
         trace!(
             "[{}] {}, SACK: cumTSN={} a_rwnd={}",
@@ -1838,7 +1839,7 @@ impl Association {
         //       TSN Ack and the Gap Ack Blocks.
 
         // acknowledged payload bytes were already released from the in-flight queue
-        let bytes_outstanding = self.inflight_queue.get_num_bytes() as u32;
+        let bytes_outstanding = self.inflight_queue.get_num_bytes_in_flight() as u32;
         if bytes_outstanding >= d.advertised_receiver_window_credit {
             self.rwnd = 0;
         } else {
@@ -2636,6 +2637,7 @@ impl Association {
         }
     }
 
+    /// Mark newly lost DATA and restore each pending retry receive credit once.
     fn process_fast_retransmission(
         &mut self,
         cum_tsn_ack_point: u32,
@@ -2690,6 +2692,15 @@ impl Association {
                     return Err(Error::ErrTsnRequestNotExist);
                 }
 
+                if self
+                    .inflight_queue
+                    .get(tsn)
+                    .is_some_and(ChunkPayloadData::is_fast_retransmit_candidate)
+                {
+                    let restored = self.inflight_queue.mark_retransmit(tsn);
+                    self.rwnd = self.rwnd.saturating_add(restored as u32);
+                    self.t3_retransmit_pending |= restored != 0;
+                }
                 tsn = tsn.wrapping_add(1);
             }
         }
@@ -2946,15 +2957,15 @@ impl Association {
         let state = self.state();
         match state {
             AssociationState::Established => {
+                raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
+                if self.state() == AssociationState::Closed {
+                    return (vec![], false);
+                }
                 raw_packets = self.gather_data_packets_to_retransmit(raw_packets, now);
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
                 }
                 raw_packets = self.gather_outbound_data_and_reconfig_packets(raw_packets, now);
-                if self.state() == AssociationState::Closed {
-                    return (vec![], false);
-                }
-                raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
                 }
@@ -2965,6 +2976,10 @@ impl Association {
             AssociationState::ShutdownPending
             | AssociationState::ShutdownSent
             | AssociationState::ShutdownReceived => {
+                raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
+                if self.state() == AssociationState::Closed {
+                    return (vec![], false);
+                }
                 raw_packets = self.gather_data_packets_to_retransmit(raw_packets, now);
                 if self.state() == AssociationState::Closed {
                     return (vec![], false);
@@ -2979,10 +2994,6 @@ impl Association {
                     }
                     // Expired pending messages can leave no DATA to acknowledge.
                     self.postprocess_sack(state, false, now);
-                }
-                raw_packets = self.gather_outbound_fast_retransmission_packets(raw_packets, now);
-                if self.state() == AssociationState::Closed {
-                    return (vec![], false);
                 }
                 raw_packets = self.gather_outbound_sack_packets(raw_packets);
                 raw_packets = self.gather_outbound_forward_tsn_packets(raw_packets);
@@ -3097,6 +3108,7 @@ impl Association {
         raw_packets
     }
 
+    /// Send the first fast-retry packet and consume its marked receive credit.
     fn gather_outbound_fast_retransmission_packets(
         &mut self,
         mut raw_packets: Vec<Bytes>,
@@ -3178,6 +3190,8 @@ impl Association {
             }
 
             for chunk in &mut to_fast_retrans {
+                let restored = self.inflight_queue.unmark_retransmit(chunk.tsn);
+                self.rwnd = self.rwnd.saturating_sub(restored as u32);
                 if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
                     c.nsent += 1;
                     chunk.nsent = c.nsent;
@@ -3306,7 +3320,9 @@ impl Association {
         now: Instant,
         raw_packets: &mut Vec<Bytes>,
     ) -> Result<()> {
-        let awnd = std::cmp::min(self.cwnd, self.rwnd);
+        let flight = self.inflight_queue.get_num_bytes_in_flight() as u32;
+        let congestion_credit = self.cwnd.saturating_sub(flight);
+        let awnd = std::cmp::min(congestion_credit, self.rwnd);
         let mut chunks: Vec<ChunkPayloadData> = vec![];
         let mut bytes_to_send = 0;
         let mut done = false;
@@ -3339,6 +3355,10 @@ impl Association {
                     break;
                 };
 
+                if bytes_to_send + c.user_data.len() > congestion_credit as usize {
+                    chunks_remaining = true;
+                    break;
+                }
                 if self.rwnd < c.user_data.len() as u32
                     && self.earliest_outstanding_tsn() == Some(tsn)
                 {
@@ -3368,8 +3388,9 @@ impl Association {
         // A later candidate can abandon an earlier fragment already selected
         // into this batch. Commit attempts only after whole-message retirement.
         for chunk in &mut chunks {
+            self.inflight_queue.unmark_retransmit(chunk.tsn);
+            self.rwnd = self.rwnd.saturating_sub(chunk.user_data.len() as u32);
             if let Some(c) = self.inflight_queue.get_mut(chunk.tsn) {
-                c.retransmit = false;
                 c.nsent += 1;
                 chunk.nsent = c.nsent;
                 trace!(
@@ -3563,6 +3584,7 @@ impl Association {
             }
         }
         for tsn in inflight {
+            self.inflight_queue.unmark_retransmit(tsn);
             if let Some(c) = self.inflight_queue.get_mut(tsn) {
                 if let Some(info) = &mut message_info {
                     info.transmission_selected |= c.nsent > 0;
@@ -4182,6 +4204,7 @@ impl Association {
         self.awake_write_loop();
     }
 
+    /// Apply timer backoff and restore credit for newly marked outstanding DATA.
     fn on_retransmission_timeout(&mut self, timer_id: Timer, n_rtos: usize, now: Instant) {
         match timer_id {
             Timer::T1Init => {
@@ -4265,7 +4288,10 @@ impl Association {
                     self.side, n_rtos, self.cwnd, self.ssthresh
                 );
 
-                self.inflight_queue.mark_all_to_retrasmit();
+                // RFC 9260 6.2.1(C): retry markers return receive credit.
+                // Only newly marked bytes return it; deferred retries already did.
+                let restored = self.inflight_queue.mark_all_to_retrasmit();
+                self.rwnd = self.rwnd.saturating_add(restored as u32);
                 self.t3_retransmit_pending = true;
                 self.awake_write_loop();
             }

@@ -893,6 +893,8 @@ pub struct EnhancedGameServer {
     /// consulted by late-join/reconnect pairing and departure re-planning
     /// instead of re-running the selection ladder (see `session_policy.rs`).
     active_session_plans: Arc<DashMap<RoomId, session_policy::ActiveSessionPlan>>,
+    /// Failed departure repairs retained until maintenance revalidates the room.
+    pending_session_replans: DashMap<RoomId, session_policy::PendingSessionReplan>,
     /// Durable player removals that failed after the physical connection was
     /// already gone. Maintenance retries these independently of whether
     /// reconnect support is enabled.
@@ -1423,6 +1425,7 @@ impl EnhancedGameServer {
             connect_token_required: std::sync::atomic::AtomicBool::new(false),
             room_applications,
             active_session_plans: Arc::new(DashMap::new()),
+            pending_session_replans: DashMap::new(),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
             moderation_lifecycle_gate: Mutex::new(()),
             #[cfg(test)]

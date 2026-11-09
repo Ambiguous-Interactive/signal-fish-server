@@ -2375,3 +2375,39 @@ async fn transport_snapshot_preserves_retained_channel_contracts_after_driver_cl
     engine.remove_peer(peer).await.unwrap();
     assert!(engine.transport_diagnostic_snapshot(peer).await.is_null());
 }
+
+/// #1537: release handled payload credit before another packet takes its message slot.
+#[test]
+fn receive_permit_releases_payload_before_message_credit() {
+    struct ReleaseObserver {
+        bytes: Arc<Semaphore>,
+        released_bytes: AtomicUsize,
+    }
+    impl futures_util::task::ArcWake for ReleaseObserver {
+        fn wake_by_ref(observer: &Arc<Self>) {
+            observer
+                .released_bytes
+                .store(observer.bytes.available_permits(), Ordering::SeqCst);
+        }
+    }
+    let budget = MessageQueueBudget::default();
+    let mut retained = (0..MAX_PENDING_CHANNEL_MESSAGES)
+        .map(|_| budget.reserve(4096).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(budget.bytes.available_permits(), 0);
+    let observer = Arc::new(ReleaseObserver {
+        bytes: budget.bytes.clone(),
+        released_bytes: AtomicUsize::new(usize::MAX),
+    });
+    let wake = futures_util::task::waker(observer.clone());
+    let mut context = std::task::Context::from_waker(&wake);
+    let mut waiting = Box::pin(budget.messages.clone().acquire_owned());
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
+    drop(retained.pop());
+    assert_eq!(
+        observer.released_bytes.load(Ordering::SeqCst),
+        4096,
+        "a concurrent packet must not see a free message slot with its old payload credit held"
+    );
+    assert!(waiting.as_mut().poll(&mut context).is_ready());
+}
