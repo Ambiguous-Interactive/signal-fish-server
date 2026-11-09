@@ -19,6 +19,8 @@ for (const [scenario, boundary] of (
             'p2p-retired',
             'p2p-late',
             'p2p-late-second',
+            'p2p-output-complete',
+            'p2p-output-incomplete',
           ] as const)
         : []),
     ] as const
@@ -43,6 +45,11 @@ for (const [scenario, boundary] of (
   let connection!: Connection;
   let release!: () => void;
   let held = false;
+  let openOutputHeld = false;
+  let releaseOpen!: () => void;
+  const blockedOpen = new Promise<void>((resolve) => {
+    releaseOpen = resolve;
+  });
   let result: number | undefined;
   let running: Promise<number> | undefined;
   const blocked = new Promise<void>((resolve) => {
@@ -141,6 +148,10 @@ for (const [scenario, boundary] of (
         __sf_emit: (line: string) => {
           const event = JSON.parse(line) as Record<string, unknown>;
           events.push(event);
+          if (event['event'] === 'channel_open' && boundary.startsWith('p2p-output-')) {
+            openOutputHeld = true;
+            return blockedOpen;
+          }
           if (event['event'] === 'peer_transport_status') {
             held = true;
             return blocked;
@@ -201,7 +212,11 @@ for (const [scenario, boundary] of (
     else if (scenario === 'pair-open') {
       if (boundary === 'p2p-retired') socket.plan('relay', []);
       for (const name of ['reliable', 'unreliable']) {
-        if (boundary === 'p2p-incomplete' && name === 'unreliable') continue;
+        if (
+          ['p2p-incomplete', 'p2p-output-incomplete'].includes(boundary) &&
+          name === 'unreliable'
+        )
+          continue;
         if (
           boundary === 'p2p-late' ||
           (boundary === 'p2p-late-second' && name === 'unreliable')
@@ -237,13 +252,24 @@ for (const [scenario, boundary] of (
     release();
     await turn();
     if (p2pBoundary) {
+      if (boundary.startsWith('p2p-output-') && !openOutputHeld)
+        failures.push(`${label}: hold the channel-open output before checking the decision`);
+      if (boundary.startsWith('p2p-output-')) {
+        const opens = events
+          .filter((event) => event['event'] === 'channel_open')
+          .map((event) => event['label']);
+        const expectedOpens =
+          boundary === 'p2p-output-complete' ? ['reliable', 'unreliable'] : ['reliable'];
+        if (JSON.stringify(opens) !== JSON.stringify(expectedOpens))
+          failures.push(`${label}: queued opens must retain output invocation order`);
+      }
       const statuses = events
         .filter((event) => event['event'] === 'transport_status_sent')
         .map((event) => event['connected']);
       const expectedStatuses =
         boundary === 'p2p-retired'
           ? []
-          : boundary === 'p2p'
+          : ['p2p', 'p2p-output-complete'].includes(boundary)
             ? [true]
             : boundary === 'p2p-late' || boundary === 'p2p-late-second'
               ? [false, true]
@@ -289,14 +315,22 @@ for (const [scenario, boundary] of (
     if (
       observed !==
       (scenario !== 'late' &&
-        !['p2p-incomplete', 'p2p-closing', 'p2p-pc-failed', 'p2p-retired'].includes(boundary))
+        ![
+          'p2p-incomplete',
+          'p2p-output-incomplete',
+          'p2p-closing',
+          'p2p-pc-failed',
+          'p2p-retired',
+        ].includes(boundary))
     )
       failures.push(`${label}: wrong queued frame dispatch: ${observed}`);
+    releaseOpen();
+    await turn();
     if (
-      boundary === 'p2p' ||
+      ['p2p', 'p2p-output-complete'].includes(boundary) ||
       ['p2p-closing', 'p2p-pc-failed', 'p2p-retired'].includes(boundary)
     ) {
-      if (boundary !== 'p2p') {
+      if (!['p2p', 'p2p-output-complete'].includes(boundary)) {
         socket.plan('relay', []);
         await turn();
         socket.plan('webrtc', [peer]);
@@ -327,6 +361,7 @@ for (const [scenario, boundary] of (
       }
     }
   } finally {
+    releaseOpen();
     release();
     socket?.onclose?.();
     let guard: ReturnType<typeof setTimeout> | undefined;

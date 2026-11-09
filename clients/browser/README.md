@@ -136,6 +136,10 @@ physical-link timeout or retry, even when output delays its handler. This also
 applies without `--exchange`. A peer departure, new incarnation, or authoritative
 plan replacement discards queued input from the previous membership or link.
 
+When output delays timely channel-open callbacks past the P2P cutoff, the client
+handles their readiness before it waits for their output acknowledgments.
+Event writes keep their order and existing output limits.
+
 When a peer reconnects or rejoins, `--exchange` requires fresh sends and receipts on both
 data channels. Completed exchanges for other peers remain valid. A transport
 rebuild alone does not reset the exchange. Each replacement link sends the probes

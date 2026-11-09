@@ -957,6 +957,9 @@ class Orchestrator {
             if (this.engine.noteChannelOpen(peer, label)) this.onPairConnected(peer);
           },
           () => this.queuedChannelOpens.delete(queued),
+          0,
+          undefined,
+          true,
         );
       },
       onChannelClosed: (peer, generation, label, reason) => {
@@ -1450,6 +1453,7 @@ class Orchestrator {
     release?: () => void,
     retainedBytes = 0,
     reservedTask?: () => void,
+    drainChannelOpens = false,
   ): void {
     if (this.finished) {
       release?.();
@@ -1477,7 +1481,17 @@ class Orchestrator {
           }
           consumeAdmission();
           await task();
-          await this.output.flush();
+          const now = monotonicNowMs();
+          const drainOpens =
+            drainChannelOpens &&
+            this.p2pDeadline !== null &&
+            now >= this.p2pDeadline &&
+            !this.waitingForAdmittedWork(now);
+          if (drainOpens) this.processP2PDeadline(now);
+          // Timely opens already in this bounded queue must update readiness
+          // before another open's acknowledged output can hold the decision.
+          // Writes keep their FIFO order and retain their output credits.
+          if (!drainOpens || !this.waitingForChannelOpens()) await this.output.flush();
           if (this.finished) return;
           this.processTimers();
           this.scheduleWake();
@@ -1607,6 +1621,27 @@ class Orchestrator {
     return false;
   }
 
+  /** Resolve an expired P2P window after its timely current-link opens drain. */
+  private processP2PDeadline(now: number): void {
+    if (
+      this.p2pDeadline !== null &&
+      now >= this.p2pDeadline &&
+      !this.waitingForChannelOpens()
+    ) {
+      for (const peer of this.expectedPeers) {
+        if (!this.connectedPairs.has(peer)) {
+          console.error(
+            `P2P timeout for ${peer}: ${JSON.stringify(this.engine.diagnosticSnapshot(peer))}`,
+          );
+        }
+      }
+      // The current P2P window expired: report any real state change.
+      this.resolveTransportStatus();
+      this.p2pDeadline = null;
+      this.retryingPairs.clear();
+    }
+  }
+
   /** Fire due timers; finishes the run when it is over. */
   private processTimers(): void {
     if (this.finished) {
@@ -1667,23 +1702,7 @@ class Orchestrator {
       this.flushPendingExchangeSends();
     }
 
-    if (
-      this.p2pDeadline !== null &&
-      now >= this.p2pDeadline &&
-      !this.waitingForChannelOpens()
-    ) {
-      for (const peer of this.expectedPeers) {
-        if (!this.connectedPairs.has(peer)) {
-          console.error(
-            `P2P timeout for ${peer}: ${JSON.stringify(this.engine.diagnosticSnapshot(peer))}`,
-          );
-        }
-      }
-      // The current P2P window expired: report any real state change.
-      this.resolveTransportStatus();
-      this.p2pDeadline = null;
-      this.retryingPairs.clear();
-    }
+    this.processP2PDeadline(now);
 
     if (this.successReleasePollAt !== null && now >= this.successReleasePollAt) {
       this.pollSuccessRelease();
