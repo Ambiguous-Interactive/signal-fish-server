@@ -14,13 +14,27 @@ assert(signalForRetryAttempt(null, 1) === undefined, 'retry raw null is discarde
 
 // Regression #1022: retry markers and fresh signals preserve sender FIFO. The stale inputs below
 // are defensive contract controls; browsers do not request retries themselves.
-for (const [initiate, retryCount, rejectEarlyCandidate] of [
+// Regression #1520: publish local SDP before gathered ICE, without holding remote ICE.
+for (const [
+  initiate,
+  retryCount,
+  rejectEarlyCandidate,
+  cancelHeldRetry,
+  holdInboundCandidate,
+  rejectLocalDescription,
+] of [
   [false, 0, false],
   [true, 0, false],
   [false, 2, false],
   [true, 2, false],
   [false, 0, true],
   [true, 0, true],
+  [false, 2, false, true],
+  [true, 2, false, true],
+  [false, 0, false, false, true],
+  [true, 0, false, false, true],
+  [false, 0, false, false, false, true],
+  [true, 0, false, false, false, true],
 ] as const) {
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
@@ -39,6 +53,17 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     descriptions: string[] = [];
     candidates: unknown[] = [];
     onicecandidate: ((event: { candidate: { toJSON(): object } }) => void) | null = null;
+    readonly index = connections.length;
+    localDescriptionPending = false;
+    releaseLocalDescription!: () => void;
+    readonly localDescriptionHeld = new Promise<void>((resolve) => {
+      this.releaseLocalDescription = resolve;
+    });
+    inboundCandidatePending = false;
+    releaseInboundCandidate!: () => void;
+    readonly inboundCandidateHeld = new Promise<void>((resolve) => {
+      this.releaseInboundCandidate = resolve;
+    });
     constructor() {
       connections.push(this);
     }
@@ -53,6 +78,15 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     }
     async setLocalDescription(description: { type: string }) {
       this.signalingState = description.type === 'offer' ? 'have-local-offer' : 'stable';
+      this.localDescriptionPending = true;
+      for (const sequence of [1, 2]) {
+        this.onicecandidate?.({
+          candidate: { toJSON: () => ({ candidate: `local-${this.index}-${sequence}` }) },
+        });
+      }
+      await this.localDescriptionHeld;
+      this.localDescriptionPending = false;
+      if (rejectLocalDescription) throw new Error('local SDP failed after gathering ICE');
     }
     async setRemoteDescription(description: { type: string; sdp: string }) {
       if (description.type === 'answer' && this.signalingState !== 'have-local-offer')
@@ -63,6 +97,14 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     async addIceCandidate(candidate: unknown) {
       assert(this.descriptions.length > 0, 'early ICE waits for remote SDP');
       this.candidates.push(candidate);
+      if (
+        holdInboundCandidate &&
+        (candidate as RTCIceCandidateInit).candidate === 'initial-candidate'
+      ) {
+        this.inboundCandidatePending = true;
+        await this.inboundCandidateHeld;
+        this.inboundCandidatePending = false;
+      }
       if ((candidate as RTCIceCandidateInit).candidate === 'unusable-early-candidate')
         throw new Error('stack rejected one early candidate');
     }
@@ -147,6 +189,49 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
   };
   const description = (sdp: string) => (initiate ? { Answer: sdp } : { Offer: sdp });
   const tagged = (attempt: unknown, signal: object) => ({ RetrySignal: { attempt, signal } });
+  const releaseDescription = async (index: number, attempt: number) => {
+    await turn();
+    const connection = connections[index];
+    assert(
+      connection?.localDescriptionPending === true,
+      'local SDP remains held after gathering ICE',
+    );
+    const attemptSignals = () =>
+      sent
+        .filter((frame) => frame.type === 'Signal')
+        .map((frame) => frame.data['signal'] as Record<string, unknown>)
+        .filter((signal) =>
+          attempt === 0
+            ? !Object.hasOwn(signal, 'RetrySignal')
+            : (signal['RetrySignal'] as { attempt?: number } | undefined)?.attempt === attempt,
+        )
+        .map((signal) =>
+          attempt === 0
+            ? signal
+            : (signal['RetrySignal'] as { signal: Record<string, unknown> }).signal,
+        );
+    assert(
+      attemptSignals().length === 0,
+      `initiate=${initiate}, attempt=${attempt}: local ICE waits until SDP is published`,
+    );
+    connection.releaseLocalDescription();
+    await turn();
+    const signals = attemptSignals();
+    assert(
+      JSON.stringify(signals) ===
+        JSON.stringify(
+          rejectLocalDescription
+            ? []
+            : [
+                initiate ? { Offer: `offer-${index + 1}` } : { Answer: `answer-${index + 1}` },
+                ...[1, 2].map((sequence) => ({
+                  IceCandidate: JSON.stringify({ candidate: `local-${index}-${sequence}` }),
+                })),
+              ],
+        ),
+      `initiate=${initiate}, attempt=${attempt}: exact local SDP precedes each gathered candidate`,
+    );
+  };
   try {
     globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
     globalThis.WebSocket = Socket as unknown as typeof WebSocket;
@@ -166,7 +251,36 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     }
     socket.signal(description('initial'));
     socket.signal({ IceCandidate: 'initial-candidate' });
-    await turn();
+    await releaseDescription(0, 0);
+    if (rejectLocalDescription) {
+      assert(
+        connections[0]?.closed === true,
+        'failed local SDP retires the gathered candidate owner',
+      );
+      continue;
+    }
+    if (holdInboundCandidate) {
+      const connection = connections[0];
+      assert(
+        connection?.inboundCandidatePending === true,
+        'remote ICE stays held after local SDP',
+      );
+      connection.onicecandidate?.({
+        candidate: { toJSON: () => ({ candidate: 'independent-local-candidate' }) },
+      });
+      await turn();
+      assert(
+        sent.some(
+          (frame) =>
+            frame.type === 'Signal' &&
+            (frame.data['signal'] as { IceCandidate?: string }).IceCandidate ===
+              JSON.stringify({ candidate: 'independent-local-candidate' }),
+        ),
+        'pending inbound ICE cannot hold gathered local ICE after SDP publication',
+      );
+      connection.releaseInboundCandidate();
+      await turn();
+    }
     assert(connections[0]?.descriptions.join() === 'initial', 'initial raw SDP is accepted');
     assert(
       connections[0]?.candidates.length === (rejectEarlyCandidate ? 3 : 1),
@@ -233,18 +347,25 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     socket.signal(tagged(1, tagged(1, description('nested'))));
     socket.signal(tagged(1, description('fresh')));
     socket.signal(tagged(1, { IceCandidate: 'fresh-candidate' }));
-    await turn();
+    if (cancelHeldRetry) {
+      await turn();
+      assert(replacement.localDescriptionPending, 'the old retry holds gathered candidates');
+    } else await releaseDescription(1, 1);
     assert(
-      replacement.descriptions.join() === 'fresh',
+      replacement.descriptions.join() === (cancelHeldRetry && initiate ? '' : 'fresh'),
       `initiate=${initiate}: only the current retry description may apply; got ${replacement.descriptions.join()}`,
     );
     assert(
       JSON.stringify(replacement.candidates) ===
-        JSON.stringify([{ candidate: 'fresh-candidate', sdpMLineIndex: 0 }]),
+        JSON.stringify(
+          cancelHeldRetry ? [] : [{ candidate: 'fresh-candidate', sdpMLineIndex: 0 }],
+        ),
       'only current retry ICE may apply',
     );
-    assert(replacement.signalingState === 'stable', 'fresh negotiation completes');
-    replacement.onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'local' }) } });
+    if (!cancelHeldRetry)
+      assert(replacement.signalingState === 'stable', 'fresh negotiation completes');
+    if (!cancelHeldRetry)
+      replacement.onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'local' }) } });
     await turn();
     const retrySignals = sent
       .filter((frame) => frame.type === 'Signal')
@@ -254,8 +375,10 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
           frame.data['signal'] as { RetrySignal?: { attempt: number; signal: object } },
       );
     assert(
-      retrySignals.length >= 2 &&
-        retrySignals.every((signal) => signal.RetrySignal?.attempt === 1),
+      cancelHeldRetry
+        ? retrySignals.length === 0
+        : retrySignals.length >= 2 &&
+            retrySignals.every((signal) => signal.RetrySignal?.attempt === 1),
       'replacement SDP and local ICE carry the current retry attempt',
     );
     socket.signal({ PairRetry: 2 });
@@ -263,7 +386,22 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     socket.signal(tagged(1, { IceCandidate: 'old-first-retry-candidate' }));
     socket.signal(tagged(2, description('second-retry')));
     socket.signal(tagged(2, { IceCandidate: 'second-retry-candidate' }));
-    await turn();
+    await releaseDescription(2, 2);
+    if (cancelHeldRetry) {
+      replacement.releaseLocalDescription();
+      replacement.onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'stale' }) } });
+      await turn();
+      assert(
+        sent
+          .filter((frame) => frame.type === 'Signal')
+          .every(
+            (frame) =>
+              (frame.data['signal'] as { RetrySignal?: { attempt: number } }).RetrySignal
+                ?.attempt !== 1,
+          ),
+        'retired local SDP and gathered ICE cannot escape after a fresh retry',
+      );
+    }
     assert(replacement.closed, 'a second retry retires the first replacement');
     assert(
       connections[2]?.descriptions.join() === 'second-retry' &&
@@ -273,6 +411,10 @@ for (const [initiate, retryCount, rejectEarlyCandidate] of [
     );
   } finally {
     socket?.onclose?.();
+    for (const connection of connections) {
+      connection.releaseLocalDescription();
+      connection.releaseInboundCandidate();
+    }
     await running;
     globalThis.RTCPeerConnection = originalPc;
     globalThis.WebSocket = originalSocket;

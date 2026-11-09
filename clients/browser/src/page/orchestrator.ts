@@ -799,6 +799,7 @@ class Orchestrator {
   private finishResolve: ((code: number) => void) | null = null;
   private finished = false;
   private readonly peerWorkStopped = new AbortController();
+  private readonly localDescriptionBarriers = new Map<string, Promise<void>>();
 
   // --- Session state (field-for-field mirror of the native Orchestrator) ---
   private readonly present = new Set<string>();
@@ -889,16 +890,29 @@ class Orchestrator {
       onLocalCandidate: (peer, generation, candidateJson) => {
         // Crippled mode never reaches here (the engine drops gathered
         // candidates), so this is always a real trickle-ICE relay.
-        this.enqueue(
-          async () => {
-            if (!this.engine.isCurrentGeneration(peer, generation)) {
-              return;
-            }
-            this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidateJson });
-          },
-          undefined,
-          utf8Bytes(candidateJson),
-        );
+        const enqueueCandidate = () =>
+          this.enqueue(
+            async () => {
+              if (!this.engine.isCurrentGeneration(peer, generation)) return;
+              this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidateJson });
+            },
+            undefined,
+            utf8Bytes(candidateJson),
+          );
+        const barrier = this.localDescriptionBarriers.get(peer);
+        if (barrier === undefined) {
+          enqueueCandidate();
+          return;
+        }
+        const release = this.taskBacklog.reserve(utf8Bytes(candidateJson));
+        if (release === null) {
+          this.failFatal(FatalError.connection('browser input task backlog limit exceeded'));
+          return;
+        }
+        void barrier.then(() => {
+          release();
+          enqueueCandidate();
+        });
       },
       onPcState: (peer, generation, state) => {
         this.enqueue(async () => {
@@ -2274,6 +2288,7 @@ class Orchestrator {
     ) {
       return;
     }
+    const releaseLocalCandidates = this.holdLocalCandidates(peer);
     try {
       const offerSdp = await this.awaitPeerOperation(
         peer,
@@ -2297,6 +2312,8 @@ class Orchestrator {
       // callback runs. Resolve the observed loss here instead of waiting for
       // the P2P timeout; other peer links and relay traffic remain active.
       this.handlePeerTransportLoss(peer, 'initial negotiation failed');
+    } finally {
+      releaseLocalCandidates();
     }
     if (
       this.currentSessionGeneration !== sessionGeneration ||
@@ -2319,6 +2336,19 @@ class Orchestrator {
         this.assertActive();
       }
     }
+  }
+
+  private holdLocalCandidates(peer: string): () => void {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.localDescriptionBarriers.set(peer, barrier);
+    return () => {
+      if (this.localDescriptionBarriers.get(peer) === barrier)
+        this.localDescriptionBarriers.delete(peer);
+      release();
+    };
   }
 
   private async awaitPeerOperation<T>(peer: string, operation: Promise<T>): Promise<T> {
@@ -2501,13 +2531,18 @@ class Orchestrator {
             throw new Error('Offer payload is not a string');
           }
           negotiatingSdp = true;
-          const answerSdp = await this.awaitPeerOperation(
-            from,
-            this.engine.handleOffer(from, sdp),
-          );
-          this.assertActive();
-          if (!isCurrentTask()) return;
-          this.sendSignal(from, 'answer', { Answer: answerSdp });
+          const releaseLocalCandidates = this.holdLocalCandidates(from);
+          try {
+            const answerSdp = await this.awaitPeerOperation(
+              from,
+              this.engine.handleOffer(from, sdp),
+            );
+            this.assertActive();
+            if (!isCurrentTask()) return;
+            this.sendSignal(from, 'answer', { Answer: answerSdp });
+          } finally {
+            releaseLocalCandidates();
+          }
           break;
         }
         case 'answer': {

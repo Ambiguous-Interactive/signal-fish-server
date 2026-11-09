@@ -3,6 +3,236 @@ use super::*;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 
+#[tokio::test]
+/// Queued real channel opens must prevent a timer from rebuilding a healthy link.
+async fn retry_timer_observes_queued_channel_readiness_before_rebuilding() {
+    use crate::engine::snapshot_tests::startup_pair_with_held_open_events;
+    use crate::engine::ChannelProfile;
+
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for (receiver_offers, boundary) in [false, true]
+            .into_iter()
+            .flat_map(|role| ["retry", "timeout"].map(move |boundary| (role, boundary)))
+        {
+            let (mut pair, _clock, opens) =
+                startup_pair_with_held_open_events(profile, receiver_offers).await;
+            let peer = pair.sender_id;
+            let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+            let cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--p2p-retry-count",
+                "1",
+            ]);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, pair.receiver_id);
+            std::mem::swap(&mut state.engine, &mut pair.receiver);
+            std::mem::swap(&mut state.engine_rx, &mut pair.receiver_events);
+            state.current_session_generation = Some(SessionGeneration::from_u128(1));
+            state.expected_peers.insert(peer);
+            state.pair_roles.insert(peer, receiver_offers);
+            state.webrtc_plan_seen = true;
+            let generation = state.engine.diagnostic_snapshot(peer)["generation"].clone();
+            let (queued, receiver) = mpsc::unbounded_channel();
+            for event in opens {
+                queued.send(event).unwrap();
+            }
+            let original = std::mem::replace(&mut state.engine_rx, receiver);
+            state.p2p_retry_at = (boundary == "retry").then(Instant::now);
+            state.p2p_deadline = Some(Deadline::after(
+                Instant::now(),
+                Duration::from_secs(if boundary == "retry" { 10 } else { 0 }),
+            ));
+            state.process_timers().await.unwrap();
+            assert!(state.pair_retry_attempts.is_empty(),
+                "profile={profile:?}, receiver_offers={receiver_offers}: queued readiness must prevent a destructive retry");
+            assert_eq!(
+                state.engine.diagnostic_snapshot(peer)["generation"],
+                generation
+            );
+            assert!(state.connected_pairs.contains(&peer));
+            state.engine_rx = original;
+
+            let local_generation = generation.as_u64().unwrap();
+            let remote_generation = pair.sender.diagnostic_snapshot(state.my_id)["generation"]
+                .as_u64()
+                .unwrap();
+            for (sender, receiver, expected_peer, bytes, expected_generation) in [
+                (
+                    &pair.sender,
+                    &mut state.engine_rx,
+                    peer,
+                    vec![b'F'; 4096],
+                    local_generation,
+                ),
+                (
+                    &state.engine,
+                    &mut pair.sender_events,
+                    state.my_id,
+                    vec![b'R'; 4096],
+                    remote_generation,
+                ),
+            ] {
+                let target = if expected_peer == peer {
+                    state.my_id
+                } else {
+                    peer
+                };
+                sender
+                    .send_channel(target, RELIABLE_LABEL)
+                    .await
+                    .unwrap()
+                    .send(bytes.as_slice().into())
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let event = receiver.recv().await.unwrap();
+                        match event {
+                            EngineEvent::ChannelMessage {
+                                peer: from,
+                                generation,
+                                text,
+                                ..
+                            } => {
+                                assert_eq!(generation, expected_generation);
+                                assert_eq!(from, expected_peer);
+                                assert_eq!(text.as_bytes(), bytes);
+                                break;
+                            }
+                            EngineEvent::ChannelBinaryMessage {
+                                peer: from,
+                                generation,
+                                data,
+                                ..
+                            } => {
+                                assert_eq!(generation, expected_generation);
+                                assert_eq!(from, expected_peer);
+                                assert_eq!(data, bytes);
+                                break;
+                            }
+                            EngineEvent::ChannelClosed { .. }
+                            | EngineEvent::ChannelReceiveRejected { .. } => {
+                                panic!("healthy retry-boundary link terminated")
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+/// Terminal and stale channel opens cannot suppress a needed retry or fallback.
+async fn retry_timer_keeps_terminal_stale_and_incomplete_links_disconnected() {
+    use crate::engine::snapshot_tests::startup_pair_with_held_open_events;
+    use crate::engine::ChannelProfile;
+
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for receiver_offers in [false, true] {
+            for mode in ["terminal", "stale", "incomplete"] {
+                for boundary in ["retry", "timeout"] {
+                    let (mut pair, _clock, mut opens) =
+                        startup_pair_with_held_open_events(profile, receiver_offers).await;
+                    let peer = pair.sender_id;
+                    if mode == "terminal" {
+                        pair.sender
+                            .channel(pair.receiver_id, UNRELIABLE_LABEL)
+                            .unwrap()
+                            .close()
+                            .await
+                            .unwrap();
+                        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                            loop {
+                                let event = pair.receiver_events.recv().await.unwrap();
+                                if matches!(event, EngineEvent::ChannelClosed { .. }) {
+                                    break event;
+                                }
+                            }
+                        })
+                        .await
+                        .expect("actual required-channel loss must reach the owner queue");
+                        opens.push(closed);
+                    } else {
+                        pair.receiver.remove_peer(peer).await.unwrap();
+                        pair.receiver
+                            .pair_with(peer, receiver_offers, &[])
+                            .await
+                            .unwrap();
+                        assert_eq!(pair.receiver.connected_pair_count(), 0);
+                        if mode == "incomplete" {
+                            opens.clear();
+                        }
+                    }
+                    let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+                    let cli = Cli::parse_from([
+                        "native",
+                        "--server-url",
+                        "ws://unused.invalid",
+                        "--create-room",
+                        "--p2p-retry-count",
+                        "1",
+                    ]);
+                    let mut state = super::tests::fixture_orchestrator(&cli, ws, pair.receiver_id);
+                    std::mem::swap(&mut state.engine, &mut pair.receiver);
+                    std::mem::swap(&mut state.engine_rx, &mut pair.receiver_events);
+                    state.current_session_generation = Some(SessionGeneration::from_u128(1));
+                    state.expected_peers.insert(peer);
+                    state.pair_roles.insert(peer, receiver_offers);
+                    state.webrtc_plan_seen = true;
+                    let generation = state.engine.diagnostic_snapshot(peer)["generation"].clone();
+                    let (queued, receiver) = mpsc::unbounded_channel();
+                    for event in opens {
+                        queued.send(event).unwrap();
+                    }
+                    state.engine_rx = receiver;
+                    state.p2p_retry_at = (boundary == "retry").then(Instant::now);
+                    state.p2p_deadline = Some(Deadline::after(
+                        Instant::now(),
+                        Duration::from_secs(if boundary == "retry" { 10 } else { 0 }),
+                    ));
+                    state.process_timers().await.unwrap();
+                    assert!(!state.connected_pairs.contains(&peer),
+                        "profile={profile:?} receiver_offers={receiver_offers} mode={mode} boundary={boundary}: old or terminal callbacks cannot establish readiness");
+                    assert!(!state.formed_pairs.contains(&peer));
+                    assert_eq!(state.engine.connected_pair_count(), 0);
+                    assert!(
+                        state.expected_peers.contains(&peer),
+                        "failure must retain the planned obligation"
+                    );
+                    if boundary == "retry" {
+                        assert_eq!(state.pair_retry_attempts.get(&peer), Some(&1));
+                        assert_ne!(
+                            state.engine.diagnostic_snapshot(peer)["generation"],
+                            generation,
+                            "the still-incomplete link must get a fresh physical retry"
+                        );
+                        assert!(state.retrying_pairs.contains(&peer));
+                    } else {
+                        assert!(state.pair_retry_attempts.is_empty());
+                        assert_eq!(state.transport_status, Some(false));
+                        assert!(state.p2p_deadline.is_none());
+                        if mode == "stale" {
+                            let snapshot = state.engine.diagnostic_snapshot(peer);
+                            for (label, channel) in snapshot["channels"].as_object().unwrap() {
+                                assert_eq!(channel["open_observed"], false,
+                                    "old-generation opens must not change current {label} observations");
+                            }
+                        }
+                    }
+                    state.engine.remove_peer(peer).await.unwrap();
+                    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                }
+            }
+        }
+    }
+}
+
 // Regression #1010: a held P2P gate must not restore removed plan obligations.
 #[tokio::test]
 /// Only current planned peers may signal when the pairing gate opens.
