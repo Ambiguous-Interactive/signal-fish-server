@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep native P2P exchange sends usable during pending SDP and retain live receive and close diagnostics
+- Keep native P2P exchange sends and completion reports active during pending SDP, with live receive and close diagnostics
   (#1525, #1527).
 - Avoid false browser relay fallback when timely P2P channel-open callbacks wait behind output (#1526).
 - Keep established native gameplay available during pending SDP and avoid rebuilding links with queued readiness

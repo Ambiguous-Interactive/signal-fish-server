@@ -1105,6 +1105,11 @@ impl Engine {
         if pending.generation != generation {
             return Ok(Some(event));
         }
+        // Established sends share their registry with the setup owner. Their
+        // completion must not wait for unrelated SDP before paying send debt.
+        if pending.pair_connected && matches!(event, EngineEvent::ChannelSendComplete { .. }) {
+            return Ok(Some(event));
+        }
         if !matches!(
             event,
             EngineEvent::RemoteChannel { .. }

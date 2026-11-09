@@ -1070,7 +1070,15 @@ async fn exchange_pending_description_gameplay(
             assert!(duplicate.is_none());
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    match sender_events.recv().await.unwrap() {
+                    let event = sender_events.recv().await.unwrap();
+                    let event = if matches!(event, EngineEvent::ChannelSendComplete { .. }) {
+                        sender.defer_negotiation_event(event).unwrap().expect(
+                            "established send completion must reach the owner during pending SDP",
+                        )
+                    } else {
+                        event
+                    };
+                    match event {
                         EngineEvent::ChannelSendComplete {
                             peer: actual_peer,
                             generation,
