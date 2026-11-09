@@ -462,6 +462,7 @@ async fn retired_links_cancel_pending_ice_and_terminal_results_cannot_commit() {
 }
 
 #[tokio::test]
+/// Bound setup ownership and release every worker capture when its Engine drops.
 async fn pending_setup_ownership_is_bounded_and_engine_drop_releases_every_worker() {
     let (tx, _events) = mpsc::unbounded_channel();
     let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
@@ -521,6 +522,7 @@ async fn pending_setup_ownership_is_bounded_and_engine_drop_releases_every_worke
 }
 
 #[tokio::test]
+/// A shared route wait must release the owner and survive a sibling cancellation.
 async fn pending_shared_route_lookup_releases_owner_and_cancels_waiting_peers() {
     let (tx, _events) = mpsc::unbounded_channel();
     let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
@@ -565,4 +567,52 @@ async fn pending_shared_route_lookup_releases_owner_and_cancels_waiting_peers() 
         vec![IpAddr::from(Ipv4Addr::LOCALHOST)]
     );
     engine.remove_peer(retained).await.unwrap();
+}
+
+#[tokio::test]
+/// Removal must drop completed peer state before its old notification is read.
+async fn peer_removal_drops_completed_setup_before_its_notification_is_consumed() {
+    let (tx, _events) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    engine.negotiation_hold = Some(NegotiationHold {
+        step: "offer_local",
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: release.clone(),
+    });
+    let peer = PlayerId::from_u128(1);
+    engine
+        .start_negotiation(
+            peer,
+            Negotiation::Pair {
+                initiate: true,
+                ice_servers: vec![],
+            },
+            Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !engine.setup_worker_finished(peer) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a completed worker queues its result");
+    assert_eq!(
+        Arc::strong_count(&release),
+        3,
+        "retain the actual completed worker"
+    );
+    engine.remove_peer(peer).await.unwrap();
+    assert_eq!(
+        Arc::strong_count(&release),
+        2,
+        "removal must drop completed peer state before consuming any old notification"
+    );
+    assert!(
+        engine.next_negotiation().await.is_none(),
+        "the retired result cannot return state"
+    );
 }

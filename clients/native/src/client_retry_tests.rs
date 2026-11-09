@@ -5,6 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 
 // Regression #1010: a held P2P gate must not restore removed plan obligations.
 #[tokio::test]
+/// Only current planned peers may signal when the pairing gate opens.
 async fn p2p_gate_does_not_signal_removed_peers() {
     for removal in [
         "departure",
@@ -161,6 +162,7 @@ async fn p2p_gate_does_not_signal_removed_peers() {
 
 /// Regression #1003: queued signaling must run between deferred peer sends.
 #[tokio::test]
+/// Queued exchange sends must service mesh traffic, relay input, and Pong.
 async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
     for unreliable in [false, true] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -352,6 +354,7 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
 // Regressions #1025/#1047: decoder-ready signaling runs between channel sends.
 /// Process queued relay input before starting the next channel's probe.
 #[tokio::test]
+/// Relay input must run between immediately completed exchange labels.
 async fn immediate_exchange_services_relay_before_the_next_label() {
     use tokio_tungstenite::tungstenite::protocol::{
         frame::{
@@ -454,6 +457,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
 
 /// A continuously ready callback stream must still let queued exchange advance.
 #[tokio::test]
+/// Queued gameplay must progress during a continuous burst of ready callbacks.
 async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -517,6 +521,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
 
 // Deferred work must not transfer to a replacement link or extend the run window.
 #[tokio::test]
+/// Queued probes must respect replacement, expiry, and signaling failure.
 async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure() {
     for mode in [
         "replacement",
@@ -590,6 +595,7 @@ async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure()
 
 // Regression #1002: a held local send must release the orchestrator and preserve relay.
 #[tokio::test]
+/// A stalled exchange must retain relay progress and unpaid delivery debt.
 async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
     struct SendGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl Drop for SendGuard {
@@ -738,6 +744,7 @@ async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
 
 // Regression #1000: a local channel send failure must preserve the relay floor.
 #[tokio::test]
+/// Channel closure must preserve relay operation and outstanding exchange debt.
 async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
     for (trigger, closed_label) in [
         ("exchange_gate", RELIABLE_LABEL),
@@ -970,6 +977,7 @@ async fn open_physical_pair(
     (engine, opens)
 }
 
+/// Open every required channel and retain the owner callbacks for a real pair.
 pub(super) async fn open_physical_pair_with_events(
     state: &mut Orchestrator<'_>,
     server_ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -1118,6 +1126,7 @@ pub(super) async fn open_physical_pair_with_events(
 }
 
 #[tokio::test]
+/// An already formed peer may recover through retry after the initial setup window.
 async fn formed_pair_accepts_remote_retry_after_window_expiry() {
     for initiate in [false, true] {
         for close_before_marker in [false, true] {
@@ -1477,6 +1486,7 @@ async fn authoritative_recovery_cannot_release_reserved_retry_exchange() {
 
 // A busy dispatcher must not turn historical open edges into live recovery.
 #[tokio::test]
+/// Queued old open callbacks must not report recovery after physical closure.
 async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
     for closed_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1592,6 +1602,7 @@ async fn remote_retry_preserves_terminal_websocket_write_errors() {
     directions. Sender FIFO cannot fence the replacement link.
 */
 #[tokio::test]
+/// A delayed old answer must not affect the fresh retry generation.
 async fn retry_discards_crossing_old_answer_before_fresh_answer() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -1759,6 +1770,7 @@ fn retry_signal_epochs_preserve_default_wire_and_reject_stale_payloads() {
 
 // Regression #1034: send evidence must fit the actual hold or linger window.
 #[tokio::test]
+/// Exchange send results must fit the active run, hold, or linger window.
 async fn exchange_sends_preserve_the_active_success_window() {
     for (label, phase, p2p_timeout) in
         [RELIABLE_LABEL, UNRELIABLE_LABEL]
@@ -1946,6 +1958,7 @@ async fn exchange_sends_preserve_the_active_success_window() {
 
 // Regression #1035: a replacement repays remote receipts lost on the old link.
 #[tokio::test]
+/// A fresh physical link must resend probes while retaining logical receipts.
 async fn physical_replacement_resends_probes_without_erasing_logical_evidence() {
     for (missing_label, retry) in [RELIABLE_LABEL, UNRELIABLE_LABEL]
         .into_iter()
@@ -2072,6 +2085,7 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
 
 // Audit #826/#853/#889: control probe, open, loss, and replacement dispatch separately.
 #[tokio::test]
+/// Early receipts and observed loss must retain debt until a valid replacement.
 async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement() {
     for initiate in [false, true] {
         for early_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
@@ -2290,6 +2304,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
 
 /// Audit #826/#853/#889: the callback producer can observe loss before dispatch.
 #[tokio::test]
+/// Observed transport loss must stop queued sends before close callbacks arrive.
 async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
     let mut failures = Vec::new();
     for initiate in [false, true] {
@@ -2408,6 +2423,7 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
 
 /// Regression #1097 / audit #826: incarnation changes re-arm queued sibling sends.
 #[tokio::test]
+/// Queued sends must respect gates rearmed by a new room incarnation.
 async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;

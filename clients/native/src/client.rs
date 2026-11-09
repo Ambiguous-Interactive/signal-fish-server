@@ -1498,11 +1498,12 @@ impl Orchestrator<'_> {
     async fn run_loop(&mut self) -> Result<i32, FatalError> {
         let mut normal_input_burst = 0_u8;
         loop {
-            if self.deferred_exchange.is_empty() {
-                normal_input_burst = 0;
-            }
             if let Some(code) = self.process_timers().await? {
                 return Ok(code);
+            }
+            let exchange_ready = self.dispatchable_exchange_position().is_some();
+            if !exchange_ready {
+                normal_input_burst = 0;
             }
             let wake_at = self.next_wake();
             /*
@@ -1519,8 +1520,8 @@ impl Orchestrator<'_> {
                         result = self.selected_pair_rx.recv() => LoopInput::SelectedPair(result),
                         _ = tokio::time::sleep_until(wake_at) => LoopInput::Tick,
                     }
-                }, if normal_input_burst < 16 || self.deferred_exchange.is_empty() => input,
-                _ = std::future::ready(()), if !self.deferred_exchange.is_empty() => LoopInput::DeferredExchange,
+                }, if normal_input_burst < 16 || !exchange_ready => input,
+                _ = std::future::ready(()), if exchange_ready => LoopInput::DeferredExchange,
             };
             if matches!(input, LoopInput::DeferredExchange) {
                 normal_input_burst = 0;
@@ -2380,13 +2381,22 @@ impl Orchestrator<'_> {
         }
     }
 
+    /// Find the first queued probe whose peer state is available.
+    fn dispatchable_exchange_position(&self) -> Option<usize> {
+        self.deferred_exchange
+            .iter()
+            .position(|send| !self.engine.negotiation_pending(send.peer))
+    }
+
     /// Dispatch one queued probe; pending RTC work belongs to its physical link.
     async fn process_deferred_exchange(&mut self) -> Result<(), FatalError> {
         if let Some(DeferredExchangeSend {
             peer,
             label,
             channel: queued_channel,
-        }) = self.deferred_exchange.pop_front()
+        }) = self
+            .dispatchable_exchange_position()
+            .and_then(|position| self.deferred_exchange.remove(position))
         {
             /* A returning member can re-arm gates while sibling sends are queued.
              * Release queues live peers again, so discard held work without
@@ -3271,6 +3281,7 @@ impl Orchestrator<'_> {
         Ok(result)
     }
 
+    /// Publish current SDP before resuming ordered callbacks and queued signals.
     async fn complete_negotiation(
         &mut self,
         completion: NegotiationCompletion,

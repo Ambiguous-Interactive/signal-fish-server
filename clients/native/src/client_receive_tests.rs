@@ -1432,6 +1432,7 @@ async fn delayed_remote_channel_admission_preserves_early_exchange_probes() {
         let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.establish_pair(peer, false).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (remote_tx, mut remote_events) = mpsc::unbounded_channel();
         let mut remote = Engine::new(cli.engine_settings(), remote_tx).unwrap();
         let offer = remote.pair_with(me, true, &[]).await.unwrap().unwrap();
@@ -1629,14 +1630,10 @@ async fn queued_liveness_survives_negotiation_during_pong_drain_grace() {
     ));
     state.p2p_retry_at = state.pong_deadline;
     tokio::time::advance(PONG_TIMEOUT).await;
-    let mut pairing = Box::pin(state.process_timers());
-    tokio::select! {
-        _ = entered.notified() => {},
-        result = &mut pairing => panic!("pairing ended before hold: {result:?}"),
-    }
+    assert!(state.process_timers().await.unwrap().is_none());
+    entered.notified().await;
+    assert!(state.engine.negotiation_pending(peer));
     tokio::time::advance(PONG_DRAIN_GRACE + Duration::from_millis(1)).await;
-    release.notify_one();
-    assert!(pairing.await.unwrap().is_none());
     assert!(state.pong_grace_applied);
     assert_eq!(state.pair_retry_attempts.get(&peer), Some(&1));
     assert!(state
@@ -1652,6 +1649,12 @@ async fn queued_liveness_survives_negotiation_during_pong_drain_grace() {
         checked_deadline(Instant::now(), PONG_TIMEOUT)
     );
     assert!(!state.pong_grace_applied);
+    assert!(
+        state.engine.negotiation_pending(peer),
+        "queued Pong is consumed before setup releases"
+    );
+    release.notify_one();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     assert!(state.process_timers().await.unwrap().is_none());
     assert_eq!(state.pong_deadline, Some(renewed_deadline));
     clock_guard.abort();

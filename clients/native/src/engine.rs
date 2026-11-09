@@ -736,13 +736,21 @@ pub(crate) struct NegotiationCompletion {
     pub events: std::collections::VecDeque<EngineEvent>,
 }
 
+struct NegotiationReady {
+    peer: PlayerId,
+    generation: u64,
+}
+
 struct PendingNegotiation {
     generation: u64,
     task: Box<dyn JoinHandle>,
+    result: tokio::sync::oneshot::Receiver<NegotiationCompletion>,
+    channels: HashMap<String, Arc<dyn DataChannel>>,
     events: std::collections::VecDeque<EngineEvent>,
 }
 
 impl Drop for PendingNegotiation {
+    /// Cancel running work before dropping any queued completed peer state.
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -758,8 +766,8 @@ pub struct Engine {
     #[cfg(test)]
     send_buffer_limit: Option<usize>,
     pending_negotiations: HashMap<PlayerId, PendingNegotiation>,
-    negotiation_tx: mpsc::Sender<NegotiationCompletion>,
-    negotiation_rx: mpsc::Receiver<NegotiationCompletion>,
+    negotiation_tx: mpsc::Sender<NegotiationReady>,
+    negotiation_rx: mpsc::Receiver<NegotiationReady>,
     settings: EngineSettings,
     runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
@@ -853,6 +861,7 @@ impl Engine {
     }
 
     #[cfg(test)]
+    /// Whether this peer has queued its setup result and notification.
     pub(crate) fn setup_worker_finished(&self, peer: PlayerId) -> bool {
         self.pending_negotiations
             .get(&peer)
@@ -860,10 +869,12 @@ impl Engine {
     }
 
     #[cfg(test)]
+    /// Whether every setup operation has returned or retired.
     pub(crate) fn pending_negotiations_empty(&self) -> bool {
         self.pending_negotiations.is_empty()
     }
 
+    /// Whether this peer still owns an outstanding setup operation.
     pub(crate) fn negotiation_pending(&self, peer: PlayerId) -> bool {
         self.pending_negotiations.contains_key(&peer)
     }
@@ -925,6 +936,11 @@ impl Engine {
         if let Some(receipts) = self.receipt_generations.get(&peer) {
             worker.receipt_generations.insert(peer, *receipts);
         }
+        let channels = worker
+            .peers
+            .get(&peer)
+            .map(|link| link.channels.clone())
+            .unwrap_or_default();
         let mut operation = Box::pin(async move {
             let result = worker.negotiate(peer, operation, deadline).await;
             NegotiationCompletion {
@@ -948,14 +964,20 @@ impl Engine {
             }
             std::task::Poll::Pending => {
                 let sender = self.negotiation_tx.clone();
+                let (result_tx, result) = tokio::sync::oneshot::channel();
                 let task = self.runtime.spawn(Box::pin(async move {
-                    let _ = sender.send(operation.await).await;
+                    let completion = operation.await;
+                    if result_tx.send(completion).is_ok() {
+                        let _ = sender.send(NegotiationReady { peer, generation }).await;
+                    }
                 }));
                 self.pending_negotiations.insert(
                     peer,
                     PendingNegotiation {
                         generation,
                         task,
+                        result,
+                        channels,
                         events: Default::default(),
                     },
                 );
@@ -964,8 +986,10 @@ impl Engine {
         }
     }
 
+    /// Return peer state and bounded close tasks to their owning Engine.
     fn restore_negotiation_worker(&mut self, completion: &mut NegotiationCompletion) {
         let peer = completion.peer;
+        tracing::debug!(%peer, generation = completion.generation, "Peer setup state returned");
         self.retiring_peers
             .append(&mut completion.worker.retiring_peers);
         if let Some(link) = completion.worker.peers.remove(&peer) {
@@ -982,6 +1006,7 @@ impl Engine {
         self.accept_negotiation(completion)
     }
 
+    /// Adopt the next current setup result without waiting.
     pub(crate) fn take_ready_negotiation(&mut self) -> Option<NegotiationCompletion> {
         loop {
             let completion = match self.negotiation_rx.try_recv() {
@@ -998,18 +1023,24 @@ impl Engine {
         }
     }
 
-    fn accept_negotiation(
-        &mut self,
-        mut completion: NegotiationCompletion,
-    ) -> Option<NegotiationCompletion> {
-        if self
-            .pending_negotiations
-            .get(&completion.peer)
-            .is_none_or(|pending| pending.generation != completion.generation)
-        {
+    /// Match a notification to its current peer-owned result slot.
+    fn accept_negotiation(&mut self, ready: NegotiationReady) -> Option<NegotiationCompletion> {
+        let pending = self.pending_negotiations.get_mut(&ready.peer)?;
+        if pending.generation != ready.generation {
             return None;
         }
-        let pending = self.pending_negotiations.remove(&completion.peer);
+        let mut completion = match pending.result.try_recv() {
+            Ok(completion) => completion,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                tracing::warn!(peer = %ready.peer, "Setup notification preceded its result");
+                return None;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                tracing::warn!(peer = %ready.peer, "Setup result channel closed");
+                return None;
+            }
+        };
+        let pending = self.pending_negotiations.remove(&ready.peer);
         self.restore_negotiation_worker(&mut completion);
         if let Some(mut pending) = pending {
             completion.events.append(&mut pending.events);
@@ -1037,6 +1068,8 @@ impl Engine {
                 | EngineEvent::PairReady { .. }
                 | EngineEvent::ChannelSendComplete { .. }
                 | EngineEvent::RemoteCandidateComplete { .. }
+                | EngineEvent::LocalCandidate { .. }
+                | EngineEvent::IceGatheringComplete { .. }
         ) {
             return Ok(Some(event));
         }
@@ -1297,6 +1330,7 @@ impl Engine {
             pc.set_local_description(offer)
                 .await
                 .context("set local description (offer)")?;
+            negotiation_checkpoint!(negotiation_hold, "sdp_complete");
             Ok(Some(sdp))
         }
         .await;
@@ -1340,6 +1374,7 @@ impl Engine {
         pc.set_local_description(answer)
             .await
             .context("set local description (answer)")?;
+        negotiation_checkpoint!(negotiation_hold, "sdp_complete");
         Ok(sdp)
     }
 
@@ -1702,6 +1737,11 @@ impl Engine {
         self.peers
             .get(&peer)
             .and_then(|link| link.channels.get(label))
+            .or_else(|| {
+                self.pending_negotiations
+                    .get(&peer)
+                    .and_then(|pending| pending.channels.get(label))
+            })
             .cloned()
     }
 
@@ -2990,6 +3030,7 @@ mod tests {
     // Regression #861: use real SDP and the WebRTC stack on both sides of
     // the pending-queue drain. The last admission must not renew that queue.
     #[tokio::test]
+    /// Pending SDP setup must flush candidates without replenishing their admission budget.
     async fn remote_candidate_budget_survives_real_description_application() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let settings = crippled_settings(IpFamily::Ipv4);
@@ -3008,8 +3049,32 @@ mod tests {
             answerer.peers[&a].pending_candidates[0].sdp_mline_index,
             Some(0)
         );
-        let answer = answerer.handle_offer(a, offer).await.unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        answerer.negotiation_hold = Some(NegotiationHold {
+            step: "remote_offer",
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: release.clone(),
+        });
+        assert!(answerer
+            .start_negotiation(
+                a,
+                Negotiation::Offer(offer),
+                Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5))
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(answerer.negotiation_pending(a));
+        release.notify_one();
+        let completion = answerer.next_negotiation().await.unwrap();
+        let answer = completion.result.unwrap().unwrap();
+        answerer.negotiation_hold = None;
         assert!(answerer.peers[&a].pending_candidates.is_empty());
+        assert_eq!(answerer.peers[&a].remote_candidate_count, 127);
+        assert_eq!(
+            answerer.peers[&a].remote_candidate_bytes,
+            127 * payload.len()
+        );
         answerer.handle_remote_candidate(a, payload).await.unwrap();
         assert!(answerer.peers[&a].pending_candidates.is_empty());
         let error = answerer

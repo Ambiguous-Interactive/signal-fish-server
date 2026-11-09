@@ -118,10 +118,13 @@ and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-god
 The CLI runs pending pair creation and SDP work outside its session loop.
 Each peer has one ordered setup operation. Signals wait behind it under the
 original deadline and the existing 32-per-peer and 128-total signal limits.
-The Engine owns at most 255 setup tasks and 128 queued completions.
-Each task retains at most 256 setup callbacks. Gameplay receipts, ICE, and terminal
+The Engine owns at most 255 setup tasks and 128 queued completion notifications.
+Each task retains at most 256 setup callbacks. Gameplay receipts and terminal
 callbacks continue through the session loop. Setup callbacks resume in arrival order.
-Departure, replacement, retry, and Engine drop cancel owned setup work.
+Gathered ICE and its completion marker follow the Offer or Answer on the wire.
+Departure, replacement, retry, and Engine drop cancel owned setup work,
+including completed peer state that still awaits adoption. Queued exchange probes
+wait for their peer's setup without holding other peers' sends.
 Only the current physical generation can return peer state or publish SDP, and
 late completion cannot extend the captured negotiation or run deadline.
 A pending diagnostic snapshot names the generation and queued callback count;
@@ -584,8 +587,8 @@ Live remote ICE application also runs outside the main event loop when the
 peer's RTC core is busy. Later signals for that peer wait in the bounded signal
 queue and keep the captured deadline. Link retirement cancels the application.
 `EngineEvent::RemoteCandidateComplete` returns its result to the CLI; exhaustive
-matches must handle this variant. Pair creation and SDP application still use
-their existing awaited operations and deadlines.
+matches must handle this variant. Pending pair creation and SDP work follow the
+setup-operation rules described above.
 
 ## Signal payload convention (matchbox `PeerSignal`)
 

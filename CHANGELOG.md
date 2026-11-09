@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep live native P2P gameplay, relay input, and keepalive responsive during pair creation, SDP work,
   channel readiness checks, exchange sends, live ICE, and old-link retirement (#1510, #1512, #1515, #1516, #1517).
+  Preserve signal order and queued gameplay while setup is pending.
 - Resume accepted native P2P messages and receive-credit replies when callback polling restarts (#1508).
 - Cancel native P2P candidate queries when their link retires so retries release old connections (#1507).
 - Preserve accepted P2P transport reports and WebRTC signals after caller cancellation (#1428, #1429).
