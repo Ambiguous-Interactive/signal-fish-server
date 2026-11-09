@@ -555,6 +555,8 @@ pub enum CandidateApplyResult {
     Terminal,
 }
 
+type ChannelSends = Arc<std::sync::Mutex<HashMap<String, Box<dyn JoinHandle>>>>;
+
 /// Per-remote-peer connection state.
 struct PeerLink {
     generation: u64,
@@ -579,17 +581,25 @@ struct PeerLink {
     selected_pair_probe: Option<SelectedPairProbe>,
     readiness_check: Option<ReadinessCheck>,
     /// At most one application send per required exchange label.
-    channel_sends: HashMap<String, Box<dyn JoinHandle>>,
+    channel_sends: ChannelSends,
     candidate_task: Option<Box<dyn JoinHandle>>,
 }
 
 impl PeerLink {
     /// Cancel every task that can retain this physical link.
     fn stop_tasks(&mut self) {
+        self.receive_admission
+            .terminal
+            .store(true, Ordering::Relaxed);
         for task in self.channel_tasks.drain(..) {
             task.abort();
         }
-        for (_, task) in self.channel_sends.drain() {
+        for (_, task) in self
+            .channel_sends
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain()
+        {
             task.abort();
         }
         if let Some(task) = self.candidate_task.take() {
@@ -747,6 +757,9 @@ struct PendingNegotiation {
     result: tokio::sync::oneshot::Receiver<NegotiationCompletion>,
     channels: HashMap<String, Arc<dyn DataChannel>>,
     established_admission: Option<Arc<ChannelReceiveAdmission>>,
+    receive_admission: Option<Arc<ChannelReceiveAdmission>>,
+    open_labels: BTreeSet<String>,
+    channel_sends: ChannelSends,
     events: std::collections::VecDeque<EngineEvent>,
 }
 
@@ -942,6 +955,20 @@ impl Engine {
             .get(&peer)
             .map(|link| link.channels.clone())
             .unwrap_or_default();
+        let channel_sends = worker
+            .peers
+            .get(&peer)
+            .map(|link| link.channel_sends.clone())
+            .unwrap_or_default();
+        let receive_admission = worker
+            .peers
+            .get(&peer)
+            .map(|link| link.receive_admission.clone());
+        let open_labels = worker
+            .peers
+            .get(&peer)
+            .map(|link| link.open_labels.clone())
+            .unwrap_or_default();
         let established_admission = worker
             .peers
             .get(&peer)
@@ -984,6 +1011,9 @@ impl Engine {
                         result,
                         channels,
                         established_admission,
+                        receive_admission,
+                        open_labels,
+                        channel_sends,
                         events: Default::default(),
                     },
                 );
@@ -1291,7 +1321,7 @@ impl Engine {
             channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
             selected_pair_probe: None,
             readiness_check: None,
-            channel_sends: HashMap::new(),
+            channel_sends: ChannelSends::default(),
             candidate_task: None,
         };
         self.peers.insert(peer, link);
@@ -1791,13 +1821,24 @@ impl Engine {
         Send: FnOnce(Arc<dyn DataChannel>, String) -> SendFuture + std::marker::Send,
         SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send,
     {
-        let link = self.peers.get(&peer).map(|link| {
-            (
-                link.generation,
-                link.receive_admission.clone(),
-                link.channels.get(label).cloned(),
-            )
-        });
+        let link = self
+            .peers
+            .get(&peer)
+            .map(|link| {
+                (
+                    link.generation,
+                    link.receive_admission.clone(),
+                    link.channels.get(label).cloned(),
+                )
+            })
+            .or_else(|| {
+                let pending = self.pending_negotiations.get(&peer)?;
+                Some((
+                    pending.generation,
+                    pending.established_admission.clone()?,
+                    pending.channels.get(label).cloned(),
+                ))
+            });
         let events = self.events.clone();
         let label = label.to_owned();
         async move {
@@ -1843,15 +1884,36 @@ impl Engine {
         Send: FnOnce(Arc<dyn DataChannel>, String) -> SendFuture + std::marker::Send + 'static,
         SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send + 'static,
     {
-        let Some(link) = self.peers.get(&peer) else {
+        let Some((generation, sends, admission)) = self
+            .peers
+            .get(&peer)
+            .map(|link| {
+                (
+                    link.generation,
+                    link.channel_sends.clone(),
+                    link.receive_admission.clone(),
+                )
+            })
+            .or_else(|| {
+                let pending = self.pending_negotiations.get(&peer)?;
+                Some((
+                    pending.generation,
+                    pending.channel_sends.clone(),
+                    pending.established_admission.clone()?,
+                ))
+            })
+        else {
             return Some(Err(format!(
                 "pair with {peer} has no usable channel {label}"
             )));
         };
-        if link.channel_sends.contains_key(label) {
+        if sends
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(label)
+        {
             return None;
         }
-        let generation = link.generation;
         let mut operation =
             Box::pin(self.channel_send_operation(peer, label, text.clone(), deadline, send));
         match std::future::poll_fn(|context| {
@@ -1873,11 +1935,16 @@ impl Engine {
                         result,
                     });
                 }));
-                if let Some(link) = self.peers.get_mut(&peer) {
-                    link.channel_sends.insert(label.to_owned(), task);
-                } else {
+                let mut sends = sends.lock().unwrap_or_else(|error| error.into_inner());
+                // Setup can retire this link on another task between the first
+                // poll and publication. Serialize insertion with its task drain.
+                if admission.terminal.load(Ordering::Relaxed) {
                     task.abort();
+                    return Some(Err(format!(
+                        "pair with {peer} has no usable channel {label}"
+                    )));
                 }
+                sends.insert(label.to_owned(), task);
                 None
             }
         }
@@ -1885,14 +1952,29 @@ impl Engine {
 
     /// Consume one pending send only on its current, nonterminal physical link.
     pub(crate) fn accept_channel_send(&mut self, peer: PlayerId, label: &str) -> bool {
-        let Some(link) = self.peers.get_mut(&peer) else {
+        let Some((sends, admission)) = self
+            .peers
+            .get(&peer)
+            .map(|link| (&link.channel_sends, &link.receive_admission))
+            .or_else(|| {
+                let pending = self.pending_negotiations.get(&peer)?;
+                Some((
+                    &pending.channel_sends,
+                    pending.established_admission.as_ref()?,
+                ))
+            })
+        else {
             return false;
         };
-        let Some(task) = link.channel_sends.remove(label) else {
+        let Some(task) = sends
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(label)
+        else {
             return false;
         };
         task.abort();
-        !link.receive_admission.terminal.load(Ordering::Relaxed)
+        !admission.terminal.load(Ordering::Relaxed)
     }
 
     pub(crate) fn report_peer_loss(&self, peer: PlayerId, reason: &str) {
@@ -1926,42 +2008,62 @@ impl Engine {
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         if let Some(pending) = self.pending_negotiations.get(&peer) {
-            return serde_json::json!({
-                "generation": pending.generation,
-                "negotiation_pending": true,
-                "queued_callbacks": pending.events.len(),
-            });
+            let mut snapshot = pending.receive_admission.as_ref().map_or_else(
+                || serde_json::json!({}),
+                |admission| {
+                    self.receive_diagnostic_snapshot(
+                        admission,
+                        &pending.channels,
+                        &pending.open_labels,
+                    )
+                },
+            );
+            snapshot["generation"] = pending.generation.into();
+            snapshot["negotiation_pending"] = true.into();
+            snapshot["queued_callbacks"] = pending.events.len().into();
+            return snapshot;
         }
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
         };
-        let channels: serde_json::Map<String, serde_json::Value> =
-            self.settings.channel_profile.labels()
-                .iter().copied()
-                .map(|label| {
-                    (
-                        label.to_string(),
-                        serde_json::json!({
-                            "registered": link.channels.contains_key(label),
-                            "open_observed": link.open_labels.contains(label),
-                            "receipts": link.receive_admission.receipts(label).map(|receipts| receipts.snapshot()),
-                            "pending_application": link.receive_admission.receipts(label).map(|receipts| serde_json::json!({
-                                "messages": receipts.pending_messages.load(Ordering::Relaxed),
-                                "bytes": receipts.pending_bytes.load(Ordering::Relaxed),
-                            })),
-                        }),
-                    )
-                })
-                .collect();
+        let mut snapshot = self.receive_diagnostic_snapshot(
+            &link.receive_admission,
+            &link.channels,
+            &link.open_labels,
+        );
+        snapshot["generation"] = link.generation.into();
+        snapshot["remote_description_set"] = link.remote_description_set.into();
+        snapshot["remote_candidate_count"] = link.remote_candidate_count.into();
+        snapshot["pending_remote_candidates"] = link.pending_candidates.len().into();
+        snapshot
+    }
+
+    /// Read shared receipt evidence even while setup owns the physical link.
+    /// Channel registration and observed opens remain the pre-operation snapshot.
+    fn receive_diagnostic_snapshot(
+        &self,
+        admission: &ChannelReceiveAdmission,
+        registered: &HashMap<String, Arc<dyn DataChannel>>,
+        open_labels: &BTreeSet<String>,
+    ) -> serde_json::Value {
+        let channels: serde_json::Map<String, serde_json::Value> = self.settings.channel_profile.labels()
+            .iter().copied().map(|label| (
+                label.to_string(),
+                serde_json::json!({
+                    "registered": registered.contains_key(label),
+                    "open_observed": open_labels.contains(label),
+                    "receipts": admission.receipts(label).map(|receipts| receipts.snapshot()),
+                    "pending_application": admission.receipts(label).map(|receipts| serde_json::json!({
+                        "messages": receipts.pending_messages.load(Ordering::Relaxed),
+                        "bytes": receipts.pending_bytes.load(Ordering::Relaxed),
+                    })),
+                }),
+            )).collect();
         serde_json::json!({
-            "generation": link.generation,
-            "remote_description_set": link.remote_description_set,
-            "remote_candidate_count": link.remote_candidate_count,
-            "pending_remote_candidates": link.pending_candidates.len(),
-            "receive_rejection": link.receive_admission.failure.get().map(|failure| failure.reason.as_str()),
-            "receive_failure": link.receive_admission.failure.get(),
-            "channel_closure": link.receive_admission.closure.get(),
-            "connection_terminal": link.receive_admission.connection_terminal.get().map(ToString::to_string),
+            "receive_rejection": admission.failure.get().map(|failure| failure.reason.as_str()),
+            "receive_failure": admission.failure.get(),
+            "channel_closure": admission.closure.get(),
+            "connection_terminal": admission.connection_terminal.get().map(ToString::to_string),
             "receive_budget": {
                 "scope": "engine",
                 "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),

@@ -6,9 +6,26 @@ const failures: string[] = [];
 for (const [scenario, boundary] of (
   ['joined', 'reconnected', 'plan', 'pair-open', 'benign', 'late'] as const
 ).flatMap((scenario) =>
-  (['linger', 'run'] as const).map((boundary) => [scenario, boundary] as const),
+  (
+    [
+      'linger',
+      'run',
+      ...(scenario === 'pair-open'
+        ? ([
+            'p2p',
+            'p2p-incomplete',
+            'p2p-closing',
+            'p2p-pc-failed',
+            'p2p-retired',
+            'p2p-late',
+            'p2p-late-second',
+          ] as const)
+        : []),
+    ] as const
+  ).map((boundary) => [scenario, boundary] as const),
 )) {
   const label = `${scenario}/${boundary}`;
+  const p2pBoundary = boundary.startsWith('p2p');
   const originalSocket = globalThis.WebSocket;
   const originalPc = globalThis.RTCPeerConnection;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -19,6 +36,8 @@ for (const [scenario, boundary] of (
   const peer = '00000000-0000-0000-0000-000000000002';
   const newcomer = '00000000-0000-0000-0000-000000000003';
   const events: Record<string, unknown>[] = [];
+  const probes: Array<{ label: string; text: string }> = [];
+  const channels: Channel[] = [];
   let now = 100;
   let socket!: Socket;
   let connection!: Connection;
@@ -36,21 +55,28 @@ for (const [scenario, boundary] of (
     maxPacketLifeTime = null;
     readonly ordered: boolean;
     readonly maxRetransmits: number | null;
+    onmessage: ((event: { data: string }) => void) | null = null;
     constructor(readonly label: string) {
+      channels.push(this);
       this.ordered = label === 'reliable';
       this.maxRetransmits = this.ordered ? null : 0;
     }
-    send(): void {}
+    send(text: string): void {
+      probes.push({ label: this.label, text });
+    }
     close(): void {
       this.readyState = 'closed';
     }
   }
   class Connection {
+    connectionState = 'connecting';
     ondatachannel: ((event: { channel: Channel }) => void) | null = null;
     constructor() {
       connection = this;
     }
-    close(): void {}
+    close(): void {
+      this.connectionState = 'closed';
+    }
   }
   class Socket {
     static OPEN = 1;
@@ -153,12 +179,12 @@ for (const [scenario, boundary] of (
       return code;
     });
     await turn();
-    if (scenario === 'pair-open') {
+    if (scenario === 'pair-open' && !p2pBoundary) {
       now = 1100;
       socket.deliver('Pong');
       await turn();
     }
-    now = scenario === 'pair-open' ? 1200 : 200;
+    now = scenario === 'pair-open' && !p2pBoundary ? 1200 : 200;
     socket.deliver('PeerTransportStatus', {
       peer_id: peer,
       transport: 'relay',
@@ -166,15 +192,27 @@ for (const [scenario, boundary] of (
     });
     await turn();
     if (!held) throw new Error(`${scenario}: hold output before the lifecycle frame`);
-    now = scenario === 'late' ? 1100 : scenario === 'pair-open' ? 1300 : 300;
+    now = scenario === 'late' ? 1100 : scenario === 'pair-open' && !p2pBoundary ? 1300 : 300;
     if (scenario === 'joined')
       socket.deliver('PlayerJoined', { player: { id: newcomer, epoch: 1, seq: 0 } });
     else if (scenario === 'reconnected')
       socket.deliver('PlayerReconnected', { player_id: peer, epoch: 2 });
     else if (scenario === 'plan') socket.plan('webrtc', [peer], newcomer);
     else if (scenario === 'pair-open') {
-      for (const name of ['reliable', 'unreliable'])
-        connection.ondatachannel?.({ channel: new Channel(name) });
+      if (boundary === 'p2p-retired') socket.plan('relay', []);
+      for (const name of ['reliable', 'unreliable']) {
+        if (boundary === 'p2p-incomplete' && name === 'unreliable') continue;
+        if (
+          boundary === 'p2p-late' ||
+          (boundary === 'p2p-late-second' && name === 'unreliable')
+        )
+          now = 1200;
+        const channel = new Channel(name);
+        connection.ondatachannel?.({ channel });
+        await turn();
+        if (boundary === 'p2p-closing') channel.readyState = 'closing';
+      }
+      if (boundary === 'p2p-pc-failed') connection.connectionState = 'failed';
       await turn();
     } else
       // The held frame retains one of the 256 backlog credits.
@@ -190,12 +228,33 @@ for (const [scenario, boundary] of (
       scenario === 'pair-open'
         ? boundary === 'run'
           ? 3200
-          : 1400
+          : p2pBoundary
+            ? 1200
+            : 1400
         : boundary === 'run' || scenario === 'late'
           ? 1200
           : 400;
     release();
     await turn();
+    if (p2pBoundary) {
+      const statuses = events
+        .filter((event) => event['event'] === 'transport_status_sent')
+        .map((event) => event['connected']);
+      const expectedStatuses =
+        boundary === 'p2p-retired'
+          ? []
+          : boundary === 'p2p'
+            ? [true]
+            : boundary === 'p2p-late' || boundary === 'p2p-late-second'
+              ? [false, true]
+              : [false];
+      if (JSON.stringify(statuses) !== JSON.stringify(expectedStatuses))
+        failures.push(
+          `${label}: expected availability ${JSON.stringify(expectedStatuses)}, got ${JSON.stringify(statuses)}`,
+        );
+      if (boundary === 'p2p' && events.some((event) => event['event'] === 'fallback_engaged'))
+        failures.push(`${label}: queued open callbacks must prevent false relay fallback`);
+    }
     const addsDebt =
       scenario === 'joined' ||
       scenario === 'reconnected' ||
@@ -227,8 +286,46 @@ for (const [scenario, boundary] of (
       if (received !== (scenario === 'benign' ? 255 : 0))
         failures.push(`${label}: wrong bounded backlog drain count ${received}`);
     }
-    if (observed !== (scenario !== 'late'))
+    if (
+      observed !==
+      (scenario !== 'late' &&
+        !['p2p-incomplete', 'p2p-closing', 'p2p-pc-failed', 'p2p-retired'].includes(boundary))
+    )
       failures.push(`${label}: wrong queued frame dispatch: ${observed}`);
+    if (
+      boundary === 'p2p' ||
+      ['p2p-closing', 'p2p-pc-failed', 'p2p-retired'].includes(boundary)
+    ) {
+      if (boundary !== 'p2p') {
+        socket.plan('relay', []);
+        await turn();
+        socket.plan('webrtc', [peer]);
+        await turn();
+        for (const name of ['reliable', 'unreliable'])
+          connection.ondatachannel?.({ channel: new Channel(name) });
+        await turn();
+      }
+      for (const channel of channels.slice(-2)) {
+        const text = JSON.stringify({ from: peer, channel: channel.label, seq: 0 });
+        channel.onmessage?.({ data: text });
+      }
+      await turn();
+      for (const name of ['reliable', 'unreliable']) {
+        const sent = probes.filter((probe) => probe.label === name);
+        const received = events.filter(
+          (event) => event['event'] === 'channel_message' && event['label'] === name,
+        );
+        if (
+          sent.length !== 1 ||
+          sent[0]?.text !== JSON.stringify({ from: me, channel: name, seq: 0 }) ||
+          received.length !== 1 ||
+          received[0]?.['text'] !== JSON.stringify({ from: peer, channel: name, seq: 0 })
+        )
+          failures.push(
+            `${label}/${name}: exact current-link gameplay must survive the cutoff or fresh recovery`,
+          );
+      }
+    }
   } finally {
     release();
     socket?.onclose?.();
