@@ -1346,6 +1346,19 @@ async fn pending_setup_preserves_exact_mesh_gameplay_relay_and_pong() {
                 .await
                 .unwrap();
             assert!(state.engine.negotiation_pending(peer), "{context}");
+            assert!(!state.connected_pairs.contains(&peer), "{context}");
+            state.queue_exchange(peer, &[RELIABLE_LABEL, UNRELIABLE_LABEL]);
+            assert!(
+                state.dispatchable_exchange_position().is_none(),
+                "{context}: initial setup must hold sends"
+            );
+            state.process_deferred_exchange().await.unwrap();
+            assert_eq!(
+                state.deferred_exchange.len(),
+                2,
+                "{context}: preserve initial queued probes"
+            );
+            state.deferred_exchange.clear();
             let deadline = state.pending_signal_deadlines[&peer];
             state
                 .apply_signal(peer, json!({"IceCandidate": ""}))

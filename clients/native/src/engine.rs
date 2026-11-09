@@ -2138,7 +2138,12 @@ impl Engine {
         } else if let Some(pending) = self.pending_negotiations.get(&peer) {
             let Some(pc) = pending.pc.as_ref() else {
                 let mut snapshot = self.diagnostic_snapshot(peer);
-                snapshot["transport_snapshot_error"] = "negotiation_pending".into();
+                if let Some(fields) = snapshot.as_object_mut() {
+                    fields.insert(
+                        "transport_snapshot_error".into(),
+                        "negotiation_pending".into(),
+                    );
+                }
                 return snapshot;
             };
             (pc, &pending.channels)
