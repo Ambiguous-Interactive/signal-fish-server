@@ -557,6 +557,14 @@ pub enum CandidateApplyResult {
 
 type ChannelSends = Arc<std::sync::Mutex<HashMap<String, Box<dyn JoinHandle>>>>;
 
+/// Borrow one physical send owner, including established state held by setup.
+struct SendLink<'a> {
+    generation: u64,
+    admission: &'a Arc<ChannelReceiveAdmission>,
+    sends: &'a ChannelSends,
+    channels: &'a HashMap<String, Arc<dyn DataChannel>>,
+}
+
 /// Per-remote-peer connection state.
 struct PeerLink {
     generation: u64,
@@ -756,7 +764,7 @@ struct PendingNegotiation {
     task: Box<dyn JoinHandle>,
     result: tokio::sync::oneshot::Receiver<NegotiationCompletion>,
     channels: HashMap<String, Arc<dyn DataChannel>>,
-    established_admission: Option<Arc<ChannelReceiveAdmission>>,
+    pair_connected: bool,
     receive_admission: Option<Arc<ChannelReceiveAdmission>>,
     open_labels: BTreeSet<String>,
     channel_sends: ChannelSends,
@@ -969,10 +977,10 @@ impl Engine {
             .get(&peer)
             .map(|link| link.open_labels.clone())
             .unwrap_or_default();
-        let established_admission = worker
+        let pair_connected = worker
             .peers
             .get(&peer)
-            .and_then(|link| link.pair_connected.then(|| link.receive_admission.clone()));
+            .is_some_and(|link| link.pair_connected);
         let mut operation = Box::pin(async move {
             let result = worker.negotiate(peer, operation, deadline).await;
             NegotiationCompletion {
@@ -1010,7 +1018,7 @@ impl Engine {
                         task,
                         result,
                         channels,
-                        established_admission,
+                        pair_connected,
                         receive_admission,
                         open_labels,
                         channel_sends,
@@ -1213,7 +1221,8 @@ impl Engine {
             .chain(
                 self.pending_negotiations
                     .values()
-                    .filter_map(|pending| pending.established_admission.as_ref()),
+                    .filter(|pending| pending.pair_connected)
+                    .filter_map(|pending| pending.receive_admission.as_ref()),
             )
             .filter(|admission| !admission.terminal.load(Ordering::Relaxed))
             .count()
@@ -1786,26 +1795,42 @@ impl Engine {
             .cloned()
     }
 
+    /// Prefer active state; setup exposes sends only for an established link.
+    fn send_link(&self, peer: PlayerId) -> Option<SendLink<'_>> {
+        if let Some(link) = self.peers.get(&peer) {
+            return Some(SendLink {
+                generation: link.generation,
+                admission: &link.receive_admission,
+                sends: &link.channel_sends,
+                channels: &link.channels,
+            });
+        }
+        let pending = self.pending_negotiations.get(&peer)?;
+        if !pending.pair_connected {
+            return None;
+        }
+        Some(SendLink {
+            generation: pending.generation,
+            admission: pending.receive_admission.as_ref()?,
+            sends: &pending.channel_sends,
+            channels: &pending.channels,
+        })
+    }
+
     /// Select a channel for a new send while the physical link remains usable.
     /// Returns `None` after observed connection loss, required-channel loss, or
     /// receive refusal. A later loss can still race selection; callers must
     /// handle send errors and apply their own operation deadline.
     pub async fn send_channel(&self, peer: PlayerId, label: &str) -> Option<Arc<dyn DataChannel>> {
-        let (generation, admission) = self
-            .peers
-            .get(&peer)
-            .map(|link| (link.generation, &link.receive_admission))
-            .or_else(|| {
-                let pending = self.pending_negotiations.get(&peer)?;
-                Some((pending.generation, pending.established_admission.as_ref()?))
-            })?;
-        if !admission
-            .allows_work(&self.events, peer, generation, None)
+        let link = self.send_link(peer)?;
+        if !link
+            .admission
+            .allows_work(&self.events, peer, link.generation, None)
             .await
         {
             return None;
         }
-        self.channel(peer, label)
+        link.channels.get(label).cloned()
     }
 
     /// Capture channel selection and its deadline without borrowing the Engine.
@@ -1821,24 +1846,13 @@ impl Engine {
         Send: FnOnce(Arc<dyn DataChannel>, String) -> SendFuture + std::marker::Send,
         SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send,
     {
-        let link = self
-            .peers
-            .get(&peer)
-            .map(|link| {
-                (
-                    link.generation,
-                    link.receive_admission.clone(),
-                    link.channels.get(label).cloned(),
-                )
-            })
-            .or_else(|| {
-                let pending = self.pending_negotiations.get(&peer)?;
-                Some((
-                    pending.generation,
-                    pending.established_admission.clone()?,
-                    pending.channels.get(label).cloned(),
-                ))
-            });
+        let link = self.send_link(peer).map(|link| {
+            (
+                link.generation,
+                link.admission.clone(),
+                link.channels.get(label).cloned(),
+            )
+        });
         let events = self.events.clone();
         let label = label.to_owned();
         async move {
@@ -1884,29 +1898,14 @@ impl Engine {
         Send: FnOnce(Arc<dyn DataChannel>, String) -> SendFuture + std::marker::Send + 'static,
         SendFuture: Future<Output = webrtc::error::Result<()>> + std::marker::Send + 'static,
     {
-        let Some((generation, sends, admission)) = self
-            .peers
-            .get(&peer)
-            .map(|link| {
-                (
-                    link.generation,
-                    link.channel_sends.clone(),
-                    link.receive_admission.clone(),
-                )
-            })
-            .or_else(|| {
-                let pending = self.pending_negotiations.get(&peer)?;
-                Some((
-                    pending.generation,
-                    pending.channel_sends.clone(),
-                    pending.established_admission.clone()?,
-                ))
-            })
-        else {
+        let Some(link) = self.send_link(peer) else {
             return Some(Err(format!(
                 "pair with {peer} has no usable channel {label}"
             )));
         };
+        let generation = link.generation;
+        let sends = link.sends.clone();
+        let admission = link.admission.clone();
         if sends
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -1952,21 +1951,11 @@ impl Engine {
 
     /// Consume one pending send only on its current, nonterminal physical link.
     pub(crate) fn accept_channel_send(&mut self, peer: PlayerId, label: &str) -> bool {
-        let Some((sends, admission)) = self
-            .peers
-            .get(&peer)
-            .map(|link| (&link.channel_sends, &link.receive_admission))
-            .or_else(|| {
-                let pending = self.pending_negotiations.get(&peer)?;
-                Some((
-                    &pending.channel_sends,
-                    pending.established_admission.as_ref()?,
-                ))
-            })
-        else {
+        let Some(link) = self.send_link(peer) else {
             return false;
         };
-        let Some(task) = sends
+        let Some(task) = link
+            .sends
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(label)
@@ -1974,7 +1963,7 @@ impl Engine {
             return false;
         };
         task.abort();
-        !admission.terminal.load(Ordering::Relaxed)
+        !link.admission.terminal.load(Ordering::Relaxed)
     }
 
     pub(crate) fn report_peer_loss(&self, peer: PlayerId, reason: &str) {
