@@ -1,3 +1,5 @@
+//! Admission contention, retry preservation and room-assignment controls.
+
 use super::*;
 use crate::config::{
     CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
@@ -7,6 +9,7 @@ use crate::database::DatabaseConfig;
 use crate::server::ServerConfig;
 use tokio::time::{timeout, Duration};
 
+/// Use a short reconnect window for paused-clock expiry histories.
 async fn server() -> Arc<EnhancedGameServer> {
     EnhancedGameServer::new(
         ServerConfig {
@@ -27,6 +30,7 @@ async fn server() -> Arc<EnhancedGameServer> {
     .unwrap()
 }
 
+/// Create an occupied durable room without registering a live connection.
 async fn room(server: &EnhancedGameServer, player: PlayerId) -> RoomId {
     server
         .database
@@ -45,6 +49,7 @@ async fn room(server: &EnhancedGameServer, player: PlayerId) -> RoomId {
         .id
 }
 
+/// Repair available rooms while retaining a busy room's durable detach for retry.
 #[tokio::test(start_paused = true)]
 async fn durable_detach_admission_skips_busy_room_and_retries_without_losing_seats() {
     let server = server().await;
@@ -97,6 +102,7 @@ async fn durable_detach_admission_skips_busy_room_and_retries_without_losing_sea
     assert_eq!(server.cleanup_pending_durable_player_detaches().await, 0);
 }
 
+/// Retain a busy expired seat and its record until a later admitted cleanup.
 #[tokio::test(start_paused = true)]
 async fn expired_reconnect_admission_skips_busy_room_and_preserves_retry_record() {
     let server = server().await;
@@ -153,6 +159,7 @@ async fn expired_reconnect_admission_skips_busy_room_and_preserves_retry_record(
     assert_eq!(server.cleanup_expired_reconnections().await, 0);
 }
 
+/// Skip a busy lifecycle and preserve a client that moves to a live room.
 #[tokio::test(start_paused = true)]
 async fn deleted_room_admission_skips_busy_lifecycle_and_rechecks_room_assignment() {
     let server = server().await;
@@ -200,6 +207,7 @@ async fn deleted_room_admission_skips_busy_lifecycle_and_rechecks_room_assignmen
     drop(receivers);
 }
 
+/// Admit a contended room when its gate releases before the wait expires.
 #[tokio::test(start_paused = true)]
 async fn room_cleanup_admission_accepts_gate_release_within_the_wait_budget() {
     for expired in [false, true] {
