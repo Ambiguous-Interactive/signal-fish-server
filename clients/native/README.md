@@ -129,6 +129,12 @@ terminal observations cannot report another connection. Exhaustive `EngineEvent`
 matches must handle the new variant. `note_channel_open` keeps its existing
 awaited behavior for callers that choose to wait on that peer.
 
+`Engine::remove_peer` removes the old generation and cancels its application
+tasks before returning. A ready physical close completes inline. A pending
+close runs in an Engine-owned task with the existing 250 ms limit.
+Engine drop cancels pending closes. Removal success does not prove that the
+old transport has completed its close handshake.
+
 For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
 All RTC, SCTP, channel-setting, and send-debt queries share one 250 ms wait budget.
 If a query times out, the snapshot keeps local callback and receive-budget evidence
@@ -559,6 +565,13 @@ A failed send keeps its unmet exchange criteria and triggers relay fallback for 
 Link retirement cancels pending sends. Queued results cannot affect a replacement link.
 `EngineEvent::ChannelSendComplete` carries the pending result back to the CLI.
 Exhaustive `EngineEvent` matches must handle this variant.
+
+Live remote ICE application also runs outside the main event loop when the
+peer's RTC core is busy. Later signals for that peer wait in the bounded signal
+queue and keep the captured deadline. Link retirement cancels the application.
+`EngineEvent::RemoteCandidateComplete` returns its result to the CLI; exhaustive
+matches must handle this variant. Pair creation and SDP application still use
+their existing awaited operations and deadlines.
 
 ## Signal payload convention (matchbox `PeerSignal`)
 

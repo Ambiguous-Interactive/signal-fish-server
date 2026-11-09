@@ -13,6 +13,7 @@ enum Budget {
     HeldSuccess,
 }
 
+/// Exercise cancellation, receipt preservation, and recovery at one suspended setup phase.
 async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
     let diagnostics = super::peer_loss_tests::DiagnosticCapture::default();
     let _subscriber = tracing::subscriber::set_default(diagnostics.subscriber());
@@ -124,7 +125,14 @@ async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
         if pairing {
             state.establish_pair(peer, initiate).await
         } else {
-            state.apply_signal(peer, signal).await
+            state.apply_signal(peer, signal).await?;
+            while state.engine.candidate_pending(peer) {
+                let event = state.engine_rx.recv().await.unwrap();
+                if matches!(event, EngineEvent::RemoteCandidateComplete { .. }) {
+                    state.handle_engine_event(event).await?;
+                }
+            }
+            Ok(())
         }
     });
     tokio::select! {
@@ -376,6 +384,7 @@ async fn negotiation_future_keeps_nested_retry_stack_bounded() {
     );
 }
 
+/// A bounded background close must leave coordinated retry available.
 #[tokio::test]
 async fn stalled_peer_close_does_not_abort_a_coordinated_retry() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -404,23 +413,15 @@ async fn stalled_peer_close_does_not_abort_a_coordinated_retry() {
         release: Arc::new(tokio::sync::Notify::new()),
     });
     tokio::time::pause();
-    let mut retry = Box::pin(state.request_pair_retry(peer, 1));
-    tokio::select! {
-        _ = entered.notified() => {}
-        result = &mut retry => panic!("retry ended before the held close: {result:?}"),
-    }
-    tokio::time::advance(Duration::from_millis(249)).await;
-    assert!(
-        futures_util::poll!(retry.as_mut()).is_pending(),
-        "close must remain held before its deadline"
-    );
-    tokio::time::advance(Duration::from_millis(2)).await;
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        state.request_pair_retry(peer, 1),
+    )
+    .await
+    .expect("the fresh retry must not wait for the old close deadline")
+    .expect("a pending retired close must not end the relay session");
+    entered.notified().await;
     tokio::time::resume();
-    retry
-        .as_mut()
-        .await
-        .expect("retired close timeout must not end the relay session");
-    drop(retry);
     assert!(
         state.engine.is_current_generation(peer, 2),
         "retry installs its fresh physical link"
@@ -772,4 +773,432 @@ async fn initial_pair_creation_failure_reports_fallback_and_recovers() {
             remote.remove_peer(state.my_id).await.unwrap();
         }
     }
+}
+
+/// A live ICE query must not hold mesh gameplay, relay input, or liveness.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_ice_does_not_block_the_session_owner() {
+    use crate::engine::snapshot_tests::{startup_pair_with_held_open_events, HeldCoreSend};
+    use crate::engine::{ChannelProfile, EngineSettings};
+
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for owner_offers in [false, true] {
+            let (mut pair, clock, _) =
+                startup_pair_with_held_open_events(profile, owner_offers).await;
+            let peer = pair.sender_id;
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+            ]);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, pair.receiver_id);
+            std::mem::swap(&mut state.engine, &mut pair.receiver);
+            std::mem::swap(&mut state.engine_rx, &mut pair.receiver_events);
+            state.expected_peers.insert(peer);
+            let other_peer = PlayerId::from_u128(0x1518);
+            let (other_tx, mut other_events) = mpsc::unbounded_channel();
+            let mut other = Engine::new(
+                EngineSettings {
+                    disable_mdns: true,
+                    channel_profile: profile,
+                    ..EngineSettings::default()
+                },
+                other_tx,
+            )
+            .unwrap();
+            super::readiness_tests::connect_owner_peer(
+                &mut state,
+                &mut other,
+                &mut other_events,
+                other_peer,
+                !owner_offers,
+                None,
+            )
+            .await;
+            let before = state.engine.diagnostic_snapshot(peer)["remote_candidate_count"]
+                .as_u64()
+                .unwrap();
+            let held =
+                HeldCoreSend::start(&clock, state.engine.channel(peer, RELIABLE_LABEL).unwrap())
+                    .await;
+            let result = tokio::time::timeout(
+                Duration::from_millis(100),
+                state.apply_signal(peer, json!({"IceCandidate": ""})),
+            )
+            .await;
+            if result.is_err() {
+                held.finish().await;
+                panic!("profile={profile:?}, owner_offers={owner_offers}: live ICE must leave the owner available while the actual RTC core is held");
+            }
+            result.unwrap().unwrap();
+            assert!(state.engine.candidate_pending(peer));
+            let captured = state.pending_signal_deadlines[&peer];
+            for _ in 0..MAX_PENDING_SIGNALS_PER_PEER {
+                state
+                    .apply_signal(peer, json!({"IceCandidate": ""}))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                state.pending_signals[&peer].len(),
+                MAX_PENDING_SIGNALS_PER_PEER
+            );
+            assert_eq!(
+                state.engine.diagnostic_snapshot(peer)["remote_candidate_count"],
+                before + 1,
+                "queued candidates cannot overtake the pending stack call"
+            );
+            assert_eq!(
+                state.negotiation_deadline(peer),
+                captured,
+                "queued work retains the original absolute operation budget"
+            );
+
+            other
+                .channel(state.my_id, RELIABLE_LABEL)
+                .unwrap()
+                .send_text("exact-mesh-during-live-ice")
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = state.engine_rx.recv().await.unwrap();
+                    let exact = matches!(&event, EngineEvent::ChannelMessage { peer, label, text, .. } if *peer == other_peer && label == RELIABLE_LABEL && text == "exact-mesh-during-live-ice");
+                    state.handle_engine_event(event).await.unwrap();
+                    if exact { break; }
+                }
+            }).await.expect("independent real mesh gameplay progresses while live ICE is pending");
+            state.pong_deadline = Some(Instant::now());
+            for message in [
+                ServerMessage::Pong,
+                ServerMessage::GameData {
+                    from_player: other_peer,
+                    data: json!({"relay_msg": "exact-relay-during-live-ice"}),
+                    seq: None,
+                    epoch: None,
+                    class: None,
+                    key: None,
+                },
+            ] {
+                server_ws
+                    .send(Message::Text(
+                        serde_json::to_string(&message).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                let frame = state.ws.next().await;
+                state
+                    .handle_server_input(frame, Instant::now())
+                    .await
+                    .unwrap();
+            }
+            assert!(state.pong_deadline.is_none());
+            assert!(state.relay_received_from.contains(&other_peer));
+            assert!(state.engine.candidate_pending(peer));
+            held.finish().await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while state.engine.candidate_pending(peer)
+                    || state.pending_signals.contains_key(&peer)
+                {
+                    let event = state.engine_rx.recv().await.unwrap();
+                    state.handle_engine_event(event).await.unwrap();
+                }
+            })
+            .await
+            .expect("released ICE drains the exact ordered candidate tail");
+            assert_eq!(
+                state.engine.diagnostic_snapshot(peer)["remote_candidate_count"],
+                before + 1 + u64::try_from(MAX_PENDING_SIGNALS_PER_PEER).unwrap()
+            );
+            assert!(!state.pending_signal_deadlines.contains_key(&peer));
+            state.engine.remove_peer(peer).await.unwrap();
+            state.engine.remove_peer(other_peer).await.unwrap();
+            other.remove_peer(state.my_id).await.unwrap();
+        }
+    }
+}
+
+/// A saturated peer falls back without ending relay, and old results cannot cancel fresh ICE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_ice_overflow_keeps_relay_and_fresh_link_recovery_live() {
+    use crate::engine::snapshot_tests::{startup_pair_with_held_open_events, HeldCoreSend};
+    use crate::engine::ChannelProfile;
+    use std::sync::atomic::Ordering;
+
+    for owner_offers in [false, true] {
+        let (mut pair, clock, _) =
+            startup_pair_with_held_open_events(ChannelProfile::Reference, owner_offers).await;
+        let peer = pair.sender_id;
+        let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+        let cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            "ws://unused.invalid",
+            "--create-room",
+            "--disable-mdns",
+        ]);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, pair.receiver_id);
+        std::mem::swap(&mut state.engine, &mut pair.receiver);
+        std::mem::swap(&mut state.engine_rx, &mut pair.receiver_events);
+        state.expected_peers.insert(peer);
+        state.pair_roles.insert(peer, owner_offers);
+        let held =
+            HeldCoreSend::start(&clock, state.engine.channel(peer, RELIABLE_LABEL).unwrap()).await;
+        state
+            .apply_signal(peer, json!({"IceCandidate": ""}))
+            .await
+            .unwrap();
+        assert!(state.engine.candidate_pending(peer));
+        held.finish().await;
+        let old_result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = state.engine_rx.recv().await.unwrap();
+                if matches!(event, EngineEvent::RemoteCandidateComplete { .. }) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("retain the completed old-generation ICE result before retirement");
+        for _ in 0..MAX_PENDING_SIGNALS_PER_PEER {
+            state
+                .apply_signal(peer, json!({"IceCandidate": ""}))
+                .await
+                .unwrap();
+        }
+        state
+            .apply_signal(peer, json!({"IceCandidate": ""}))
+            .await
+            .expect("peer overload must not terminate the session");
+        assert!(!state.engine.is_paired(peer));
+        assert!(!state.pending_signals.contains_key(&peer));
+        assert!(!state.pending_signal_deadlines.contains_key(&peer));
+        assert!(state.expected_peers.contains(&peer));
+        state.pong_deadline = Some(Instant::now());
+        for message in [
+            ServerMessage::Pong,
+            ServerMessage::GameData {
+                from_player: peer,
+                data: json!({"relay_msg": "exact-after-ice-overflow"}),
+                seq: None,
+                epoch: None,
+                class: None,
+                key: None,
+            },
+        ] {
+            server_ws
+                .send(Message::Text(
+                    serde_json::to_string(&message).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let frame = state.ws.next().await;
+            state
+                .handle_server_input(frame, Instant::now())
+                .await
+                .unwrap();
+        }
+        assert!(state.pong_deadline.is_none());
+        assert!(state.relay_received_from.contains(&peer));
+        let offer = state
+            .engine
+            .pair_with(peer, owner_offers, &[])
+            .await
+            .unwrap();
+        let (mut fresh, _, mut fresh_events) = super::retry_tests::open_physical_pair_with_events(
+            &mut state,
+            &mut server_ws,
+            peer,
+            offer,
+        )
+        .await;
+        let held =
+            HeldCoreSend::start(&clock, state.engine.channel(peer, RELIABLE_LABEL).unwrap()).await;
+        let live = clock.observe_next_task();
+        state
+            .apply_signal(peer, json!({"IceCandidate": ""}))
+            .await
+            .unwrap();
+        state
+            .apply_signal(peer, json!({"IceCandidate": ""}))
+            .await
+            .unwrap();
+        state.handle_engine_event(old_result).await.unwrap();
+        assert!(
+            state.engine.candidate_pending(peer),
+            "old completion cannot consume fresh pending ICE"
+        );
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.pending_signals[&peer].len(),
+            1,
+            "old completion cannot drain fresh signaling"
+        );
+        held.finish().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.engine.candidate_pending(peer) || state.pending_signals.contains_key(&peer)
+            {
+                let event = state.engine_rx.recv().await.unwrap();
+                state.handle_engine_event(event).await.unwrap();
+            }
+        })
+        .await
+        .expect("fresh ordered ICE completes after core release");
+        state
+            .engine
+            .channel(peer, RELIABLE_LABEL)
+            .unwrap()
+            .send_text("exact-fresh-local")
+            .await
+            .unwrap();
+        fresh
+            .channel(state.my_id, RELIABLE_LABEL)
+            .unwrap()
+            .send_text("exact-fresh-remote")
+            .await
+            .unwrap();
+        let mut local_received = false;
+        let mut remote_received = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !local_received || !remote_received {
+                tokio::select! {
+                    event = state.engine_rx.recv() => {
+                        if let EngineEvent::ChannelMessage { text, label, .. } = event.unwrap() {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            if text == "held-readiness" { continue; }
+                            assert_eq!(text, "exact-fresh-remote");
+                            assert!(!local_received);
+                            local_received = true;
+                        }
+                    }
+                    event = fresh_events.recv() => {
+                        if let EngineEvent::ChannelMessage { text, label, .. } = event.unwrap() {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            if text == "held-readiness" { continue; }
+                            assert_eq!(text, "exact-fresh-local");
+                            assert!(!remote_received);
+                            remote_received = true;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("fresh link preserves exact reliable bytes in both directions");
+        state.engine.remove_peer(peer).await.unwrap();
+        fresh.remove_peer(state.my_id).await.unwrap();
+    }
+}
+
+/// A queued live candidate inherits the first operation's absolute cutoff.
+#[tokio::test]
+async fn queued_ice_cannot_renew_the_original_operation_deadline() {
+    use crate::engine::snapshot_tests::{startup_pair_with_held_open_events, HeldCoreSend};
+    use crate::engine::ChannelProfile;
+
+    let (mut pair, clock, _) =
+        startup_pair_with_held_open_events(ChannelProfile::Godot, false).await;
+    let peer = pair.sender_id;
+    let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+    let cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        "ws://unused.invalid",
+        "--create-room",
+    ]);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, pair.receiver_id);
+    std::mem::swap(&mut state.engine, &mut pair.receiver);
+    std::mem::swap(&mut state.engine_rx, &mut pair.receiver_events);
+    state.expected_peers.insert(peer);
+    let held =
+        HeldCoreSend::start(&clock, state.engine.channel(peer, RELIABLE_LABEL).unwrap()).await;
+    tokio::time::pause();
+    let clock_guard = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    state.run_deadline = Deadline::after(Instant::now(), Duration::from_millis(500));
+    state
+        .apply_signal(peer, json!({"IceCandidate": ""}))
+        .await
+        .unwrap();
+    state
+        .apply_signal(peer, json!({"IceCandidate": ""}))
+        .await
+        .unwrap();
+    let original = state.pending_signal_deadlines[&peer];
+    held.finish().await;
+    let first = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = state.engine_rx.recv().await.unwrap();
+            if matches!(event, EngineEvent::RemoteCandidateComplete { .. }) {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        &first,
+        EngineEvent::RemoteCandidateComplete {
+            result: CandidateApplyResult::Applied,
+            ..
+        }
+    ));
+    state.run_deadline = Deadline::after(Instant::now(), Duration::from_secs(10));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    state.engine.negotiation_hold = Some(NegotiationHold {
+        step: "live_ice",
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    state.handle_engine_event(first).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(state.pending_signal_deadlines[&peer], original);
+    tokio::time::advance(Duration::from_millis(499)).await;
+    loop {
+        match state.engine_rx.try_recv() {
+            Ok(event) => assert!(
+                !matches!(event, EngineEvent::RemoteCandidateComplete { .. }),
+                "queued ICE must not expire before its original cutoff"
+            ),
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                panic!("the retained Engine owns its event sender")
+            }
+        }
+    }
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert_eq!(Instant::now(), original.finite().unwrap());
+    clock_guard.abort();
+    let expired = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = state.engine_rx.recv().await.unwrap();
+            if matches!(event, EngineEvent::RemoteCandidateComplete { .. }) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("queued ICE must expire at the first deadline despite the extended session window");
+    assert!(matches!(
+        &expired,
+        EngineEvent::RemoteCandidateComplete {
+            result: CandidateApplyResult::DeadlineElapsed,
+            ..
+        }
+    ));
+    state.handle_engine_event(expired).await.unwrap();
+    assert!(!state.engine.is_paired(peer));
+    assert!(!state.pending_signals.contains_key(&peer));
+    assert!(!state.pending_signal_deadlines.contains_key(&peer));
+    assert!(state.expected_peers.contains(&peer));
+    release.notify_waiters();
+    tokio::time::resume();
 }

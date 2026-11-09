@@ -1,4 +1,4 @@
-//! Game-start selection must not copy endpoints for a disabled Direct transport.
+//! Game-start selection must copy only endpoints that can affect Direct selection.
 use super::*;
 use signal_fish_server::coordination::FinalizedRoom;
 use signal_fish_server::protocol::{DirectEndpoint, PeerConnectionInfo, PlayerInfo};
@@ -7,11 +7,13 @@ use signal_fish_server::server::allocation_benchmark::{
 };
 use std::sync::Arc;
 
-/// #1457: disabled Direct metadata cannot add work to P2P publication preparation.
+/// Unavailable Direct metadata cannot add work to P2P publication preparation.
 pub(crate) fn disabled_direct_start_skips_endpoints() {
     let mut disabled_profiles = Vec::new();
     for members in [2_u128, 16, 255] {
-        for direct in [false, true] {
+        for (enable_direct, direct_members) in [(false, 0), (true, 0), (true, 1), (true, members)] {
+            let direct = direct_members == members;
+            let mixed = direct_members > 0 && !direct;
             allocation_harness::block_on(async {
                 let server = EnhancedGameServer::new(
                     ServerConfig {
@@ -23,7 +25,7 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     SessionConfig {
                         default_topology: Topology::Host,
                         enable_webrtc: !direct,
-                        enable_direct: direct,
+                        enable_direct,
                         ..Default::default()
                     },
                     TurnConfig {
@@ -46,7 +48,7 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
                     receivers.push(receiver);
                     server.connect_client(id, sender).await;
-                    if direct {
+                    if index <= direct_members {
                         negotiate_direct_for_measurement(&server, &id);
                     } else {
                         negotiate_webrtc_for_measurement(&server, &id);
@@ -95,17 +97,17 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     let region = stats_alloc::Region::new(ALLOCATOR);
                     let publication = builder(&finalized, starting.clone());
                     let stats = region.change();
-                    println!("START_ENDPOINT_COST members={members} direct={direct} host_len={:?} stats={stats:?}", host.map(str::len));
+                    println!("START_ENDPOINT_COST members={members} enable_direct={enable_direct} direct_members={direct_members} host_len={:?} stats={stats:?}", host.map(str::len));
                     profiles.push(stats);
                     let valid_direct = direct && host == Some(long_host.as_str());
                     let expected_transport = if valid_direct {
                         Transport::Direct
-                    } else if direct {
+                    } else if direct || mixed {
                         Transport::Relay
                     } else {
                         Transport::WebRtc
                     };
-                    let expected_topology = if direct && !valid_direct {
+                    let expected_topology = if (direct || mixed) && !valid_direct {
                         Topology::Relay
                     } else {
                         Topology::Host
@@ -160,18 +162,18 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                         assert_membership_queue_empty(receiver);
                     }
                 }
-                if !direct {
-                    disabled_profiles.push((members, profiles));
+                if direct_members == 0 {
+                    disabled_profiles.push((members, enable_direct, profiles));
                 }
             });
         }
     }
-    for (members, profiles) in &disabled_profiles {
+    for (members, enable_direct, profiles) in &disabled_profiles {
         assert_eq!(profiles[2].allocations, profiles[0].allocations,
-            "disabled Direct copied one endpoint per member: members={members} profiles={disabled_profiles:?}");
+            "unavailable Direct copied one endpoint per member: members={members} enable_direct={enable_direct} profiles={disabled_profiles:?}");
         assert_eq!(
             profiles[2].bytes_allocated, profiles[0].bytes_allocated,
-            "disabled Direct copied hostnames: members={members} profiles={disabled_profiles:?}"
+            "unavailable Direct copied hostnames: members={members} enable_direct={enable_direct} profiles={disabled_profiles:?}"
         );
         assert_eq!(profiles[1].allocations, profiles[0].allocations);
     }

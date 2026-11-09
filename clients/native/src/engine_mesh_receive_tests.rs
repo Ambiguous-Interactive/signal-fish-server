@@ -336,3 +336,50 @@ async fn godot_mesh_receive_owners_survive_shared_limit_refusal_and_fresh_links(
         }
     }
 }
+
+/// #1515/#1264/#1244: a busy departed link must leave the live mesh runnable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_peer_retirement_preserves_live_mesh_input_and_fresh_link_recovery() {
+    for center_offers in [false, true] {
+        let mut mesh = ReceiveMesh::new();
+        let (mut unused, clock) = super::snapshot_tests::unconnected_pair(ChannelProfile::Godot);
+        std::mem::swap(&mut mesh.center, &mut unused.receiver);
+        std::mem::swap(&mut mesh.center_events, &mut unused.receiver_events);
+        for index in 0..2 {
+            mesh.pair(index, center_offers).await;
+        }
+        let peer = mesh.sender_ids[0];
+        let old_generation = mesh.center.peers[&peer].generation;
+        let held = super::snapshot_tests::HeldCoreSend::start(
+            &clock,
+            mesh.center.channel(peer, RELIABLE_LABEL).unwrap(),
+        )
+        .await;
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), mesh.center.remove_peer(peer)).await;
+        if result.is_err() {
+            held.finish().await;
+            panic!("departed mesh link must not hold the owner behind its busy core");
+        }
+        result.unwrap().unwrap();
+        assert_eq!(mesh.center.connected_pair_count(), 1);
+        assert!(!mesh.center.is_current_generation(peer, old_generation));
+        for sequence in 0..4 {
+            drop(mesh.send(1, sequence, 4096).await);
+        }
+        assert!(
+            !mesh.center.retiring_peers.is_empty(),
+            "retirement handle remains tracked until pruning"
+        );
+        held.finish().await;
+        mesh.senders[0].remove_peer(mesh.center_id).await.unwrap();
+        mesh.pair(0, center_offers).await;
+        assert_ne!(mesh.center.peers[&peer].generation, old_generation);
+        for sequence in 0..4 {
+            drop(mesh.send(0, sequence, 4096).await);
+        }
+        for index in 0..2 {
+            mesh.remove(index).await;
+        }
+    }
+}

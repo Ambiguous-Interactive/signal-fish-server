@@ -398,3 +398,65 @@ async fn first_channel_closure_survives_later_labels_and_duplicate_reports() {
     assert_eq!(engine.diagnostic_snapshot(peer)["channel_closure"], first);
     engine.remove_peer(peer).await.unwrap();
 }
+
+/// Pending ICE releases its captured core query before retired transports can resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_links_cancel_pending_ice_and_terminal_results_cannot_commit() {
+    use super::snapshot_tests::{startup_pair_with_held_open_events, HeldCoreSend};
+
+    for terminal in [false, true] {
+        for receiver_offers in [false, true] {
+            let (mut pair, clock, _) =
+                startup_pair_with_held_open_events(ChannelProfile::Godot, receiver_offers).await;
+            let peer = pair.sender_id;
+            let held =
+                HeldCoreSend::start(&clock, pair.receiver.channel(peer, RELIABLE_LABEL).unwrap())
+                    .await;
+            let live = clock.observe_next_task();
+            assert!(pair
+                .receiver
+                .start_remote_candidate(
+                    peer,
+                    "",
+                    Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5))
+                )
+                .await
+                .is_none());
+            assert_eq!(live.load(Ordering::SeqCst), 1);
+            if terminal {
+                pair.receiver.peers[&peer]
+                    .receive_admission
+                    .terminal
+                    .store(true, Ordering::Relaxed);
+                assert!(
+                    !pair.receiver.accept_candidate_result(peer),
+                    "terminal receipt admission cannot accept a late ICE completion"
+                );
+            } else {
+                pair.receiver.remove_peer(peer).await.unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while live.load(Ordering::SeqCst) != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("retirement cancels pending ICE captures before the RTC core is released");
+            assert!(!pair.receiver.candidate_pending(peer));
+            held.finish().await;
+            loop {
+                match pair.receiver_events.try_recv() {
+                    Ok(event) => assert!(
+                        !matches!(event, EngineEvent::RemoteCandidateComplete { .. }),
+                        "cancelled ICE cannot publish a late completion"
+                    ),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("the retained Engine must own its event sender")
+                    }
+                }
+            }
+            pair.receiver.remove_peer(peer).await.unwrap();
+        }
+    }
+}

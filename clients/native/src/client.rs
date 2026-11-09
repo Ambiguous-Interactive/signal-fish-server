@@ -62,7 +62,8 @@ use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
 use crate::deadline::Deadline;
 use crate::engine::{
-    Engine, EngineEvent, Negotiation, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
+    CandidateApplyResult, Engine, EngineEvent, Negotiation, SelectedPairProbeResult,
+    RELIABLE_LABEL, UNRELIABLE_LABEL,
 };
 use crate::events::{emit, Event, PlanPeer, SignalKind};
 use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
@@ -673,6 +674,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         exchange_reliable_ready_reported: false,
         unreliable_exchange_release_poll_at: None,
         pending_signals: BTreeMap::new(),
+        pending_signal_deadlines: BTreeMap::new(),
         drop_ice_from: None,
         run_deadline,
         linger_until: None,
@@ -1464,9 +1466,10 @@ struct Orchestrator<'a> {
     exchange_reliable_ready_reported: bool,
     /// Next poll for `--unreliable-exchange-release-file` while held.
     unreliable_exchange_release_poll_at: Option<Instant>,
-    /// Signals that arrived before their peer was paired (defensive: server
-    /// FIFO ordering makes this unreachable in the documented flows).
+    /// Bounded signals awaiting peer creation or an earlier live ICE application.
     pending_signals: BTreeMap<PlayerId, VecDeque<serde_json::Value>>,
+    /// The first pending ICE deadline also bounds signals queued behind it.
+    pending_signal_deadlines: BTreeMap<PlayerId, Deadline>,
     /// Runtime UUID resolved from the harness-only `--drop-ice-from` ordinal
     /// when an authoritative plan supplies its `cNN` peer name.
     drop_ice_from: Option<PlayerId>,
@@ -1812,6 +1815,7 @@ impl Orchestrator<'_> {
         self.reset_peer_engine()?;
         self.current_session_generation = None;
         self.pending_signals.clear();
+        self.pending_signal_deadlines.clear();
         self.pending_pair_directives.clear();
         self.webrtc_plan_seen = false;
         self.last_ice_servers = payload.ice_servers;
@@ -2577,6 +2581,7 @@ impl Orchestrator<'_> {
                 self.lobby_state = None;
                 self.current_session_generation = None;
                 self.pending_signals.clear();
+                self.pending_signal_deadlines.clear();
                 self.start_game_gate = StartGameGate::default();
             }
             ServerMessage::PlayerJoined { player } => {
@@ -2689,6 +2694,7 @@ impl Orchestrator<'_> {
                 self.current_session_generation = Some(plan.generation);
                 if generation_changed {
                     self.pending_signals.clear();
+                    self.pending_signal_deadlines.clear();
                 }
                 self.drop_ice_from =
                     resolve_drop_ice_from(self.cli.drop_ice_from, self.my_id, &plan.peers)
@@ -3076,6 +3082,15 @@ impl Orchestrator<'_> {
                         .await?;
                 }
             }
+            EngineEvent::RemoteCandidateComplete { peer, result, .. } => {
+                if self.engine.accept_candidate_result(peer) {
+                    self.complete_remote_candidate(peer, result).await?;
+                    self.drain_pending_signals(peer).await?;
+                } else if self.engine.candidate_link_terminal(peer) {
+                    self.handle_peer_transport_loss(peer, "terminal peer ICE completion")
+                        .await?;
+                }
+            }
             EngineEvent::ChannelClosed {
                 peer,
                 generation,
@@ -3175,6 +3190,7 @@ impl Orchestrator<'_> {
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.pending_signals.remove(&peer);
+        self.pending_signal_deadlines.remove(&peer);
         if let Err(error) = self.engine.remove_peer(peer).await {
             let message = format!(
                 "failed to close unusable peer connection {peer}; continuing on relay: {error:#}"
@@ -3203,6 +3219,7 @@ impl Orchestrator<'_> {
         self.retrying_pairs.insert(peer);
         self.pending_pair_directives.remove(&peer);
         self.pending_signals.remove(&peer);
+        self.pending_signal_deadlines.remove(&peer);
         if let Err(error) = self.engine.remove_peer(peer).await {
             let message = format!(
                 "failed to close superseded peer connection {peer}; continuing on relay: {error:#}"
@@ -3212,6 +3229,7 @@ impl Orchestrator<'_> {
         }
     }
 
+    /// Apply a bounded setup operation while retaining its logical peer obligation.
     async fn negotiate(
         &mut self,
         peer: PlayerId,
@@ -3226,6 +3244,7 @@ impl Orchestrator<'_> {
         Ok(result)
     }
 
+    /// Select the shortest setup, queued-signal, and active session deadline.
     fn negotiation_deadline(&self, peer: PlayerId) -> Deadline {
         let now = Instant::now();
         let budget = if self.cli.p2p_timeout_secs == 0 {
@@ -3238,6 +3257,16 @@ impl Orchestrator<'_> {
             .filter(|_| !self.connected_pairs.contains(&peer))
             .filter(|deadline| self.cli.p2p_timeout_secs != 0 && !deadline.is_due(now))
             .unwrap_or_else(|| Deadline::after(now, Duration::from_secs(budget)));
+        let operation = match (
+            operation.finite(),
+            self.pending_signal_deadlines
+                .get(&peer)
+                .and_then(|deadline| deadline.finite()),
+        ) {
+            (Some(current), Some(queued)) => current.min(queued).into(),
+            (None, Some(queued)) => queued.into(),
+            _ => operation,
+        };
         if self.success_criteria_reported && self.cli.success_release_file.is_some() {
             return operation;
         }
@@ -3262,10 +3291,22 @@ impl Orchestrator<'_> {
         generation: PairGeneration,
     ) -> Result<(), FatalError> {
         self.establish_pair_link(peer, initiate, generation).await?;
-        if let Some(buffered) = self.pending_signals.remove(&peer) {
-            for signal in buffered {
-                self.apply_signal(peer, signal).await?;
-            }
+        self.drain_pending_signals(peer).await
+    }
+
+    /// Resume queued signals in arrival order without overtaking pending live ICE.
+    async fn drain_pending_signals(&mut self, peer: PlayerId) -> Result<(), FatalError> {
+        while !self.engine.candidate_pending(peer) && self.engine.is_paired(peer) {
+            let Some(signal) = self
+                .pending_signals
+                .get_mut(&peer)
+                .and_then(VecDeque::pop_front)
+            else {
+                self.pending_signals.remove(&peer);
+                self.pending_signal_deadlines.remove(&peer);
+                break;
+            };
+            self.apply_signal(peer, signal).await?;
         }
         Ok(())
     }
@@ -3401,6 +3442,7 @@ impl Orchestrator<'_> {
         // generation state. Retrying the transport cannot erase either side
         // of an already observed debt.
         self.pending_signals.remove(&peer);
+        self.pending_signal_deadlines.remove(&peer);
         self.pending_pair_directives.remove(&peer);
         // Decide once before the marker write. The window may expire while
         // that write awaits; a published marker still needs a local rebuild.
@@ -3488,6 +3530,7 @@ impl Orchestrator<'_> {
         self.ice_gathering_complete.remove(&peer);
         self.peer_status_from.remove(&peer);
         self.pending_signals.remove(&peer);
+        self.pending_signal_deadlines.remove(&peer);
         if let Err(error) = self.engine.remove_peer(peer).await {
             tracing::debug!(%peer, %error, "failed to close removed peer connection");
         }
@@ -3548,6 +3591,18 @@ impl Orchestrator<'_> {
         signal: serde_json::Value,
     ) -> Result<(), FatalError> {
         let kind = SignalKind::classify(&signal);
+        if kind != SignalKind::PairRetry && self.engine.candidate_pending(from) {
+            if !try_buffer_planned_signal(&mut self.pending_signals, from, signal) {
+                self.handle_peer_transport_loss(from, "pending peer signal backlog limit exceeded")
+                    .await?;
+                emit(&Event::Error {
+                    message: format!(
+                        "signal from {from} failed: pending peer signal backlog limit exceeded"
+                    ),
+                });
+            }
+            return Ok(());
+        }
         let result = match kind {
             SignalKind::Offer => match signal.get("Offer").and_then(|sdp| sdp.as_str()) {
                 Some(sdp) => match self
@@ -3584,10 +3639,21 @@ impl Orchestrator<'_> {
                     Ok(())
                 } else {
                     match signal.get("IceCandidate").and_then(|c| c.as_str()) {
-                        Some(payload) => self
-                            .negotiate(from, Negotiation::Candidate(payload.to_string()))
-                            .await?
-                            .map(|_| ()),
+                        Some(payload) => {
+                            let deadline = self.negotiation_deadline(from);
+                            if let Some(result) = self
+                                .engine
+                                .start_remote_candidate(from, payload, deadline)
+                                .await
+                            {
+                                self.complete_remote_candidate(from, result).await?;
+                            } else {
+                                self.pending_signal_deadlines
+                                    .entry(from)
+                                    .or_insert(deadline);
+                            }
+                            Ok(())
+                        }
                         None => Err(anyhow::anyhow!("IceCandidate payload is not a string")),
                     }
                 }
@@ -3615,6 +3681,34 @@ impl Orchestrator<'_> {
             emit(&Event::Error {
                 message: format!("signal from {from} failed: {error:#}"),
             });
+        }
+        Ok(())
+    }
+
+    /// Handle live ICE rejection separately from expiry of its captured deadline.
+    async fn complete_remote_candidate(
+        &mut self,
+        peer: PlayerId,
+        result: CandidateApplyResult,
+    ) -> Result<(), FatalError> {
+        match result {
+            CandidateApplyResult::Applied => {}
+            CandidateApplyResult::Terminal => {
+                self.handle_peer_transport_loss(peer, "terminal peer ICE application")
+                    .await?;
+            }
+            CandidateApplyResult::Rejected(message) => emit(&Event::Error {
+                message: format!("signal from {peer} failed: {message}"),
+            }),
+            CandidateApplyResult::DeadlineElapsed => {
+                self.handle_peer_transport_loss(peer, "negotiation deadline expired")
+                    .await?;
+                emit(&Event::Error {
+                    message: format!(
+                        "signal from {peer} failed: WebRTC negotiation deadline elapsed"
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -4790,6 +4884,7 @@ mod tests {
         );
     }
 
+    /// Build an isolated session owner over an established test WebSocket.
     pub(super) fn fixture_orchestrator<'a>(
         cli: &'a Cli,
         ws: crate::wire::WsStream,
@@ -4859,6 +4954,7 @@ mod tests {
             exchange_reliable_ready_reported: false,
             unreliable_exchange_release_poll_at: None,
             pending_signals: BTreeMap::new(),
+            pending_signal_deadlines: BTreeMap::new(),
             drop_ice_from: None,
             run_deadline: Deadline::after(
                 tokio::time::Instant::now(),

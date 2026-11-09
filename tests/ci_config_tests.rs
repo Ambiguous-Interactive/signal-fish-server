@@ -35006,8 +35006,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 /*
     556 (was 546): shared deployment bounds validation adds ten mutation sites (#1464).
     With 56 shards, ceil(556/56) * 29s remains 290s.
+    557 (was 556): finalization filters unused Direct endpoints by capability (#636).
+    With 56 shards, ceil(557/56) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 556;
+const MUTATION_TOTAL_MUTANTS: u32 = 557;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

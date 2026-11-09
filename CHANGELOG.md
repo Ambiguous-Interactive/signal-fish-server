@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** Add native `EngineEvent::PairReady` and `EngineEvent::ChannelSendComplete` for pending
-  readiness and send results; exhaustive matches must handle them (#1510, #1512).
+- Reduce P2P game-start memory use for players that do not support Direct transport (#636).
+- **Breaking:** Add native `EngineEvent::PairReady`, `EngineEvent::ChannelSendComplete`, and
+  `EngineEvent::RemoteCandidateComplete` for pending work; exhaustive matches must handle them (#1510, #1512, #1516).
 - **Breaking:** Require a mutable native `Engine` for `start_selected_candidate_pair_probe` (#1507).
 - Reduce server heap allocations and bytes used during P2P room changes, and avoid recipient storage growth in broadcasts
   with excluded players (#1469, #1470).
@@ -62,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep live native P2P gameplay, relay input, and keepalive responsive while busy peers check channel readiness
-  or send exchange messages (#1510, #1512).
+  or send exchange messages, apply live ICE, or retire old links (#1510, #1512, #1515, #1516).
 - Resume accepted native P2P messages and receive-credit replies when callback polling restarts (#1508).
 - Cancel native P2P candidate queries when their link retires so retries release old connections (#1507).
 - Preserve accepted P2P transport reports and WebRTC signals after caller cancellation (#1428, #1429).
