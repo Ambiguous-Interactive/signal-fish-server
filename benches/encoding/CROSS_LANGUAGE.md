@@ -60,7 +60,7 @@ separate controls. The GDScript adapter is measurement code, not a general parse
 | Language | Codec | Contract and limit |
 | --- | --- | --- |
 | TypeScript | `@msgpack/msgpack` 3.1.3 | Named fields; `forceIntegerToFloat` preserves negative zero but writes every number as float64 |
-| TypeScript | `@bufbuild/protobuf` 2.16.0 | Generated schema; packed repeated doubles |
+| TypeScript | `@bufbuild/protobuf` 2.17.0 | Generated schema; packed repeated doubles |
 | C# | `Google.Protobuf` 3.36.2 | Generated schema; packed repeated doubles |
 | GDScript | Godot4MessagePack | Named fields; integers normalized; floats encoded as float32 |
 | GDScript | Schema varint | Schema field order; unsigned LEB128; ZigZag axes; float64 coordinates |
@@ -97,8 +97,9 @@ hashes beside the Rust baseline. Different runtime and model costs limit direct
 language comparisons. The Rust run uses Criterion's different sampling method.
 The [adoption decision](ADOPTION.md) applies the separate gate in #772.
 
-The [latest dependency refresh](results/2026-11-05-cross-language-aarch64/README.md)
+The [latest dependency refresh](results/2026-11-09-cross-language-aarch64/README.md)
 retains a new full sample set for the current locks and Godot 4.7.2. The earlier
+[2026-11-05 refresh](results/2026-11-05-cross-language-aarch64/README.md),
 [2026-10-28 refresh](results/2026-10-28-cross-language-aarch64/README.md),
 [2026-10-21 refresh](results/2026-10-21-cross-language-aarch64/README.md),
 [2026-10-16 refresh](results/2026-10-16-cross-language-aarch64/README.md), and baseline remain
