@@ -1682,6 +1682,32 @@ async fn established_setup_dispatches_exchange_queued_before_and_during_state_tr
             }
         }
     }).await.expect("both exact probes arrive before setup returns peer state");
+        let reject_extra_probe = |event| {
+            let (label, text) = match event {
+                EngineEvent::ChannelMessage { label, text, .. } => (label, text),
+                EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                    (label, String::from_utf8(data).unwrap())
+                }
+                _ => return,
+            };
+            assert!(
+                !is_exchange_probe(me, &label, &text),
+                "a current channel must send its probe only once"
+            );
+        };
+        let quiet = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                tokio::select! {
+                    event = state.engine_rx.recv() => state.handle_engine_event(event.unwrap()).await.unwrap(),
+                    event = remote_events.recv() => reject_extra_probe(event.unwrap()),
+                    event = healthy_events.recv() => reject_extra_probe(event.unwrap()),
+                }
+            }
+        }).await;
+        assert!(
+            quiet.is_err(),
+            "both receipt streams stay quiet before setup release"
+        );
         assert!(state.engine.negotiation_pending(peer));
         release.notify_one();
         settle_negotiations(&mut state).await;

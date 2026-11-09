@@ -1027,7 +1027,30 @@ async fn pending_setup_transport_snapshot_keeps_the_live_generation_visible() {
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .unwrap();
+        let inbound = b"exact-live-setup-receipt".to_vec();
+        pair.sender
+            .channel(pair.receiver_id, RELIABLE_LABEL)
+            .unwrap()
+            .send(inbound.as_slice().into())
+            .await
+            .unwrap();
+        drop(next_exact_receipt(&mut pair.receiver_events, &inbound, profile).await);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pair.receiver.diagnostic_snapshot(peer)["channels"][RELIABLE_LABEL]["receipts"]
+                ["admitted"]
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receipt publication completes while setup owns the link");
         let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["receipts"]["raw"], 1);
+        assert_eq!(
+            snapshot["channels"][RELIABLE_LABEL]["receipts"]["admitted"],
+            1
+        );
         assert!(
             snapshot.is_object(),
             "pending setup must not look like an absent peer"
