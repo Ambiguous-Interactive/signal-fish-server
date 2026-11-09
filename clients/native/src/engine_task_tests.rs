@@ -718,6 +718,7 @@ async fn cancelled_setup_releases_driver_sockets_before_queued_adoption() {
 }
 
 #[tokio::test]
+/// Keep established guarded gameplay available through SDP, loss, and cancellation.
 async fn established_pair_stays_connected_during_pending_description() {
     for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
         for holds_offer in [false, true] {
@@ -911,6 +912,7 @@ async fn established_pair_stays_connected_during_pending_description() {
     }
 }
 
+/// Exchange exact reliable gameplay through guarded channels at one setup phase.
 async fn exchange_pending_description_gameplay(
     pair: &mut super::receive_tests::LivePair,
     physical_generation: usize,
