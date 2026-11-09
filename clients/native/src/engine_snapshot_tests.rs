@@ -896,3 +896,107 @@ pub(crate) async fn startup_pair_with_held_open_events(
     assert_eq!(pair.receiver.connected_pair_count(), 0);
     (pair, clock, opens)
 }
+
+/// Peer retirement must leave the owner runnable while the old RTC core is busy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_retirement_does_not_wait_for_its_busy_rtc_core() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for receiver_offers in [false, true] {
+            let (mut pair, clock, opens) =
+                startup_pair_with_held_open_events(profile, receiver_offers).await;
+            let peer = pair.sender_id;
+            for event in opens {
+                let EngineEvent::ChannelOpen { label, .. } = event else {
+                    unreachable!()
+                };
+                pair.receiver.note_channel_open(peer, &label).await;
+            }
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
+            let generation = pair.receiver.peers[&peer].generation;
+            let held =
+                HeldCoreSend::start(&clock, pair.receiver.channel(peer, RELIABLE_LABEL).unwrap())
+                    .await;
+            let result =
+                tokio::time::timeout(Duration::from_millis(100), pair.receiver.remove_peer(peer))
+                    .await;
+            if result.is_err() {
+                held.finish().await;
+                panic!("profile={profile:?}, receiver_offers={receiver_offers}: peer retirement must not wait for the old core");
+            }
+            result.unwrap().unwrap();
+            assert!(!pair.receiver.is_current_generation(peer, generation));
+            assert_eq!(pair.receiver.connected_pair_count(), 0);
+            held.finish().await;
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.negotiate().await;
+            assert_ne!(pair.receiver.peers[&peer].generation, generation);
+            for (sender, remote, events) in [
+                (&pair.sender, pair.receiver_id, &mut pair.receiver_events),
+                (&pair.receiver, peer, &mut pair.sender_events),
+            ] {
+                sender
+                    .channel(remote, RELIABLE_LABEL)
+                    .unwrap()
+                    .send(b"fresh-after-busy-retirement".as_slice().into())
+                    .await
+                    .unwrap();
+                drop(next_exact_receipt(events, b"fresh-after-busy-retirement", profile).await);
+            }
+            pair.cleanup().await;
+        }
+    }
+}
+
+/// #1515: pending close work has the original deadline and dies with its Engine.
+#[tokio::test]
+async fn pending_peer_retirement_releases_its_capture_on_timeout_or_engine_drop() {
+    for drop_engine in [false, true] {
+        let (mut pair, clock) = unconnected_pair(ChannelProfile::Reference);
+        let peer = pair.sender_id;
+        pair.receiver.pair_with(peer, false, &[]).await.unwrap();
+        let old_pc = Arc::downgrade(&pair.receiver.peers[&peer].pc);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        pair.receiver.negotiation_hold = Some(NegotiationHold {
+            step: "close",
+            entered: entered.clone(),
+            release: Arc::new(tokio::sync::Notify::new()),
+        });
+        let live = clock.observe_next_task();
+        tokio::time::pause();
+        pair.receiver.remove_peer(peer).await.unwrap();
+        entered.notified().await;
+        assert!(!pair.receiver.is_paired(peer));
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert!(old_pc.upgrade().is_some(), "pending close owns the old PC");
+        if drop_engine {
+            let (events, _) = mpsc::unbounded_channel();
+            drop(std::mem::replace(
+                &mut pair.receiver,
+                Engine::new(EngineSettings::default(), events).unwrap(),
+            ));
+        } else {
+            tokio::time::advance(Duration::from_millis(249)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                live.load(Ordering::SeqCst),
+                1,
+                "the existing graceful close budget must not be shortened"
+            );
+            tokio::time::advance(Duration::from_millis(2)).await;
+        }
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while live.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retired close work releases its capture without checkpoint release");
+        assert!(old_pc.upgrade().is_none());
+        pair.receiver.remove_peer(peer).await.unwrap();
+        assert!(
+            pair.receiver.retiring_peers.is_empty(),
+            "later removal prunes completed close handles"
+        );
+    }
+}

@@ -457,6 +457,12 @@ pub enum EngineEvent {
         text: String,
         result: Result<(), String>,
     },
+    /// A link-owned remote ICE application completed.
+    RemoteCandidateComplete {
+        peer: PlayerId,
+        generation: u64,
+        result: CandidateApplyResult,
+    },
     /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed {
         peer: PlayerId,
@@ -517,6 +523,9 @@ impl EngineEvent {
             | Self::ChannelSendComplete {
                 peer, generation, ..
             }
+            | Self::RemoteCandidateComplete {
+                peer, generation, ..
+            }
             | Self::ChannelClosed {
                 peer, generation, ..
             }
@@ -531,6 +540,19 @@ impl EngineEvent {
             } => (*peer, *generation),
         }
     }
+}
+
+/// Outcome of one ordered remote ICE application.
+#[derive(Debug)]
+pub enum CandidateApplyResult {
+    /// The stack accepted the candidate.
+    Applied,
+    /// The stack rejected this candidate; later candidates can still apply.
+    Rejected(String),
+    /// The original operation deadline elapsed.
+    DeadlineElapsed,
+    /// The link has already observed terminal transport loss.
+    Terminal,
 }
 
 /// Per-remote-peer connection state.
@@ -558,6 +580,7 @@ struct PeerLink {
     readiness_check: Option<ReadinessCheck>,
     /// At most one application send per required exchange label.
     channel_sends: HashMap<String, Box<dyn JoinHandle>>,
+    candidate_task: Option<Box<dyn JoinHandle>>,
 }
 
 impl PeerLink {
@@ -569,6 +592,9 @@ impl PeerLink {
         for (_, task) in self.channel_sends.drain() {
             task.abort();
         }
+        if let Some(task) = self.candidate_task.take() {
+            task.abort();
+        }
         self.selected_pair_probe = None;
         self.readiness_check = None;
     }
@@ -577,6 +603,17 @@ impl PeerLink {
 struct ReadinessCheck {
     task: Box<dyn JoinHandle>,
     ready: Arc<AtomicBool>,
+}
+
+struct PeerRetirement {
+    task: Box<dyn JoinHandle>,
+}
+
+impl Drop for PeerRetirement {
+    /// Cancel retained close work when its owning Engine drops.
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Drop for ReadinessCheck {
@@ -658,6 +695,7 @@ pub(crate) enum Negotiation {
     },
     Offer(String),
     Answer(String),
+    #[cfg(test)]
     Candidate(String),
 }
 
@@ -693,6 +731,7 @@ pub struct Engine {
     events: mpsc::UnboundedSender<EngineEvent>,
     message_budget: Arc<MessageQueueBudget>,
     peers: HashMap<PlayerId, PeerLink>,
+    retiring_peers: Vec<PeerRetirement>,
     next_generation: u64,
     receipt_generations: HashMap<PlayerId, (u64, u64)>,
     /// Routing answers for the current ICE endpoints, resolved once per set
@@ -726,6 +765,7 @@ impl Engine {
             events,
             message_budget: Arc::new(MessageQueueBudget::default()),
             peers: HashMap::new(),
+            retiring_peers: Vec::new(),
             next_generation: 0,
             receipt_generations: HashMap::new(),
             ice_route_sources: None,
@@ -772,6 +812,7 @@ impl Engine {
         self.receipt_generations.remove(&peer);
     }
 
+    /// Apply setup work under one absolute deadline and retire expired state.
     pub(crate) async fn negotiate(
         &mut self,
         peer: PlayerId,
@@ -791,6 +832,7 @@ impl Engine {
                 } => self.pair_with(peer, initiate, &ice_servers).await,
                 Negotiation::Offer(sdp) => self.handle_offer(peer, sdp).await.map(Some),
                 Negotiation::Answer(sdp) => self.handle_answer(peer, sdp).await.map(|()| None),
+                #[cfg(test)]
                 Negotiation::Candidate(payload) => self
                     .handle_remote_candidate(peer, &payload)
                     .await
@@ -808,20 +850,47 @@ impl Engine {
         }
     }
 
-    /// Close and forget a departed peer so a later directive can pair it anew.
+    /// Forget a departed peer so a later directive can pair it anew.
+    /// Ready closes complete inline. A pending close retains the existing
+    /// 250 ms bound in an Engine-owned task and logs any close error.
+    /// The old generation's application tasks stop before this method returns.
     pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
+        self.retiring_peers
+            .retain(|retirement| !retirement.task.is_finished());
         if let Some(mut link) = self.peers.remove(&peer) {
             link.stop_tasks();
+            let pc = link.pc.clone();
+            drop(link);
             #[cfg(test)]
             let negotiation_hold = self.negotiation_hold.clone();
-            let result = crate::deadline::timeout(Duration::from_millis(250), async {
-                negotiation_checkpoint!(negotiation_hold, "close");
-                link.pc.close().await
+            let mut close = Box::pin(async move {
+                let result = crate::deadline::timeout(Duration::from_millis(250), async {
+                    negotiation_checkpoint!(negotiation_hold, "close");
+                    pc.close().await
+                })
+                .await;
+                match result {
+                    Ok(result) => result.context("close departed RTCPeerConnection"),
+                    Err(_) => {
+                        tracing::warn!(%peer, "Peer close deadline elapsed; retry can continue");
+                        Ok(())
+                    }
+                }
+            });
+            match std::future::poll_fn(|context| {
+                std::task::Poll::Ready(close.as_mut().poll(context))
             })
-            .await;
-            match result {
-                Ok(result) => result.context("close departed RTCPeerConnection")?,
-                Err(_) => tracing::warn!(%peer, "Peer close deadline elapsed; retry can continue"),
+            .await
+            {
+                std::task::Poll::Ready(result) => result?,
+                std::task::Poll::Pending => {
+                    let task = self.runtime.spawn(Box::pin(async move {
+                        if let Err(error) = close.await {
+                            tracing::warn!(%peer, %error, "Retired peer close failed");
+                        }
+                    }));
+                    self.retiring_peers.push(PeerRetirement { task });
+                }
             }
         }
         Ok(())
@@ -943,6 +1012,7 @@ impl Engine {
             selected_pair_probe: None,
             readiness_check: None,
             channel_sends: HashMap::new(),
+            candidate_task: None,
         };
         self.peers.insert(peer, link);
         self.receipt_generations
@@ -1075,6 +1145,30 @@ impl Engine {
     ) -> Result<()> {
         #[cfg(test)]
         let negotiation_hold = self.negotiation_hold.clone();
+        let init = self.reserve_remote_candidate(peer, candidate_payload)?;
+        let link = self
+            .peers
+            .get_mut(&peer)
+            .ok_or_else(|| anyhow!("candidate from unpaired peer {peer}"))?;
+        if link.remote_description_set {
+            let pc = link.pc.clone();
+            negotiation_checkpoint!(negotiation_hold, "live_ice");
+            pc.add_ice_candidate(init)
+                .await
+                .context("apply remote candidate")?;
+        } else {
+            link.pending_candidates.push(init);
+        }
+        negotiation_checkpoint!(negotiation_hold, "candidate_complete");
+        Ok(())
+    }
+
+    /// Validate and charge one candidate before handing it to the stack.
+    fn reserve_remote_candidate(
+        &mut self,
+        peer: PlayerId,
+        candidate_payload: &str,
+    ) -> Result<RTCIceCandidateInit> {
         if candidate_payload.len() > MAX_CANDIDATE_PAYLOAD_BYTES {
             return Err(anyhow!("remote ICE candidate payload exceeds 4096 bytes"));
         }
@@ -1099,17 +1193,108 @@ impl Engine {
         link.remote_candidate_bytes = link
             .remote_candidate_bytes
             .saturating_add(candidate_payload.len());
-        if link.remote_description_set {
-            let pc = link.pc.clone();
-            negotiation_checkpoint!(negotiation_hold, "live_ice");
-            pc.add_ice_candidate(init)
-                .await
-                .context("apply remote candidate")?;
-        } else {
-            link.pending_candidates.push(init);
+        Ok(init)
+    }
+
+    /// Whether later signals must wait for this link's current ICE application.
+    pub(crate) fn candidate_pending(&self, peer: PlayerId) -> bool {
+        self.peers
+            .get(&peer)
+            .is_some_and(|link| link.candidate_task.is_some())
+    }
+
+    /// Whether this retained link has already observed terminal transport loss.
+    pub(crate) fn candidate_link_terminal(&self, peer: PlayerId) -> bool {
+        self.peers
+            .get(&peer)
+            .is_some_and(|link| link.receive_admission.terminal.load(Ordering::Relaxed))
+    }
+
+    /// Release the completed operation before the owner dispatches the next signal.
+    pub(crate) fn accept_candidate_result(&mut self, peer: PlayerId) -> bool {
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        let Some(task) = link.candidate_task.take() else {
+            return false;
+        };
+        task.abort();
+        !link.receive_admission.terminal.load(Ordering::Relaxed)
+    }
+
+    /// Apply live ICE without holding the session owner on a pending RTC query.
+    /// The physical link owns the query and cancels it when retired.
+    pub(crate) async fn start_remote_candidate(
+        &mut self,
+        peer: PlayerId,
+        payload: &str,
+        deadline: Deadline,
+    ) -> Option<CandidateApplyResult> {
+        if self.candidate_link_terminal(peer) {
+            return Some(CandidateApplyResult::Terminal);
         }
-        negotiation_checkpoint!(negotiation_hold, "candidate_complete");
-        Ok(())
+        if self.candidate_pending(peer) {
+            return Some(CandidateApplyResult::Rejected(
+                "another ICE application is pending".to_owned(),
+            ));
+        }
+        if deadline.is_due(tokio::time::Instant::now()) {
+            return Some(CandidateApplyResult::DeadlineElapsed);
+        }
+        let init = match self.reserve_remote_candidate(peer, payload) {
+            Ok(init) => init,
+            Err(error) => return Some(CandidateApplyResult::Rejected(error.to_string())),
+        };
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return Some(CandidateApplyResult::Rejected(
+                "the peer link was retired".to_owned(),
+            ));
+        };
+        if !link.remote_description_set {
+            link.pending_candidates.push(init);
+            return Some(CandidateApplyResult::Applied);
+        }
+        let generation = link.generation;
+        let pc = link.pc.clone();
+        #[cfg(test)]
+        let negotiation_hold = self.negotiation_hold.clone();
+        let mut operation = Box::pin(async move {
+            let result = deadline
+                .timeout(async move {
+                    negotiation_checkpoint!(negotiation_hold, "live_ice");
+                    let result = pc.add_ice_candidate(init).await;
+                    negotiation_checkpoint!(negotiation_hold, "candidate_complete");
+                    result
+                })
+                .await;
+            if deadline.is_due(tokio::time::Instant::now()) {
+                return CandidateApplyResult::DeadlineElapsed;
+            }
+            match result {
+                Ok(Ok(())) => CandidateApplyResult::Applied,
+                Ok(Err(error)) => CandidateApplyResult::Rejected(error.to_string()),
+                Err(_) => CandidateApplyResult::DeadlineElapsed,
+            }
+        });
+        match std::future::poll_fn(|context| {
+            std::task::Poll::Ready(operation.as_mut().poll(context))
+        })
+        .await
+        {
+            std::task::Poll::Ready(result) => Some(result),
+            std::task::Poll::Pending => {
+                let events = self.events.clone();
+                link.candidate_task = Some(self.runtime.spawn(Box::pin(async move {
+                    let result = operation.await;
+                    let _ = events.send(EngineEvent::RemoteCandidateComplete {
+                        peer,
+                        generation,
+                        result,
+                    });
+                })));
+                None
+            }
+        }
     }
 
     /// Accept the first required channel and close extras or distinct duplicates.

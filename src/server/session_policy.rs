@@ -604,16 +604,20 @@ impl EnhancedGameServer {
                 .members
                 .iter()
                 .map(|player| {
+                    let capabilities = crate::session_capability::resolve_connection_capabilities(
+                        connection_manager.project_protocol(&player.id, |protocol| {
+                            SessionCapabilities::from(protocol)
+                        }),
+                    );
                     SessionMember::from_player(
                         player,
-                        crate::session_capability::resolve_connection_capabilities(
-                            connection_manager.project_protocol(&player.id, |protocol| {
-                                SessionCapabilities::from(protocol)
-                            }),
-                        ),
-                        // A disabled transport can never be selected. Keep its
-                        // legacy metadata only in the shared GameStarting frame.
-                        session_config.enable_direct,
+                        capabilities,
+                        session_config.enable_direct
+                            && crate::session_capability::supports_session(
+                                capabilities,
+                                Topology::Host,
+                                Transport::Direct,
+                            ),
                     )
                 })
                 .collect();
