@@ -797,6 +797,11 @@ Library callers can read the same local snapshot with
 Transient `disconnected` callbacks do not set it. It is separate from
 `channel_closure` and `receive_failure`; none establishes a network cause.
 A fresh link starts with no terminal observation.
+While SDP work is pending on an existing link, the local snapshot keeps live
+receipt counts, pending payload usage, receive refusal, and terminal causes.
+It sets `negotiation_pending` to `true`. Channel registration and observed opens
+remain the snapshot from before that operation; remote SDP and candidate fields
+are omitted until the worker returns. No driver query blocks this snapshot.
 
 `Engine::transport_diagnostic_snapshot(peer)` also queries each registered channel.
 `channel_properties` maps labels to the actual internal ID, label, protocol,

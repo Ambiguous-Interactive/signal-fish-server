@@ -850,6 +850,12 @@ class Orchestrator {
   }>();
   private readonly pairRetryState = new Map<string, { attempt: number; connected: boolean }>();
   private readonly retryingPairs = new Set<string>();
+  private readonly queuedChannelOpens = new Set<{
+    peer: string;
+    generation: number;
+    label: string;
+    arrivedAt: number;
+  }>();
   private readonly connectedPairs = new Set<string>();
   private readonly pairConnectedReported = new Set<string>();
   private lastIceServers: PlanIceServer[] = [];
@@ -942,15 +948,20 @@ class Orchestrator {
         });
       },
       onChannelOpen: (peer, generation, label) => {
-        this.enqueue(async () => {
-          if (!this.engine.isCurrentGeneration(peer, generation)) {
-            return;
-          }
-          this.emit({ event: 'channel_open', peer, label });
-          if (this.engine.noteChannelOpen(peer, label)) {
-            this.onPairConnected(peer);
-          }
-        });
+        const queued = { peer, generation, label, arrivedAt: monotonicNowMs() };
+        this.queuedChannelOpens.add(queued);
+        this.enqueue(
+          async () => {
+            this.queuedChannelOpens.delete(queued);
+            if (!this.engine.isCurrentGeneration(peer, generation)) return;
+            this.emit({ event: 'channel_open', peer, label });
+            if (this.engine.noteChannelOpen(peer, label)) this.onPairConnected(peer);
+          },
+          () => this.queuedChannelOpens.delete(queued),
+          0,
+          undefined,
+          true,
+        );
       },
       onChannelClosed: (peer, generation, label, reason) => {
         this.enqueue(async () => {
@@ -1443,6 +1454,7 @@ class Orchestrator {
     release?: () => void,
     retainedBytes = 0,
     reservedTask?: () => void,
+    drainChannelOpens = false,
   ): void {
     if (this.finished) {
       release?.();
@@ -1470,7 +1482,14 @@ class Orchestrator {
           }
           consumeAdmission();
           await task();
-          await this.output.flush();
+          const now = monotonicNowMs();
+          const drainOpens =
+            drainChannelOpens && this.p2pDeadline !== null && now >= this.p2pDeadline;
+          if (drainOpens && !this.waitingForAdmittedWork(now)) this.processP2PDeadline(now);
+          // Timely opens already in this bounded queue must update readiness
+          // before another open's acknowledged output can hold the decision.
+          // Writes keep their FIFO order and retain their output credits.
+          if (!drainOpens || !this.waitingForChannelOpens()) await this.output.flush();
           if (this.finished) return;
           this.processTimers();
           this.scheduleWake();
@@ -1537,7 +1556,7 @@ class Orchestrator {
     if (this.exchangeRetryAt !== null) {
       wake = Math.min(wake, this.exchangeRetryAt);
     }
-    if (this.p2pDeadline !== null) {
+    if (this.p2pDeadline !== null && !this.waitingForChannelOpens()) {
       wake = Math.min(wake, this.p2pDeadline);
     }
     if (this.lingerUntil !== null) {
@@ -1582,6 +1601,44 @@ class Orchestrator {
         this.pendingAdmittedServerFrames > 0 ||
         this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
     );
+  }
+
+  /** Timely current-link opens own a bounded queue pass before availability expires. */
+  private waitingForChannelOpens(): boolean {
+    const deadline = this.p2pDeadline;
+    if (deadline === null) return false;
+    for (const { peer, generation, label, arrivedAt } of this.queuedChannelOpens) {
+      if (
+        arrivedAt < deadline &&
+        this.expectedPeers.has(peer) &&
+        !this.connectedPairs.has(peer) &&
+        this.engine.isCurrentGeneration(peer, generation) &&
+        this.engine.channel(peer, label) !== undefined
+      )
+        return true;
+    }
+    return false;
+  }
+
+  /** Resolve an expired P2P window after its timely current-link opens drain. */
+  private processP2PDeadline(now: number): void {
+    if (
+      this.p2pDeadline !== null &&
+      now >= this.p2pDeadline &&
+      !this.waitingForChannelOpens()
+    ) {
+      for (const peer of this.expectedPeers) {
+        if (!this.connectedPairs.has(peer)) {
+          console.error(
+            `P2P timeout for ${peer}: ${JSON.stringify(this.engine.diagnosticSnapshot(peer))}`,
+          );
+        }
+      }
+      // The current P2P window expired: report any real state change.
+      this.resolveTransportStatus();
+      this.p2pDeadline = null;
+      this.retryingPairs.clear();
+    }
   }
 
   /** Fire due timers; finishes the run when it is over. */
@@ -1644,19 +1701,7 @@ class Orchestrator {
       this.flushPendingExchangeSends();
     }
 
-    if (this.p2pDeadline !== null && now >= this.p2pDeadline) {
-      for (const peer of this.expectedPeers) {
-        if (!this.connectedPairs.has(peer)) {
-          console.error(
-            `P2P timeout for ${peer}: ${JSON.stringify(this.engine.diagnosticSnapshot(peer))}`,
-          );
-        }
-      }
-      // The current P2P window expired: report any real state change.
-      this.resolveTransportStatus();
-      this.p2pDeadline = null;
-      this.retryingPairs.clear();
-    }
+    this.processP2PDeadline(now);
 
     if (this.successReleasePollAt !== null && now >= this.successReleasePollAt) {
       this.pollSuccessRelease();
