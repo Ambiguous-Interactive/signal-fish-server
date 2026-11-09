@@ -1505,10 +1505,14 @@ async fn saturate_held_reliable_callbacks(
     let mut progress = HeldRefusalProgress::default();
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(15), async {
-        /* Coarse timer wakes must not renew a relative wait for each packet. */
-        let mut pacing = tokio::time::interval(Duration::from_millis(1));
+        /* Bound catch-up bursts and avoid a separate coarse wake per packet. */
+        const PACKETS_PER_TICK: u32 = 4;
+        let mut pacing = tokio::time::interval(Duration::from_millis(u64::from(PACKETS_PER_TICK)));
+        pacing.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         for sequence in 0u32..2048 {
-            pacing.tick().await;
+            if sequence % PACKETS_PER_TICK == 0 {
+                pacing.tick().await;
+            }
             payload[..4].copy_from_slice(&sequence.to_be_bytes());
             channel.send(payload.as_slice().into()).await.unwrap();
             sent += 1;
