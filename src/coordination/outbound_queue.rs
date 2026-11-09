@@ -2352,7 +2352,7 @@ impl OutboundReceiver {
         self.shared.state().len()
     }
 
-    #[cfg(feature = "allocation-tracking")]
+    #[cfg(any(test, feature = "allocation-tracking"))]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce server work when checking reliable delivery deadlines behind lossy gameplay backlogs (#1540).
+- Reduce server work when checking reliable delivery deadlines across mixed and lossy gameplay backlogs (#1540).
 - Reduce P2P game-start memory use for players that do not support Direct transport (#636).
 - **Breaking:** Add native `EngineEvent::PairReady`, `EngineEvent::ChannelSendComplete`, and
   `EngineEvent::RemoteCandidateComplete` for pending work; exhaustive matches must handle them (#1510, #1512, #1516).
