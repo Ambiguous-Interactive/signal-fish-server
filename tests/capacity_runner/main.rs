@@ -2530,7 +2530,8 @@ async fn artifact_replay_rejects_invalid_delivery_and_send_ledgers() {
     let output = tempfile::tempdir().expect("replay output");
     let config = RunConfig {
         output_dir: output.path().to_path_buf(),
-        ..scenario_config(Encoding::V3Json)
+        // Replay ledger validation uses the shared functional fixture budget.
+        ..wire_correctness_config(Encoding::V3Json)
     };
     let outcome = runner::run(config).await.expect("valid live history");
     assert!(outcome.summary.valid, "{:?}", outcome.summary.reasons);
