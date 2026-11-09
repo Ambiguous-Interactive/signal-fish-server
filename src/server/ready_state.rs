@@ -131,6 +131,7 @@ impl EnhancedGameServer {
         self.handle_start_game_from_lifecycle(player_id, None).await;
     }
 
+    /// Pin the requesting connection and report the coordinator's current-roster decision.
     pub(super) async fn handle_start_game_from_lifecycle(
         &self,
         player_id: &PlayerId,

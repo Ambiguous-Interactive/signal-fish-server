@@ -522,3 +522,29 @@ async fn authority_request_rechecks_live_route_after_room_gate() {
         );
     }
 }
+
+/// Route removal cannot overtake an authority decision waiting on storage.
+#[tokio::test]
+async fn authority_request_holds_route_through_storage_wait() {
+    for become_authority in [false, true] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let member = PlayerId::new_v4();
+        let room = database.create_room("authority-route-lease".into(), None, 4, true, member, "relay".into(), "test".into(), None).await.unwrap();
+        if become_authority { database.request_room_authority(&room.id, &member, false).await.unwrap(); }
+        let (sender, _receiver) = mpsc::channel(8);
+        messages.register_local_client(member, Some(room.id), ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached())).await.unwrap();
+        let coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None));
+        let storage = database.hold_room_reads_for_test().await;
+        let mut request = Box::pin(coordinator.handle_authority_request(&room.id, &member, become_authority));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        let mut removal = Box::pin(messages.unregister_local_client(&member));
+        assert!(futures_util::poll!(&mut removal).is_pending());
+        assert_eq!(storage[&room.id].authority_player, (!become_authority).then_some(member));
+        drop(storage);
+        let (outcome, removed) = tokio::join!(request, removal);
+        assert_eq!(outcome.unwrap(), AuthorityOutcome::Granted);
+        removed.unwrap();
+        assert_eq!(database.get_room_by_id(&room.id).await.unwrap().unwrap().authority_player, become_authority.then_some(member));
+    }
+}

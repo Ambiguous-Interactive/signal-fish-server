@@ -1317,6 +1317,10 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     get_room_by_id_calls: std::sync::atomic::AtomicU32,
     #[cfg(test)]
+    session_direct_projection_reads: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    session_host_snapshot_reads: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pause_room_metrics: std::sync::atomic::AtomicBool,
@@ -1424,6 +1428,14 @@ impl InMemoryDatabase {
     ) -> Result<Option<RoomSessionHostSnapshot>> {
         #[cfg(test)]
         self.before_room_read_for_test().await?;
+        #[cfg(test)]
+        if include_direct {
+            self.session_direct_projection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        self.session_host_snapshot_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self
             .rooms
             .read()
@@ -1446,6 +1458,11 @@ impl InMemoryDatabase {
     ) -> Result<Option<RoomSessionSelectionSnapshot>> {
         #[cfg(test)]
         self.before_room_read_for_test().await?;
+        #[cfg(test)]
+        if include_direct {
+            self.session_direct_projection_reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(self
             .rooms
             .read()
@@ -1535,7 +1552,7 @@ impl InMemoryDatabase {
     }
 
     /// Hold room storage exclusively to test cancellation before a snapshot read.
-    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg(test)]
     pub(crate) async fn hold_room_reads_for_test(
         &self,
     ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<RoomId, Room>> {
@@ -1586,6 +1603,10 @@ impl InMemoryDatabase {
             release_update_room_code: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            session_direct_projection_reads: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            session_host_snapshot_reads: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             pause_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -1784,6 +1805,20 @@ impl InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn release_paused_update_room_code_for_test(&self) {
         self.release_update_room_code.notify_one();
+    }
+
+    /// Count narrow host snapshots separately from full selection snapshots.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn session_host_snapshot_reads_for_test(&self) -> u32 {
+        self.session_host_snapshot_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Observe requests that copy Direct metadata, including unused projections.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn session_direct_projection_reads_for_test(&self) -> u32 {
+        self.session_direct_projection_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]

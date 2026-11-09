@@ -95,6 +95,24 @@ pub(crate) use crate::session_member::SessionMember;
 pub(crate) use crate::session_member::{RELAY_FLOOR, UPGRADE_LADDER};
 
 impl SessionMember {
+    /// Build a finalization candidate without retaining an unused Direct endpoint.
+    pub(super) fn from_finalized_player(
+        player: &PlayerInfo,
+        capabilities: SessionCapabilities,
+        direct_enabled: bool,
+    ) -> Self {
+        Self::from_player(
+            player,
+            capabilities,
+            direct_enabled
+                && crate::session_capability::supports_session(
+                    capabilities,
+                    Topology::Host,
+                    Transport::Direct,
+                ),
+        )
+    }
+
     /// Copy selection fields and include validated endpoints only when the caller needs Direct.
     fn from_player(
         player: &PlayerInfo,
@@ -370,15 +388,6 @@ impl SessionPlanDecision {
         member.supports_session(self.topology, self.transport)
     }
 
-    /// Whether the recipient (looked up by id in `members`) is [`Self::pairable`].
-    /// An id absent from `members` is defensively non-pairable.
-    #[cfg(all(test, signal_fish_repository_tests))]
-    pub(crate) fn recipient_pairable(&self, recipient: PlayerId) -> bool {
-        self.members
-            .iter()
-            .any(|member| member.player_id == recipient && self.pairable(member))
-    }
-
     /// Build the per-recipient [`SessionPlanPayload`] for `recipient`.
     ///
     /// `ice_servers` is the recipient's already-prepared ICE list (the operator's
@@ -622,15 +631,10 @@ impl EnhancedGameServer {
                             SessionCapabilities::from(protocol)
                         }),
                     );
-                    SessionMember::from_player(
+                    SessionMember::from_finalized_player(
                         player,
                         capabilities,
-                        session_config.enable_direct
-                            && crate::session_capability::supports_session(
-                                capabilities,
-                                Topology::Host,
-                                Transport::Direct,
-                            ),
+                        session_config.enable_direct,
                     )
                 })
                 .collect();

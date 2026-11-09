@@ -625,6 +625,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         Ok(())
     }
 
+    /// Recheck live routing before committing and publishing an owned authority change.
     async fn handle_authority_request(
         &self,
         room_id: &RoomId,
@@ -632,11 +633,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-        let requester_is_routed = self
+        let route_lease = self
             .coordinator
-            .routed_player_pair(room_id, player_id, player_id)
-            .await?
-            .is_none_or(|pair| pair == [true, true]);
+            .lease_room_member_route(room_id, player_id)
+            .await?;
 
         // From the first durable mutation onward this owned task retains the
         // room mutation guard. Dropping the caller only detaches its join
@@ -647,7 +647,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         let transaction = tokio::spawn(async move {
             tracing::info!(%room_id, %player_id, %become_authority, "InMemory: Processing authority request");
 
-            let authority_result = if requester_is_routed {
+            let authority_result = if route_lease.is_routed.unwrap_or(true) {
                 coordinator
                     .database
                     .request_room_authority(&room_id, &player_id, become_authority)
@@ -655,6 +655,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             } else {
                 Ok(AuthorityOutcome::Denied(AuthorityDenial::NotAMember))
             };
+            drop(route_lease);
             let (result, response, authority_change) = match authority_result {
                 Ok(outcome) => {
                     // The single site that turns a storage decision into the

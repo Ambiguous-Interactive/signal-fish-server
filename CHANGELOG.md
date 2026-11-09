@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep P2P host recovery moving while an expired connection waits for teardown (#1547).
+- Keep P2P host recovery moving while expired connections wait for teardown (#1547).
 - Preserve room authority and lobby state when a delayed request outlives its live membership (#1548, #1549).
 - Keep room cleanup and P2P host recovery moving when another room or connection is busy (#1543, #1544, #1545).
 - Recover native SCTP receive credit after lost gameplay packets (#1536).

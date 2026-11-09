@@ -19541,6 +19541,7 @@ fn test_lychee_version_pinned_above_v0_22() {
     }
 }
 
+/// Keep installer retries, pinned bytes and shared call sites on one download contract.
 #[test]
 fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
     let root = repo_root();
@@ -19557,7 +19558,7 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         "--max-time 60",
         "--proto \"=${protocol}\"",
         "--tlsv1.2",
-        "sha256sum -c",
+        "sha256sum -c -",
     ] {
         assert!(
             downloader.contains(required),
@@ -19754,7 +19755,7 @@ pathlib.Path(args[args.index('--output') + 1]).write_bytes(payload)
         &checksum,
         r#"#!/usr/bin/env python3
 import hashlib, pathlib, sys
-if sys.argv[1:] != ['-c']:
+if sys.argv[1:] != ['-c', '-']:
     sys.exit(64)
 for line in sys.stdin:
     expected, name = line.rstrip('\n').split('  ', 1)
@@ -19847,6 +19848,74 @@ for line in sys.stdin:
             assert_eq!(fs::read(output).unwrap(), b"verified payload\n");
             assert!(requests.contains("Accept: application/vnd.github+json"));
         }
+    }
+}
+
+/// Exercise the runner's native checksum tool, including macOS stdin handling.
+#[test]
+#[cfg(unix)]
+fn test_verified_downloader_native_checksum_accepts_only_matching_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = unique_temp_dir("native-checksum-download");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create curl fixture directory");
+    let payload = temp.path().join("payload.bin");
+    fs::write(&payload, b"verified payload\n").expect("write native checksum payload");
+    let curl = bin.join("curl");
+    write_file(
+        &curl,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --output) output="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+cp "$DOWNLOAD_FIXTURE_PAYLOAD" "$output"
+"#,
+    );
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755))
+        .expect("make curl fixture executable");
+    let original_path = std::env::var("PATH").expect("runner PATH");
+    let native = Command::new("bash")
+        .args(["-c", "command -v sha256sum"])
+        .output()
+        .expect("locate native checksum command");
+    assert!(native.status.success(), "runner must provide sha256sum");
+    let native_path = String::from_utf8(native.stdout).expect("native checksum path");
+    println!("NATIVE_CHECKSUM_PATH={}", native_path.trim());
+    let path = format!("{}:{original_path}", bin.display());
+    for (digest, expected_success) in [
+        (
+            "62d33f34d79dd4a4590a760d9f6c6926834eadc87e48b9409e029c61e8aa37dc",
+            true,
+        ),
+        (
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            false,
+        ),
+    ] {
+        let output = temp.path().join("download with spaces.bin");
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/download-verified.sh"))
+            .args(["https://example.invalid/native-checksum.bin", digest])
+            .arg(&output)
+            .env("PATH", &path)
+            .env("DOWNLOAD_FIXTURE_PAYLOAD", &payload)
+            .output()
+            .expect("run downloader with native checksum command");
+        assert_eq!(
+            result.status.success(),
+            expected_success,
+            "native checksum {}: {}{}",
+            native_path.trim(),
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"verified payload\n");
     }
 }
 
@@ -35026,8 +35095,14 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     With 56 shards, ceil(557/56) * 29s remains 290s.
     Host-departure repair decisions add eight mutation sites (#1539).
     With 57 shards, ceil(565/57) * 29s remains 290s.
+    566 (was 565): the finalization projection constructor adds one return-value site (#1550).
+    The existing endpoint predicate moves without an exclusion.
+    With 57 shards, ceil(566/57) * 29s remains 290s.
+    563 (was 566): remove four sites from an obsolete test-only pairing helper (#1550).
+    Its fixture now calls the production pairing predicate directly.
+    With 57 shards, ceil(563/57) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 565;
+const MUTATION_TOTAL_MUTANTS: u32 = 563;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

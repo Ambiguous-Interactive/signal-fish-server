@@ -2112,7 +2112,11 @@ async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
         ],
     };
     assert!(
-        !decision.recipient_pairable(seat_filler),
+        decision.pairable(&decision.members[0]),
+        "the capable fixture member participates in the production pairing decision"
+    );
+    assert!(
+        !decision.pairable(&decision.members[1]),
         "fixture precondition: the seat filler can never appear in this session's pairs"
     );
     let now_unix = chrono::Utc::now().timestamp();
@@ -6769,7 +6773,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         if let Some((player, _, _)) = busy_activity {
             timeout(Duration::from_secs(1), async {
                 while server.connection_manager.has_client(&player) {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             })
             .await
@@ -7185,4 +7189,231 @@ async fn maintenance_host_repairs_do_not_starve_rooms_beyond_the_worker_limit() 
         assert!(server.pending_session_replans.is_empty());
         assert_plan_queue_empty(&mut healthy_receiver);
     }
+}
+
+/// #1550: The production finalization projection retains only usable Direct candidates.
+#[test]
+fn finalization_projection_does_not_retain_unused_direct_endpoints() {
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    let mut legacy = direct.clone();
+    legacy.version = 2;
+    let mut webrtc = direct.clone();
+    webrtc.transports = vec![Transport::Relay, Transport::WebRtc];
+    let mut mesh = direct.clone();
+    mesh.topologies = vec![Topology::Relay, Topology::Mesh];
+    let endpoint = crate::protocol::DirectEndpoint {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    let mut player = player_info(PlayerId::from_u128(1), "Host-雪", true);
+    player.connected_at = Some(base_time());
+    player.connection_info = Some(ConnectionInfo::Direct {
+        host: endpoint.host.clone(),
+        port: endpoint.port,
+    });
+    let original = serde_json::to_value(&player).unwrap();
+    for (case, direct_enabled, protocol, expected_endpoint) in [
+        ("deployment disabled", false, direct.clone(), None),
+        ("legacy connection", true, legacy, None),
+        ("WebRTC connection", true, webrtc, None),
+        ("mesh connection", true, mesh, None),
+        ("Direct host candidate", true, direct, Some(endpoint)),
+    ] {
+        let capabilities = super::session_policy::SessionCapabilities::from(&protocol);
+        let member = SessionMember::from_finalized_player(&player, capabilities, direct_enabled);
+        assert_eq!(member.direct_endpoint, expected_endpoint, "{case}");
+        assert_eq!(member.player_id, player.id, "{case}");
+        assert_eq!(member.player_name, player.name, "{case}");
+        assert_eq!(member.is_authority, player.is_authority, "{case}");
+        assert_eq!(Some(member.joined_at), player.connected_at, "{case}");
+        assert_eq!(member.capabilities, capabilities, "{case}");
+        assert_eq!(serde_json::to_value(&player).unwrap(), original, "{case}");
+    }
+}
+
+/// Keep the host fast path lifecycle-aware and omit unused endpoint projections.
+#[tokio::test(start_paused = true)]
+async fn departure_projection_observes_host_lifecycle_and_transport() {
+    for transport in [Transport::WebRtc, Transport::Direct] {
+        for finalized in [true, false] {
+            for host_departed in [true, false] {
+                let server = create_server_with_session(host_config()).await;
+                let (host, _host_rx) = register_client(&server).await;
+                let (peer, _peer_rx) = register_client(&server).await;
+                for player in [host, peer] {
+                    server.set_client_protocol(
+                        &player,
+                        NegotiatedProtocol {
+                            transports: vec![
+                                Transport::Relay,
+                                Transport::WebRtc,
+                                Transport::Direct,
+                            ],
+                            ..v3_webrtc()
+                        },
+                    );
+                }
+                let room = finalized_db_room_with(&server, host, &[(peer, "Peer")]).await;
+                publish_room_members(&server, &room, &[host, peer]).await;
+                server
+                    .database
+                    .update_player_connection_info(
+                        &room,
+                        &host,
+                        ConnectionInfo::Direct {
+                            host: "192.0.2.10".into(),
+                            port: 7777,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let database = server
+                    .database
+                    .as_any()
+                    .downcast_ref::<crate::database::InMemoryDatabase>()
+                    .unwrap();
+                if !finalized {
+                    database
+                        .hold_room_reads_for_test()
+                        .await
+                        .get_mut(&room)
+                        .unwrap()
+                        .lobby_state = LobbyState::Waiting;
+                }
+                let stored = ActiveSessionPlan {
+                    topology: Topology::Host,
+                    transport,
+                    host: Some(host),
+                };
+                server.active_session_plans.insert(room, stored);
+                let before = database.session_direct_projection_reads_for_test();
+                let host_reads = database.session_host_snapshot_reads_for_test();
+                database.reset_get_room_by_id_calls_for_test();
+                server
+                    .handle_session_member_departure(
+                        &room,
+                        &if host_departed { host } else { peer },
+                    )
+                    .await;
+                // #1550: the selected plan cannot reveal redundant reads or
+                // copied-but-unused endpoints. A valid host needs one narrow
+                // read; a changed lifecycle needs a second selection read.
+                // WebRTC must request no Direct projection; Direct needs one
+                // per snapshot. Revisit these costs if the read strategy changes.
+                let expected_reads = if !host_departed && !finalized { 2 } else { 1 };
+                assert_eq!(
+                    database.get_room_by_id_calls_for_test(),
+                    expected_reads,
+                    "{transport:?}, finalized={finalized}, host_departed={host_departed}"
+                );
+                assert_eq!(
+                    database.session_direct_projection_reads_for_test() - before,
+                    if transport == Transport::Direct {
+                        expected_reads
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    database.session_host_snapshot_reads_for_test() - host_reads,
+                    u32::from(!host_departed)
+                );
+                assert_eq!(server.active_session_plan(&room), Some(stored));
+                assert!(server.pending_session_replans.is_empty());
+            }
+        }
+    }
+}
+
+/// Failed endpoint lookup must stop preparation before any broader read.
+#[tokio::test(start_paused = true)]
+async fn endpoint_lookup_failure_stops_refresh_preparation() {
+    let server = create_server_with_session(host_config()).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let room = RoomId::new_v4();
+    let player = PlayerId::new_v4();
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&room)
+        .await;
+    database.fail_get_room_by_id_for_test(true);
+    database.reset_get_room_by_id_calls_for_test();
+    assert!(
+        !server
+            .prepare_direct_endpoint_refresh(
+                &room,
+                &player,
+                ConnectionInfo::Direct {
+                    host: "192.0.2.10".into(),
+                    port: 7777
+                },
+                ActiveSessionPlan {
+                    topology: Topology::Host,
+                    transport: Transport::Direct,
+                    host: Some(player)
+                },
+                guard
+            )
+            .await
+    );
+    assert_eq!(database.get_room_by_id_calls_for_test(), 1);
+}
+
+/// The sweep must never start more room workers than its configured bound.
+#[tokio::test(start_paused = true)]
+async fn maintenance_repair_worker_limit_is_exact() {
+    let server = create_server_with_session(host_config()).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.fail_get_room_by_id_for_test(true);
+    for _ in 0..=super::session_policy::SESSION_REPAIR_CONCURRENCY {
+        let room = RoomId::new_v4();
+        let player = PlayerId::new_v4();
+        server.active_session_plans.insert(
+            room,
+            ActiveSessionPlan {
+                topology: Topology::Host,
+                transport: Transport::WebRtc,
+                host: Some(player),
+            },
+        );
+        server.handle_session_member_departure(&room, &player).await;
+    }
+    database.fail_get_room_by_id_for_test(false);
+    let guard = database.hold_room_reads_for_test().await;
+    database.reset_get_room_by_id_calls_for_test();
+    let worker_server = Arc::clone(&server);
+    let worker = tokio::spawn(async move { worker_server.retry_pending_session_replans().await });
+    let limit = super::session_policy::SESSION_REPAIR_CONCURRENCY;
+    for _ in 0..1000 {
+        if database.get_room_by_id_calls_for_test() as usize >= limit {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        database.get_room_by_id_calls_for_test() as usize >= limit,
+        "the initial worker cohort must start within the bounded wait"
+    );
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        database.get_room_by_id_calls_for_test() as usize,
+        super::session_policy::SESSION_REPAIR_CONCURRENCY
+    );
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    drop(guard);
 }

@@ -299,6 +299,10 @@ async fn activity_eviction_allows_maintenance_to_finish_while_unregister_waits()
             }
         })
         .await;
+        assert!(
+            swept.is_ok(),
+            "a busy unregister must not stop the maintenance sweep"
+        );
         assert!(server.connection_manager.has_client(&player));
         let farewell = receiver.try_recv().unwrap();
         assert!(matches!(
@@ -315,16 +319,121 @@ async fn activity_eviction_allows_maintenance_to_finish_while_unregister_waits()
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            swept.is_ok(),
-            "a busy unregister must not stop the maintenance sweep"
-        );
         timeout(Duration::from_secs(1), async {
             while server.connection_manager.has_client(&player) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
         .expect("the owned unregister must finish after admission resumes");
     }
+}
+
+/// #1547: A batch shares one observation budget and never repeats pinned evictions.
+#[tokio::test(start_paused = true)]
+async fn activity_eviction_batch_shares_a_wait_budget_and_keeps_owned_teardowns() {
+    let server = server().await;
+    let mut guards = Vec::new();
+    let mut receivers = Vec::new();
+    let mut players = Vec::new();
+    for id in 1..=8 {
+        let player = PlayerId::from_u128(id);
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        server.connect_client(player, sender).await;
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        guards.push(lifecycle.lock_owned().await);
+        receivers.push(receiver);
+        players.push(player);
+    }
+    tokio::time::advance(server.config.ping_timeout + Duration::from_secs(1)).await;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let maintenance_server = Arc::clone(&server);
+    let maintenance = tokio::spawn(async move {
+        maintenance_server
+            .cleanup_task_until(async {
+                let _ = stopped.await;
+            })
+            .await;
+    });
+    timeout(Duration::from_millis(500), async {
+        while server
+            .metrics
+            .maintenance_sweeps_total
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("one eviction batch must share its teardown observation budget");
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        8
+    );
+    let first_sweeps = server
+        .metrics
+        .maintenance_sweeps_total
+        .load(Ordering::Relaxed);
+    tokio::time::advance(
+        server
+            .config
+            .room_cleanup_interval
+            .max(Duration::from_secs(1)),
+    )
+    .await;
+    timeout(Duration::from_millis(500), async {
+        while server
+            .metrics
+            .maintenance_sweeps_total
+            .load(Ordering::Relaxed)
+            <= first_sweeps
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a later sweep must not wait for already pinned activity evictions");
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        8
+    );
+    for (player, receiver) in players.iter().zip(&mut receivers) {
+        assert!(server.connection_manager.has_client(player));
+        let farewell = receiver.try_recv().unwrap();
+        assert!(matches!(
+            farewell.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::ActivityTimeout),
+                ..
+            }
+        ));
+        let pending = receiver.try_recv();
+        assert!(matches!(
+            pending,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+    stop.send(()).unwrap();
+    timeout(Duration::from_secs(1), maintenance)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(guards);
+    timeout(Duration::from_secs(1), async {
+        while players
+            .iter()
+            .any(|player| server.connection_manager.has_client(player))
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("every teardown must outlive its observer and finish after gate release");
 }

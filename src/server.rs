@@ -4758,6 +4758,25 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(Some(players))
     }
 
+    async fn lease_room_member_route(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> anyhow::Result<crate::coordination::RoomMemberRouteLease> {
+        let routing = self.room_routing_gates.read(*room_id).await;
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let routed = room_players
+            .get(room_id)
+            .is_some_and(|players| players.contains(player_id))
+            && clients.contains_key(player_id)
+            && !self.is_spectator_route(player_id);
+        Ok(crate::coordination::RoomMemberRouteLease::new(
+            Some(routed),
+            routing,
+        ))
+    }
+
     async fn routed_player_pair(
         &self,
         room_id: &RoomId,

@@ -829,6 +829,12 @@ async fn finalized_join_uses_a_valid_newer_membership_refresh() {
         .assign_client_to_room(&replacement, fixture.room.id)
         .await;
 
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .unwrap();
+    let direct_reads = database.session_direct_projection_reads_for_test();
     let guard = server
         .message_coordinator
         .lock_room_event_mutation(&fixture.room.id)
@@ -844,6 +850,11 @@ async fn finalized_join_uses_a_valid_newer_membership_refresh() {
             .await
     );
 
+    assert_eq!(
+        database.session_direct_projection_reads_for_test(),
+        direct_reads,
+        "WebRTC join refresh must not copy Direct metadata"
+    );
     match recv(&mut fixture.joiner_rx).await.as_ref() {
         ServerMessage::SessionPlan(plan) => {
             assert_eq!(plan.peers.len(), 1);
