@@ -1899,13 +1899,56 @@ async fn rejected_remote_sdp_retires_only_its_link_before_the_setup_deadline() {
                 state.engine.negotiation_hold = None;
                 state.establish_pair(peer, initiate).await.unwrap();
                 settle_negotiations(&mut state).await;
-                let (mut remote, _, _) = super::retry_tests::open_physical_pair_with_events(
-                    &mut state,
-                    &mut server_ws,
-                    peer,
-                    None,
-                )
-                .await;
+                let (mut remote, opens, mut recovered_events) =
+                    super::retry_tests::open_physical_pair_with_events(
+                        &mut state,
+                        &mut server_ws,
+                        peer,
+                        None,
+                    )
+                    .await;
+                for event in opens {
+                    state.handle_engine_event(event).await.unwrap();
+                }
+                let outbound = "exact-recovered-owner";
+                let inbound = "exact-recovered-remote";
+                state
+                    .engine
+                    .channel(peer, RELIABLE_LABEL)
+                    .unwrap()
+                    .send_text(outbound)
+                    .await
+                    .unwrap();
+                remote
+                    .channel(state.my_id, RELIABLE_LABEL)
+                    .unwrap()
+                    .send_text(inbound)
+                    .await
+                    .unwrap();
+                let mut received = BTreeSet::new();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while received.len() != 2 {
+                        tokio::select! {
+                            event = state.engine_rx.recv() => {
+                                let event = event.unwrap();
+                                if let EngineEvent::ChannelMessage { peer: from, label, text, .. } = &event {
+                                    assert_eq!(*from, peer);
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert_eq!(text, inbound);
+                                    assert!(received.insert("owner"));
+                                }
+                                state.handle_engine_event(event).await.unwrap();
+                            }
+                            event = recovered_events.recv() => {
+                                if let EngineEvent::ChannelMessage { label, text, .. } = event.unwrap() {
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert_eq!(text, outbound);
+                                    assert!(received.insert("remote"));
+                                }
+                            }
+                        }
+                    }
+                }).await.expect("recovered link carries exact reliable bytes in both directions");
                 state.engine.remove_peer(peer).await.unwrap();
                 state.engine.remove_peer(sibling).await.unwrap();
                 remote.remove_peer(state.my_id).await.unwrap();
