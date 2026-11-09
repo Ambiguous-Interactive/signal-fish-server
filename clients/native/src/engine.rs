@@ -719,13 +719,55 @@ macro_rules! negotiation_checkpoint {
     };
 }
 
-/// The per-client WebRTC engine. Owned by the orchestrator task; all methods
-/// are called from that single task, so no interior locking is needed.
+#[derive(Clone, Copy)]
+pub(crate) enum NegotiationReply {
+    Offer,
+    Answer,
+    None,
+}
+
+pub(crate) struct NegotiationCompletion {
+    pub deadline: Deadline,
+    pub peer: PlayerId,
+    generation: u64,
+    pub reply: NegotiationReply,
+    pub result: Result<Option<String>>,
+    worker: Box<Engine>,
+    pub events: std::collections::VecDeque<EngineEvent>,
+}
+
+struct NegotiationReady {
+    peer: PlayerId,
+    generation: u64,
+}
+
+struct PendingNegotiation {
+    generation: u64,
+    task: Box<dyn JoinHandle>,
+    result: tokio::sync::oneshot::Receiver<NegotiationCompletion>,
+    channels: HashMap<String, Arc<dyn DataChannel>>,
+    events: std::collections::VecDeque<EngineEvent>,
+}
+
+impl Drop for PendingNegotiation {
+    /// Cancel running work before dropping any queued completed peer state.
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+type IceRouteSources = Option<(Vec<(String, u16)>, Vec<IpAddr>)>;
+
+/// The per-client WebRTC engine. Each pending setup task exclusively owns
+/// its peer state until the orchestrator adopts the completed operation.
 pub struct Engine {
     #[cfg(test)]
     pub(crate) negotiation_hold: Option<NegotiationHold>,
     #[cfg(test)]
     send_buffer_limit: Option<usize>,
+    pending_negotiations: HashMap<PlayerId, PendingNegotiation>,
+    negotiation_tx: mpsc::Sender<NegotiationReady>,
+    negotiation_rx: mpsc::Receiver<NegotiationReady>,
     settings: EngineSettings,
     runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
@@ -737,13 +779,10 @@ pub struct Engine {
     /// Routing answers for the current ICE endpoints, resolved once per set
     /// rather than once per pair.
     ///
-    /// Pairing runs on the orchestrator task, which also pumps the WebSocket.
-    /// Resolving every server for every peer would multiply any resolver
-    /// latency by the mesh size on that task, and a long enough stall there is
-    /// indistinguishable from an idle client to the server. The key is the
+    /// Completed routing results are reused by later setup tasks. The key is the
     /// endpoint list itself, so a replan that changes servers re-probes while a
     /// credential rotation — same URLs, new username and password — does not.
-    ice_route_sources: Option<(Vec<(String, u16)>, Vec<IpAddr>)>,
+    ice_route_sources: Arc<Mutex<IceRouteSources>>,
 }
 
 impl Engine {
@@ -755,11 +794,15 @@ impl Engine {
     ) -> Result<Self> {
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
+        let (negotiation_tx, negotiation_rx) = mpsc::channel(128);
         Ok(Self {
             #[cfg(test)]
             negotiation_hold: None,
             #[cfg(test)]
             send_buffer_limit: None,
+            pending_negotiations: HashMap::new(),
+            negotiation_tx,
+            negotiation_rx,
             settings,
             runtime,
             events,
@@ -768,7 +811,7 @@ impl Engine {
             retiring_peers: Vec::new(),
             next_generation: 0,
             receipt_generations: HashMap::new(),
-            ice_route_sources: None,
+            ice_route_sources: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -776,25 +819,30 @@ impl Engine {
     /// while the endpoint set is unchanged (see [`Engine::ice_route_sources`]).
     async fn ice_route_sources(&mut self, ice_servers: &[IceServer]) -> Vec<IpAddr> {
         let endpoints = ice_server_endpoints(ice_servers);
-        if let Some((probed, sources)) = &self.ice_route_sources {
+        let mut cached = self.ice_route_sources.lock().await;
+        if let Some((probed, sources)) = &*cached {
             if *probed == endpoints {
                 return sources.clone();
             }
         }
         let sources = ice_server_source_addrs(&endpoints).await;
-        self.ice_route_sources = Some((endpoints, sources.clone()));
+        *cached = Some((endpoints, sources.clone()));
         sources
     }
 
     /// Whether a peer connection toward `peer` already exists.
     pub fn is_paired(&self, peer: PlayerId) -> bool {
-        self.peers.contains_key(&peer)
+        self.peers.contains_key(&peer) || self.negotiation_pending(peer)
     }
 
     pub fn is_current_generation(&self, peer: PlayerId, generation: u64) -> bool {
         self.peers
             .get(&peer)
             .is_some_and(|link| link.generation == generation)
+            || self
+                .pending_negotiations
+                .get(&peer)
+                .is_some_and(|pending| pending.generation == generation)
     }
 
     pub fn is_current_event(&self, event: &EngineEvent) -> bool {
@@ -810,6 +858,226 @@ impl Engine {
 
     pub(crate) fn invalidate_pending_receipts(&mut self, peer: PlayerId) {
         self.receipt_generations.remove(&peer);
+    }
+
+    #[cfg(test)]
+    /// Whether this peer has queued its setup result and notification.
+    pub(crate) fn setup_worker_finished(&self, peer: PlayerId) -> bool {
+        self.pending_negotiations
+            .get(&peer)
+            .is_some_and(|pending| pending.task.is_finished())
+    }
+
+    #[cfg(test)]
+    /// Whether every setup operation has returned or retired.
+    pub(crate) fn pending_negotiations_empty(&self) -> bool {
+        self.pending_negotiations.is_empty()
+    }
+
+    /// Whether this peer still owns an outstanding setup operation.
+    pub(crate) fn negotiation_pending(&self, peer: PlayerId) -> bool {
+        self.pending_negotiations.contains_key(&peer)
+    }
+
+    /// Start one ordered operation without retaining the session loop.
+    pub(crate) async fn start_negotiation(
+        &mut self,
+        peer: PlayerId,
+        operation: Negotiation,
+        deadline: Deadline,
+    ) -> Result<Option<String>> {
+        if self.negotiation_pending(peer) {
+            return if matches!(operation, Negotiation::Pair { .. }) {
+                Ok(None)
+            } else {
+                Err(anyhow!("peer negotiation already pending"))
+            };
+        }
+        if self.pending_negotiations.len() >= usize::from(u8::MAX) {
+            return Err(anyhow!("pending peer negotiation limit exceeded"));
+        }
+        let reply = match &operation {
+            Negotiation::Pair { .. } => NegotiationReply::Offer,
+            Negotiation::Offer(_) => NegotiationReply::Answer,
+            _ => NegotiationReply::None,
+        };
+        if matches!(operation, Negotiation::Pair { .. }) && self.peers.contains_key(&peer) {
+            return Ok(None);
+        }
+        let mut worker = Box::new(Self::new(self.settings, self.events.clone())?);
+        worker.runtime = self.runtime.clone();
+        worker.message_budget = self.message_budget.clone();
+        worker.ice_route_sources = self.ice_route_sources.clone();
+        worker.next_generation = self.next_generation;
+        #[cfg(test)]
+        {
+            worker.negotiation_hold = self.negotiation_hold.clone();
+            worker.send_buffer_limit = self.send_buffer_limit;
+        }
+        let generation = if matches!(operation, Negotiation::Pair { .. }) {
+            self.next_generation = self
+                .next_generation
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("peer-link generation overflow"))?;
+            self.next_generation
+        } else {
+            let link = self
+                .peers
+                .remove(&peer)
+                .ok_or_else(|| anyhow!("negotiation from unpaired peer {peer}"))?;
+            let generation = link.generation;
+            worker.peers.insert(peer, link);
+            generation
+        };
+        self.receipt_generations
+            .entry(peer)
+            .and_modify(|(_, last)| *last = generation)
+            .or_insert((generation, generation));
+        if let Some(receipts) = self.receipt_generations.get(&peer) {
+            worker.receipt_generations.insert(peer, *receipts);
+        }
+        let channels = worker
+            .peers
+            .get(&peer)
+            .map(|link| link.channels.clone())
+            .unwrap_or_default();
+        let mut operation = Box::pin(async move {
+            let result = worker.negotiate(peer, operation, deadline).await;
+            NegotiationCompletion {
+                deadline,
+                peer,
+                generation,
+                reply,
+                result,
+                worker,
+                events: Default::default(),
+            }
+        });
+        match std::future::poll_fn(|context| {
+            std::task::Poll::Ready(operation.as_mut().poll(context))
+        })
+        .await
+        {
+            std::task::Poll::Ready(mut completion) => {
+                self.restore_negotiation_worker(&mut completion);
+                completion.result
+            }
+            std::task::Poll::Pending => {
+                let sender = self.negotiation_tx.clone();
+                let (result_tx, result) = tokio::sync::oneshot::channel();
+                let task = self.runtime.spawn(Box::pin(async move {
+                    let completion = operation.await;
+                    if result_tx.send(completion).is_ok() {
+                        let _ = sender.send(NegotiationReady { peer, generation }).await;
+                    }
+                }));
+                self.pending_negotiations.insert(
+                    peer,
+                    PendingNegotiation {
+                        generation,
+                        task,
+                        result,
+                        channels,
+                        events: Default::default(),
+                    },
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Return peer state and bounded close tasks to their owning Engine.
+    fn restore_negotiation_worker(&mut self, completion: &mut NegotiationCompletion) {
+        let peer = completion.peer;
+        tracing::debug!(%peer, generation = completion.generation, "Peer setup state returned");
+        self.retiring_peers
+            .append(&mut completion.worker.retiring_peers);
+        if let Some(link) = completion.worker.peers.remove(&peer) {
+            self.peers.insert(peer, link);
+        }
+        if let Some(receipts) = completion.worker.receipt_generations.remove(&peer) {
+            self.receipt_generations.insert(peer, receipts);
+        }
+    }
+
+    /// Adopt only the still-owned generation. Retirement drops stale workers.
+    pub(crate) async fn next_negotiation(&mut self) -> Option<NegotiationCompletion> {
+        let completion = self.negotiation_rx.recv().await?;
+        self.accept_negotiation(completion)
+    }
+
+    /// Adopt the next current setup result without waiting.
+    pub(crate) fn take_ready_negotiation(&mut self) -> Option<NegotiationCompletion> {
+        loop {
+            let completion = match self.negotiation_rx.try_recv() {
+                Ok(completion) => completion,
+                Err(mpsc::error::TryRecvError::Empty) => return None,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    tracing::debug!("negotiation completion channel disconnected");
+                    return None;
+                }
+            };
+            if let Some(completion) = self.accept_negotiation(completion) {
+                return Some(completion);
+            }
+        }
+    }
+
+    /// Match a notification to its current peer-owned result slot.
+    fn accept_negotiation(&mut self, ready: NegotiationReady) -> Option<NegotiationCompletion> {
+        let pending = self.pending_negotiations.get_mut(&ready.peer)?;
+        if pending.generation != ready.generation {
+            return None;
+        }
+        let mut completion = match pending.result.try_recv() {
+            Ok(completion) => completion,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                tracing::warn!(peer = %ready.peer, "Setup notification preceded its result");
+                return None;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                tracing::warn!(peer = %ready.peer, "Setup result channel closed");
+                return None;
+            }
+        };
+        let pending = self.pending_negotiations.remove(&ready.peer);
+        self.restore_negotiation_worker(&mut completion);
+        if let Some(mut pending) = pending {
+            completion.events.append(&mut pending.events);
+        }
+        Some(completion)
+    }
+
+    /// Retain setup callbacks until the worker returns its physical link.
+    /// Overflow retires the link instead of silently losing gameplay receipts.
+    pub(crate) fn defer_negotiation_event(
+        &mut self,
+        event: EngineEvent,
+    ) -> Result<Option<EngineEvent>> {
+        let (peer, generation) = event.peer_generation();
+        let Some(pending) = self.pending_negotiations.get_mut(&peer) else {
+            return Ok(Some(event));
+        };
+        if pending.generation != generation {
+            return Ok(Some(event));
+        }
+        if !matches!(
+            event,
+            EngineEvent::RemoteChannel { .. }
+                | EngineEvent::ChannelOpen { .. }
+                | EngineEvent::PairReady { .. }
+                | EngineEvent::ChannelSendComplete { .. }
+                | EngineEvent::RemoteCandidateComplete { .. }
+                | EngineEvent::LocalCandidate { .. }
+                | EngineEvent::IceGatheringComplete { .. }
+        ) {
+            return Ok(Some(event));
+        }
+        if pending.events.len() >= 256 {
+            return Err(anyhow!("pending negotiation callback limit exceeded"));
+        }
+        pending.events.push_back(event);
+        Ok(None)
     }
 
     /// Apply setup work under one absolute deadline and retire expired state.
@@ -855,6 +1123,7 @@ impl Engine {
     /// 250 ms bound in an Engine-owned task and logs any close error.
     /// The old generation's application tasks stop before this method returns.
     pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
+        self.pending_negotiations.remove(&peer);
         self.retiring_peers
             .retain(|retirement| !retirement.task.is_finished());
         if let Some(mut link) = self.peers.remove(&peer) {
@@ -1061,6 +1330,7 @@ impl Engine {
             pc.set_local_description(offer)
                 .await
                 .context("set local description (offer)")?;
+            negotiation_checkpoint!(negotiation_hold, "sdp_complete");
             Ok(Some(sdp))
         }
         .await;
@@ -1104,6 +1374,7 @@ impl Engine {
         pc.set_local_description(answer)
             .await
             .context("set local description (answer)")?;
+        negotiation_checkpoint!(negotiation_hold, "sdp_complete");
         Ok(sdp)
     }
 
@@ -1466,6 +1737,11 @@ impl Engine {
         self.peers
             .get(&peer)
             .and_then(|link| link.channels.get(label))
+            .or_else(|| {
+                self.pending_negotiations
+                    .get(&peer)
+                    .and_then(|pending| pending.channels.get(label))
+            })
             .cloned()
     }
 
@@ -1632,6 +1908,13 @@ impl Engine {
     /// It is separate from channel closure and receive refusal.
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
+        if let Some(pending) = self.pending_negotiations.get(&peer) {
+            return serde_json::json!({
+                "generation": pending.generation,
+                "negotiation_pending": true,
+                "queued_callbacks": pending.events.len(),
+            });
+        }
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
         };
@@ -2747,6 +3030,7 @@ mod tests {
     // Regression #861: use real SDP and the WebRTC stack on both sides of
     // the pending-queue drain. The last admission must not renew that queue.
     #[tokio::test]
+    /// Pending SDP setup must flush candidates without replenishing their admission budget.
     async fn remote_candidate_budget_survives_real_description_application() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let settings = crippled_settings(IpFamily::Ipv4);
@@ -2765,8 +3049,32 @@ mod tests {
             answerer.peers[&a].pending_candidates[0].sdp_mline_index,
             Some(0)
         );
-        let answer = answerer.handle_offer(a, offer).await.unwrap();
+        let release = Arc::new(tokio::sync::Notify::new());
+        answerer.negotiation_hold = Some(NegotiationHold {
+            step: "remote_offer",
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: release.clone(),
+        });
+        assert!(answerer
+            .start_negotiation(
+                a,
+                Negotiation::Offer(offer),
+                Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5))
+            )
+            .await
+            .unwrap()
+            .is_none());
+        assert!(answerer.negotiation_pending(a));
+        release.notify_one();
+        let completion = answerer.next_negotiation().await.unwrap();
+        let answer = completion.result.unwrap().unwrap();
+        answerer.negotiation_hold = None;
         assert!(answerer.peers[&a].pending_candidates.is_empty());
+        assert_eq!(answerer.peers[&a].remote_candidate_count, 127);
+        assert_eq!(
+            answerer.peers[&a].remote_candidate_bytes,
+            127 * payload.len()
+        );
         answerer.handle_remote_candidate(a, payload).await.unwrap();
         assert!(answerer.peers[&a].pending_candidates.is_empty());
         let error = answerer
@@ -3445,7 +3753,12 @@ mod tests {
         }];
         assert_eq!(engine.ice_route_sources(&rotated).await, expected);
         assert_eq!(
-            engine.ice_route_sources.as_ref().map(|(probed, _)| probed),
+            engine
+                .ice_route_sources
+                .lock()
+                .await
+                .as_ref()
+                .map(|(probed, _)| probed),
             Some(&ice_server_endpoints(&loopback)),
             "the memo is keyed by the endpoint set, not by the credentials"
         );
@@ -3465,7 +3778,7 @@ mod tests {
         // A plan with no ICE servers probes nothing and caches that.
         assert!(engine.ice_route_sources(&[]).await.is_empty());
         assert_eq!(
-            engine.ice_route_sources,
+            *engine.ice_route_sources.lock().await,
             Some((Vec::new(), Vec::new())),
             "an empty endpoint set is a cached answer, not a repeated no-op probe"
         );

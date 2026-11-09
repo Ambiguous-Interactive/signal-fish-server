@@ -130,8 +130,11 @@ async fn native_peer_loss_retains_snapshot_before_removal() {
                 if mode == "expired" {
                     state.run_deadline = Deadline::after(now, Duration::ZERO);
                 }
-                let mut operation =
-                    Box::pin(state.negotiate(peer, Negotiation::Candidate("tail".into())));
+                let mut operation = Box::pin(super::negotiation_tests::negotiation_result(
+                    &mut state,
+                    peer,
+                    Negotiation::Candidate("tail".into()),
+                ));
                 if mode != "expired" {
                     tokio::select! {
                         _ = entered.notified() => {}

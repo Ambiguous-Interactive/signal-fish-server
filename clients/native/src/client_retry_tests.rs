@@ -5,6 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 
 // Regression #1010: a held P2P gate must not restore removed plan obligations.
 #[tokio::test]
+/// Only current planned peers may signal when the pairing gate opens.
 async fn p2p_gate_does_not_signal_removed_peers() {
     for removal in [
         "departure",
@@ -109,6 +110,7 @@ async fn p2p_gate_does_not_signal_removed_peers() {
         }
         std::fs::write(&release, b"go").unwrap();
         state.process_p2p_gate(Instant::now()).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         assert_eq!(
             state.engine.is_paired(removed),
             rejoined,
@@ -160,6 +162,7 @@ async fn p2p_gate_does_not_signal_removed_peers() {
 
 /// Regression #1003: queued signaling must run between deferred peer sends.
 #[tokio::test]
+/// Queued exchange sends must service mesh traffic, relay input, and Pong.
 async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
     for unreliable in [false, true] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -196,6 +199,7 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
         for id in 2..=5 {
             let peer = PlayerId::from_u128(id);
             state.establish_pair(peer, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             let (remote, opens, receiver) =
                 open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
             remote_receivers.push(receiver);
@@ -350,6 +354,7 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
 // Regressions #1025/#1047: decoder-ready signaling runs between channel sends.
 /// Process queued relay input before starting the next channel's probe.
 #[tokio::test]
+/// Relay input must run between immediately completed exchange labels.
 async fn immediate_exchange_services_relay_before_the_next_label() {
     use tokio_tungstenite::tungstenite::protocol::{
         frame::{
@@ -380,6 +385,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
     state.current_session_generation = Some(SessionGeneration::from_u128(3));
     state.webrtc_plan_seen = true;
     state.establish_pair(peer, true).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
     let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let send_count = sends.clone();
@@ -451,6 +457,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
 
 /// A continuously ready callback stream must still let queued exchange advance.
 #[tokio::test]
+/// Queued gameplay must progress during a continuous burst of ready callbacks.
 async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -471,6 +478,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
     let peer = PlayerId::from_u128(2);
     state.current_session_generation = Some(SessionGeneration::from_u128(3));
     state.establish_pair(peer, true).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     let event = tokio::time::timeout(Duration::from_secs(2), state.engine_rx.recv())
         .await
         .unwrap()
@@ -513,6 +521,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
 
 // Deferred work must not transfer to a replacement link or extend the run window.
 #[tokio::test]
+/// Queued probes must respect replacement, expiry, and signaling failure.
 async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure() {
     for mode in [
         "replacement",
@@ -542,6 +551,7 @@ async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure()
         state.transport_status = Some(true);
         if mode == "old-channel-replacement" {
             state.establish_pair(peer, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
         }
         state.exchange_ledger.note_connected(peer);
         state.connected_pairs.insert(peer);
@@ -552,6 +562,7 @@ async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure()
                     state.prepare_retained_pair_replacement(peer).await;
                 }
                 state.establish_pair(peer, true).await.unwrap();
+                super::negotiation_tests::settle_negotiations(&mut state).await;
                 assert!(state.engine.channel(peer, RELIABLE_LABEL).is_some());
                 state.connected_pairs.insert(peer);
                 state.process_deferred_exchange().await.unwrap();
@@ -584,6 +595,7 @@ async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure()
 
 // Regression #1002: a held local send must release the orchestrator and preserve relay.
 #[tokio::test]
+/// A stalled exchange must retain relay progress and unpaid delivery debt.
 async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
     struct SendGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl Drop for SendGuard {
@@ -613,6 +625,7 @@ async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
             state.handle_engine_event(event).await.unwrap();
@@ -731,6 +744,7 @@ async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
 
 // Regression #1000: a local channel send failure must preserve the relay floor.
 #[tokio::test]
+/// Channel closure must preserve relay operation and outstanding exchange debt.
 async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
     for (trigger, closed_label) in [
         ("exchange_gate", RELIABLE_LABEL),
@@ -772,6 +786,7 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
             state.handle_engine_event(event).await.unwrap();
@@ -868,6 +883,7 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
         .expect("relay control frames remain writable after P2P send failure");
         remote.remove_peer(state.my_id).await.unwrap();
         state.request_pair_retry(peer, 1).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut replacement, opens) =
             open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         state.exchange_released = true;
@@ -961,6 +977,7 @@ async fn open_physical_pair(
     (engine, opens)
 }
 
+/// Open every required channel and retain the owner callbacks for a real pair.
 pub(super) async fn open_physical_pair_with_events(
     state: &mut Orchestrator<'_>,
     server_ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -971,6 +988,7 @@ pub(super) async fn open_physical_pair_with_events(
     Vec<EngineEvent>,
     tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
 ) {
+    super::negotiation_tests::settle_negotiations(state).await;
     let initiate = state.pair_roles[&peer];
     let mut offer = saved_offer;
     state.send_message(&ClientMessage::Ping).await.unwrap();
@@ -1026,11 +1044,18 @@ pub(super) async fn open_physical_pair_with_events(
         let answer = state.engine.handle_offer(peer, offer).await.unwrap();
         remote.handle_answer(state.my_id, answer).await.unwrap();
     }
+    super::negotiation_tests::settle_negotiations(state).await;
     let mut opens = Vec::new();
     let mut local_opens = BTreeSet::new();
     let mut remote_opens = BTreeSet::new();
+    let required_channels =
+        if state.cli.engine_settings().channel_profile == crate::engine::ChannelProfile::Godot {
+            3
+        } else {
+            2
+        };
     tokio::time::timeout(Duration::from_secs(15), async {
-        while local_opens.len() < 2 || remote_opens.len() < 2 {
+        while local_opens.len() < required_channels || remote_opens.len() < required_channels {
             tokio::select! {
                 event = state.engine_rx.recv() => {
                     let event = event.unwrap();
@@ -1101,6 +1126,7 @@ pub(super) async fn open_physical_pair_with_events(
 }
 
 #[tokio::test]
+/// An already formed peer may recover through retry after the initial setup window.
 async fn formed_pair_accepts_remote_retry_after_window_expiry() {
     for initiate in [false, true] {
         for close_before_marker in [false, true] {
@@ -1130,8 +1156,10 @@ async fn formed_pair_accepts_remote_retry_after_window_expiry() {
             state.negotiated_version = 3;
             state.webrtc_plan_seen = true;
             state.establish_pair(peer, initiate).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             // A due local attempt must not publish a marker without rebuilding.
             state.request_pair_retry(peer, 1).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             state.send_message(&ClientMessage::Ping).await.unwrap();
             let mut initial_offer = None;
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -1458,6 +1486,7 @@ async fn authoritative_recovery_cannot_release_reserved_retry_exchange() {
 
 // A busy dispatcher must not turn historical open edges into live recovery.
 #[tokio::test]
+/// Queued old open callbacks must not report recovery after physical closure.
 async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
     for closed_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1486,6 +1515,7 @@ async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
         state.negotiated_version = 3;
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut initial_remote, opens) =
             open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
@@ -1496,6 +1526,7 @@ async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
         state.prepare_retained_pair_replacement(peer).await;
         state.exchange_released = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut replacement_remote, opens) =
             open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         state
@@ -1571,6 +1602,7 @@ async fn remote_retry_preserves_terminal_websocket_write_errors() {
     directions. Sender FIFO cannot fence the replacement link.
 */
 #[tokio::test]
+/// A delayed old answer must not affect the fresh retry generation.
 async fn retry_discards_crossing_old_answer_before_fresh_answer() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -1595,6 +1627,7 @@ async fn retry_discards_crossing_old_answer_before_fresh_answer() {
     let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
     state.current_session_generation = Some(generation);
     state.establish_pair(peer, true).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     let offer = server_ws
         .next()
         .await
@@ -1618,6 +1651,7 @@ async fn retry_discards_crossing_old_answer_before_fresh_answer() {
         .unwrap();
 
     state.request_pair_retry(peer, 1).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     // The marker precedes this offer on the requester's own wire.
     let marker = server_ws
         .next()
@@ -1736,6 +1770,7 @@ fn retry_signal_epochs_preserve_default_wire_and_reject_stale_payloads() {
 
 // Regression #1034: send evidence must fit the actual hold or linger window.
 #[tokio::test]
+/// Exchange send results must fit the active run, hold, or linger window.
 async fn exchange_sends_preserve_the_active_success_window() {
     for (label, phase, p2p_timeout) in
         [RELIABLE_LABEL, UNRELIABLE_LABEL]
@@ -1792,6 +1827,7 @@ async fn exchange_sends_preserve_the_active_success_window() {
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
             state.handle_engine_event(event).await.unwrap();
@@ -1922,6 +1958,7 @@ async fn exchange_sends_preserve_the_active_success_window() {
 
 // Regression #1035: a replacement repays remote receipts lost on the old link.
 #[tokio::test]
+/// A fresh physical link must resend probes while retaining logical receipts.
 async fn physical_replacement_resends_probes_without_erasing_logical_evidence() {
     for (missing_label, retry) in [RELIABLE_LABEL, UNRELIABLE_LABEL]
         .into_iter()
@@ -1949,6 +1986,7 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
         let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens, mut remote_events) =
             open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
@@ -1990,6 +2028,7 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
         } else {
             state.prepare_retained_pair_replacement(peer).await;
             state.establish_pair(peer, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
         }
         remote.remove_peer(state.my_id).await.unwrap();
         assert!(state.exchange_ledger.unmet_criteria().is_empty());
@@ -2046,6 +2085,7 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
 
 // Audit #826/#853/#889: control probe, open, loss, and replacement dispatch separately.
 #[tokio::test]
+/// Early receipts and observed loss must retain debt until a valid replacement.
 async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement() {
     for initiate in [false, true] {
         for early_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
@@ -2066,6 +2106,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
                 let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
                 state.current_session_generation = Some(SessionGeneration::from_u128(3));
                 state.establish_pair(peer, initiate).await.unwrap();
+                super::negotiation_tests::settle_negotiations(&mut state).await;
                 let (mut remote, opens, _remote_events) =
                     open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
                 let late_label = if early_label == RELIABLE_LABEL {
@@ -2263,6 +2304,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
 
 /// Audit #826/#853/#889: the callback producer can observe loss before dispatch.
 #[tokio::test]
+/// Observed transport loss must stop queued sends before close callbacks arrive.
 async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
     let mut failures = Vec::new();
     for initiate in [false, true] {
@@ -2281,6 +2323,7 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
             let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
             state.current_session_generation = Some(SessionGeneration::from_u128(3));
             state.establish_pair(peer, initiate).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             let (mut remote, opens, mut remote_events) =
                 open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
             for event in opens {
@@ -2380,6 +2423,7 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
 
 /// Regression #1097 / audit #826: incarnation changes re-arm queued sibling sends.
 #[tokio::test]
+/// Queued sends must respect gates rearmed by a new room incarnation.
 async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -2415,6 +2459,7 @@ async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
             state.exchange_released = true;
             state.unreliable_exchange_released = true;
             state.establish_pair(sibling, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             let (mut remote, opens, mut remote_events) =
                 open_physical_pair_with_events(&mut state, &mut server_ws, sibling, None).await;
             for event in opens {
