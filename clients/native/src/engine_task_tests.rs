@@ -616,3 +616,103 @@ async fn peer_removal_drops_completed_setup_before_its_notification_is_consumed(
         "the retired result cannot return state"
     );
 }
+
+/// Pending and completed setup must release every bound UDP socket on removal or Engine drop.
+#[tokio::test]
+async fn cancelled_setup_releases_driver_sockets_before_queued_adoption() {
+    for completed in [false, true] {
+        for drop_engine in [false, true] {
+            let (tx, mut events) = mpsc::unbounded_channel();
+            let mut engine = Some(
+                Engine::new(
+                    EngineSettings {
+                        disable_mdns: true,
+                        ip_family: IpFamily::Ipv4,
+                        ..EngineSettings::default()
+                    },
+                    tx,
+                )
+                .unwrap(),
+            );
+            let peer = PlayerId::from_u128(0x1517);
+            let release = Arc::new(tokio::sync::Notify::new());
+            engine.as_mut().unwrap().negotiation_hold = Some(NegotiationHold {
+                step: "sdp_complete",
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: release.clone(),
+            });
+            engine
+                .as_mut()
+                .unwrap()
+                .start_negotiation(
+                    peer,
+                    Negotiation::Pair {
+                        initiate: true,
+                        ice_servers: vec![],
+                    },
+                    Deadline::after(tokio::time::Instant::now(), Duration::from_secs(30)),
+                )
+                .await
+                .unwrap();
+            let mut addresses = BTreeSet::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match events.recv().await.unwrap() {
+                        EngineEvent::LocalCandidate { gathered, .. } => {
+                            assert_eq!(gathered.candidate_type, "host");
+                            addresses.insert(SocketAddr::new(
+                                gathered.address.parse().unwrap(),
+                                gathered.port,
+                            ));
+                        }
+                        EngineEvent::IceGatheringComplete { .. } => break,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("retain actual bound host candidate addresses");
+            assert!(!addresses.is_empty());
+            for address in &addresses {
+                assert_eq!(tokio::net::UdpSocket::bind(address).await.unwrap_err().kind(), std::io::ErrorKind::AddrInUse,
+                    "completed={completed}, drop_engine={drop_engine}: the live worker owns {address}");
+            }
+            if completed {
+                release.notify_one();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !engine.as_ref().unwrap().setup_worker_finished(peer) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("retain completed peer state without adopting its result");
+            }
+            if drop_engine {
+                drop(engine.take());
+            } else {
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    engine.as_mut().unwrap().remove_peer(peer),
+                )
+                .await
+                .expect("cancellation must release the session owner")
+                .unwrap();
+            }
+            let mut rebound = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                for address in &addresses {
+                    loop {
+                        match tokio::net::UdpSocket::bind(address).await {
+                            Ok(socket) => { rebound.push(socket); break; }
+                            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => tokio::task::yield_now().await,
+                            Err(error) => panic!("completed={completed}, drop_engine={drop_engine}: cannot rebind {address}: {error}"),
+                        }
+                    }
+                }
+            }).await.expect("cancellation drops the driver and every bound socket, even with an unread completion");
+            assert_eq!(rebound.len(), addresses.len());
+            release.notify_waiters();
+            drop(engine);
+        }
+    }
+}
