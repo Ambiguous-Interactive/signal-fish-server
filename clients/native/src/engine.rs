@@ -746,6 +746,7 @@ struct PendingNegotiation {
     task: Box<dyn JoinHandle>,
     result: tokio::sync::oneshot::Receiver<NegotiationCompletion>,
     channels: HashMap<String, Arc<dyn DataChannel>>,
+    established_admission: Option<Arc<ChannelReceiveAdmission>>,
     events: std::collections::VecDeque<EngineEvent>,
 }
 
@@ -941,6 +942,10 @@ impl Engine {
             .get(&peer)
             .map(|link| link.channels.clone())
             .unwrap_or_default();
+        let established_admission = worker
+            .peers
+            .get(&peer)
+            .and_then(|link| link.pair_connected.then(|| link.receive_admission.clone()));
         let mut operation = Box::pin(async move {
             let result = worker.negotiate(peer, operation, deadline).await;
             NegotiationCompletion {
@@ -978,6 +983,7 @@ impl Engine {
                         task,
                         result,
                         channels,
+                        established_admission,
                         events: Default::default(),
                     },
                 );
@@ -1172,9 +1178,14 @@ impl Engine {
     pub fn connected_pair_count(&self) -> usize {
         self.peers
             .values()
-            .filter(|link| {
-                link.pair_connected && !link.receive_admission.terminal.load(Ordering::Relaxed)
-            })
+            .filter(|link| link.pair_connected)
+            .map(|link| &link.receive_admission)
+            .chain(
+                self.pending_negotiations
+                    .values()
+                    .filter_map(|pending| pending.established_admission.as_ref()),
+            )
+            .filter(|admission| !admission.terminal.load(Ordering::Relaxed))
             .count()
     }
 
@@ -1750,15 +1761,21 @@ impl Engine {
     /// receive refusal. A later loss can still race selection; callers must
     /// handle send errors and apply their own operation deadline.
     pub async fn send_channel(&self, peer: PlayerId, label: &str) -> Option<Arc<dyn DataChannel>> {
-        let link = self.peers.get(&peer)?;
-        if !link
-            .receive_admission
-            .allows_work(&self.events, peer, link.generation, None)
+        let (generation, admission) = self
+            .peers
+            .get(&peer)
+            .map(|link| (link.generation, &link.receive_admission))
+            .or_else(|| {
+                let pending = self.pending_negotiations.get(&peer)?;
+                Some((pending.generation, pending.established_admission.as_ref()?))
+            })?;
+        if !admission
+            .allows_work(&self.events, peer, generation, None)
             .await
         {
             return None;
         }
-        link.channels.get(label).cloned()
+        self.channel(peer, label)
     }
 
     /// Capture channel selection and its deadline without borrowing the Engine.

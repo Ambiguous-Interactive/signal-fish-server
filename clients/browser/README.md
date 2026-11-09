@@ -277,6 +277,13 @@ window also bounds these waits. A zero P2P timeout reports fallback immediately
 and still permits late connection. In that mode, each operation uses a
 `--run-for-secs` budget, capped by the active run window. Each peer has an ordered
 SDP and ICE queue. A stalled peer does not block relay input or other peers.
+Local candidate publication waits for its Offer or Answer to reach signaling.
+Candidates retain their physical generation and queue budget while they wait.
+Retiring the link discards its queued candidates.
+Pending local ICE uses its own budget: 128 candidates and 64 KiB per physical
+link, 512 candidates and 256 KiB across links, and 4096 bytes per candidate.
+It does not consume room-input credits while SDP is held. Exceeding a candidate
+limit or a full owner queue retires only that link; relay and other peers continue.
 A rejected SDP operation closes its physical link and reports current transport
 availability immediately. A rejected ICE candidate keeps the link available for
 other candidates. A stalled operation closes its physical link at its deadline. A new session plan

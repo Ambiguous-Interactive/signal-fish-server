@@ -131,6 +131,14 @@ A pending diagnostic snapshot names the generation and queued callback count;
 missing channel samples do not mean zero activity.
 The public awaited `pair_with`, `handle_offer`, and `handle_answer` methods keep
 their existing behavior for Engine consumers.
+An established link remains counted by `connected_pair_count` and available
+through `send_channel` while its SDP operation is pending. Observed channel
+or connection loss still blocks channel selection immediately.
+
+Before automatic retry or P2P timeout decisions, the CLI consumes the current
+queue of Engine callbacks. A queued current readiness callback can preserve
+an already open physical link. Stale or terminal callbacks cannot restore it.
+This drain does not wait for future callbacks or extend the original deadline.
 
 The CLI checks channel readiness without waiting for a busy peer's RTC core on
 its main event loop. Ready checks complete inline. A pending check runs in one

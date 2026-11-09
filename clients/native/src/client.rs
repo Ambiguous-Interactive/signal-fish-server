@@ -1976,6 +1976,16 @@ impl Orchestrator<'_> {
 
         self.process_p2p_gate(now).await?;
 
+        let mut now = Instant::now();
+        if self.p2p_retry_at.is_some_and(|at| now >= at)
+            || self
+                .p2p_deadline
+                .is_some_and(|deadline| deadline.is_due(now))
+        {
+            self.drain_queued_engine_events().await?;
+            now = Instant::now();
+        }
+
         if self.p2p_retry_at.is_some_and(|at| now >= at) {
             self.retry_incomplete_pairs(now).await?;
         }

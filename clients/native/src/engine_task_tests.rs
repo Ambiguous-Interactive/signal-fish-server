@@ -716,3 +716,268 @@ async fn cancelled_setup_releases_driver_sockets_before_queued_adoption() {
         }
     }
 }
+
+#[tokio::test]
+/// Keep established guarded gameplay available through SDP, loss, and cancellation.
+async fn established_pair_stays_connected_during_pending_description() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for holds_offer in [false, true] {
+            let settings = EngineSettings {
+                channel_profile: profile,
+                disable_mdns: true,
+                ..EngineSettings::default()
+            };
+            let (sender_tx, sender_events) = mpsc::unbounded_channel();
+            let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
+            let mut pair = super::receive_tests::LivePair {
+                sender: Engine::new(settings, sender_tx).unwrap(),
+                receiver: Engine::new(settings, receiver_tx).unwrap(),
+                sender_events,
+                receiver_events,
+                sender_id: PlayerId::from_u128(0x853),
+                receiver_id: PlayerId::from_u128(0x889),
+            };
+            for physical_generation in 0..3 {
+                pair.negotiate().await;
+                let remote_offer = pair.sender.peers[&pair.receiver_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp;
+                let remote_answer = pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp;
+                let (engine, peer, operation, step) = if holds_offer {
+                    (
+                        &mut pair.receiver,
+                        pair.sender_id,
+                        Negotiation::Offer(remote_offer),
+                        "remote_offer",
+                    )
+                } else {
+                    (
+                        &mut pair.sender,
+                        pair.receiver_id,
+                        Negotiation::Answer(remote_answer),
+                        "remote_answer",
+                    )
+                };
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                engine.negotiation_hold = Some(NegotiationHold {
+                    step,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                });
+                let generation = engine.peers[&peer].generation;
+                assert_eq!(engine.connected_pair_count(), 1);
+                assert!(engine
+                    .start_negotiation(
+                        peer,
+                        operation,
+                        Deadline::after(tokio::time::Instant::now(), Duration::from_secs(10)),
+                    )
+                    .await
+                    .unwrap()
+                    .is_none());
+                entered.notified().await;
+                assert!(engine.is_current_generation(peer, generation));
+                assert_eq!(engine.connected_pair_count(), 1,
+                    "profile={profile:?} holds_offer={holds_offer} generation={physical_generation}: pending SDP must preserve established readiness");
+                exchange_pending_description_gameplay(&mut pair, physical_generation, "held").await;
+                if physical_generation == 2 {
+                    let engine = if holds_offer {
+                        &mut pair.receiver
+                    } else {
+                        &mut pair.sender
+                    };
+                    let channels: Vec<_> = profile
+                        .labels()
+                        .iter()
+                        .map(|label| Arc::downgrade(&engine.channel(peer, label).unwrap()))
+                        .collect();
+                    engine.remove_peer(peer).await.unwrap();
+                    engine.negotiation_hold = None;
+                    assert_eq!(engine.connected_pair_count(), 0);
+                    assert!(!engine.is_current_generation(peer, generation));
+                    assert!(engine.send_channel(peer, RELIABLE_LABEL).await.is_none());
+                    release.notify_one();
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while channels.iter().any(|channel| channel.strong_count() != 0) {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("removing held SDP releases all established channel captures");
+                    assert!(engine.take_ready_negotiation().is_none());
+                    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                    pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+                    pair.negotiate().await;
+                    let engine = if holds_offer {
+                        &pair.receiver
+                    } else {
+                        &pair.sender
+                    };
+                    assert!(!engine.is_current_generation(peer, generation));
+                    assert_eq!(engine.connected_pair_count(), 1);
+                    exchange_pending_description_gameplay(
+                        &mut pair,
+                        physical_generation,
+                        "cancelled-recovery",
+                    )
+                    .await;
+                    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                    pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+                    continue;
+                }
+                if physical_generation == 1 {
+                    let (remote, peer) = if holds_offer {
+                        (&pair.sender, pair.receiver_id)
+                    } else {
+                        (&pair.receiver, pair.sender_id)
+                    };
+                    remote
+                        .channel(peer, UNRELIABLE_LABEL)
+                        .unwrap()
+                        .close()
+                        .await
+                        .unwrap();
+                    let events = if holds_offer {
+                        &mut pair.receiver_events
+                    } else {
+                        &mut pair.sender_events
+                    };
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            if let EngineEvent::ChannelClosed {
+                                label,
+                                generation: actual,
+                                ..
+                            } = events.recv().await.unwrap()
+                            {
+                                assert_eq!(label, UNRELIABLE_LABEL);
+                                assert_eq!(actual, generation);
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("actual remote closure must invalidate pending established readiness");
+                }
+                let engine = if holds_offer {
+                    &mut pair.receiver
+                } else {
+                    &mut pair.sender
+                };
+                assert_eq!(
+                    engine.connected_pair_count(),
+                    usize::from(physical_generation != 1)
+                );
+                assert_eq!(
+                    engine.send_channel(peer, RELIABLE_LABEL).await.is_some(),
+                    physical_generation != 1
+                );
+                release.notify_one();
+                let completion =
+                    tokio::time::timeout(Duration::from_secs(5), engine.next_negotiation())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                /* Repeated answers may be refused by the signaling-state machine. */
+                assert!(engine.is_current_generation(peer, generation));
+                assert_eq!(
+                    engine.connected_pair_count(),
+                    usize::from(physical_generation != 1),
+                    "{:?}",
+                    completion.result
+                );
+                engine.negotiation_hold = None;
+                if physical_generation != 1 {
+                    exchange_pending_description_gameplay(
+                        &mut pair,
+                        physical_generation,
+                        "restored",
+                    )
+                    .await;
+                }
+                pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+            }
+            pair.cleanup().await;
+        }
+    }
+}
+
+/// Exchange exact reliable gameplay through guarded channels at one setup phase.
+async fn exchange_pending_description_gameplay(
+    pair: &mut super::receive_tests::LivePair,
+    physical_generation: usize,
+    phase: &str,
+) {
+    for sender_offers in [false, true] {
+        let prefix = format!("SDP-held-gameplay-{sender_offers}-{physical_generation}-{phase}:");
+        let text = prefix.clone() + &"gameplay".repeat(512);
+        assert!(text.len() > 4096);
+        let mut exact = text.clone();
+        exact.truncate(4096);
+        assert_eq!(exact.len(), 4096);
+        assert!(exact.starts_with(&prefix));
+        let (sender, peer, receiver, receiver_events, sender_id) = if sender_offers {
+            (
+                &pair.sender,
+                pair.receiver_id,
+                &pair.receiver,
+                &mut pair.receiver_events,
+                pair.sender_id,
+            )
+        } else {
+            (
+                &pair.receiver,
+                pair.sender_id,
+                &pair.sender,
+                &mut pair.sender_events,
+                pair.receiver_id,
+            )
+        };
+        for text in [exact, text] {
+            sender
+                .send_channel(peer, RELIABLE_LABEL)
+                .await
+                .expect("pending SDP must still select a healthy established gameplay channel")
+                .send_text(&text)
+                .await
+                .unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match receiver_events.recv().await.unwrap() {
+                        event @ EngineEvent::ChannelMessage { .. } => break event,
+                        EngineEvent::ChannelReceiveRejected { .. }
+                        | EngineEvent::ChannelClosed { .. } => {
+                            panic!("held SDP must preserve the live gameplay stream")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("exact reliable gameplay progresses during held SDP");
+            assert!(receiver.is_current_event(&received));
+            let EngineEvent::ChannelMessage {
+                peer,
+                label,
+                text: actual,
+                ..
+            } = received
+            else {
+                unreachable!()
+            };
+            assert_eq!(peer, sender_id);
+            assert_eq!(label, RELIABLE_LABEL);
+            assert_eq!(actual, text);
+        }
+    }
+}
