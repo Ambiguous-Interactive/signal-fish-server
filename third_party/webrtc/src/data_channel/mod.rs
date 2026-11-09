@@ -732,8 +732,24 @@ mod tests {
             );
             let (binary, text, writable, closed) = futures::join!(binary, text, writable, close);
             assert!(closed.is_ok());
-            for result in [binary, text, writable] {
-                assert!(matches!(result, Err(Error::ErrDataChannelClosed)));
+            // The empty buffer admits the first oversized send even at limit zero.
+            // These Connecting sends run before close and retain their typed error.
+            for result in [binary, text] {
+                assert!(
+                    matches!(result, Err(Error::ErrDataChannelNotOpen)),
+                    "{result:?}"
+                );
+            }
+            assert!(matches!(writable, Err(Error::ErrDataChannelClosed)));
+            for result in [
+                dc.send(BytesMut::from(&b"x"[..])).await,
+                dc.send_text("x").await,
+                dc.writable().await,
+            ] {
+                assert!(
+                    matches!(result, Err(Error::ErrDataChannelClosed)),
+                    "{result:?}"
+                );
             }
         }));
     }
