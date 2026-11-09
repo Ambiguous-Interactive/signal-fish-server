@@ -2002,20 +2002,21 @@ impl Engine {
     /// An observed open callback does not establish current channel state.
     pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         if let Some(pending) = self.pending_negotiations.get(&peer) {
-            let mut snapshot = pending.receive_admission.as_ref().map_or_else(
-                || serde_json::json!({}),
-                |admission| {
-                    self.receive_diagnostic_snapshot(
-                        admission,
-                        &pending.channels,
-                        &pending.open_labels,
-                    )
-                },
-            );
-            snapshot["generation"] = pending.generation.into();
-            snapshot["negotiation_pending"] = true.into();
-            snapshot["queued_callbacks"] = pending.events.len().into();
-            return snapshot;
+            let mut snapshot =
+                pending
+                    .receive_admission
+                    .as_ref()
+                    .map_or_else(serde_json::Map::new, |admission| {
+                        self.receive_diagnostic_snapshot(
+                            admission,
+                            &pending.channels,
+                            &pending.open_labels,
+                        )
+                    });
+            snapshot.insert("generation".into(), pending.generation.into());
+            snapshot.insert("negotiation_pending".into(), true.into());
+            snapshot.insert("queued_callbacks".into(), pending.events.len().into());
+            return serde_json::Value::Object(snapshot);
         }
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
@@ -2025,11 +2026,20 @@ impl Engine {
             &link.channels,
             &link.open_labels,
         );
-        snapshot["generation"] = link.generation.into();
-        snapshot["remote_description_set"] = link.remote_description_set.into();
-        snapshot["remote_candidate_count"] = link.remote_candidate_count.into();
-        snapshot["pending_remote_candidates"] = link.pending_candidates.len().into();
-        snapshot
+        snapshot.insert("generation".into(), link.generation.into());
+        snapshot.insert(
+            "remote_description_set".into(),
+            link.remote_description_set.into(),
+        );
+        snapshot.insert(
+            "remote_candidate_count".into(),
+            link.remote_candidate_count.into(),
+        );
+        snapshot.insert(
+            "pending_remote_candidates".into(),
+            link.pending_candidates.len().into(),
+        );
+        serde_json::Value::Object(snapshot)
     }
 
     /// Read shared receipt evidence even while setup owns the physical link.
@@ -2039,7 +2049,7 @@ impl Engine {
         admission: &ChannelReceiveAdmission,
         registered: &HashMap<String, Arc<dyn DataChannel>>,
         open_labels: &BTreeSet<String>,
-    ) -> serde_json::Value {
+    ) -> serde_json::Map<String, serde_json::Value> {
         let channels: serde_json::Map<String, serde_json::Value> = self.settings.channel_profile.labels()
             .iter().copied().map(|label| (
                 label.to_string(),
@@ -2053,21 +2063,39 @@ impl Engine {
                     })),
                 }),
             )).collect();
-        serde_json::json!({
-            "receive_rejection": admission.failure.get().map(|failure| failure.reason.as_str()),
-            "receive_failure": admission.failure.get(),
-            "channel_closure": admission.closure.get(),
-            "connection_terminal": admission.connection_terminal.get().map(ToString::to_string),
-            "receive_budget": {
-                "scope": "engine",
-                "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
-                "pending_bytes": MAX_PENDING_CHANNEL_BYTES.saturating_sub(self.message_budget.bytes.available_permits()),
-                "max_pending_messages": MAX_PENDING_CHANNEL_MESSAGES,
-                "max_pending_bytes": MAX_PENDING_CHANNEL_BYTES,
-                "max_message_bytes": MAX_CHANNEL_MESSAGE_BYTES,
-            },
-            "channels": channels,
-        })
+        serde_json::Map::from_iter([
+            (
+                "receive_rejection".into(),
+                serde_json::json!(admission
+                    .failure
+                    .get()
+                    .map(|failure| failure.reason.as_str())),
+            ),
+            (
+                "receive_failure".into(),
+                serde_json::json!(admission.failure.get()),
+            ),
+            (
+                "channel_closure".into(),
+                serde_json::json!(admission.closure.get()),
+            ),
+            (
+                "connection_terminal".into(),
+                serde_json::json!(admission.connection_terminal.get().map(ToString::to_string)),
+            ),
+            (
+                "receive_budget".into(),
+                serde_json::json!({
+                    "scope": "engine",
+                    "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
+                    "pending_bytes": MAX_PENDING_CHANNEL_BYTES.saturating_sub(self.message_budget.bytes.available_permits()),
+                    "max_pending_messages": MAX_PENDING_CHANNEL_MESSAGES,
+                    "max_pending_bytes": MAX_PENDING_CHANNEL_BYTES,
+                    "max_message_bytes": MAX_CHANNEL_MESSAGE_BYTES,
+                }),
+            ),
+            ("channels".into(), serde_json::Value::Object(channels)),
+        ])
     }
 
     /// Add SCTP, RTC packet, and channel counters to callback observations for one
