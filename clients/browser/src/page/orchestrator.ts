@@ -853,6 +853,7 @@ class Orchestrator {
   private readonly queuedChannelOpens = new Set<{
     peer: string;
     generation: number;
+    label: string;
     arrivedAt: number;
   }>();
   private readonly connectedPairs = new Set<string>();
@@ -947,7 +948,7 @@ class Orchestrator {
         });
       },
       onChannelOpen: (peer, generation, label) => {
-        const queued = { peer, generation, arrivedAt: monotonicNowMs() };
+        const queued = { peer, generation, label, arrivedAt: monotonicNowMs() };
         this.queuedChannelOpens.add(queued);
         this.enqueue(
           async () => {
@@ -1483,11 +1484,8 @@ class Orchestrator {
           await task();
           const now = monotonicNowMs();
           const drainOpens =
-            drainChannelOpens &&
-            this.p2pDeadline !== null &&
-            now >= this.p2pDeadline &&
-            !this.waitingForAdmittedWork(now);
-          if (drainOpens) this.processP2PDeadline(now);
+            drainChannelOpens && this.p2pDeadline !== null && now >= this.p2pDeadline;
+          if (drainOpens && !this.waitingForAdmittedWork(now)) this.processP2PDeadline(now);
           // Timely opens already in this bounded queue must update readiness
           // before another open's acknowledged output can hold the decision.
           // Writes keep their FIFO order and retain their output credits.
@@ -1609,12 +1607,13 @@ class Orchestrator {
   private waitingForChannelOpens(): boolean {
     const deadline = this.p2pDeadline;
     if (deadline === null) return false;
-    for (const { peer, generation, arrivedAt } of this.queuedChannelOpens) {
+    for (const { peer, generation, label, arrivedAt } of this.queuedChannelOpens) {
       if (
         arrivedAt < deadline &&
         this.expectedPeers.has(peer) &&
         !this.connectedPairs.has(peer) &&
-        this.engine.isCurrentGeneration(peer, generation)
+        this.engine.isCurrentGeneration(peer, generation) &&
+        this.engine.channel(peer, label) !== undefined
       )
         return true;
     }

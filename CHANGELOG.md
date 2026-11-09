@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keep native P2P exchange sends and results active while SDP runs, with live receive and close diagnostics
   (#1525, #1527).
-- Resolve browser P2P availability after timely queued channel opens, even when their output stalls (#1526).
+- Avoid false or stalled browser P2P fallback when channel-open events wait behind output (#1526).
 - Keep established native gameplay available during pending SDP and avoid rebuilding links with queued readiness
   (#1521, #1522).
 - Send browser P2P offers and answers before ICE, and keep held ICE from blocking unrelated input (#1520).

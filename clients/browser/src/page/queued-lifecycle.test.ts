@@ -21,6 +21,12 @@ for (const [scenario, boundary] of (
             'p2p-late-second',
             'p2p-output-complete',
             'p2p-output-incomplete',
+            'p2p-output-complete-run',
+            'p2p-output-incomplete-run',
+            'p2p-terminal-output-closing',
+            'p2p-terminal-output-failed',
+            'p2p-terminal-output-pc-closed',
+            'p2p-terminal-output-channel-closed',
           ] as const)
         : []),
     ] as const
@@ -148,7 +154,11 @@ for (const [scenario, boundary] of (
         __sf_emit: (line: string) => {
           const event = JSON.parse(line) as Record<string, unknown>;
           events.push(event);
-          if (event['event'] === 'channel_open' && boundary.startsWith('p2p-output-')) {
+          if (
+            (event['event'] === 'channel_open' && boundary.startsWith('p2p-output-')) ||
+            (event['event'] === 'game_data_received' &&
+              boundary.startsWith('p2p-terminal-output-'))
+          ) {
             openOutputHeld = true;
             return blockedOpen;
           }
@@ -211,9 +221,16 @@ for (const [scenario, boundary] of (
     else if (scenario === 'plan') socket.plan('webrtc', [peer], newcomer);
     else if (scenario === 'pair-open') {
       if (boundary === 'p2p-retired') socket.plan('relay', []);
+      if (boundary.startsWith('p2p-terminal-output-'))
+        socket.deliver('GameData', {
+          from_player: peer,
+          epoch: 1,
+          seq: 1,
+          data: { before_terminal_open: true },
+        });
       for (const name of ['reliable', 'unreliable']) {
         if (
-          ['p2p-incomplete', 'p2p-output-incomplete'].includes(boundary) &&
+          (boundary === 'p2p-incomplete' || boundary.startsWith('p2p-output-incomplete')) &&
           name === 'unreliable'
         )
           continue;
@@ -227,7 +244,11 @@ for (const [scenario, boundary] of (
         await turn();
         if (boundary === 'p2p-closing') channel.readyState = 'closing';
       }
-      if (boundary === 'p2p-pc-failed') connection.connectionState = 'failed';
+      if (boundary === 'p2p-pc-failed' || boundary === 'p2p-terminal-output-failed')
+        connection.connectionState = 'failed';
+      if (boundary === 'p2p-terminal-output-closing') channels[0]!.readyState = 'closing';
+      if (boundary === 'p2p-terminal-output-pc-closed') connection.connectionState = 'closed';
+      if (boundary === 'p2p-terminal-output-channel-closed') channels[0]!.readyState = 'closed';
       await turn();
     } else
       // The held frame retains one of the 256 backlog credits.
@@ -241,7 +262,7 @@ for (const [scenario, boundary] of (
     // Output resumes after the old linger expires, with admitted input still queued.
     now =
       scenario === 'pair-open'
-        ? boundary === 'run'
+        ? boundary === 'run' || boundary.endsWith('-run')
           ? 3200
           : p2pBoundary
             ? 1200
@@ -252,14 +273,18 @@ for (const [scenario, boundary] of (
     release();
     await turn();
     if (p2pBoundary) {
-      if (boundary.startsWith('p2p-output-') && !openOutputHeld)
+      if (
+        (boundary.startsWith('p2p-output-') || boundary.startsWith('p2p-terminal-output-')) &&
+        !openOutputHeld
+      )
         failures.push(`${label}: hold the channel-open output before checking the decision`);
       if (boundary.startsWith('p2p-output-')) {
         const opens = events
           .filter((event) => event['event'] === 'channel_open')
           .map((event) => event['label']);
-        const expectedOpens =
-          boundary === 'p2p-output-complete' ? ['reliable', 'unreliable'] : ['reliable'];
+        const expectedOpens = boundary.startsWith('p2p-output-complete')
+          ? ['reliable', 'unreliable']
+          : ['reliable'];
         if (JSON.stringify(opens) !== JSON.stringify(expectedOpens))
           failures.push(`${label}: queued opens must retain output invocation order`);
       }
@@ -269,7 +294,7 @@ for (const [scenario, boundary] of (
       const expectedStatuses =
         boundary === 'p2p-retired'
           ? []
-          : ['p2p', 'p2p-output-complete'].includes(boundary)
+          : boundary === 'p2p' || boundary.startsWith('p2p-output-complete')
             ? [true]
             : boundary === 'p2p-late' || boundary === 'p2p-late-second'
               ? [false, true]
@@ -315,6 +340,8 @@ for (const [scenario, boundary] of (
     if (
       observed !==
       (scenario !== 'late' &&
+        !boundary.startsWith('p2p-terminal-output-') &&
+        !boundary.startsWith('p2p-output-incomplete') &&
         ![
           'p2p-incomplete',
           'p2p-output-incomplete',
@@ -326,6 +353,17 @@ for (const [scenario, boundary] of (
       failures.push(`${label}: wrong queued frame dispatch: ${observed}`);
     releaseOpen();
     await turn();
+    if (boundary.endsWith('-run')) {
+      // A never-connected fallback pair owes no exchange. A formed pair still
+      // owes its exact probes, which must not be sent after the run cutoff.
+      const expectedExit = boundary.startsWith('p2p-output-incomplete')
+        ? 0
+        : EXIT_CRITERIA_UNMET;
+      if (result !== expectedExit || probes.length !== 0)
+        failures.push(
+          `${label}: preserve the run cutoff and refuse late gameplay (exit=${String(result)}, probes=${probes.length})`,
+        );
+    }
     if (
       ['p2p', 'p2p-output-complete'].includes(boundary) ||
       ['p2p-closing', 'p2p-pc-failed', 'p2p-retired'].includes(boundary)
