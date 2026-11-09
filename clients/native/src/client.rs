@@ -62,8 +62,8 @@ use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
 use crate::deadline::Deadline;
 use crate::engine::{
-    CandidateApplyResult, Engine, EngineEvent, Negotiation, SelectedPairProbeResult,
-    RELIABLE_LABEL, UNRELIABLE_LABEL,
+    CandidateApplyResult, Engine, EngineEvent, Negotiation, NegotiationCompletion,
+    NegotiationReply, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
 };
 use crate::events::{emit, Event, PlanPeer, SignalKind};
 use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
@@ -1194,6 +1194,7 @@ enum LoopInput {
     ),
     Engine(Option<EngineEvent>),
     SelectedPair(Option<SelectedPairProbeResult>),
+    Negotiation(Option<NegotiationCompletion>),
     Tick,
     DeferredExchange,
 }
@@ -1514,6 +1515,7 @@ impl Orchestrator<'_> {
                     tokio::select! {
                         frame = futures_util::StreamExt::next(&mut self.ws) => LoopInput::Server(frame, Instant::now()),
                         event = self.engine_rx.recv() => LoopInput::Engine(event),
+                        result = self.engine.next_negotiation() => LoopInput::Negotiation(result),
                         result = self.selected_pair_rx.recv() => LoopInput::SelectedPair(result),
                         _ = tokio::time::sleep_until(wake_at) => LoopInput::Tick,
                     }
@@ -1541,6 +1543,10 @@ impl Orchestrator<'_> {
                     // Unreachable while the orchestrator owns the probe sender.
                     tracing::warn!("selected-pair probe channel closed");
                 }
+                LoopInput::Negotiation(Some(completion)) => {
+                    self.complete_negotiation(completion).await?
+                }
+                LoopInput::Negotiation(None) => {}
                 LoopInput::Tick => {}
                 LoopInput::DeferredExchange => self.process_deferred_exchange().await?,
             }
@@ -1911,6 +1917,9 @@ impl Orchestrator<'_> {
 
     /// Fire due timers; returns `Some(exit_code)` when the run is over.
     async fn process_timers(&mut self) -> Result<Option<i32>, FatalError> {
+        while let Some(completion) = self.engine.take_ready_negotiation() {
+            self.complete_negotiation(completion).await?;
+        }
         let now = Instant::now();
         if self.reconnect_poll_at.is_some_and(|at| now >= at) {
             let deadline = self.run_deadline;
@@ -2999,6 +3008,16 @@ impl Orchestrator<'_> {
 
     /// Apply current-link callbacks and retain only eligible pending receipts.
     async fn handle_engine_event(&mut self, event: EngineEvent) -> Result<(), FatalError> {
+        let peer = event.peer_generation().0;
+        let event = match self.engine.defer_negotiation_event(event) {
+            Ok(Some(event)) => event,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                self.handle_peer_transport_loss(peer, &error.to_string())
+                    .await?;
+                return Ok(());
+            }
+        };
         let (event_peer, generation) = event.peer_generation();
         let pending_receipt = matches!(
             event,
@@ -3236,12 +3255,56 @@ impl Orchestrator<'_> {
         operation: Negotiation,
     ) -> Result<anyhow::Result<Option<String>>, FatalError> {
         let deadline = self.negotiation_deadline(peer);
-        let result = self.engine.negotiate(peer, operation, deadline).await;
+        let result = self
+            .engine
+            .start_negotiation(peer, operation, deadline)
+            .await;
+        if self.engine.negotiation_pending(peer) {
+            self.pending_signal_deadlines
+                .entry(peer)
+                .or_insert(deadline);
+        }
         if result.is_err() && !self.engine.is_paired(peer) {
             self.handle_peer_transport_loss(peer, "negotiation failed")
                 .await?;
         }
         Ok(result)
+    }
+
+    async fn complete_negotiation(
+        &mut self,
+        completion: NegotiationCompletion,
+    ) -> Result<(), FatalError> {
+        let peer = completion.peer;
+        if completion.deadline.is_due(Instant::now()) {
+            self.handle_peer_transport_loss(peer, "negotiation deadline expired before adoption")
+                .await?;
+            return Ok(());
+        }
+        match completion.result {
+            Ok(Some(sdp)) => {
+                let (kind, signal) = match completion.reply {
+                    NegotiationReply::Offer => (SignalKind::Offer, json!({"Offer": sdp})),
+                    NegotiationReply::Answer => (SignalKind::Answer, json!({"Answer": sdp})),
+                    NegotiationReply::None => return Ok(()),
+                };
+                self.send_signal(peer, kind, signal).await?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                emit(&Event::Error {
+                    message: format!("negotiation with {peer} failed: {error:#}"),
+                });
+                if !self.engine.is_paired(peer) {
+                    self.handle_peer_transport_loss(peer, "negotiation failed")
+                        .await?;
+                }
+            }
+        }
+        for event in completion.events {
+            self.handle_engine_event(event).await?;
+        }
+        self.drain_pending_signals(peer).await
     }
 
     /// Select the shortest setup, queued-signal, and active session deadline.
@@ -3296,7 +3359,10 @@ impl Orchestrator<'_> {
 
     /// Resume queued signals in arrival order without overtaking pending live ICE.
     async fn drain_pending_signals(&mut self, peer: PlayerId) -> Result<(), FatalError> {
-        while !self.engine.candidate_pending(peer) && self.engine.is_paired(peer) {
+        while !self.engine.candidate_pending(peer)
+            && !self.engine.negotiation_pending(peer)
+            && self.engine.is_paired(peer)
+        {
             let Some(signal) = self
                 .pending_signals
                 .get_mut(&peer)
@@ -3591,7 +3657,9 @@ impl Orchestrator<'_> {
         signal: serde_json::Value,
     ) -> Result<(), FatalError> {
         let kind = SignalKind::classify(&signal);
-        if kind != SignalKind::PairRetry && self.engine.candidate_pending(from) {
+        if kind != SignalKind::PairRetry
+            && (self.engine.candidate_pending(from) || self.engine.negotiation_pending(from))
+        {
             if !try_buffer_planned_signal(&mut self.pending_signals, from, signal) {
                 self.handle_peer_transport_loss(from, "pending peer signal backlog limit exceeded")
                     .await?;
@@ -4070,6 +4138,11 @@ impl Orchestrator<'_> {
     /// Human-readable list of unmet criteria (for the failure diagnostics).
     fn unmet_criteria(&self) -> Vec<String> {
         let mut unmet = Vec::new();
+        for peer in &self.expected_peers {
+            if self.engine.negotiation_pending(*peer) {
+                unmet.push(format!("WebRTC negotiation pending for {peer}"));
+            }
+        }
         if self.reserved_rebuild_pending() {
             unmet.push("awaiting requested P2P rebuild".to_string());
         }

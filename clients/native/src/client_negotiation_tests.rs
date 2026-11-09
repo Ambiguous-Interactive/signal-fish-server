@@ -5,6 +5,33 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 
+pub(super) async fn settle_negotiations(state: &mut Orchestrator<'_>) {
+    while !state.engine.pending_negotiations_empty() {
+        if let Some(completion) = state.engine.next_negotiation().await {
+            state.complete_negotiation(completion).await.unwrap();
+        }
+    }
+}
+
+pub(super) async fn negotiation_result(
+    state: &mut Orchestrator<'_>,
+    peer: PlayerId,
+    operation: Negotiation,
+) -> Result<anyhow::Result<Option<String>>, FatalError> {
+    let result = state.negotiate(peer, operation).await?;
+    if !state.engine.negotiation_pending(peer) {
+        return Ok(result);
+    }
+    let completion = state.engine.next_negotiation().await.unwrap();
+    let failed = completion.result.is_err();
+    state.complete_negotiation(completion).await?;
+    Ok(if failed {
+        Err(anyhow::anyhow!("negotiation failed"))
+    } else {
+        Ok(None)
+    })
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Budget {
     P2p,
@@ -85,6 +112,7 @@ async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
         }
         if step == "live_ice" {
             state.apply_signal(peer, signal).await.unwrap();
+            settle_negotiations(&mut state).await;
             signal = json!({"IceCandidate": ""});
         }
     }
@@ -123,9 +151,12 @@ async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
     let old_generation = 1;
     let mut operation = Box::pin(async {
         if pairing {
-            state.establish_pair(peer, initiate).await
+            state.establish_pair(peer, initiate).await?;
+            settle_negotiations(&mut state).await;
+            Ok::<(), FatalError>(())
         } else {
             state.apply_signal(peer, signal).await?;
+            settle_negotiations(&mut state).await;
             while state.engine.candidate_pending(peer) {
                 let event = state.engine_rx.recv().await.unwrap();
                 if matches!(event, EngineEvent::RemoteCandidateComplete { .. }) {
@@ -406,6 +437,7 @@ async fn stalled_peer_close_does_not_abort_a_coordinated_retry() {
     let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
     state.current_session_generation = Some(SessionGeneration::from_u128(3));
     state.establish_pair(peer, false).await.unwrap();
+    settle_negotiations(&mut state).await;
     let entered = Arc::new(tokio::sync::Notify::new());
     state.engine.negotiation_hold = Some(NegotiationHold {
         step: "close",
@@ -487,46 +519,48 @@ async fn planned_peers_share_the_connection_deadline() {
         });
         tokio::time::pause();
         let started = Instant::now();
-        let mut operation = Box::pin(async {
-            if gated {
-                state.process_p2p_gate(started).await
-            } else {
-                state.handle_server_message(plan).await
-            }
-        });
-        tokio::select! {
-            _ = entered.notified() => {}
-            result = &mut operation => panic!("{step}/{gated}: ended before held negotiation: {result:?}"),
+        if gated {
+            state.process_p2p_gate(started).await.unwrap();
+        } else {
+            state.handle_server_message(plan).await.unwrap();
         }
+        entered.notified().await;
+        assert!(peers
+            .iter()
+            .all(|peer| state.engine.negotiation_pending(*peer)));
         if partial {
             tokio::time::advance(Duration::from_millis(700)).await;
             release.notify_one();
-            tokio::select! {
-                _ = entered.notified() => {}
-                result = &mut operation => panic!("{step}/{gated}: ended before second held negotiation: {result:?}"),
-            }
+            let completion = state.engine.next_negotiation().await.unwrap();
+            state.complete_negotiation(completion).await.unwrap();
+            assert_eq!(
+                peers
+                    .iter()
+                    .filter(|peer| state.engine.negotiation_pending(**peer))
+                    .count(),
+                1
+            );
         }
         tokio::time::advance(Duration::from_millis(if partial { 299 } else { 999 })).await;
         assert!(
-            futures_util::poll!(operation.as_mut()).is_pending(),
+            peers
+                .iter()
+                .any(|peer| state.engine.negotiation_pending(*peer)),
             "{step}/{gated}: no early expiry"
         );
         tokio::time::advance(Duration::from_millis(1)).await;
-        let result = tokio::time::timeout(Duration::from_millis(100), operation.as_mut()).await;
-        assert!(
-            result.is_ok(),
-            "{step}/{gated}: later peers renew the expired plan window"
-        );
-        result.unwrap().unwrap();
-        drop(operation);
+        tokio::time::timeout(Duration::from_millis(100), settle_negotiations(&mut state))
+            .await
+            .expect("later peers cannot renew the plan window");
         assert_eq!(state.expected_peers, BTreeSet::from(peers));
-        for (index, peer) in peers.into_iter().enumerate() {
-            assert_eq!(
-                state.engine.is_paired(peer),
-                partial && index == 0,
-                "{step}/{gated}: expired plan must not retain links"
-            );
-        }
+        assert_eq!(
+            peers
+                .iter()
+                .filter(|peer| state.engine.is_paired(**peer))
+                .count(),
+            usize::from(partial),
+            "{step}/{gated}: only the released peer retains a link"
+        );
         assert!(state.p2p_deadline.unwrap().is_due(Instant::now()));
         assert_eq!(state.process_timers().await.unwrap(), None);
         assert_eq!(state.transport_status, Some(false));
@@ -597,7 +631,11 @@ async fn connected_peer_ice_uses_a_fresh_bounded_operation_window() {
             entered: entered.clone(),
             release: release.clone(),
         });
-        let mut operation = Box::pin(state.negotiate(peer, Negotiation::Candidate(String::new())));
+        let mut operation = Box::pin(negotiation_result(
+            &mut state,
+            peer,
+            Negotiation::Candidate(String::new()),
+        ));
         tokio::select! {
             _ = entered.notified() => {}
             result = &mut operation => panic!("live candidate did not reach the hold: {result:?}"),
@@ -672,6 +710,7 @@ async fn initial_pair_creation_failure_reports_fallback_and_recovers() {
         state.webrtc_plan_seen = true;
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.establish_pair(healthy, false).await.unwrap();
+        settle_negotiations(&mut state).await;
         let mut sibling = if sibling_connected {
             let (remote, opens, _) = super::retry_tests::open_physical_pair_with_events(
                 &mut state,
@@ -694,6 +733,7 @@ async fn initial_pair_creation_failure_reports_fallback_and_recovers() {
             credential: None,
         }];
         state.establish_pair(peer, initiate).await.unwrap();
+        settle_negotiations(&mut state).await;
         assert!(
             !state.engine.is_paired(peer),
             "invalid configuration fails setup"
@@ -1200,5 +1240,302 @@ async fn queued_ice_cannot_renew_the_original_operation_deadline() {
     assert!(!state.pending_signal_deadlines.contains_key(&peer));
     assert!(state.expected_peers.contains(&peer));
     release.notify_waiters();
+    tokio::time::resume();
+}
+
+/// #1517/#853/#889: every suspended setup phase leaves an existing mesh link live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_setup_preserves_exact_mesh_gameplay_relay_and_pong() {
+    for profile in ["reference", "godot"] {
+        for (step, initiate) in [
+            ("route", false),
+            ("route", true),
+            ("build", false),
+            ("build", true),
+            ("reliable", true),
+            ("unreliable", true),
+            ("offer", true),
+            ("offer_local", true),
+            ("remote_offer", false),
+            ("answer", false),
+            ("answer_local", false),
+            ("remote_answer", true),
+            ("buffered_ice", false),
+            ("buffered_ice", true),
+        ] {
+            let context = format!("{profile}/{step}/initiate={initiate}");
+            eprintln!("setup progress cell {context}");
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--disable-mdns",
+                "--channel-profile",
+                profile,
+                "--p2p-retry-count",
+                "1",
+            ]);
+            let me = PlayerId::from_u128(1);
+            let peer = PlayerId::from_u128(2);
+            let healthy = PlayerId::from_u128(3);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+            state.current_session_generation = Some(SessionGeneration::from_u128(4));
+            state.webrtc_plan_seen = true;
+            state.p2p_deadline = Some(Deadline::after(Instant::now(), Duration::from_secs(30)));
+            let (tx, mut healthy_events) = mpsc::unbounded_channel();
+            let mut sibling = Engine::new(cli.engine_settings(), tx).unwrap();
+            super::readiness_tests::connect_owner_peer(
+                &mut state,
+                &mut sibling,
+                &mut healthy_events,
+                healthy,
+                !initiate,
+                None,
+            )
+            .await;
+            let (tx, _remote_events) = mpsc::unbounded_channel();
+            let mut remote = Engine::new(cli.engine_settings(), tx).unwrap();
+            let pairing = matches!(
+                step,
+                "route" | "build" | "reliable" | "unreliable" | "offer" | "offer_local"
+            );
+            let operation = if pairing {
+                Negotiation::Pair {
+                    initiate,
+                    ice_servers: vec![],
+                }
+            } else {
+                let offer = state.engine.pair_with(peer, initiate, &[]).await.unwrap();
+                if step == "buffered_ice" {
+                    state
+                        .engine
+                        .handle_remote_candidate(peer, "")
+                        .await
+                        .unwrap();
+                }
+                if initiate {
+                    remote.pair_with(me, false, &[]).await.unwrap();
+                    Negotiation::Answer(remote.handle_offer(me, offer.unwrap()).await.unwrap())
+                } else {
+                    Negotiation::Offer(remote.pair_with(me, true, &[]).await.unwrap().unwrap())
+                }
+            };
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            state.engine.negotiation_hold = Some(NegotiationHold {
+                step,
+                entered: entered.clone(),
+                release: release.clone(),
+            });
+            state.expected_peers.insert(peer);
+            state.pair_roles.insert(peer, initiate);
+            tokio::time::timeout(Duration::from_millis(100), state.negotiate(peer, operation))
+                .await
+                .unwrap_or_else(|_| panic!("{context}: setup held the session owner"))
+                .unwrap()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .unwrap();
+            assert!(state.engine.negotiation_pending(peer), "{context}");
+            let deadline = state.pending_signal_deadlines[&peer];
+            state
+                .apply_signal(peer, json!({"IceCandidate": ""}))
+                .await
+                .unwrap();
+            assert_eq!(
+                state.pending_signals[&peer].len(),
+                1,
+                "{context}: preserve signal order"
+            );
+            assert_eq!(
+                state.negotiation_deadline(peer),
+                deadline,
+                "{context}: preserve the deadline"
+            );
+            let outbound = format!("exact-owner-gameplay/{context}");
+            let inbound = format!("exact-sibling-gameplay/{context}");
+            state
+                .engine
+                .channel(healthy, RELIABLE_LABEL)
+                .unwrap()
+                .send_text(&outbound)
+                .await
+                .unwrap();
+            sibling
+                .channel(me, RELIABLE_LABEL)
+                .unwrap()
+                .send_text(&inbound)
+                .await
+                .unwrap();
+            let mut received = BTreeSet::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while received.len() != 2 {
+                    tokio::select! {
+                        event = state.engine_rx.recv() => {
+                            let event = event.unwrap();
+                            let exact = match &event {
+                                EngineEvent::ChannelMessage { peer, label, text, .. } => *peer == healthy && label == RELIABLE_LABEL && text == &inbound,
+                                EngineEvent::ChannelBinaryMessage { peer, label, data, .. } => *peer == healthy && label == RELIABLE_LABEL && data == inbound.as_bytes(),
+                                _ => false,
+                            };
+                            state.handle_engine_event(event).await.unwrap();
+                            if exact { assert!(received.insert("owner")); }
+                        }
+                        event = healthy_events.recv() => {
+                            let exact = match event.unwrap() {
+                                EngineEvent::ChannelMessage { peer, label, text, .. } => peer == me && label == RELIABLE_LABEL && text == outbound,
+                                EngineEvent::ChannelBinaryMessage { peer, label, data, .. } => peer == me && label == RELIABLE_LABEL && data == outbound.as_bytes(),
+                                _ => false,
+                            };
+                            if exact { assert!(received.insert("sibling")); }
+                        }
+                    }
+                }
+            }).await.unwrap_or_else(|_| panic!("{context}: independent exact gameplay stalled"));
+            state.pong_deadline = Some(Instant::now() + Duration::from_secs(1));
+            for message in [
+                ServerMessage::Pong,
+                ServerMessage::GameData {
+                    from_player: healthy,
+                    data: json!({"relay_msg": context}),
+                    seq: None,
+                    epoch: None,
+                    class: None,
+                    key: None,
+                },
+            ] {
+                server_ws
+                    .send(Message::Text(
+                        serde_json::to_string(&message).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                let frame = state.ws.next().await;
+                state
+                    .handle_server_input(frame, Instant::now())
+                    .await
+                    .unwrap();
+            }
+            assert!(state.pong_deadline.is_none(), "{context}");
+            assert!(state.relay_received_from.contains(&healthy), "{context}");
+            assert!(
+                state.engine.negotiation_pending(peer),
+                "{context}: progress precedes release"
+            );
+            let old_generation = state.engine.diagnostic_snapshot(peer)["generation"]
+                .as_u64()
+                .unwrap();
+            state.engine.negotiation_hold = None;
+            match step {
+                "build" => state.request_pair_retry(peer, 1).await.unwrap(),
+                "remote_offer" => state.prepare_retained_pair_replacement(peer).await,
+                "remote_answer" => state
+                    .handle_engine_event(EngineEvent::PcState {
+                        peer,
+                        generation: old_generation,
+                        state: RTCPeerConnectionState::Failed,
+                    })
+                    .await
+                    .unwrap(),
+                "offer_local" => state
+                    .handle_peer_transport_loss(peer, "held setup terminal control")
+                    .await
+                    .unwrap(),
+                "buffered_ice" => {
+                    for _ in 1..=MAX_PENDING_SIGNALS_PER_PEER {
+                        state
+                            .apply_signal(peer, json!({"IceCandidate": ""}))
+                            .await
+                            .unwrap();
+                    }
+                    assert!(
+                        !state.engine.is_paired(peer),
+                        "{context}: overflow retires only its peer"
+                    );
+                    assert_eq!(
+                        state.transport_status,
+                        Some(true),
+                        "{context}: healthy sibling stays available"
+                    );
+                }
+                _ => state.remove_pair_obligation(peer).await,
+            }
+            release.notify_waiters();
+            state.establish_pair(peer, initiate).await.unwrap();
+            settle_negotiations(&mut state).await;
+            assert!(
+                !state.engine.is_current_generation(peer, old_generation),
+                "{context}: old completion cannot replace fresh state"
+            );
+            let (mut fresh, _, _) = super::retry_tests::open_physical_pair_with_events(
+                &mut state,
+                &mut server_ws,
+                peer,
+                None,
+            )
+            .await;
+            state.engine.remove_peer(peer).await.unwrap();
+            state.engine.remove_peer(healthy).await.unwrap();
+            sibling.remove_peer(me).await.unwrap();
+            remote.remove_peer(me).await.unwrap();
+            fresh.remove_peer(me).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn setup_completion_cannot_publish_sdp_after_its_captured_deadline() {
+    let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+    let cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        "ws://unused.invalid",
+        "--create-room",
+        "--disable-mdns",
+    ]);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.current_session_generation = Some(SessionGeneration::from_u128(3));
+    let release = Arc::new(tokio::sync::Notify::new());
+    state.engine.negotiation_hold = Some(NegotiationHold {
+        step: "offer_local",
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: release.clone(),
+    });
+    state.establish_pair(peer, true).await.unwrap();
+    let deadline = state.pending_signal_deadlines[&peer];
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !state.engine.setup_worker_finished(peer) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("setup completes while the owner retains its result");
+    tokio::time::pause();
+    tokio::time::advance(deadline.finite().unwrap() - Instant::now()).await;
+    let completion = state.engine.next_negotiation().await.unwrap();
+    assert!(
+        completion.result.as_ref().unwrap().is_some(),
+        "retain a real successful offer"
+    );
+    state.complete_negotiation(completion).await.unwrap();
+    assert!(!state.engine.is_paired(peer));
+    assert!(state.expected_peers.contains(&peer));
+    state.send_message(&ClientMessage::Ping).await.unwrap();
+    loop {
+        let frame = server_ws.next().await.unwrap().unwrap();
+        let message: ClientMessage = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        if matches!(message, ClientMessage::Ping) {
+            break;
+        }
+        assert!(
+            !matches!(message, ClientMessage::Signal { .. }),
+            "late completion must not send SDP"
+        );
+    }
     tokio::time::resume();
 }

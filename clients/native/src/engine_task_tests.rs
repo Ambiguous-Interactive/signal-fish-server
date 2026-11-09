@@ -460,3 +460,109 @@ async fn retired_links_cancel_pending_ice_and_terminal_results_cannot_commit() {
         }
     }
 }
+
+#[tokio::test]
+async fn pending_setup_ownership_is_bounded_and_engine_drop_releases_every_worker() {
+    let (tx, _events) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    engine.negotiation_hold = Some(NegotiationHold {
+        step: "route",
+        entered,
+        release: release.clone(),
+    });
+    let deadline = Deadline::after(tokio::time::Instant::now(), Duration::from_secs(30));
+    for id in 1..=u8::MAX {
+        engine
+            .start_negotiation(
+                PlayerId::from_u128(u128::from(id)),
+                Negotiation::Pair {
+                    initiate: true,
+                    ice_servers: vec![],
+                },
+                deadline,
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(engine.pending_negotiations.len(), usize::from(u8::MAX));
+    engine
+        .start_negotiation(
+            PlayerId::from_u128(1),
+            Negotiation::Pair {
+                initiate: true,
+                ice_servers: vec![],
+            },
+            deadline,
+        )
+        .await
+        .expect("a duplicate pair directive remains idempotent at capacity");
+    assert!(engine
+        .start_negotiation(
+            PlayerId::from_u128(256),
+            Negotiation::Pair {
+                initiate: true,
+                ice_servers: vec![],
+            },
+            deadline
+        )
+        .await
+        .is_err());
+    assert!(!engine.is_paired(PlayerId::from_u128(256)));
+    drop(engine);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while Arc::strong_count(&release) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Engine drop cancels every owned setup task");
+}
+
+#[tokio::test]
+async fn pending_shared_route_lookup_releases_owner_and_cancels_waiting_peers() {
+    let (tx, _events) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
+    let cache = engine.ice_route_sources.clone();
+    let held_cache = cache.lock().await;
+    let departed = PlayerId::from_u128(1);
+    let retained = PlayerId::from_u128(2);
+    let deadline = Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5));
+    for peer in [departed, retained] {
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            engine.start_negotiation(
+                peer,
+                Negotiation::Pair {
+                    initiate: false,
+                    ice_servers: vec![IceServer {
+                        urls: vec!["stun:127.0.0.1:3478".into()],
+                        username: None,
+                        credential: None,
+                    }],
+                },
+                deadline,
+            ),
+        )
+        .await
+        .expect("a busy shared route lookup cannot retain the owner")
+        .unwrap();
+        assert!(engine.negotiation_pending(peer));
+    }
+    engine.remove_peer(departed).await.unwrap();
+    drop(held_cache);
+    let completion = tokio::time::timeout(Duration::from_secs(2), engine.next_negotiation())
+        .await
+        .expect("the remaining route waiter completes after cancellation")
+        .unwrap();
+    assert_eq!(completion.peer, retained);
+    completion.result.unwrap();
+    assert!(!engine.is_paired(departed));
+    assert!(engine.is_paired(retained));
+    assert_eq!(
+        cache.lock().await.as_ref().unwrap().1,
+        vec![IpAddr::from(Ipv4Addr::LOCALHOST)]
+    );
+    engine.remove_peer(retained).await.unwrap();
+}

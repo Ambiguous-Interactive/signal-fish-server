@@ -109,6 +109,7 @@ async fn p2p_gate_does_not_signal_removed_peers() {
         }
         std::fs::write(&release, b"go").unwrap();
         state.process_p2p_gate(Instant::now()).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         assert_eq!(
             state.engine.is_paired(removed),
             rejoined,
@@ -196,6 +197,7 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
         for id in 2..=5 {
             let peer = PlayerId::from_u128(id);
             state.establish_pair(peer, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             let (remote, opens, receiver) =
                 open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
             remote_receivers.push(receiver);
@@ -380,6 +382,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
     state.current_session_generation = Some(SessionGeneration::from_u128(3));
     state.webrtc_plan_seen = true;
     state.establish_pair(peer, true).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
     let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let send_count = sends.clone();
@@ -471,6 +474,7 @@ async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
     let peer = PlayerId::from_u128(2);
     state.current_session_generation = Some(SessionGeneration::from_u128(3));
     state.establish_pair(peer, true).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     let event = tokio::time::timeout(Duration::from_secs(2), state.engine_rx.recv())
         .await
         .unwrap()
@@ -542,6 +546,7 @@ async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure()
         state.transport_status = Some(true);
         if mode == "old-channel-replacement" {
             state.establish_pair(peer, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
         }
         state.exchange_ledger.note_connected(peer);
         state.connected_pairs.insert(peer);
@@ -552,6 +557,7 @@ async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure()
                     state.prepare_retained_pair_replacement(peer).await;
                 }
                 state.establish_pair(peer, true).await.unwrap();
+                super::negotiation_tests::settle_negotiations(&mut state).await;
                 assert!(state.engine.channel(peer, RELIABLE_LABEL).is_some());
                 state.connected_pairs.insert(peer);
                 state.process_deferred_exchange().await.unwrap();
@@ -613,6 +619,7 @@ async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
             state.handle_engine_event(event).await.unwrap();
@@ -772,6 +779,7 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
             state.handle_engine_event(event).await.unwrap();
@@ -868,6 +876,7 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
         .expect("relay control frames remain writable after P2P send failure");
         remote.remove_peer(state.my_id).await.unwrap();
         state.request_pair_retry(peer, 1).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut replacement, opens) =
             open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         state.exchange_released = true;
@@ -971,6 +980,7 @@ pub(super) async fn open_physical_pair_with_events(
     Vec<EngineEvent>,
     tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
 ) {
+    super::negotiation_tests::settle_negotiations(state).await;
     let initiate = state.pair_roles[&peer];
     let mut offer = saved_offer;
     state.send_message(&ClientMessage::Ping).await.unwrap();
@@ -1026,11 +1036,18 @@ pub(super) async fn open_physical_pair_with_events(
         let answer = state.engine.handle_offer(peer, offer).await.unwrap();
         remote.handle_answer(state.my_id, answer).await.unwrap();
     }
+    super::negotiation_tests::settle_negotiations(state).await;
     let mut opens = Vec::new();
     let mut local_opens = BTreeSet::new();
     let mut remote_opens = BTreeSet::new();
+    let required_channels =
+        if state.cli.engine_settings().channel_profile == crate::engine::ChannelProfile::Godot {
+            3
+        } else {
+            2
+        };
     tokio::time::timeout(Duration::from_secs(15), async {
-        while local_opens.len() < 2 || remote_opens.len() < 2 {
+        while local_opens.len() < required_channels || remote_opens.len() < required_channels {
             tokio::select! {
                 event = state.engine_rx.recv() => {
                     let event = event.unwrap();
@@ -1130,8 +1147,10 @@ async fn formed_pair_accepts_remote_retry_after_window_expiry() {
             state.negotiated_version = 3;
             state.webrtc_plan_seen = true;
             state.establish_pair(peer, initiate).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             // A due local attempt must not publish a marker without rebuilding.
             state.request_pair_retry(peer, 1).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             state.send_message(&ClientMessage::Ping).await.unwrap();
             let mut initial_offer = None;
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -1486,6 +1505,7 @@ async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
         state.negotiated_version = 3;
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut initial_remote, opens) =
             open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
@@ -1496,6 +1516,7 @@ async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
         state.prepare_retained_pair_replacement(peer).await;
         state.exchange_released = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut replacement_remote, opens) =
             open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         state
@@ -1595,6 +1616,7 @@ async fn retry_discards_crossing_old_answer_before_fresh_answer() {
     let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
     state.current_session_generation = Some(generation);
     state.establish_pair(peer, true).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     let offer = server_ws
         .next()
         .await
@@ -1618,6 +1640,7 @@ async fn retry_discards_crossing_old_answer_before_fresh_answer() {
         .unwrap();
 
     state.request_pair_retry(peer, 1).await.unwrap();
+    super::negotiation_tests::settle_negotiations(&mut state).await;
     // The marker precedes this offer on the requester's own wire.
     let marker = server_ws
         .next()
@@ -1792,6 +1815,7 @@ async fn exchange_sends_preserve_the_active_success_window() {
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.webrtc_plan_seen = true;
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
             state.handle_engine_event(event).await.unwrap();
@@ -1949,6 +1973,7 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
         let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
         state.current_session_generation = Some(SessionGeneration::from_u128(3));
         state.establish_pair(peer, true).await.unwrap();
+        super::negotiation_tests::settle_negotiations(&mut state).await;
         let (mut remote, opens, mut remote_events) =
             open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
         for event in opens {
@@ -1990,6 +2015,7 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
         } else {
             state.prepare_retained_pair_replacement(peer).await;
             state.establish_pair(peer, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
         }
         remote.remove_peer(state.my_id).await.unwrap();
         assert!(state.exchange_ledger.unmet_criteria().is_empty());
@@ -2066,6 +2092,7 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
                 let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
                 state.current_session_generation = Some(SessionGeneration::from_u128(3));
                 state.establish_pair(peer, initiate).await.unwrap();
+                super::negotiation_tests::settle_negotiations(&mut state).await;
                 let (mut remote, opens, _remote_events) =
                     open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
                 let late_label = if early_label == RELIABLE_LABEL {
@@ -2281,6 +2308,7 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
             let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
             state.current_session_generation = Some(SessionGeneration::from_u128(3));
             state.establish_pair(peer, initiate).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             let (mut remote, opens, mut remote_events) =
                 open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
             for event in opens {
@@ -2415,6 +2443,7 @@ async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
             state.exchange_released = true;
             state.unreliable_exchange_released = true;
             state.establish_pair(sibling, true).await.unwrap();
+            super::negotiation_tests::settle_negotiations(&mut state).await;
             let (mut remote, opens, mut remote_events) =
                 open_physical_pair_with_events(&mut state, &mut server_ws, sibling, None).await;
             for event in opens {

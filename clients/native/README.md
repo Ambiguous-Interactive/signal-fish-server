@@ -115,6 +115,20 @@ remote networks, and the historical Godot 4.3 loss remain open in
 [server #1240](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1240)
 and [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
 
+The CLI runs pending pair creation and SDP work outside its session loop.
+Each peer has one ordered setup operation. Signals wait behind it under the
+original deadline and the existing 32-per-peer and 128-total signal limits.
+The Engine owns at most 255 setup tasks and 128 queued completions.
+Each task retains at most 256 setup callbacks. Gameplay receipts, ICE, and terminal
+callbacks continue through the session loop. Setup callbacks resume in arrival order.
+Departure, replacement, retry, and Engine drop cancel owned setup work.
+Only the current physical generation can return peer state or publish SDP, and
+late completion cannot extend the captured negotiation or run deadline.
+A pending diagnostic snapshot names the generation and queued callback count;
+missing channel samples do not mean zero activity.
+The public awaited `pair_with`, `handle_offer`, and `handle_answer` methods keep
+their existing behavior for Engine consumers.
+
 The CLI checks channel readiness without waiting for a busy peer's RTC core on
 its main event loop. Ready checks complete inline. A pending check runs in one
 task owned by the physical link, so other peers and relay input can continue.
