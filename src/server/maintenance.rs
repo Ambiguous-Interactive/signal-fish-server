@@ -8,7 +8,17 @@ use std::sync::Arc;
 use super::room_service::ROOM_JOIN_LOCK_TTL;
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
+/// Limit one candidate's wait before maintenance mutates durable or connection state.
+const MAINTENANCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl EnhancedGameServer {
+    /// Abandon only admission waits; an admitted mutation retains its normal completion rules.
+    async fn admit_maintenance<T>(&self, admission: impl Future<Output = T>) -> Option<T> {
+        tokio::time::timeout(MAINTENANCE_ADMISSION_WAIT, admission)
+            .await
+            .ok()
+    }
+
     /// Reclaim unpublished rooms after a failed or interrupted creation.
     /// The code lock excludes a creator still preparing its first response;
     /// storage rechecks publication before deleting a stale scan result.
@@ -93,10 +103,12 @@ impl EnhancedGameServer {
         room_id: RoomId,
         player_id: PlayerId,
     ) -> bool {
-        let guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
+        let Some(guard) = self
+            .admit_maintenance(self.message_coordinator.lock_room_event_mutation(&room_id))
+            .await
+        else {
+            return false;
+        };
         if self
             .connection_manager
             .current_relay_stamp_in_room(&player_id, &room_id)
@@ -365,10 +377,12 @@ impl EnhancedGameServer {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return false;
         };
-        let guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
+        let Some(guard) = self
+            .admit_maintenance(self.message_coordinator.lock_room_event_mutation(&room_id))
+            .await
+        else {
+            return false;
+        };
         if self
             .connection_manager
             .current_relay_stamp_in_room(&player_id, &room_id)
@@ -453,7 +467,12 @@ impl EnhancedGameServer {
         let Some(lifecycle) = self.connection_manager.client_lifecycle(&player_id) else {
             return false;
         };
-        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let Some(_lifecycle_guard) = self
+            .admit_maintenance(Arc::clone(&lifecycle).lock_owned())
+            .await
+        else {
+            return false;
+        };
         let effective_player_id = lifecycle.player_id();
         if effective_player_id != player_id
             || !self
@@ -903,3 +922,7 @@ impl EnhancedGameServer {
         }
     }
 }
+
+#[cfg(all(test, signal_fish_repository_tests))]
+#[path = "maintenance_admission_tests.rs"]
+mod admission_tests;

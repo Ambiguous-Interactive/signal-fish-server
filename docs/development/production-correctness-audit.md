@@ -15233,3 +15233,43 @@ peer networking. The Godot addon uses Godot WebRTC. These SDKs do not consume
 this wrapper or Engine budget. The Godot native reference probe does use them. Its additional
 qualification remains open in
 [Godot #575](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/575).
+
+### F300–F302 — Bound maintenance admission waits
+
+Issues: #1543, #1544 and #1545. Baseline: `0f846075`.
+Campaigns #826 and #636 remain open.
+
+Durable detach retries and expired reconnect cleanup awaited each candidate's
+room publication gate without a wait bound. Deleted-room cleanup likewise
+awaited each connection's lifecycle gate. One held gate prevented each sweep
+from reaching later available candidates. This could also delay the host-repair
+sweep that follows durable detach retries. Three paused-clock regressions hold
+one gate and retain a second available candidate. Each baseline fails its
+one-second observation deadline. Initial nextest run:
+`513a94a1-bf2c-47e8-bbd6-5926f5881fdc`.
+
+Maintenance now waits at most 100 ms for each of these admission gates. A timed
+out candidate retains its seat, reconnect record or connection assignment for
+the next sweep. Admission timeout never wraps durable writes, authority
+publication or connection teardown. Existing owned transactions retain their
+cancellation guarantees, and shutdown rules remain unchanged. This is a bound
+on each admission wait, not a bound on the complete maintenance pass or custom
+storage operations. Multiple contended candidates can each consume that wait.
+
+Controls verify available-room cleanup, exact retry removal, preservation of
+blocked seats and records, gate release within the wait budget, and a live room
+assignment surviving a later deleted-room scan. The actual cleanup task also
+repairs a failed WebRTC host election while a separate room's durable detach
+gate remains held. Existing claimed reconnect, committed authority successor,
+shutdown drain and cancellation controls retain their contracts. These are
+controlled first-party contention histories; they do not establish the cause
+of the historical capacity timeout in #1352.
+
+The wire schema, reconnect window, close codes, sticky topology and transport
+remain unchanged. SDK qualification is tracked in Rust client
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+These issues remain open until their client controls pass. Current SDK READMEs
+were inspected through the connected GitHub app; server regressions alone do
+not establish SDK qualification or remote-network behavior.
