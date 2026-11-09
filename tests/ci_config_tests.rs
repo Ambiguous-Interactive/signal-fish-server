@@ -19708,7 +19708,7 @@ fn test_verified_downloader_retries_transient_http_and_rejects_corruption() {
 
 /// Keep official release fallback downloads subject to the original byte pin.
 #[test]
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn test_verified_downloader_github_api_fallback_requires_exact_asset_and_hash() {
     use std::os::unix::fs::PermissionsExt;
 

@@ -2393,9 +2393,9 @@ impl Orchestrator<'_> {
 
     /// Find the first queued probe whose peer state is available.
     fn dispatchable_exchange_position(&self) -> Option<usize> {
-        self.deferred_exchange
-            .iter()
-            .position(|send| !self.engine.negotiation_pending(send.peer))
+        self.deferred_exchange.iter().position(|send| {
+            !self.engine.negotiation_pending(send.peer) || self.connected_pairs.contains(&send.peer)
+        })
     }
 
     /// Dispatch one queued probe; pending RTC work belongs to its physical link.
@@ -3284,7 +3284,7 @@ impl Orchestrator<'_> {
                 .entry(peer)
                 .or_insert(deadline);
         }
-        if result.is_err() && !self.engine.is_paired(peer) {
+        if result.is_err() {
             self.handle_peer_transport_loss(peer, "negotiation failed")
                 .await?;
         }
@@ -3316,10 +3316,9 @@ impl Orchestrator<'_> {
                 emit(&Event::Error {
                     message: format!("negotiation with {peer} failed: {error:#}"),
                 });
-                if !self.engine.is_paired(peer) {
-                    self.handle_peer_transport_loss(peer, "negotiation failed")
-                        .await?;
-                }
+                self.handle_peer_transport_loss(peer, "negotiation failed")
+                    .await?;
+                return Ok(());
             }
         }
         for event in completion.events {

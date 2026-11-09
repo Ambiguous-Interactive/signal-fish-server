@@ -1346,6 +1346,19 @@ async fn pending_setup_preserves_exact_mesh_gameplay_relay_and_pong() {
                 .await
                 .unwrap();
             assert!(state.engine.negotiation_pending(peer), "{context}");
+            assert!(!state.connected_pairs.contains(&peer), "{context}");
+            state.queue_exchange(peer, &[RELIABLE_LABEL, UNRELIABLE_LABEL]);
+            assert!(
+                state.dispatchable_exchange_position().is_none(),
+                "{context}: initial setup must hold sends"
+            );
+            state.process_deferred_exchange().await.unwrap();
+            assert_eq!(
+                state.deferred_exchange.len(),
+                2,
+                "{context}: preserve initial queued probes"
+            );
+            state.deferred_exchange.clear();
             let deadline = state.pending_signal_deadlines[&peer];
             state
                 .apply_signal(peer, json!({"IceCandidate": ""}))
@@ -1548,74 +1561,95 @@ async fn setup_completion_cannot_publish_sdp_after_its_captured_deadline() {
 }
 
 #[tokio::test]
-/// Preserve both target probes while another peer dispatches exact queued gameplay.
-async fn pending_setup_retains_exchange_queued_before_and_during_state_transfer() {
-    let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
-    let cli = Cli::parse_from([
-        "native",
-        "--server-url",
-        "ws://unused.invalid",
-        "--create-room",
-        "--exchange",
-        "--disable-mdns",
-    ]);
-    let me = PlayerId::from_u128(1);
-    let peer = PlayerId::from_u128(2);
-    let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
-    state.current_session_generation = Some(SessionGeneration::from_u128(4));
-    let (tx, mut remote_events) = mpsc::unbounded_channel();
-    let mut remote = Engine::new(cli.engine_settings(), tx).unwrap();
-    super::readiness_tests::connect_owner_peer(
-        &mut state,
-        &mut remote,
-        &mut remote_events,
-        peer,
-        true,
-        None,
-    )
-    .await;
-    let healthy = PlayerId::from_u128(3);
-    let (healthy_tx, mut healthy_events) = mpsc::unbounded_channel();
-    let mut sibling = Engine::new(cli.engine_settings(), healthy_tx).unwrap();
-    super::readiness_tests::connect_owner_peer(
-        &mut state,
-        &mut sibling,
-        &mut healthy_events,
-        healthy,
-        false,
-        None,
-    )
-    .await;
-    state.deferred_exchange.clear();
-    state.queue_exchange(peer, &[RELIABLE_LABEL]);
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    state.engine.negotiation_hold = Some(NegotiationHold {
-        step: "candidate_complete",
-        entered: entered.clone(),
-        release: release.clone(),
-    });
-    state
-        .negotiate(peer, Negotiation::Candidate(String::new()))
-        .await
-        .unwrap()
-        .unwrap();
-    entered.notified().await;
-    state.queue_exchange(peer, &[UNRELIABLE_LABEL]);
-    state.queue_exchange(healthy, &[RELIABLE_LABEL]);
-    state.process_deferred_exchange().await.unwrap();
-    assert_eq!(
-        state.deferred_exchange.len(),
-        2,
-        "pending setup must retain both admitted exchange probes"
-    );
-    let mut healthy_received = false;
-    tokio::time::timeout(Duration::from_secs(5), async {
+/// #1532: dispatch exact queued probes before established SDP returns.
+async fn established_setup_dispatches_exchange_queued_before_and_during_state_transfer() {
+    for (profile, initiate) in [
+        (crate::engine::ChannelProfile::Reference, false),
+        (crate::engine::ChannelProfile::Reference, true),
+        (crate::engine::ChannelProfile::Godot, false),
+        (crate::engine::ChannelProfile::Godot, true),
+    ] {
+        let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+        let mut cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            "ws://unused.invalid",
+            "--create-room",
+            "--exchange",
+            "--disable-mdns",
+        ]);
+        cli.channel_profile = profile;
+        let me = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+        state.current_session_generation = Some(SessionGeneration::from_u128(4));
+        let (tx, mut remote_events) = mpsc::unbounded_channel();
+        let mut remote = Engine::new(cli.engine_settings(), tx).unwrap();
+        super::readiness_tests::connect_owner_peer(
+            &mut state,
+            &mut remote,
+            &mut remote_events,
+            peer,
+            initiate,
+            None,
+        )
+        .await;
+        let healthy = PlayerId::from_u128(3);
+        let (healthy_tx, mut healthy_events) = mpsc::unbounded_channel();
+        let mut sibling = Engine::new(cli.engine_settings(), healthy_tx).unwrap();
+        super::readiness_tests::connect_owner_peer(
+            &mut state,
+            &mut sibling,
+            &mut healthy_events,
+            healthy,
+            false,
+            None,
+        )
+        .await;
+        state.deferred_exchange.clear();
+        state.queue_exchange(peer, &[RELIABLE_LABEL]);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        state.engine.negotiation_hold = Some(NegotiationHold {
+            step: if initiate {
+                "remote_answer"
+            } else {
+                "remote_offer"
+            },
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".to_string();
+        let operation = if initiate {
+            Negotiation::Answer(sdp)
+        } else {
+            Negotiation::Offer(sdp)
+        };
+        state.negotiate(peer, operation).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        state.queue_exchange(peer, &[UNRELIABLE_LABEL]);
+        state.queue_exchange(healthy, &[RELIABLE_LABEL]);
+        state.process_deferred_exchange().await.unwrap();
+        state.process_deferred_exchange().await.unwrap();
+        state.process_deferred_exchange().await.unwrap();
+        assert!(
+            state.deferred_exchange.is_empty(),
+            "established links must dispatch while setup is pending"
+        );
+        let mut healthy_received = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
         while !healthy_received || !state.exchange_ledger.has_sent(healthy, RELIABLE_LABEL) {
             tokio::select! {
                 event = state.engine_rx.recv() => state.handle_engine_event(event.unwrap()).await.unwrap(),
                 event = healthy_events.recv() => {
-                    if let EngineEvent::ChannelMessage { label, text, .. } = event.unwrap() {
+                    let (label, text) = match event.unwrap() {
+                        EngineEvent::ChannelMessage { label, text, .. } => (label, text),
+                        EngineEvent::ChannelBinaryMessage { label, data, .. } => (label, String::from_utf8(data).unwrap()),
+                        _ => continue,
+                    };
+                    {
                         assert_eq!(label, RELIABLE_LABEL);
                         assert!(is_exchange_probe(me, &label, &text));
                         assert!(!healthy_received);
@@ -1625,34 +1659,68 @@ async fn pending_setup_retains_exchange_queued_before_and_during_state_transfer(
             }
         }
     }).await.expect("pending setup cannot starve another peer's queued exact exchange");
-    assert!(
-        state.dispatchable_exchange_position().is_none(),
-        "only blocked work remains; the owner must wait for input"
-    );
-    release.notify_one();
-    settle_negotiations(&mut state).await;
-    state.process_deferred_exchange().await.unwrap();
-    state.process_deferred_exchange().await.unwrap();
-    let mut receipts = BTreeSet::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
+        assert!(
+            state.dispatchable_exchange_position().is_none(),
+            "all admitted sends have dispatched"
+        );
+        let mut receipts = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
         while receipts.len() != 2 || ![RELIABLE_LABEL, UNRELIABLE_LABEL].iter().all(|label| state.exchange_ledger.has_sent(peer, label)) {
             tokio::select! {
                 event = state.engine_rx.recv() => state.handle_engine_event(event.unwrap()).await.unwrap(),
                 event = remote_events.recv() => {
-                    if let EngineEvent::ChannelMessage { label, text, .. } = event.unwrap() {
+                    let (label, text) = match event.unwrap() {
+                        EngineEvent::ChannelMessage { label, text, .. } => (label, text),
+                        EngineEvent::ChannelBinaryMessage { label, data, .. } => (label, String::from_utf8(data).unwrap()),
+                        _ => continue,
+                    };
+                    {
                         assert!(is_exchange_probe(me, &label, &text));
                         assert!(receipts.insert(label));
                     }
                 }
             }
         }
-    }).await.expect("both exact probes resume after setup returns peer state");
-    assert!(state.engine.is_paired(peer));
-    state.engine.remove_peer(peer).await.unwrap();
-    remote.remove_peer(me).await.unwrap();
-    state.engine.remove_peer(healthy).await.unwrap();
-    sibling.remove_peer(me).await.unwrap();
-    server_ws.close(None).await.unwrap();
+    }).await.expect("both exact probes arrive before setup returns peer state");
+        let reject_extra_probe = |event| {
+            let (label, text) = match event {
+                EngineEvent::ChannelMessage { label, text, .. } => (label, text),
+                EngineEvent::ChannelBinaryMessage { label, data, .. } => {
+                    (label, String::from_utf8(data).unwrap())
+                }
+                _ => return,
+            };
+            assert!(
+                !is_exchange_probe(me, &label, &text),
+                "a current channel must send its probe only once"
+            );
+        };
+        let quiet = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                tokio::select! {
+                    event = state.engine_rx.recv() => state.handle_engine_event(event.unwrap()).await.unwrap(),
+                    event = remote_events.recv() => reject_extra_probe(event.unwrap()),
+                    event = healthy_events.recv() => reject_extra_probe(event.unwrap()),
+                }
+            }
+        }).await;
+        assert!(
+            quiet.is_err(),
+            "both receipt streams stay quiet before setup release"
+        );
+        assert!(state.engine.negotiation_pending(peer));
+        release.notify_one();
+        settle_negotiations(&mut state).await;
+        assert!(
+            !state.engine.is_paired(peer),
+            "released invalid SDP retires its link"
+        );
+        state.engine.remove_peer(peer).await.unwrap();
+        remote.remove_peer(me).await.unwrap();
+        state.engine.remove_peer(healthy).await.unwrap();
+        sibling.remove_peer(me).await.unwrap();
+        server_ws.close(None).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1766,5 +1834,165 @@ async fn pending_setup_relays_sdp_before_its_exact_gathered_ice_and_marker() {
         );
         state.engine.remove_peer(peer).await.unwrap();
         remote.remove_peer(me).await.unwrap();
+    }
+}
+
+#[tokio::test]
+/// #1531: reject failed SDP promptly while preserving sibling links and recovery.
+async fn rejected_remote_sdp_retires_only_its_link_before_the_setup_deadline() {
+    for initiate in [false, true] {
+        for deferred in [false, true] {
+            for sibling_connected in [false, true] {
+                let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+                let cli = Cli::parse_from([
+                    "native",
+                    "--server-url",
+                    "ws://unused.invalid",
+                    "--create-room",
+                    "--disable-mdns",
+                    "--p2p-timeout-secs",
+                    "30",
+                ]);
+                let peer = PlayerId::from_u128(2);
+                let sibling = PlayerId::from_u128(3);
+                let mut state =
+                    super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+                state.webrtc_plan_seen = true;
+                state.current_session_generation = Some(SessionGeneration::from_u128(4));
+                state.establish_pair(peer, initiate).await.unwrap();
+                settle_negotiations(&mut state).await;
+                state.establish_pair(sibling, false).await.unwrap();
+                settle_negotiations(&mut state).await;
+                let (sibling_tx, mut sibling_events) = mpsc::unbounded_channel();
+                let mut sibling_engine = Engine::new(cli.engine_settings(), sibling_tx).unwrap();
+                if sibling_connected {
+                    super::readiness_tests::connect_owner_peer(
+                        &mut state,
+                        &mut sibling_engine,
+                        &mut sibling_events,
+                        sibling,
+                        false,
+                        None,
+                    )
+                    .await;
+                }
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                if deferred {
+                    state.engine.negotiation_hold = Some(NegotiationHold {
+                        step: if initiate {
+                            "remote_answer"
+                        } else {
+                            "remote_offer"
+                        },
+                        entered: entered.clone(),
+                        release: release.clone(),
+                    });
+                }
+                let sdp = if deferred {
+                    "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+                } else {
+                    ""
+                };
+                let signal = if initiate {
+                    json!({"Answer": sdp})
+                } else {
+                    json!({"Offer": sdp})
+                };
+                state.apply_signal(peer, signal).await.unwrap();
+                if deferred {
+                    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                        .await
+                        .unwrap();
+                    assert!(state.engine.negotiation_pending(peer));
+                    release.notify_one();
+                    settle_negotiations(&mut state).await;
+                }
+                assert!(
+                    !state.engine.is_paired(peer),
+                    "initiate={initiate}, deferred={deferred}: rejected SDP must retire now"
+                );
+                assert!(state.engine.is_paired(sibling));
+                assert!(state.expected_peers.contains(&peer));
+                assert_eq!(state.transport_status, Some(sibling_connected));
+                assert!(!state.p2p_deadline.unwrap().is_due(Instant::now()));
+                state.send_message(&ClientMessage::Ping).await.unwrap();
+                let reports = tokio::time::timeout(Duration::from_secs(1), async {
+                    let mut reports = Vec::new();
+                    loop {
+                        let frame = server_ws.next().await.unwrap().unwrap();
+                        let message: ClientMessage =
+                            serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                        match message {
+                            ClientMessage::TransportStatus { connected, .. } => {
+                                reports.push(connected)
+                            }
+                            ClientMessage::Ping => return reports,
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("failed setup preserves signaling progress");
+                assert_eq!(reports, [sibling_connected]);
+                state.engine.negotiation_hold = None;
+                state.establish_pair(peer, initiate).await.unwrap();
+                settle_negotiations(&mut state).await;
+                let (mut remote, opens, mut recovered_events) =
+                    super::retry_tests::open_physical_pair_with_events(
+                        &mut state,
+                        &mut server_ws,
+                        peer,
+                        None,
+                    )
+                    .await;
+                for event in opens {
+                    state.handle_engine_event(event).await.unwrap();
+                }
+                let outbound = "exact-recovered-owner";
+                let inbound = "exact-recovered-remote";
+                state
+                    .engine
+                    .channel(peer, RELIABLE_LABEL)
+                    .unwrap()
+                    .send_text(outbound)
+                    .await
+                    .unwrap();
+                remote
+                    .channel(state.my_id, RELIABLE_LABEL)
+                    .unwrap()
+                    .send_text(inbound)
+                    .await
+                    .unwrap();
+                let mut received = BTreeSet::new();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while received.len() != 2 {
+                        tokio::select! {
+                            event = state.engine_rx.recv() => {
+                                let event = event.unwrap();
+                                if let EngineEvent::ChannelMessage { peer: from, label, text, .. } = &event {
+                                    assert_eq!(*from, peer);
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert_eq!(text, inbound);
+                                    assert!(received.insert("owner"));
+                                }
+                                state.handle_engine_event(event).await.unwrap();
+                            }
+                            event = recovered_events.recv() => {
+                                if let EngineEvent::ChannelMessage { label, text, .. } = event.unwrap() {
+                                    assert_eq!(label, RELIABLE_LABEL);
+                                    assert_eq!(text, outbound);
+                                    assert!(received.insert("remote"));
+                                }
+                            }
+                        }
+                    }
+                }).await.expect("recovered link carries exact reliable bytes in both directions");
+                state.engine.remove_peer(peer).await.unwrap();
+                state.engine.remove_peer(sibling).await.unwrap();
+                remote.remove_peer(state.my_id).await.unwrap();
+                sibling_engine.remove_peer(state.my_id).await.unwrap();
+            }
+        }
     }
 }

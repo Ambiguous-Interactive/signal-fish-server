@@ -764,6 +764,7 @@ struct PendingNegotiation {
     task: Box<dyn JoinHandle>,
     result: tokio::sync::oneshot::Receiver<NegotiationCompletion>,
     channels: HashMap<String, Arc<dyn DataChannel>>,
+    pc: Option<Arc<dyn PeerConnection>>,
     pair_connected: bool,
     receive_admission: Option<Arc<ChannelReceiveAdmission>>,
     open_labels: BTreeSet<String>,
@@ -963,6 +964,7 @@ impl Engine {
             .get(&peer)
             .map(|link| link.channels.clone())
             .unwrap_or_default();
+        let pc = worker.peers.get(&peer).map(|link| link.pc.clone());
         let channel_sends = worker
             .peers
             .get(&peer)
@@ -1018,6 +1020,7 @@ impl Engine {
                         task,
                         result,
                         channels,
+                        pc,
                         pair_connected,
                         receive_admission,
                         open_labels,
@@ -2124,10 +2127,27 @@ impl Engine {
     /// `transport_snapshot_error=deadline_elapsed`, and names the incomplete
     /// stage and channel (when applicable). Uncollected fields stay absent.
     /// `send_channels` reports outstanding bytes under the same deadline.
+    /// Established links remain queryable during setup; channel registration is
+    /// the pre-operation snapshot. Initial setup without a published connection
+    /// returns local observations with `transport_snapshot_error=negotiation_pending`.
     /// The timeout cancels queries; it does not close or retire the link.
     /// A synchronous driver operation can still delay executor scheduling.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
-        let Some(link) = self.peers.get(&peer) else {
+        let (pc, registered_channels) = if let Some(link) = self.peers.get(&peer) {
+            (&link.pc, &link.channels)
+        } else if let Some(pending) = self.pending_negotiations.get(&peer) {
+            let Some(pc) = pending.pc.as_ref() else {
+                let mut snapshot = self.diagnostic_snapshot(peer);
+                if let Some(fields) = snapshot.as_object_mut() {
+                    fields.insert(
+                        "transport_snapshot_error".into(),
+                        "negotiation_pending".into(),
+                    );
+                }
+                return snapshot;
+            };
+            (pc, &pending.channels)
+        } else {
             return serde_json::Value::Null;
         };
         let mut transport_fields = serde_json::Map::new();
@@ -2136,8 +2156,7 @@ impl Engine {
         let mut stage = "rtc_stats";
         let mut stage_channel = None;
         let sampled = crate::deadline::timeout(Duration::from_millis(250), async {
-            let reports = link
-                .pc
+            let reports = pc
                 .get_stats(std::time::Instant::now(), StatsSelector::None)
                 .await;
             let channels: Vec<_> = reports
@@ -2174,7 +2193,7 @@ impl Engine {
             transport_fields.insert("transport_channels".to_string(), channels.into());
             transport_fields.insert("transports".to_string(), transports.into());
             stage = "sctp";
-            let (sctp, sctp_error) = match link.pc.sctp().await {
+            let (sctp, sctp_error) = match pc.sctp().await {
                 Some(transport) => match transport.association_stats().await {
                     Ok(stats) => (stats, None),
                     Err(error) => (None, Some(error.to_string())),
@@ -2183,7 +2202,7 @@ impl Engine {
             };
             transport_fields.insert("sctp".to_string(), serde_json::json!(sctp));
             transport_fields.insert("sctp_error".to_string(), serde_json::json!(sctp_error));
-            for (label, channel) in &link.channels {
+            for (label, channel) in registered_channels {
                 stage = "channel_properties";
                 stage_channel = Some(label.as_str());
                 let properties = async {
