@@ -72,6 +72,9 @@ pub(crate) struct PayloadQueue {
     pub(crate) sorted: VecDeque<u32>,
     dup_tsn: Vec<u32>,
     n_bytes: usize,
+    // Only marker methods change this sum; ACK, payload release and pop
+    // cancel their marker before retiring the retained payload bytes.
+    n_bytes_retransmit: usize,
     /// Sent fragments of messages eligible for abandonment. A whole message
     /// uses its candidate TSN directly; only fragmented messages need a group.
     message_tsns: FxHashMap<MessageId, MessageTsns>,
@@ -130,6 +133,7 @@ impl PayloadQueue {
         }
     }
 
+    /// Insert unique DATA while tracking retained payload and marked retry bytes.
     pub(crate) fn push_no_check(&mut self, p: ChunkPayloadData) {
         if let Some(id) = Self::abandonment_id(&p) {
             self.message_tsns
@@ -138,6 +142,9 @@ impl PayloadQueue {
                 .or_insert(MessageTsns::One(p.tsn));
         }
         self.n_bytes += p.user_data.len();
+        if p.retransmit {
+            self.n_bytes_retransmit += p.user_data.len();
+        }
         self.insert_sorted(p.tsn);
         self.chunk_map.insert(p.tsn, p);
         //self.length += 1;
@@ -194,6 +201,9 @@ impl PayloadQueue {
         let c = entry.remove();
         self.sorted.pop_front();
         self.n_bytes -= c.user_data.len();
+        if c.retransmit {
+            self.n_bytes_retransmit -= c.user_data.len();
+        }
         Some(c)
     }
 
@@ -281,7 +291,9 @@ impl PayloadQueue {
         s
     }
 
+    /// Cancel retry debt before acknowledging an outstanding chunk once.
     pub(crate) fn acknowledge(&mut self, tsn: u32) -> bool {
+        self.unmark_retransmit(tsn);
         self.chunk_map
             .get_mut(&tsn)
             .is_some_and(ChunkPayloadData::acknowledge)
@@ -289,6 +301,7 @@ impl PayloadQueue {
 
     /// Release each payload byte once, preserving its acknowledgment state.
     pub(crate) fn release_payload(&mut self, tsn: u32) -> usize {
+        self.unmark_retransmit(tsn);
         if let Some(c) = self.chunk_map.get_mut(&tsn) {
             let n = c.user_data.len();
             self.n_bytes -= n;
@@ -305,12 +318,49 @@ impl PayloadQueue {
         self.sorted.back()
     }
 
-    pub(crate) fn mark_all_to_retrasmit(&mut self) {
+    /// Mark every outstanding unmarked chunk and return newly restored receive credit.
+    pub(crate) fn mark_all_to_retrasmit(&mut self) -> usize {
+        let mut restored = 0;
         for c in self.chunk_map.values_mut() {
-            if !c.is_outstanding() {
+            if !c.is_outstanding() || c.retransmit {
                 continue;
             }
             c.retransmit = true;
+            restored += c.user_data.len();
+        }
+        self.n_bytes_retransmit += restored;
+        restored
+    }
+
+    /// Bytes still in flight, excluding DATA waiting for another transmission.
+    pub(crate) fn get_num_bytes_in_flight(&self) -> usize {
+        self.n_bytes - self.n_bytes_retransmit
+    }
+
+    /// Return receive credit only when a live DATA chunk first becomes a retry.
+    pub(crate) fn mark_retransmit(&mut self, tsn: u32) -> usize {
+        if let Some(c) = self.chunk_map.get_mut(&tsn)
+            && c.is_outstanding()
+            && !c.retransmit
+        {
+            c.retransmit = true;
+            self.n_bytes_retransmit += c.user_data.len();
+            c.user_data.len()
+        } else {
+            0
+        }
+    }
+
+    /// Commit a retry once; ACK and abandonment also cancel its marker.
+    pub(crate) fn unmark_retransmit(&mut self, tsn: u32) -> usize {
+        if let Some(c) = self.chunk_map.get_mut(&tsn)
+            && c.retransmit
+        {
+            c.retransmit = false;
+            self.n_bytes_retransmit -= c.user_data.len();
+            c.user_data.len()
+        } else {
+            0
         }
     }
 

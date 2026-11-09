@@ -2230,6 +2230,7 @@ async fn test_concurrent_release_ip_slot_no_underflow() {
     }
 }
 
+/// Keep connection liveness updates independent of a blocked metrics queue read.
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn blocked_queue_scrape_does_not_hold_the_live_connection_registry() {

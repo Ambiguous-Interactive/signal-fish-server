@@ -61,6 +61,7 @@ fn recovery_checks_are_bounded_by_candidates_in_large_windows() -> Result<()> {
 }
 
 #[test]
+/// Deferred retry selection rechecks expiry without retiring unrelated DATA.
 fn deferred_retry_rechecks_expiry_without_retiring_unrelated_messages() -> Result<()> {
     for fast in [false, true] {
         let mut a = timed_test_association();
@@ -85,7 +86,7 @@ fn deferred_retry_rechecks_expiry_without_retiring_unrelated_messages() -> Resul
         } else {
             a.handle_timeout(now + Duration::from_secs(1));
             // New DATA sent after the T3 marking pass is not a retry candidate.
-            a.inflight_queue.get_mut(sent[1].tsn).unwrap().retransmit = false;
+            a.inflight_queue.unmark_retransmit(sent[1].tsn);
         }
         let at = now + Duration::from_millis(1500);
         let packets = if fast {
@@ -103,6 +104,7 @@ fn deferred_retry_rechecks_expiry_without_retiring_unrelated_messages() -> Resul
 }
 
 #[test]
+/// Whole-message retirement cancels earlier fragments selected in the same batch.
 fn later_exhausted_fragment_cancels_previously_selected_retry() -> Result<()> {
     for unordered in [false, true] {
         let mut a = timed_test_association();
@@ -131,6 +133,10 @@ fn later_exhausted_fragment_cancels_previously_selected_retry() -> Result<()> {
                 .map(|c| c.tsn)
                 .collect::<Vec<_>>()
         );
+        // The fast send consumed its marker. Model a later retry decision,
+        // rather than relying on the stale marker from the completed attempt.
+        let restored = a.inflight_queue.mark_retransmit(sent[1].tsn);
+        a.rwnd = a.rwnd.saturating_add(restored as u32);
         a.cwnd = 10 * a.mtu;
         let packets = a.gather_data_packets_to_retransmit(vec![], at);
         assert_eq!(
@@ -346,6 +352,7 @@ fn invalid_pending_message_closes_without_sending_or_rearming_timers() -> Result
 }
 
 #[test]
+/// Current receiver credit bounds retries after abandoned prefixes during shutdown.
 fn shutdown_zero_window_retries_live_data_after_abandoned_prefix() -> Result<()> {
     for shutdown in [false, true] {
         for first_tsn in [100, u32::MAX] {
@@ -369,9 +376,18 @@ fn shutdown_zero_window_retries_live_data_after_abandoned_prefix() -> Result<()>
                     if shutdown {
                         sender.shutdown()?;
                     }
-                    sender.rwnd = credit;
                     let retry_at = sender.timers.get(Timer::T3RTX).unwrap();
                     sender.handle_timeout(retry_at);
+                    // A current receiver-space report overrides returned retry
+                    // credit. This pins an actual closed or small window.
+                    sender.handle_sack(
+                        &ChunkSelectiveAck {
+                            cumulative_tsn_ack: sender.cumulative_tsn_ack_point,
+                            advertised_receiver_window_credit: credit,
+                            ..Default::default()
+                        },
+                        retry_at,
+                    )?;
                     let flush_at = now + Duration::from_millis(1500);
                     let retry = transmitted_data(
                         &sender.gather_data_packets_to_retransmit(vec![], flush_at),

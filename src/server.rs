@@ -894,7 +894,7 @@ pub struct EnhancedGameServer {
     /// instead of re-running the selection ladder (see `session_policy.rs`).
     active_session_plans: Arc<DashMap<RoomId, session_policy::ActiveSessionPlan>>,
     /// Failed departure repairs retained until maintenance revalidates the room.
-    pending_session_replans: DashMap<RoomId, (PlayerId, Uuid)>,
+    pending_session_replans: DashMap<RoomId, session_policy::PendingSessionReplan>,
     /// Durable player removals that failed after the physical connection was
     /// already gone. Maintenance retries these independently of whether
     /// reconnect support is enabled.

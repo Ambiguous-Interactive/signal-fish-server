@@ -2188,3 +2188,55 @@ fn payload_queue_gap_ack_release_drops_storage_before_cumulative_ack() {
         }
     }
 }
+
+#[test]
+/// Retry credit is idempotent through acknowledgment, release, removal and abandonment.
+fn payload_queue_retransmission_credit_tracks_ack_release_and_pop() {
+    for retired in ["ack", "release", "pop", "abandon"] {
+        let mut queue = PayloadQueue::new();
+        queue.push_no_check(ChunkPayloadData {
+            tsn: 1,
+            user_data: Bytes::from_static(b"game"),
+            ..Default::default()
+        });
+        assert_eq!(queue.get_num_bytes_in_flight(), 4);
+        assert_eq!(queue.mark_all_to_retrasmit(), 4);
+        assert_eq!(queue.mark_all_to_retrasmit(), 0);
+        assert_eq!(queue.mark_retransmit(1), 0);
+        assert_eq!(queue.get_num_bytes_in_flight(), 0);
+        assert_eq!(queue.unmark_retransmit(1), 4);
+        assert_eq!(queue.unmark_retransmit(1), 0);
+        assert_eq!(queue.get_num_bytes_in_flight(), 4);
+        assert_eq!(queue.mark_retransmit(1), 4);
+        assert_eq!(queue.get_num_bytes_in_flight(), 0);
+        match retired {
+            "ack" => {
+                assert!(queue.acknowledge(1));
+                assert!(!queue.acknowledge(1));
+            }
+            "release" => {
+                assert_eq!(queue.release_payload(1), 4);
+                assert_eq!(queue.release_payload(1), 0);
+            }
+            "pop" => {
+                assert!(queue.pop(1).is_some());
+            }
+            "abandon" => {
+                queue.unmark_retransmit(1);
+                queue.get_mut(1).unwrap().mark_abandoned();
+                queue.release_payload(1);
+                assert_eq!(queue.mark_all_to_retrasmit(), 0);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            queue.get_num_bytes_in_flight(),
+            if retired == "ack" { 4 } else { 0 }
+        );
+        assert_eq!(queue.unmark_retransmit(1), 0);
+        assert_eq!(
+            queue.get_num_bytes_in_flight(),
+            if retired == "ack" { 4 } else { 0 }
+        );
+    }
+}

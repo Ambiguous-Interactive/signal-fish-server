@@ -621,6 +621,7 @@ impl QueueState {
         (depth, oldest)
     }
 
+    /// Initialize queue lanes, delivery counters and reliable deadline caches.
     fn new(data_capacity: usize, control_capacity: usize) -> Self {
         let now = Instant::now();
         Self {
@@ -653,6 +654,7 @@ impl QueueState {
         }
     }
 
+    /// Refresh the selected lane after a reliable row leaves the resident queue.
     fn refresh_after_pop(&mut self, lane: Lane, class: Option<DeliveryClass>) {
         if class == Some(DeliveryClass::Reliable) {
             match lane {
@@ -817,6 +819,7 @@ impl SharedQueue {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Read resident queue statistics under one state lock.
     fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
         #[cfg(test)]
         if let Some(started) = self
@@ -958,12 +961,14 @@ pub(crate) struct OutboundQueueObserver {
 }
 
 impl OutboundQueueObserver {
+    /// Sample resident rows without owning a producer.
     pub(crate) fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
         self.shared.depth_and_oldest()
     }
 }
 
 impl OutboundSender {
+    /// Capture observation ownership without taking the queue state lock.
     pub(crate) fn observer(&self) -> OutboundQueueObserver {
         OutboundQueueObserver {
             shared: Arc::clone(&self.shared),
@@ -987,11 +992,13 @@ impl OutboundSender {
         self.shared.depth_and_oldest()
     }
 
+    /// Observe the next scrape before it waits for queue state.
     #[cfg(test)]
     pub(crate) fn sample_started_for_test(&self, started: std::sync::mpsc::Sender<()>) {
         *self.shared.sample_started.lock().unwrap() = Some(started);
     }
 
+    /// Keep queue state held while a test drives independent registry work.
     #[cfg(test)]
     pub(crate) fn with_state_locked_for_test(&self, action: impl FnOnce()) {
         let _state = self.shared.state();
@@ -2136,6 +2143,7 @@ impl OutboundReceiver {
         Ok(item)
     }
 
+    /// Select the next frame and refresh only its reliable lane head.
     fn try_pop(&self) -> Result<QueuedOutbound, PopState> {
         let mut state = self.shared.state();
         if state.accountability_failed {
@@ -2199,6 +2207,7 @@ impl OutboundReceiver {
         result
     }
 
+    /// Select a fair batch while preserving exact reliable deadline heads.
     fn try_pop_batched(
         &mut self,
         batch_size: usize,
@@ -2648,6 +2657,7 @@ const fn encoding_from_tag(tag: u8) -> GameDataEncoding {
     }
 }
 
+/// Read the cached reliable deadlines from both data-bearing lanes.
 fn oldest_reliable_enqueued_at(state: &QueueState) -> Option<Instant> {
     state
         .oldest_reliable_legacy
@@ -2656,6 +2666,7 @@ fn oldest_reliable_enqueued_at(state: &QueueState) -> Option<Instant> {
         .min()
 }
 
+/// Find the next reliable timestamp after selecting a lane's oldest reliable row.
 fn oldest_reliable_in_lane<'a>(
     _queue_state: &QueueState,
     lane: impl Iterator<Item = &'a QueuedOutbound>,
@@ -5857,6 +5868,84 @@ mod tests {
             .expect("a simultaneous enqueue must not reset the overdue row's deadline");
         assert_eq!(rx.len(), 2, "the watcher must leave queue ownership intact");
     }
+    /// Compare the cache with all resident lanes through loss, cancellation and generation changes.
+    #[tokio::test(start_paused = true)]
+    async fn reliable_deadline_cache_survives_lossy_mutation_and_receive_cancellation() {
+        fn check(rx: &OutboundReceiver) {
+            let state = rx.shared.state();
+            let expected = [&state.legacy, &state.control, &state.data, &state.barriers]
+                .into_iter()
+                .flatten()
+                .filter(|row| row.class() == Some(DeliveryClass::Reliable))
+                .map(|row| row.enqueued_at)
+                .min();
+            assert_eq!(oldest_reliable_enqueued_at(&state), expected);
+        }
+        for version in [2, 3] {
+            for batched in [false, true] {
+                let (tx, mut rx) = channel(3, 16);
+                tx.set_protocol_version(version);
+                for (seq, class, key) in [
+                    (1, DeliveryClass::Reliable, None),
+                    (2, DeliveryClass::Volatile, None),
+                    (3, DeliveryClass::Latest, Some(10)),
+                ] {
+                    tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
+                    check(&rx);
+                    tokio::time::advance(Duration::from_micros(1)).await;
+                }
+                if version == 3 {
+                    tx.try_enqueue_data(data(4, DeliveryClass::Latest, Some(10), 4))
+                        .unwrap();
+                    check(&rx);
+                    tx.try_enqueue_data(data(5, DeliveryClass::Latest, Some(11), 5))
+                        .unwrap();
+                    check(&rx);
+                    assert_eq!(rx.shared.state().counters.latest.superseded, 1);
+                    assert_eq!(rx.shared.state().counters.volatile.dropped, 1);
+                }
+                while !rx.is_empty() {
+                    check(&rx);
+                    let selected = if batched {
+                        rx.recv_batched(16, Duration::ZERO).await.unwrap().unwrap()
+                    } else {
+                        rx.recv().await.unwrap().unwrap()
+                    };
+                    check(&rx);
+                    // A writer can discard its selected frame without restoring resident debt.
+                    drop(selected);
+                }
+                {
+                    let waiting = async {
+                        if batched {
+                            rx.recv_batched(16, Duration::ZERO).await
+                        } else {
+                            rx.recv().await
+                        }
+                    };
+                    tokio::pin!(waiting);
+                    assert!(futures_util::poll!(&mut waiting).is_pending());
+                }
+                check(&rx);
+                tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+                    .unwrap();
+                tx.try_enqueue_data(data(6, DeliveryClass::Reliable, None, 6))
+                    .unwrap();
+                check(&rx);
+                while !rx.is_empty() {
+                    let selected = if batched {
+                        rx.recv_batched(16, Duration::ZERO).await.unwrap().unwrap()
+                    } else {
+                        rx.recv().await.unwrap().unwrap()
+                    };
+                    drop(selected);
+                    check(&rx);
+                }
+                assert_eq!(rx.oldest_reliable_enqueued_at(), None);
+            }
+        }
+    }
+    /// Bound production deadline-scan work while preserving exact frame order and timestamps.
     #[tokio::test(start_paused = true)]
     async fn live_writer_deadline_lookups_do_linear_work_across_lossy_backlogs() {
         const DEPTH: usize = 1_024;
@@ -5912,6 +6001,7 @@ mod tests {
             }
         }
     }
+    /// Keep receiver EOF independent of metrics observation ownership.
     #[tokio::test]
     async fn queue_observers_do_not_keep_producers_open() {
         let (sender, mut receiver) = channel(4, 4);

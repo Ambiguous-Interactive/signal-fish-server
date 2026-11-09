@@ -156,6 +156,10 @@ echo "==> Verifying the local SCTP stream reset repair"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib reset
 
+echo "==> Verifying SCTP retransmission receive credit"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib retransmission_credit
+
 echo "==> Verifying zero-budget SCTP write rejection"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib zero_fragment_budget

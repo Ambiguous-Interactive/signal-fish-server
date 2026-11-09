@@ -63,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recover native SCTP receive credit after lost gameplay packets (#1536).
+- Release native receive capacity in the correct order when handling gameplay (#1537).
+- Keep blocking native sends within whole-message buffer capacity (#1538).
 - Retry failed P2P host replacement during room maintenance without waiting for another player action (#1539).
 - Keep queue metrics waits from blocking connection liveness updates (#1541).
 - Keep queued native P2P gameplay active during established SDP work, retain bounded transport diagnostics,

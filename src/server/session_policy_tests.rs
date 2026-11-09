@@ -6608,6 +6608,7 @@ fn shared_mesh_projection_preserves_filtered_edges_for_every_roster_shape() {
     }
 }
 
+/// Require a live empty receiver without accepting a disconnected queue.
 fn assert_plan_queue_empty(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
     let message = receiver.try_recv();
     assert!(
@@ -6616,6 +6617,7 @@ fn assert_plan_queue_empty(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
     );
 }
 
+/// Require maintenance to repair failed host changes without new membership actions.
 #[tokio::test(start_paused = true)]
 async fn maintenance_retries_failed_host_departure_without_another_membership_change() {
     for failure in ["read", "publication", "routing"] {
@@ -6706,59 +6708,78 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
     }
 }
 
+/// Retain canceled preparation across room-lock and storage waits, then clear resolved rooms.
 #[tokio::test(start_paused = true)]
 async fn canceled_departure_repair_retries_and_deleted_rooms_release_pending_state() {
-    for deleted in [false, true] {
-        let server = create_server_with_session(host_config()).await;
-        let (host, _host_rx) = register_client(&server).await;
-        let (successor, mut successor_rx) = register_client(&server).await;
-        for player in [host, successor] {
-            server.set_client_protocol(&player, v3_webrtc());
-        }
-        let room = finalized_db_room_with(&server, host, &[(successor, "Next")]).await;
-        publish_room_members(&server, &room, &[successor]).await;
-        server
-            .database
-            .remove_player_from_room(&room, &host)
-            .await
-            .unwrap();
-        server.active_session_plans.insert(
-            room,
-            ActiveSessionPlan {
-                topology: Topology::Host,
-                transport: Transport::WebRtc,
-                host: Some(host),
-            },
-        );
-        let database = server
-            .database
-            .as_any()
-            .downcast_ref::<crate::database::InMemoryDatabase>()
-            .unwrap();
-        let held_storage = database.hold_room_reads_for_test().await;
-        let mut departure = Box::pin(server.handle_session_member_departure(&room, &host));
-        assert!(futures_util::poll!(departure.as_mut()).is_pending());
-        assert_eq!(server.pending_session_replans.len(), 1);
-        drop(departure);
-        drop(held_storage);
-        if deleted {
-            assert!(server.database.delete_room(&room).await.unwrap());
-        }
-        server.retry_pending_session_replans().await;
-        assert!(server.pending_session_replans.is_empty());
-        if deleted {
-            assert!(server.active_session_plan(&room).is_none());
-            assert_plan_queue_empty(&mut successor_rx);
-        } else {
-            let plan = expect_plan(&mut successor_rx, "successor after cancellation").await;
-            assert_eq!(plan.host, Some(successor));
-            assert!(plan.peers.is_empty());
+    for stage in ["room_gate", "storage"] {
+        for deleted in [false, true] {
+            let server = create_server_with_session(host_config()).await;
+            let (host, _host_rx) = register_client(&server).await;
+            let (successor, mut successor_rx) = register_client(&server).await;
+            for player in [host, successor] {
+                server.set_client_protocol(&player, v3_webrtc());
+            }
+            let room = finalized_db_room_with(&server, host, &[(successor, "Next")]).await;
+            publish_room_members(&server, &room, &[successor]).await;
+            server
+                .database
+                .remove_player_from_room(&room, &host)
+                .await
+                .unwrap();
+            server.active_session_plans.insert(
+                room,
+                ActiveSessionPlan {
+                    topology: Topology::Host,
+                    transport: Transport::WebRtc,
+                    host: Some(host),
+                },
+            );
+            let database = server
+                .database
+                .as_any()
+                .downcast_ref::<crate::database::InMemoryDatabase>()
+                .unwrap();
+            let held_room = if stage == "room_gate" {
+                Some(
+                    server
+                        .message_coordinator
+                        .lock_room_event_mutation(&room)
+                        .await,
+                )
+            } else {
+                None
+            };
+            let held_storage = if stage == "storage" {
+                Some(database.hold_room_reads_for_test().await)
+            } else {
+                None
+            };
+            let mut departure = Box::pin(server.handle_session_member_departure(&room, &host));
+            assert!(futures_util::poll!(departure.as_mut()).is_pending());
+            assert_eq!(server.pending_session_replans.len(), 1);
+            drop(departure);
+            drop(held_storage);
+            drop(held_room);
+            if deleted {
+                assert!(server.database.delete_room(&room).await.unwrap());
+            }
             server.retry_pending_session_replans().await;
-            assert_plan_queue_empty(&mut successor_rx);
+            assert!(server.pending_session_replans.is_empty());
+            if deleted {
+                assert!(server.active_session_plan(&room).is_none());
+                assert_plan_queue_empty(&mut successor_rx);
+            } else {
+                let plan = expect_plan(&mut successor_rx, "successor after cancellation").await;
+                assert_eq!(plan.host, Some(successor));
+                assert!(plan.peers.is_empty());
+                server.retry_pending_session_replans().await;
+                assert_plan_queue_empty(&mut successor_rx);
+            }
         }
     }
 }
 
+/// Repair an actual route change while host-plan reservations wait for capacity.
 #[tokio::test(start_paused = true)]
 async fn maintenance_repairs_real_routing_change_during_host_plan_reservation() {
     let server = create_server_with_session(host_config()).await;
@@ -6847,6 +6868,7 @@ async fn maintenance_repairs_real_routing_change_during_host_plan_reservation() 
     );
 }
 
+/// Publish one replacement generation when concurrent repair attempts race.
 #[tokio::test(start_paused = true)]
 async fn concurrent_departure_repairs_publish_one_current_generation() {
     let server = create_server_with_session(host_config()).await;
@@ -6895,4 +6917,200 @@ async fn concurrent_departure_repairs_publish_one_current_generation() {
     assert!(server.pending_session_replans.is_empty());
     assert_plan_queue_empty(&mut host_rx);
     assert_plan_queue_empty(&mut successor_rx);
+}
+
+/// Keep a blocked room from holding maintenance or a healthy room's failover.
+#[tokio::test(start_paused = true)]
+async fn maintenance_host_repairs_bound_waits_and_preserve_other_rooms() {
+    for blocking in ["room_gate", "queue"] {
+        let server = create_server_with_session(host_config()).await;
+        let mut rooms = Vec::new();
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        for _ in 0..2 {
+            let (host, _host_rx) = register_client(&server).await;
+            let (successor, receiver) = register_client(&server).await;
+            for player in [host, successor] {
+                server.set_client_protocol(&player, v3_webrtc());
+            }
+            let room = finalized_db_room_with(&server, host, &[(successor, "Next")]).await;
+            publish_room_members(&server, &room, &[successor]).await;
+            server
+                .database
+                .remove_player_from_room(&room, &host)
+                .await
+                .unwrap();
+            server.active_session_plans.insert(
+                room,
+                ActiveSessionPlan {
+                    topology: Topology::Host,
+                    transport: Transport::WebRtc,
+                    host: Some(host),
+                },
+            );
+            database.fail_get_room_by_id_for_test(true);
+            server.handle_session_member_departure(&room, &host).await;
+            database.fail_get_room_by_id_for_test(false);
+            rooms.push((room, successor, receiver));
+        }
+        let (blocked_room, blocked_successor, mut blocked_receiver) = rooms.remove(0);
+        let (healthy_room, healthy_successor, mut healthy_receiver) = rooms.remove(0);
+        let held_room = if blocking == "room_gate" {
+            Some(
+                server
+                    .message_coordinator
+                    .lock_room_event_mutation(&blocked_room)
+                    .await,
+            )
+        } else {
+            for _ in 0..16 {
+                server
+                    .message_coordinator
+                    .send_to_player(&blocked_successor, Arc::new(ServerMessage::Pong))
+                    .await
+                    .unwrap();
+            }
+            None
+        };
+        let started = tokio::time::Instant::now();
+        let completed = timeout(
+            Duration::from_secs(2),
+            server.retry_pending_session_replans(),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let healthy_message = healthy_receiver.try_recv();
+        let blocked_message = blocked_receiver.try_recv();
+        let blocked_pending = server.pending_session_replans.contains_key(&blocked_room);
+        let healthy_pending = server.pending_session_replans.contains_key(&healthy_room);
+        drop(held_room);
+        completed.expect("one blocked room must not hold the maintenance sweep");
+        assert!(elapsed <= Duration::from_secs(1));
+        if blocking == "room_gate" {
+            assert!(matches!(
+                blocked_message,
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        } else {
+            assert!(matches!(
+                blocked_message.unwrap().as_ref(),
+                ServerMessage::Pong
+            ));
+            for _ in 0..15 {
+                let message = blocked_receiver.try_recv().unwrap();
+                assert!(matches!(message.as_ref(), ServerMessage::Pong));
+            }
+            let plan = expect_plan(
+                &mut blocked_receiver,
+                "owned publication after worker cancellation",
+            )
+            .await;
+            assert_eq!(plan.host, Some(blocked_successor));
+        }
+        assert!(blocked_pending);
+        assert!(!healthy_pending);
+        let message = healthy_message
+            .expect("the independent room must repair while the first gate stays held");
+        assert!(
+            matches!(message.as_ref(), ServerMessage::SessionPlan(plan) if plan.host == Some(healthy_successor))
+        );
+        server.retry_pending_session_replans().await;
+        if blocking == "room_gate" {
+            let plan = expect_plan(&mut blocked_receiver, "released room").await;
+            assert_eq!(plan.host, Some(blocked_successor));
+        }
+        assert!(server.pending_session_replans.is_empty());
+        assert_plan_queue_empty(&mut blocked_receiver);
+        assert_plan_queue_empty(&mut healthy_receiver);
+    }
+}
+
+/// Rotate past blocked worker cohorts without losing any room's repair obligation.
+#[tokio::test(start_paused = true)]
+async fn maintenance_host_repairs_do_not_starve_rooms_beyond_the_worker_limit() {
+    for placement in ["largest_id", "last_map_row"] {
+        let server = create_server_with_session(host_config()).await;
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        let mut rooms = Vec::new();
+        for _ in 0..=super::session_policy::SESSION_REPAIR_CONCURRENCY {
+            let (host, _host_rx) = register_client(&server).await;
+            let (successor, receiver) = register_client(&server).await;
+            for player in [host, successor] {
+                server.set_client_protocol(&player, v3_webrtc());
+            }
+            let room = finalized_db_room_with(&server, host, &[(successor, "Next")]).await;
+            publish_room_members(&server, &room, &[successor]).await;
+            server
+                .database
+                .remove_player_from_room(&room, &host)
+                .await
+                .unwrap();
+            server.active_session_plans.insert(
+                room,
+                ActiveSessionPlan {
+                    topology: Topology::Host,
+                    transport: Transport::WebRtc,
+                    host: Some(host),
+                },
+            );
+            database.fail_get_room_by_id_for_test(true);
+            server.handle_session_member_departure(&room, &host).await;
+            database.fail_get_room_by_id_for_test(false);
+            rooms.push((room, successor, receiver));
+        }
+        rooms.sort_unstable_by_key(|(room, _, _)| *room);
+        let healthy_index = if placement == "largest_id" {
+            rooms.len() - 1
+        } else {
+            let last_room = server
+                .pending_session_replans
+                .iter()
+                .map(|entry| *entry.key())
+                .last()
+                .unwrap();
+            rooms
+                .iter()
+                .position(|(room, _, _)| *room == last_room)
+                .unwrap()
+        };
+        let (healthy_room, healthy_successor, mut healthy_receiver) =
+            rooms.swap_remove(healthy_index);
+        let mut held_rooms = Vec::new();
+        for (room, _, _) in &rooms {
+            held_rooms.push(
+                server
+                    .message_coordinator
+                    .lock_room_event_mutation(room)
+                    .await,
+            );
+        }
+        for _ in 0..3 {
+            server.retry_pending_session_replans().await;
+        }
+        let message = healthy_receiver.try_recv();
+        let pending = server.pending_session_replans.contains_key(&healthy_room);
+        drop(held_rooms);
+        assert!(
+            !pending,
+            "the room beyond the first worker cohort must get a turn"
+        );
+        assert!(
+            matches!(message.unwrap().as_ref(), ServerMessage::SessionPlan(plan) if plan.host == Some(healthy_successor))
+        );
+        server.retry_pending_session_replans().await;
+        for (_, successor, mut receiver) in rooms {
+            let plan = expect_plan(&mut receiver, "released worker cohort").await;
+            assert_eq!(plan.host, Some(successor));
+            assert_plan_queue_empty(&mut receiver);
+        }
+        assert!(server.pending_session_replans.is_empty());
+        assert_plan_queue_empty(&mut healthy_receiver);
+    }
 }

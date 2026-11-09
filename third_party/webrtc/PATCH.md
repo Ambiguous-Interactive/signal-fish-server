@@ -140,3 +140,13 @@ Application traffic statistics still count zero bytes for empty messages.
 Replacement qualification in #912 must retain exact acknowledgment and expiry
 release, DCEP isolation, duplicate/gap acknowledgment, and the public stalled-reactor
 controls for both sender roles, reference/Godot profiles, closure, and fresh links.
+
+Blocking text and binary sends check the whole message against remaining send
+capacity while holding the same core lock used for enqueue. Competing sends
+cannot reuse stale capacity. One oversized packet can enter an empty buffer,
+and empty messages still charge one filler byte. Advisory writable checks stay
+independent of the next packet size. Live paused-reactor controls cover both
+sender roles, exact-fit traffic beside a waiting larger packet, exact reliable
+receipts, and final byte release. Replacement qualification in #912 must retain
+atomic message-aware admission. See
+[#1538](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1538).

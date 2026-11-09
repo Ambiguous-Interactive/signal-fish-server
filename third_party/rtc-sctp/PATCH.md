@@ -576,3 +576,19 @@ Internal stream write refusal and reset suppression still use shutdown state.
 Replacement qualification must retain `drain_readiness` controls for admitted
 DATA, final reads/stops, abrupt closure and packet handoff. The public WebRTC
 wrapper uses abort and does not consume this association predicate.
+
+## Retransmission receive credit
+
+Issue [#1536](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1536)
+repairs send-window accounting after DATA loss. T3 and fast-retry markers return
+receive credit once. Sending a retry consumes it again. SACK refreshes exclude
+marked DATA still waiting for a retry. The queue tracks marked bytes without
+rescanning the send window. Deferred retries respect remaining congestion credit
+across output polls. The single fast-retry packet precedes general retries.
+
+Replacement qualification must retain `retransmission_credit` controls for lost
+DATA, TSN wrap, exact gameplay, repeated SACKs, fast retry, partial resend and
+send-debt retirement. Existing zero/small-window and abandoned-prefix controls
+retain current receiver-space reports and one-probe assertions. This confirms
+a native SCTP accounting defect. It does not establish the historical causes
+of #1319, #1244, #1264 or any remote-network incident.

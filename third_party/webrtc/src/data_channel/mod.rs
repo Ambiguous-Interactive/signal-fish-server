@@ -134,8 +134,8 @@ pub trait DataChannel: crate::sealed::Sealed + Send + Sync + 'static {
     /// Queues the message and returns; it never waits for the peer to acknowledge. When a
     /// send-buffer limit is configured
     /// ([`PeerConnectionBuilder::with_data_channel_send_buffer_limit`]) it first **blocks**
-    /// until the channel's outstanding bytes are below the limit — mirroring
-    /// `tokio::mpsc::Sender::send`. With no limit (the default) it never blocks, like the
+    /// until the whole message fits in the remaining capacity. One message larger than
+    /// the limit can enter an empty buffer. With no limit (the default) it never blocks, like the
     /// browser `RTCDataChannel.send()`. For a non-blocking send that fails fast when the
     /// buffer is full, use [`try_send`](Self::try_send).
     ///
@@ -162,8 +162,8 @@ pub trait DataChannel: crate::sealed::Sealed + Send + Sync + 'static {
     /// Sends text data on this data channel.
     ///
     /// Blocking/non-blocking behaviour and error contract match [`send`](Self::send): with a
-    /// configured send-buffer limit it blocks until the buffer is below the limit, and
-    /// returns [`Error::ErrDataChannelClosed`] on a closing/closed channel. Use
+    /// configured send-buffer limit it blocks until the whole message fits (or the
+    /// buffer is empty for an oversized message), and returns [`Error::ErrDataChannelClosed`] on a closing/closed channel. Use
     /// [`try_send_text`](Self::try_send_text) for the non-blocking variant.
     ///
     /// # Examples
@@ -308,15 +308,47 @@ impl DataChannelImpl {
         }
     }
 
-    async fn wait_for_send_buffer(&self) -> Result<()> {
-        if self.inner.closing.load(Ordering::Acquire) {
-            return Err(Error::ErrDataChannelClosed);
+    /// Hold the enqueue lock only when the whole next message fits the send budget.
+    async fn send_guard(
+        &self,
+        bytes: usize,
+    ) -> Result<futures::lock::MutexGuard<'_, rtc::peer_connection::RTCPeerConnection>> {
+        let limit = self.inner.data_channel_send_buffer_limit;
+        let mut waiting = false;
+        loop {
+            let listener = waiting.then(|| self.inner.data_channel_backpressure.listen());
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(Error::ErrDataChannelClosed);
+            }
+            let mut core = self.inner.core.lock().await;
+            if self.inner.closing.load(Ordering::Acquire) {
+                return Err(Error::ErrDataChannelClosed);
+            }
+            let channel = core
+                .data_channel(self.id)
+                .ok_or(Error::ErrDataChannelClosed)?;
+            if matches!(
+                channel.ready_state(),
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
+                return Err(Error::ErrDataChannelClosed);
+            }
+            let outstanding = channel.outstanding_bytes();
+            // Keep the capacity check and enqueue under one lock. An oversized
+            // packet can enter an empty buffer, as on the nonblocking path.
+            if outstanding == 0 || outstanding.saturating_add(bytes.max(1)) <= limit {
+                return Ok(core);
+            }
+            drop(core);
+            if let Some(notified) = listener {
+                futures::select! {
+                    _ = notified.fuse() => {}
+                    _ = self.inner.runtime.sleep(Duration::from_millis(50)).fuse() => {}
+                }
+            } else {
+                waiting = true;
+            }
         }
-        /* Unbounded sends check channel state under the enqueue lock. */
-        if self.inner.data_channel_send_buffer_limit != usize::MAX {
-            self.writable().await?;
-        }
-        Ok(())
     }
 }
 
@@ -458,13 +490,10 @@ impl DataChannel for DataChannelImpl {
     }
 
     // Contract (blocking behaviour, errors, example) is documented on `DataChannel::send`.
+    /// Queue binary data atomically with its complete message-capacity check.
     async fn send(&self, data: BytesMut) -> Result<()> {
-        self.wait_for_send_buffer().await?;
         {
-            let mut peer_connection = self.inner.core.lock().await;
-            if self.inner.closing.load(Ordering::Acquire) {
-                return Err(Error::ErrDataChannelClosed);
-            }
+            let mut peer_connection = self.send_guard(data.len()).await?;
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
@@ -478,13 +507,10 @@ impl DataChannel for DataChannelImpl {
     }
 
     // Contract is documented on `DataChannel::send_text`.
+    /// Queue text atomically with its complete message-capacity check.
     async fn send_text(&self, text: &str) -> Result<()> {
-        self.wait_for_send_buffer().await?;
         {
-            let mut peer_connection = self.inner.core.lock().await;
-            if self.inner.closing.load(Ordering::Acquire) {
-                return Err(Error::ErrDataChannelClosed);
-            }
+            let mut peer_connection = self.send_guard(text.len()).await?;
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;

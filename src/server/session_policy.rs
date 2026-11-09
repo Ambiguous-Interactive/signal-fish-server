@@ -57,6 +57,19 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 
 pub(crate) use crate::session_admission::{joiner_supports_sticky_plan, ActiveSessionPlan};
 
+/// Maximum concurrent room checks owned by one maintenance sweep.
+pub(super) const SESSION_REPAIR_CONCURRENCY: usize = 8;
+/// Limit maintenance waiting; already enqueued publications keep their owned room guard.
+const SESSION_REPAIR_SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Latest failed or unfinished room repair, ordered by its last attempt.
+#[derive(Clone, Copy)]
+pub(super) struct PendingSessionReplan {
+    departed: PlayerId,
+    revision: uuid::Uuid,
+    attempted_at: tokio::time::Instant,
+}
+
 impl ActiveSessionPlan {
     /// Rehydrate a full [`SessionPlanDecision`] from this sticky decision plus
     /// the room's *current* member list. The ladder is **not** re-run — the
@@ -861,47 +874,82 @@ impl EnhancedGameServer {
         // snapshot stable through host election, stored-plan replacement, and
         // all exact-membership deliveries so a pending join/reconnect cannot
         // wedge the plan on a host that nobody was told about.
+        let revision = uuid::Uuid::new_v4();
+        self.pending_session_replans.insert(
+            *room_id,
+            PendingSessionReplan {
+                departed: *departed,
+                revision,
+                attempted_at: tokio::time::Instant::now(),
+            },
+        );
         let room_event_guard = self
             .message_coordinator
             .lock_room_event_mutation(room_id)
             .await;
 
-        let revision = uuid::Uuid::new_v4();
-        self.pending_session_replans
-            .insert(*room_id, (*departed, revision));
         if self
             .repair_session_after_departure(room_id, departed, room_event_guard)
             .await
         {
             self.pending_session_replans
-                .remove_if(room_id, |_, pending| pending.1 == revision);
+                .remove_if(room_id, |_, pending| pending.revision == revision);
         }
     }
 
-    /// Retry only failed room repairs, with one owned attempt per room per sweep.
+    /// Retry older rooms first, with bounded workers and one shared maintenance wait.
     pub(crate) async fn retry_pending_session_replans(self: &Arc<Self>) {
-        let pending: Vec<_> = self
+        let mut pending: Vec<_> = self
             .pending_session_replans
             .iter()
-            .map(|entry| (*entry.key(), entry.value().0))
+            .map(|entry| (*entry.key(), *entry.value()))
             .collect();
-        for (room, departed) in pending {
+        pending.sort_unstable_by_key(|(room, repair)| (repair.attempted_at, *room));
+        let mut pending = pending.into_iter();
+        let mut workers = tokio::task::JoinSet::new();
+        let mut draining = self.shutdown_drain_receiver();
+        let deadline =
+            crate::deadline::after(tokio::time::Instant::now(), SESSION_REPAIR_SWEEP_BUDGET);
+        loop {
             if self.is_draining() {
-                break;
+                workers.shutdown().await;
+                return;
             }
-            let server = Arc::clone(self);
-            if let Err(error) = tokio::spawn(async move {
-                server
-                    .handle_session_member_departure(&room, &departed)
-                    .await;
-            })
-            .await
-            {
-                tracing::warn!(%room, %error, "Session repair task failed; retaining it for retry");
+            while workers.len() < SESSION_REPAIR_CONCURRENCY {
+                let Some((room, repair)) = pending.next() else {
+                    break;
+                };
+                let server = Arc::clone(self);
+                workers.spawn(async move {
+                    server
+                        .handle_session_member_departure(&room, &repair.departed)
+                        .await;
+                });
+            }
+            if workers.is_empty() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = draining.changed() => {
+                    workers.shutdown().await;
+                    return;
+                }
+                _ = crate::deadline::wait_until(deadline) => {
+                    workers.shutdown().await;
+                    tracing::debug!("Session repairs remain pending after the maintenance wait");
+                    return;
+                }
+                result = workers.join_next() => {
+                    if let Some(Err(error)) = result {
+                        tracing::warn!(%error, "Session repair task failed; retaining it for retry");
+                    }
+                }
             }
         }
     }
 
+    /// Revalidate one departure and report whether its repair obligation is resolved.
     async fn repair_session_after_departure(
         &self,
         room_id: &RoomId,

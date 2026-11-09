@@ -15146,8 +15146,14 @@ paused-clock regression removes the host, fails its snapshot, restores storage,
 and starts the actual cleanup task. The original source emits no replacement
 plan within the one-second observation bound. Failed repairs now retain one
 revision per affected room until maintenance revalidates current membership.
-Successful repairs remove only their own revision. Read failures, publication
-errors, routing refusals, cancellation before publication, deleted rooms, repeated
+Successful repairs remove only their own revision. Maintenance prioritizes older
+attempts, runs at most eight workers and waits at most one second per pass.
+Expired workers are aborted and joined; already enqueued publications retain
+their owned room guards and can finish. Pending records survive cancellation
+while waiting for either the room gate or storage. Controls retain progress in
+independent rooms, preserve an owned publication after worker cancellation, and
+prevent blocked cohorts from starving a room beyond the worker limit.
+Read failures, publication errors, routing refusals, deleted rooms, repeated
 sweeps and concurrent attempts retain the sticky transport and topology.
 A separate real reservation history fills a recipient queue, removes its route
 while the plan waits for capacity, and releases the reservation. The refused
@@ -15187,3 +15193,43 @@ These assessment issues stay open until client controls pass. Their current
 READMEs were inspected through the connected GitHub app. The queue cache and
 observer changes preserve wire payloads, ordering, delivery classes, deadlines
 and negotiation, so none of these SDKs needs a migration for those private changes.
+
+### F297–F299 — Recover native credit and bound whole-message admission
+
+Issues: #1536, #1537 and #1538. Baseline: `034734cc`.
+
+SCTP retained lost DATA against its effective receive window after marking it
+for retransmission. Marking now restores each live chunk's credit once; sending
+the retry consumes it again. SACK refreshes exclude marked bytes that still wait
+for transmission. The queue maintains that sum on mark, unmark, acknowledgment,
+payload release and removal. General retries use remaining congestion capacity;
+the single fast-retry packet goes first. Paired packet histories cover T3 and
+fast recovery, TSN wrap, repeated SACKs, partial retries, actual zero-window
+reports, exact reliable payloads and final send-debt retirement. Existing
+abandonment and shutdown controls retain their deadlines. Replacement-stack
+qualification remains tracked in #912 and the vendored PATCH notes.
+
+The Engine's receive permit released its message slot before its payload-byte
+permit. A waiting callback could acquire the slot while the handled message
+still held its byte credit. Field order now releases payload credit first. A
+synchronous semaphore wake observer fills all 256 slots with 4 KiB messages and
+checks that the first released slot exposes its 4 KiB of payload credit. The
+limits and actual-exhaustion refusals stay unchanged. Live retained-prefix,
+active-consumer and fresh-link controls qualify the surrounding behavior.
+
+Blocking wrapper sends checked only the old outstanding byte count, separately
+from enqueue. Seven outstanding bytes admitted a four-byte message under an
+eight-byte limit. Both text and binary sends now check complete message capacity
+and enqueue under one core guard. Empty messages retain their one-byte filler
+charge; one oversized message can enter an empty buffer. Paused-reactor pairs
+cover both offer roles, exact-fit traffic beside a waiting larger message, exact
+receipts and final byte retirement. Connecting, close and reset controls keep
+their original contracts.
+
+These histories establish the three local defects. They do not establish the
+historical causes of #1319, #1244, #1264 or #1120. The signaling schema does not
+change. The external Rust SDK uses its own transport, .NET uses its own WebRTC
+implementation, and the Godot addon uses Godot WebRTC; none consumes this wrapper
+or Engine budget. The Godot native reference probe does use them. Its additional
+qualification remains open in
+[Godot #575](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/575).

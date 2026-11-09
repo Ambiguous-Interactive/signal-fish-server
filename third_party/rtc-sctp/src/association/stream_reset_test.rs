@@ -5771,3 +5771,238 @@ fn data_ingress_acceptance_includes_full_window_completion_and_stopped_drain() -
     assert_eq!(receiver.streams[&1].get_num_bytes_in_reassembly_queue(), 0);
     Ok(())
 }
+
+// Issue #1536: lost DATA consumes send credit until its retry is marked.
+#[test]
+/// Lost-window recovery preserves exact gameplay across normal and wrapped TSNs.
+fn retransmission_credit_recovers_lost_window_without_waiting_for_each_rto() -> Result<()> {
+    for first_tsn in [100u32, u32::MAX - 1] {
+        let (mut sender, mut receiver) = reset_pair();
+        let now = Instant::now();
+        sender.my_next_tsn = first_tsn;
+        sender.cumulative_tsn_ack_point = first_tsn.wrapping_sub(1);
+        sender.advanced_peer_tsn_ack_point = first_tsn.wrapping_sub(1);
+        receiver.peer_last_tsn = first_tsn.wrapping_sub(1);
+        receiver.ack_mode = AckMode::NoDelay;
+        receiver.max_receive_buffer_size = 4096;
+        sender.cwnd = 4096;
+        sender.rwnd = 4096;
+        let expected: Vec<_> = (0..4).map(|n| Bytes::from(vec![n; 1024])).collect();
+        for payload in &expected {
+            sender
+                .stream(1)?
+                .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+        }
+        let lost = transmitted_data(&sender.gather_outbound(now).0);
+        assert_eq!(lost.len(), 4);
+        assert_eq!(sender.rwnd, 0);
+        assert_eq!(receiver.get_my_receiver_window_credit(), 4096);
+        let retry_at = sender.timers.get(Timer::T3RTX).unwrap();
+        sender.handle_timeout(retry_at);
+        assert_eq!(sender.rwnd, 4096, "T3 must restore every newly marked byte");
+        let retry = sender.gather_outbound(retry_at).0;
+        assert_eq!(
+            transmitted_data(&retry).len(),
+            1,
+            "T3 remains congestion bounded"
+        );
+        assert_eq!(sender.rwnd, 3072, "the retry consumes credit once");
+        assert!(transmitted_data(&sender.gather_outbound(retry_at).0).is_empty());
+        for raw in retry {
+            receiver.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+        }
+        let sacks = receiver.gather_outbound(retry_at).0;
+        for _ in 0..2 {
+            for raw in &sacks {
+                sender.handle_inbound(Packet::unmarshal(raw)?, retry_at)?;
+            }
+            assert_eq!(
+                sender.rwnd, 3072,
+                "repeated SACKs must retain marked credit"
+            );
+        }
+        for _ in 0..8 {
+            for raw in sender.gather_outbound(retry_at).0 {
+                receiver.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+            }
+            for raw in receiver.gather_outbound(retry_at).0 {
+                sender.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+            }
+        }
+        for payload in expected {
+            let actual = receiver
+                .stream(1)?
+                .read_sctp()?
+                .expect("accepted reliable gameplay");
+            assert_eq!(actual.into_payload(payload.len())?.freeze(), payload);
+        }
+        assert!(receiver.stream(1)?.read_sctp()?.is_none());
+        assert!(sender.inflight_queue.is_empty());
+        assert!(sender.pending_queue.is_empty());
+        assert_eq!(sender.stream(1)?.buffered_amount()?, 0);
+        assert_eq!(sender.stats.get_num_t3timeouts(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+/// Repeated marks, SACKs and partial retries preserve exact window credit.
+fn retransmission_credit_fast_marking_and_partial_resend_are_idempotent() -> Result<()> {
+    let mut sender = timed_test_association();
+    let now = Instant::now();
+    sender.cwnd = 4096;
+    sender.rwnd = 4096;
+    sender.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+    for _ in 0..4 {
+        sender.stream(1)?.write(now, &[7; 1024])?;
+    }
+    let original = transmitted_data(&sender.gather_outbound(now).0);
+    assert_eq!(original.len(), 4);
+    for chunk in &original[..3] {
+        sender
+            .inflight_queue
+            .get_mut(chunk.tsn)
+            .unwrap()
+            .miss_indicator = 2;
+    }
+    sender.process_fast_retransmission(sender.cumulative_tsn_ack_point, original[3].tsn, false)?;
+    assert_eq!(sender.rwnd, 3072);
+    assert_eq!(sender.inflight_queue.get_num_bytes_in_flight(), 1024);
+    // Repeated gap reports cannot restore the same marked bytes twice.
+    sender.process_fast_retransmission(sender.cumulative_tsn_ack_point, original[3].tsn, false)?;
+    assert_eq!(sender.rwnd, 3072);
+    let first = sender.gather_outbound_fast_retransmission_packets(vec![], now);
+    assert_eq!(transmitted_data(&first).len(), 1);
+    assert_eq!(sender.rwnd, 2048);
+    assert_eq!(sender.inflight_queue.get_num_bytes_in_flight(), 2048);
+    assert!(
+        transmitted_data(&sender.gather_outbound_fast_retransmission_packets(vec![], now))
+            .is_empty()
+    );
+    // SACK refresh excludes only retries still waiting; a sent retry counts.
+    let sack = ChunkSelectiveAck {
+        cumulative_tsn_ack: sender.cumulative_tsn_ack_point,
+        advertised_receiver_window_credit: 4096,
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        sender.handle_sack(&sack, now)?;
+        assert_eq!(sender.rwnd, 2048);
+    }
+    sender.cwnd = 3072;
+    let tail = sender.gather_data_packets_to_retransmit(vec![], now);
+    assert_eq!(transmitted_data(&tail).len(), 1);
+    assert_eq!(sender.rwnd, 1024);
+    assert_eq!(sender.inflight_queue.get_num_bytes_in_flight(), 3072);
+    assert!(transmitted_data(&sender.gather_data_packets_to_retransmit(vec![], now)).is_empty());
+    // A current zero-space report overrides previously restored credit.
+    let zero = ChunkSelectiveAck {
+        advertised_receiver_window_credit: 0,
+        ..sack
+    };
+    sender.handle_sack(&zero, now)?;
+    assert_eq!(sender.rwnd, 0);
+    assert!(transmitted_data(&sender.gather_data_packets_to_retransmit(vec![], now)).is_empty());
+    Ok(())
+}
+
+#[test]
+/// Paired fast recovery and a later T3 deliver each reliable payload once.
+fn retransmission_credit_fast_wire_history_delivers_exact_gameplay() -> Result<()> {
+    let (mut sender, mut receiver) = reset_pair();
+    let now = Instant::now();
+    sender.cwnd = 8192;
+    sender.rwnd = 8192;
+    receiver.max_receive_buffer_size = 8192;
+    receiver.ack_mode = AckMode::NoDelay;
+    let expected: Vec<_> = (0..7).map(|n| Bytes::from(vec![n; 1024])).collect();
+    for payload in &expected {
+        sender
+            .stream(1)?
+            .write_sctp(now, payload, PayloadProtocolIdentifier::Binary)?;
+    }
+    let original = transmitted_data(&sender.gather_outbound(now).0);
+    assert_eq!(original.len(), 7);
+    // Three newly acknowledged high TSNs mark the missing prefix, before T3.
+    for chunk in &original[3..6] {
+        let raw = sender
+            .create_packet(vec![Box::new(chunk.clone())])
+            .marshal()?;
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        for sack in receiver.gather_outbound(now).0 {
+            sender.handle_inbound(Packet::unmarshal(&sack)?, now)?;
+        }
+    }
+    assert!(sender.will_retransmit_fast);
+    assert_eq!(sender.rwnd, 4096);
+    // The final DATA is also lost and recovers when its T3 expires.
+    for _ in 0..8 {
+        for raw in sender.gather_outbound(now).0 {
+            receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in receiver.gather_outbound(now).0 {
+            sender.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+    }
+    assert_eq!(sender.stats.get_num_fast_retrans(), 1);
+    let at = sender.timers.get(Timer::T3RTX).unwrap();
+    sender.handle_timeout(at);
+    for _ in 0..8 {
+        for raw in sender.gather_outbound(at).0 {
+            receiver.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+        }
+        for raw in receiver.gather_outbound(at).0 {
+            sender.handle_inbound(Packet::unmarshal(&raw)?, at)?;
+        }
+    }
+    for payload in expected {
+        let actual = receiver
+            .stream(1)?
+            .read_sctp()?
+            .expect("exact fast-recovered gameplay");
+        assert_eq!(actual.into_payload(payload.len())?.freeze(), payload);
+    }
+    assert!(receiver.stream(1)?.read_sctp()?.is_none());
+    assert_eq!(sender.stream(1)?.buffered_amount()?, 0);
+    assert!(sender.inflight_queue.is_empty());
+    Ok(())
+}
+
+#[test]
+/// A zero-window probe waits for congestion space before consuming retry credit.
+fn retransmission_credit_zero_window_probe_waits_for_congestion_space() -> Result<()> {
+    let mut sender = timed_test_association();
+    let now = Instant::now();
+    sender.cwnd = 3072;
+    sender.rwnd = 3072;
+    sender.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+    for _ in 0..3 {
+        sender.stream(1)?.write(now, &[7; 1024])?;
+    }
+    let original = transmitted_data(&sender.gather_outbound(now).0);
+    assert_eq!(original.len(), 3);
+    sender.inflight_queue.mark_retransmit(original[0].tsn);
+    sender.t3_retransmit_pending = true;
+    sender.cwnd = 2048;
+    let mut sack = ChunkSelectiveAck {
+        cumulative_tsn_ack: sender.cumulative_tsn_ack_point,
+        advertised_receiver_window_credit: 0,
+        ..Default::default()
+    };
+    sender.handle_sack(&sack, now)?;
+    assert_eq!(sender.inflight_queue.get_num_bytes_in_flight(), 2048);
+    assert!(
+        transmitted_data(&sender.gather_data_packets_to_retransmit(vec![], now)).is_empty(),
+        "a zero-window probe must not exceed a full congestion window"
+    );
+    sack.gap_ack_blocks.push(GapAckBlock { start: 2, end: 2 });
+    sender.handle_sack(&sack, now)?;
+    assert_eq!(sender.inflight_queue.get_num_bytes_in_flight(), 1024);
+    let probe = transmitted_data(&sender.gather_data_packets_to_retransmit(vec![], now));
+    assert_eq!(probe.len(), 1);
+    assert_eq!(probe[0].tsn, original[0].tsn);
+    assert_eq!(probe[0].user_data, original[0].user_data);
+    assert_eq!(sender.rwnd, 0);
+    assert!(transmitted_data(&sender.gather_data_packets_to_retransmit(vec![], now)).is_empty());
+    Ok(())
+}
