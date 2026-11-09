@@ -890,7 +890,8 @@ class Orchestrator {
       onLocalCandidate: (peer, generation, candidateJson) => {
         // Crippled mode never reaches here (the engine drops gathered
         // candidates), so this is always a real trickle-ICE relay.
-        const enqueueCandidate = () =>
+        const enqueueCandidate = () => {
+          if (!this.engine.isCurrentGeneration(peer, generation)) return;
           this.enqueue(
             async () => {
               if (!this.engine.isCurrentGeneration(peer, generation)) return;
@@ -899,6 +900,7 @@ class Orchestrator {
             undefined,
             utf8Bytes(candidateJson),
           );
+        };
         const barrier = this.localDescriptionBarriers.get(peer);
         if (barrier === undefined) {
           enqueueCandidate();

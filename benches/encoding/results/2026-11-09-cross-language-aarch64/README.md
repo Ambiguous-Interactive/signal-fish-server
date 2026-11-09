@@ -10,6 +10,8 @@ Host: shared Linux aarch64 development container. Node.js 24.21.0;
 [the host manifest](environment.json). The host was not exclusive. These
 samples qualify the current locks. They do not establish a performance change
 or server capacity.
+The harness uses a fixed codec order. [Order-effect controls](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1524)
+are required before relative-speed claims.
 
 | Language | Codec | Fixture | Bytes | Encode median µs | Decode median µs |
 | --- | --- | --- | ---: | ---: | ---: |

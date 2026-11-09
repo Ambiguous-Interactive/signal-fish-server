@@ -22,6 +22,7 @@ for (const [
   cancelHeldRetry,
   holdInboundCandidate,
   rejectLocalDescription,
+  backlogCancellation,
 ] of [
   [false, 0, false],
   [true, 0, false],
@@ -35,6 +36,8 @@ for (const [
   [true, 0, false, false, true],
   [false, 0, false, false, false, true],
   [true, 0, false, false, false, true],
+  [false, 0, false, false, false, false, true],
+  [true, 0, false, false, false, false, true],
 ] as const) {
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
@@ -46,6 +49,12 @@ for (const [
   const sent: Array<{ type: string; data: Record<string, unknown> }> = [];
   let socket!: Socket;
   let running: Promise<number> | undefined;
+  let blockReplacementOutput = false;
+  let replacementOutputHeld = false;
+  let releaseReplacementOutput!: () => void;
+  const heldReplacementOutput = new Promise<void>((resolve) => {
+    releaseReplacementOutput = resolve;
+  });
   const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
   class Connection {
     signalingState = 'stable';
@@ -79,7 +88,7 @@ for (const [
     async setLocalDescription(description: { type: string }) {
       this.signalingState = description.type === 'offer' ? 'have-local-offer' : 'stable';
       this.localDescriptionPending = true;
-      for (const sequence of [1, 2]) {
+      for (let sequence = 1; sequence <= (backlogCancellation ? 300 : 2); sequence += 1) {
         this.onicecandidate?.({
           candidate: { toJSON: () => ({ candidate: `local-${this.index}-${sequence}` }) },
         });
@@ -239,7 +248,12 @@ for (const [
       configurable: true,
       value: {
         __sf_emit: (line: string) => {
-          events.push(JSON.parse(line));
+          const event = JSON.parse(line) as Record<string, unknown>;
+          events.push(event);
+          if (blockReplacementOutput && event['event'] === 'session_plan') {
+            replacementOutputHeld = true;
+            return heldReplacementOutput;
+          }
         },
       },
     });
@@ -251,6 +265,50 @@ for (const [
     }
     socket.signal(description('initial'));
     socket.signal({ IceCandidate: 'initial-candidate' });
+    if (backlogCancellation) {
+      await turn();
+      const connection = connections[0];
+      assert(connection?.localDescriptionPending === true, 'hold 300 gathered candidates');
+      blockReplacementOutput = true;
+      socket.deliver('SessionPlan', {
+        generation: peer,
+        topology: 'relay',
+        transport: 'relay',
+        fallback: 'relay',
+        ice_servers: [],
+        peers: [],
+      });
+      await turn();
+      assert(
+        connection.closed && replacementOutputHeld,
+        'retire old SDP while room output is held',
+      );
+      for (let index = 0; index < 250; index += 1) socket.deliver('Pong');
+      socket.deliver('PeerTransportStatus', {
+        peer_id: peer,
+        transport: 'relay',
+        connected: true,
+      });
+      connection.onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'retired' }) } });
+      await turn();
+      assert(
+        !events.some(
+          (event) => event['event'] === 'error' && String(event['message']).includes('backlog'),
+        ),
+        'retired candidate credits must not charge the held room chain or reject unrelated input',
+      );
+      releaseReplacementOutput();
+      await turn();
+      assert(
+        events.some((event) => event['event'] === 'peer_transport_status'),
+        'unrelated current-room input resumes after retired candidate credits are released',
+      );
+      assert(
+        !sent.some((frame) => frame.type === 'Signal'),
+        'the retired description and candidates never reach signaling',
+      );
+      continue;
+    }
     await releaseDescription(0, 0);
     if (rejectLocalDescription) {
       assert(
@@ -410,6 +468,7 @@ for (const [
       'delayed first-attempt SDP and ICE cannot affect the second retry',
     );
   } finally {
+    releaseReplacementOutput();
     socket?.onclose?.();
     for (const connection of connections) {
       connection.releaseLocalDescription();

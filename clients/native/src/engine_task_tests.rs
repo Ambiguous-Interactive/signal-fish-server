@@ -919,8 +919,13 @@ async fn exchange_pending_description_gameplay(
     phase: &str,
 ) {
     for sender_offers in [false, true] {
-        let text = format!("SDP-held-gameplay-{sender_offers}-{physical_generation}-{phase}:")
-            + &"gameplay".repeat(512);
+        let prefix = format!("SDP-held-gameplay-{sender_offers}-{physical_generation}-{phase}:");
+        let text = prefix.clone() + &"gameplay".repeat(512);
+        assert!(text.len() > 4096);
+        let mut exact = text.clone();
+        exact.truncate(4096);
+        assert_eq!(exact.len(), 4096);
+        assert!(exact.starts_with(&prefix));
         let (sender, peer, receiver, receiver_events, sender_id) = if sender_offers {
             (
                 &pair.sender,
@@ -938,39 +943,41 @@ async fn exchange_pending_description_gameplay(
                 pair.receiver_id,
             )
         };
-        sender
-            .send_channel(peer, RELIABLE_LABEL)
-            .await
-            .expect("pending SDP must still select a healthy established gameplay channel")
-            .send_text(&text)
-            .await
-            .unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match receiver_events.recv().await.unwrap() {
-                    event @ EngineEvent::ChannelMessage { .. } => break event,
-                    EngineEvent::ChannelReceiveRejected { .. }
-                    | EngineEvent::ChannelClosed { .. } => {
-                        panic!("held SDP must preserve the live gameplay stream")
+        for text in [exact, text] {
+            sender
+                .send_channel(peer, RELIABLE_LABEL)
+                .await
+                .expect("pending SDP must still select a healthy established gameplay channel")
+                .send_text(&text)
+                .await
+                .unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match receiver_events.recv().await.unwrap() {
+                        event @ EngineEvent::ChannelMessage { .. } => break event,
+                        EngineEvent::ChannelReceiveRejected { .. }
+                        | EngineEvent::ChannelClosed { .. } => {
+                            panic!("held SDP must preserve the live gameplay stream")
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-        })
-        .await
-        .expect("exact reliable gameplay progresses during held SDP");
-        assert!(receiver.is_current_event(&received));
-        let EngineEvent::ChannelMessage {
-            peer,
-            label,
-            text: actual,
-            ..
-        } = received
-        else {
-            unreachable!()
-        };
-        assert_eq!(peer, sender_id);
-        assert_eq!(label, RELIABLE_LABEL);
-        assert_eq!(actual, text);
+            })
+            .await
+            .expect("exact reliable gameplay progresses during held SDP");
+            assert!(receiver.is_current_event(&received));
+            let EngineEvent::ChannelMessage {
+                peer,
+                label,
+                text: actual,
+                ..
+            } = received
+            else {
+                unreachable!()
+            };
+            assert_eq!(peer, sender_id);
+            assert_eq!(label, RELIABLE_LABEL);
+            assert_eq!(actual, text);
+        }
     }
 }
