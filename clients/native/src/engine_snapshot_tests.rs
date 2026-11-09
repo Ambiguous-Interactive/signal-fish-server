@@ -1000,3 +1000,89 @@ async fn pending_peer_retirement_releases_its_capture_on_timeout_or_engine_drop(
         );
     }
 }
+
+#[tokio::test]
+/// #1533: keep bounded live samples distinct from initial setup and absent peers.
+async fn pending_setup_transport_snapshot_keeps_the_live_generation_visible() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        let (mut pair, clock) = unconnected_pair(profile);
+        pair.negotiate().await;
+        let peer = pair.sender_id;
+        let generation = pair.receiver.diagnostic_snapshot(peer)["generation"].clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        pair.receiver.negotiation_hold = Some(NegotiationHold {
+            step: "remote_offer",
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        pair.receiver
+            .start_negotiation(
+                peer,
+                Negotiation::Offer("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".into()),
+                Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        let snapshot = pair.receiver.transport_diagnostic_snapshot(peer).await;
+        assert!(
+            snapshot.is_object(),
+            "pending setup must not look like an absent peer"
+        );
+        assert_eq!(snapshot["generation"], generation);
+        assert_eq!(snapshot["negotiation_pending"], true);
+        assert!(
+            snapshot["transport_channels"].is_array(),
+            "sample the actual live RTC core"
+        );
+        assert!(snapshot["sctp"].is_object());
+        assert!(pair.receiver.negotiation_pending(peer));
+        let payload = vec![b'P'; 64];
+        let partial = snapshot_during_send(
+            &pair.receiver,
+            peer,
+            &clock,
+            pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
+            payload.clone(),
+        )
+        .await;
+        assert_eq!(partial["generation"], generation);
+        assert_eq!(partial["transport_snapshot_error"], "deadline_elapsed");
+        drop(next_exact_receipt(&mut pair.sender_events, &payload, profile).await);
+        pair.receiver.remove_peer(peer).await.unwrap();
+        assert!(pair
+            .receiver
+            .transport_diagnostic_snapshot(peer)
+            .await
+            .is_null());
+
+        pair.receiver.negotiation_hold = Some(NegotiationHold {
+            step: "route",
+            entered: entered.clone(),
+            release,
+        });
+        pair.receiver
+            .start_negotiation(
+                peer,
+                Negotiation::Pair {
+                    initiate: true,
+                    ice_servers: vec![],
+                },
+                Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        let initial = pair.receiver.transport_diagnostic_snapshot(peer).await;
+        assert_eq!(initial["transport_snapshot_error"], "negotiation_pending");
+        assert_eq!(initial["negotiation_pending"], true);
+        assert!(initial.get("sctp").is_none());
+        assert_ne!(initial["generation"], generation);
+        pair.cleanup().await;
+    }
+}

@@ -124,7 +124,9 @@ callbacks continue through the session loop. Setup callbacks resume in arrival o
 Gathered ICE and its completion marker follow the Offer or Answer on the wire.
 Departure, replacement, retry, and Engine drop cancel owned setup work,
 including completed peer state that still awaits adoption. Queued exchange probes
-wait for their peer's setup without holding other peers' sends.
+use established links during setup and wait only for initial link creation.
+Rejected SDP retires its physical link and reports current fallback at once;
+ICE candidate rejection remains recoverable.
 Only the current physical generation can return peer state or publish SDP, and
 late completion cannot extend the captured negotiation or run deadline.
 A pending diagnostic snapshot names the generation and queued callback count;
@@ -162,6 +164,9 @@ old transport has completed its close handshake.
 
 For packet-loss diagnosis, await `Engine::transport_diagnostic_snapshot(peer)`.
 All RTC, SCTP, channel-setting, and send-debt queries share one 250 ms wait budget.
+An established link remains queryable while setup owns it. Channel registration
+uses the pre-operation snapshot. Initial setup with no published connection
+returns local evidence with `transport_snapshot_error=negotiation_pending`.
 If a query times out, the snapshot keeps local callback and receive-budget evidence
 and completed transport samples. `transport_snapshot_error` is `deadline_elapsed`;
 `transport_snapshot_stage` names the unfinished query. A channel query also sets
