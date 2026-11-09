@@ -175,7 +175,7 @@ impl EnhancedGameServer {
                         ErrorCode::GameStartNotReady,
                     ),
                     StartGameOutcome::Forbidden => (
-                        "Only the room's authority player may start the game.".to_string(),
+                        "Only a current member may start; when authority is set, that player must start.".to_string(),
                         ErrorCode::GameStartForbidden,
                     ),
                     StartGameOutcome::AlreadyStarted => (

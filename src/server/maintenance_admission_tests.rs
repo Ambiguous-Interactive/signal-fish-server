@@ -248,3 +248,83 @@ async fn room_cleanup_admission_accepts_gate_release_within_the_wait_budget() {
             .is_empty());
     }
 }
+
+/// #1547: An activity timeout must not keep the maintenance sweep behind a busy lifecycle.
+#[tokio::test(start_paused = true)]
+async fn activity_eviction_allows_maintenance_to_finish_while_unregister_waits() {
+    for blocked_gate in ["lifecycle", "room"] {
+        let server = server().await;
+        let player = PlayerId::from_u128(1);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        server.connect_client(player, sender).await;
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        let room_id = room(&server, player).await;
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+        let lifecycle_guard = if blocked_gate == "lifecycle" {
+            Some(lifecycle.lock().await)
+        } else {
+            None
+        };
+        let room_guard = if blocked_gate == "room" {
+            Some(
+                server
+                    .message_coordinator
+                    .lock_room_event_mutation(&room_id)
+                    .await,
+            )
+        } else {
+            None
+        };
+        tokio::time::advance(server.config.ping_timeout + Duration::from_secs(1)).await;
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let maintenance_server = Arc::clone(&server);
+        let maintenance = tokio::spawn(async move {
+            maintenance_server
+                .cleanup_task_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        });
+        let swept = timeout(Duration::from_millis(500), async {
+            while server
+                .metrics
+                .maintenance_sweeps_total
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(server.connection_manager.has_client(&player));
+        let farewell = receiver.try_recv().unwrap();
+        assert!(matches!(
+            farewell.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::ActivityTimeout),
+                ..
+            }
+        ));
+        drop(lifecycle_guard);
+        drop(room_guard);
+        stop.send(()).unwrap();
+        timeout(Duration::from_secs(1), maintenance)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            swept.is_ok(),
+            "a busy unregister must not stop the maintenance sweep"
+        );
+        timeout(Duration::from_secs(1), async {
+            while server.connection_manager.has_client(&player) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the owned unregister must finish after admission resumes");
+    }
+}

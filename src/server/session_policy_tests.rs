@@ -6620,7 +6620,13 @@ fn assert_plan_queue_empty(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) {
 /// Require maintenance to repair failed host changes without new membership actions.
 #[tokio::test(start_paused = true)]
 async fn maintenance_retries_failed_host_departure_without_another_membership_change() {
-    for failure in ["read", "publication", "routing", "busy_detach"] {
+    for failure in [
+        "read",
+        "publication",
+        "routing",
+        "busy_detach",
+        "busy_activity",
+    ] {
         let server = create_server_with_session(host_config()).await;
         let (host, mut host_rx) = register_client(&server).await;
         let (successor, mut successor_rx) = register_client(&server).await;
@@ -6649,7 +6655,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
         match failure {
-            "read" | "busy_detach" => database.fail_get_room_by_id_for_test(true),
+            "read" | "busy_detach" | "busy_activity" => database.fail_get_room_by_id_for_test(true),
             "publication" => server
                 .message_coordinator
                 .fail_room_transactions_for_test(true),
@@ -6705,6 +6711,21 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         } else {
             None
         };
+        let busy_activity = if failure == "busy_activity" {
+            let (player, receiver) = register_client(&server).await;
+            let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+            tokio::time::advance(server.config.ping_timeout + Duration::from_secs(1)).await;
+            server.record_client_activity(&host);
+            server.record_client_activity(&successor);
+            Some((player, receiver, lifecycle))
+        } else {
+            None
+        };
+        let busy_activity_guard = if let Some((_, _, lifecycle)) = &busy_activity {
+            Some(lifecycle.lock().await)
+        } else {
+            None
+        };
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let maintenance_server = Arc::clone(&server);
         let maintenance = tokio::spawn(async move {
@@ -6740,6 +6761,19 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
                 .contains_key(&(room, player)));
             drop(guard);
             assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+        }
+        if let Some((player, _, _)) = &busy_activity {
+            assert!(server.connection_manager.has_client(player));
+        }
+        drop(busy_activity_guard);
+        if let Some((player, _, _)) = busy_activity {
+            timeout(Duration::from_secs(1), async {
+                while server.connection_manager.has_client(&player) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("activity teardown continues after maintenance");
         }
         server.retry_pending_session_replans().await;
         assert_plan_queue_empty(&mut successor_rx);

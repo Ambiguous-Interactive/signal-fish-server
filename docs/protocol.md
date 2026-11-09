@@ -282,10 +282,10 @@ Preconditions:
 
 1. Every **current** player in the room must be ready (`all_ready`). Otherwise
    the server returns an `Error` with `GAME_START_NOT_READY`.
-2. The sender must be permitted to start: if the room has a designated
-   authority player, only that authority may start; if no authority is set,
-   **any** member may start. An unauthorized sender receives an `Error` with
-   `GAME_START_FORBIDDEN`.
+2. The sender must belong to the current effective player roster. If the room
+   has a designated authority player, only that authority may start; if no
+   authority is set, **any** current member may start. A sender outside this
+   roster or authority rule receives an `Error` with `GAME_START_FORBIDDEN`.
 
 On success the server transitions the room to `finalized` and broadcasts the
 unchanged [`GameStarting`](#gamestarting) (legacy peer metadata) to every

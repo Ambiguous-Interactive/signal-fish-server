@@ -312,3 +312,89 @@ async fn lobby_entry_borrows_ready_members_and_sorts_the_exact_intersection() {
         assert_eq!(coordinator.ready_players.read().await[&room.id], ready, "{name}");
     }
 }
+
+/// #1549: A delayed start must still belong to the exact effective starting roster.
+#[tokio::test]
+async fn start_game_rechecks_requester_membership_after_room_gate() {
+    for retained_seat in [false, true] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let member = PlayerId::from_u128(1);
+        let departed = PlayerId::from_u128(2);
+        let room = database
+            .create_room(
+                "stale-start".into(),
+                None,
+                4,
+                false,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        database
+            .add_player_to_room(&room.id, player_fixture(departed, "departed", false, None))
+            .await
+            .unwrap();
+        let mut receivers = Vec::new();
+        for player in [member, departed] {
+            let (sender, receiver) = mpsc::channel(8);
+            messages
+                .register_local_client(
+                    player,
+                    Some(room.id),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+            receivers.push(receiver);
+        }
+        let coordinator =
+            InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+        coordinator
+            .ready_players
+            .write()
+            .await
+            .insert(room.id, HashSet::from([member]));
+        let guard = messages.lock_room_event_mutation(&room.id).await;
+        let mut request = Box::pin(coordinator.handle_start_game(&room.id, &departed));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        messages.unregister_local_client(&departed).await.unwrap();
+        if !retained_seat {
+            database
+                .remove_player_from_room(&room.id, &departed)
+                .await
+                .unwrap();
+        }
+        let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        drop(guard);
+        assert!(matches!(
+            request.await.unwrap(),
+            StartGameOutcome::Forbidden
+        ));
+        let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(after.lobby_state, before.lobby_state);
+        assert_eq!(after.last_activity, before.last_activity);
+        assert_eq!(
+            coordinator.current_ready_players(&room.id).await,
+            vec![member]
+        );
+        let member_pending = receivers[0].try_recv();
+        let departed_pending = receivers[1].try_recv();
+        assert!(matches!(member_pending, Err(mpsc::error::TryRecvError::Empty)));
+        assert!(matches!(departed_pending, Err(mpsc::error::TryRecvError::Disconnected)));
+        database
+            .remove_player_from_room(&room.id, &departed)
+            .await
+            .unwrap();
+        assert!(matches!(
+            coordinator
+                .handle_start_game(&room.id, &member)
+                .await
+                .unwrap(),
+            StartGameOutcome::Started(_)
+        ));
+    }
+}

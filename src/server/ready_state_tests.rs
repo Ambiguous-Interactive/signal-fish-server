@@ -2787,3 +2787,66 @@ fn snapshot_readiness_preserves_identity_metadata_and_ready_order() {
         }
     }
 }
+
+/// #1549: Classify a stale assigned start as a member refusal, preserving the live lobby.
+#[tokio::test]
+async fn start_game_with_a_missing_assigned_seat_reports_forbidden() {
+    let server = create_test_server().await;
+    let (member, mut member_messages) = register_client(&server).await;
+    let (departed, mut departed_messages) = register_client(&server).await;
+    let room = server
+        .database
+        .create_room(
+            "stale-start-wire".into(),
+            None,
+            4,
+            false,
+            member,
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    server
+        .database
+        .add_player_to_room(&room.id, player_info(departed, "Departed"))
+        .await
+        .unwrap();
+    for player in [member, departed] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room.id)
+            .await;
+    }
+    server.handle_player_ready(&member).await;
+    drain_pending(&mut member_messages);
+    drain_pending(&mut departed_messages);
+    server
+        .database
+        .remove_player_from_room(&room.id, &departed)
+        .await
+        .unwrap();
+    server.handle_start_game(&departed).await;
+    let refusal = recv(&mut departed_messages).await;
+    assert!(matches!(refusal.as_ref(), ServerMessage::Error {
+        error_code: Some(ErrorCode::GameStartForbidden), message,
+    } if message.contains("current member")));
+    let pending = member_messages.try_recv();
+    assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+    assert_ne!(
+        server
+            .database
+            .get_room_lobby_state(&room.id)
+            .await
+            .unwrap(),
+        Some(LobbyState::Finalized)
+    );
+    assert_eq!(
+        server
+            .room_coordinator
+            .current_ready_players(&room.id)
+            .await,
+        vec![member]
+    );
+}

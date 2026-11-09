@@ -19557,7 +19557,7 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         "--max-time 60",
         "--proto \"=${protocol}\"",
         "--tlsv1.2",
-        "sha256sum --check",
+        "sha256sum -c",
     ] {
         assert!(
             downloader.contains(required),
@@ -19749,6 +19749,21 @@ pathlib.Path(args[args.index('--output') + 1]).write_bytes(payload)
     );
     fs::set_permissions(&curl, fs::Permissions::from_mode(0o755))
         .expect("make fixture curl executable");
+    let checksum = bin.join("sha256sum");
+    write_file(
+        &checksum,
+        r#"#!/usr/bin/env python3
+import hashlib, pathlib, sys
+if sys.argv[1:] != ['-c']:
+    sys.exit(64)
+for line in sys.stdin:
+    expected, name = line.rstrip('\n').split('  ', 1)
+    if hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() != expected:
+        sys.exit(1)
+"#,
+    );
+    fs::set_permissions(&checksum, fs::Permissions::from_mode(0o755))
+        .expect("make short-option checksum fixture executable");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     for (mode, url, expected_success, expected_requests) in [
         (

@@ -15273,3 +15273,54 @@ and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-cli
 These issues remain open until their client controls pass. Current SDK READMEs
 were inspected through the connected GitHub app; server regressions alone do
 not establish SDK qualification or remote-network behavior.
+
+### F303–F305 — Keep delayed room operations on current membership
+
+Issues: #1547, #1548 and #1549. Baseline: `e242b66d`.
+Campaign #826 remains open.
+
+The activity reaper awaited each expired connection's owned unregister task.
+A held lifecycle or room gate stopped the maintenance pass before pending P2P
+host repairs. Maintenance now observes that teardown for at most 100 ms. The
+owned unregister keeps running after this wait or caller cancellation. The
+existing close pin prevents a later sweep from starting another eviction for
+that connection. This bounds one teardown observation, not a complete sweep or
+custom storage call. A paused-clock control retains the busy connection,
+observes its ActivityTimeout farewell, completes the sweep, then releases each
+gate and requires the original unregister to finish. The actual maintenance task
+also repairs a pending WebRTC host election while unrelated activity teardown
+waits on a held lifecycle.
+
+A delayed authority request used durable membership alone. An unrouted retained
+seat could claim or release authority after waiting for the room gate. The
+coordinator now checks its live route before applying the storage decision.
+Refusal preserves the authority, activity timestamp and replay history. A later
+live request still commits one response and one live/replay authority event.
+Coordinators without routing snapshots retain their durable-membership fallback.
+The room gate orders ordinary membership changes; this check does not prove a
+whole-program atomic relation between routing and custom storage.
+
+Game-start preparation filtered the effective starting roster without checking
+its requester. At the public coordinator boundary, a request could start the
+survivors after its own route and row were removed during the wait. A retained
+unrouted row instead reached a storage snapshot mismatch. The same effective
+roster now refuses both cases with the existing Forbidden result. Refusal keeps
+lobby state and readiness; a surviving member can still start. The controlled
+row-removal history does not prove that a normal socket can race a voluntary
+leave while holding its lifecycle gate.
+
+All three initial regressions fail on the baseline in nextest run
+`192418fc-626f-456f-a554-ba38d28a600c`. Focused controls cover committed authority
+publication after cancellation, successful current-member starts, stale
+activity snapshots, existing close ownership, shutdown drain and busy-gate
+teardown. These findings do not establish the cause of historical #1352.
+
+Wire schemas, close reasons and reconnect windows stay unchanged. Existing
+AuthorityDenied and GameStartForbidden outcomes carry the refusals. Active SDK
+qualification was extended in Rust client
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Their current README files were inspected through the connected GitHub app.
+The assessment issues remain open until their client controls pass; these server
+controls do not establish SDK or remote-network qualification.

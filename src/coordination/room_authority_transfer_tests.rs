@@ -414,3 +414,111 @@ async fn failed_authority_response_still_publishes_committed_claim_and_release()
         assert_eq!(roles, vec![None, Some(peer), None]);
     }
 }
+
+/// #1548: A retained reconnect seat cannot act after teardown removes its route.
+#[tokio::test]
+async fn authority_request_rechecks_live_route_after_room_gate() {
+    for become_authority in [false, true] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let replay = Arc::new(crate::reconnection::ReconnectionManager::new(
+            30,
+            16,
+            Arc::new(crate::metrics::ServerMetrics::new()),
+        ));
+        let member = PlayerId::from_u128(1);
+        let room = database
+            .create_room(
+                "stale-authority".into(),
+                None,
+                4,
+                true,
+                member,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        replay
+            .register_disconnection(PlayerId::from_u128(3), room.id, false, None, 0)
+            .await;
+        if become_authority {
+            database
+                .request_room_authority(&room.id, &member, false)
+                .await
+                .unwrap();
+        }
+        let (sender, mut receiver) = mpsc::channel(8);
+        messages
+            .register_local_client(
+                member,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        let coordinator = InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            database.clone(),
+            Some(replay.clone()),
+        );
+        let guard = messages.lock_room_event_mutation(&room.id).await;
+        let mut request =
+            Box::pin(coordinator.handle_authority_request(&room.id, &member, become_authority));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        messages.unregister_local_client(&member).await.unwrap();
+        let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        drop(guard);
+        assert_eq!(
+            request.await.unwrap(),
+            AuthorityOutcome::Denied(AuthorityDenial::NotAMember)
+        );
+        let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(after.authority_player, before.authority_player);
+        assert_eq!(after.last_activity, before.last_activity);
+        let pending = receiver.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Disconnected)));
+        assert!(replay
+            .get_missed_events(&room.id, 0)
+            .await
+            .events
+            .is_empty());
+
+        let (sender, mut receiver) = mpsc::channel(8);
+        messages
+            .register_local_client(
+                member,
+                Some(room.id),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .handle_authority_request(&room.id, &member, become_authority)
+                .await
+                .unwrap(),
+            AuthorityOutcome::Granted
+        );
+        let response = receiver.try_recv().unwrap();
+        assert!(matches!(
+            response.as_ref(),
+            ServerMessage::AuthorityResponse { granted: true, .. }
+        ));
+        let changed = receiver.try_recv().unwrap();
+        assert!(
+            matches!(changed.as_ref(), ServerMessage::AuthorityChanged { authority_player, .. } if *authority_player == become_authority.then_some(member))
+        );
+        assert_eq!(replay.get_missed_events(&room.id, 0).await.events.len(), 1);
+        assert_eq!(
+            database
+                .get_room_by_id(&room.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .authority_player,
+            become_authority.then_some(member)
+        );
+    }
+}
