@@ -15228,8 +15228,8 @@ their original contracts.
 
 These histories establish the three local defects. They do not establish the
 historical causes of #1319, #1244, #1264 or #1120. The signaling schema does not
-change. The external Rust SDK uses its own transport, .NET uses its own WebRTC
-implementation, and the Godot addon uses Godot WebRTC; none consumes this wrapper
-or Engine budget. The Godot native reference probe does use them. Its additional
+change. The external Rust and .NET SDKs provide signaling and relay; games own
+peer networking. The Godot addon uses Godot WebRTC. These SDKs do not consume
+this wrapper or Engine budget. The Godot native reference probe does use them. Its additional
 qualification remains open in
 [Godot #575](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/575).
