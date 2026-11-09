@@ -428,6 +428,10 @@ struct QueueState {
     control: VecDeque<QueuedOutbound>,
     data: VecDeque<QueuedOutbound>,
     barriers: VecDeque<QueuedOutbound>,
+    oldest_reliable_legacy: Option<Instant>,
+    oldest_reliable_data: Option<Instant>,
+    #[cfg(test)]
+    reliable_scan_visits: std::cell::Cell<usize>,
     reserved_legacy: usize,
     reserved_control: usize,
     reserved_data: usize,
@@ -624,6 +628,10 @@ impl QueueState {
             control: VecDeque::new(),
             data: VecDeque::new(),
             barriers: VecDeque::new(),
+            oldest_reliable_legacy: None,
+            oldest_reliable_data: None,
+            #[cfg(test)]
+            reliable_scan_visits: std::cell::Cell::new(0),
             reserved_legacy: 0,
             reserved_control: 0,
             reserved_data: 0,
@@ -643,6 +651,21 @@ impl QueueState {
             control_capacity,
             capacity_available_since: [Some(now); 3],
         }
+    }
+
+    fn refresh_after_pop(&mut self, lane: Lane, class: Option<DeliveryClass>) {
+        if class == Some(DeliveryClass::Reliable) {
+            match lane {
+                Lane::Legacy => {
+                    self.oldest_reliable_legacy = oldest_reliable_in_lane(self, self.legacy.iter());
+                }
+                Lane::Data => {
+                    self.oldest_reliable_data = oldest_reliable_in_lane(self, self.data.iter());
+                }
+                Lane::Control => {}
+            }
+        }
+        self.refresh_capacity_availability(lane);
     }
 
     fn refresh_capacity_availability(&mut self, lane: Lane) {
@@ -714,6 +737,8 @@ impl QueueState {
 
 #[derive(Debug)]
 struct SharedQueue {
+    #[cfg(test)]
+    sample_started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     state: Mutex<QueueState>,
     item_available: Notify,
     reliable_added: Notify,
@@ -790,6 +815,19 @@ impl SharedQueue {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
+        #[cfg(test)]
+        if let Some(started) = self
+            .sample_started
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            let _ = started.send(());
+        }
+        self.state().depth_and_oldest()
     }
 
     fn capacity(&self, lane: Lane) -> usize {
@@ -914,7 +952,24 @@ impl Clone for OutboundSender {
     }
 }
 
+/// Scrape-only queue ownership that does not count as a producer.
+pub(crate) struct OutboundQueueObserver {
+    shared: Arc<SharedQueue>,
+}
+
+impl OutboundQueueObserver {
+    pub(crate) fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
+        self.shared.depth_and_oldest()
+    }
+}
+
 impl OutboundSender {
+    pub(crate) fn observer(&self) -> OutboundQueueObserver {
+        OutboundQueueObserver {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     /// Return the number of sender clones for deterministic hot-path
     /// benchmarking.
     #[cfg(feature = "allocation-tracking")]
@@ -927,8 +982,20 @@ impl OutboundSender {
     /// read in one pass under the shared state lock — the connection's
     /// sender-half view for the scrape-time queue-depth/age gauges.
     /// Observability only; never a deadline input.
+    #[cfg(test)]
     pub(crate) fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
-        self.shared.state().depth_and_oldest()
+        self.shared.depth_and_oldest()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sample_started_for_test(&self, started: std::sync::mpsc::Sender<()>) {
+        *self.shared.sample_started.lock().unwrap() = Some(started);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_state_locked_for_test(&self, action: impl FnOnce()) {
+        let _state = self.shared.state();
+        action();
     }
 }
 
@@ -987,6 +1054,8 @@ fn channel_inner(
     let data_capacity = data_capacity.max(1);
     let control_capacity = control_capacity.max(1);
     let shared = Arc::new(SharedQueue {
+        #[cfg(test)]
+        sample_started: Mutex::new(None),
         state: Mutex::new(QueueState::new(data_capacity, control_capacity)),
         item_available: Notify::new(),
         reliable_added: Notify::new(),
@@ -2118,9 +2187,9 @@ impl OutboundReceiver {
             None if state.receiver_open && state.producers_open() => Err(PopState::Empty),
             None => Err(PopState::Disconnected),
         };
-        if result.is_ok() {
+        if let Ok(item) = &result {
             if let Some(lane) = released_lane {
-                state.refresh_capacity_availability(lane);
+                state.refresh_after_pop(lane, item.class());
             }
         }
         drop(state);
@@ -2258,9 +2327,9 @@ impl OutboundReceiver {
             None if state.receiver_open && state.producers_open() => Err(BatchedPopState::Empty),
             None => Err(BatchedPopState::Disconnected),
         };
-        if result.is_ok() {
+        if let Ok(item) = &result {
             if let Some(lane) = released_lane {
-                state.refresh_capacity_availability(lane);
+                state.refresh_after_pop(lane, item.class());
             }
         }
         drop(state);
@@ -2580,20 +2649,28 @@ const fn encoding_from_tag(tag: u8) -> GameDataEncoding {
 }
 
 fn oldest_reliable_enqueued_at(state: &QueueState) -> Option<Instant> {
-    [&state.legacy, &state.control, &state.data, &state.barriers]
+    state
+        .oldest_reliable_legacy
         .into_iter()
-        .filter_map(|lane| oldest_reliable_in_lane(lane.iter()))
+        .chain(state.oldest_reliable_data)
         .min()
 }
 
 fn oldest_reliable_in_lane<'a>(
-    mut lane: impl Iterator<Item = &'a QueuedOutbound>,
+    _queue_state: &QueueState,
+    lane: impl Iterator<Item = &'a QueuedOutbound>,
 ) -> Option<Instant> {
     // Reliable rows are stamped and appended while holding the queue lock.
     // Only Latest successors inherit an older stamp. Removing or superseding
     // lossy rows cannot change reliable timestamp order within a lane.
-    lane.find(|queued| queued.class() == Some(DeliveryClass::Reliable))
-        .map(|queued| queued.enqueued_at)
+    lane.inspect(|_| {
+        #[cfg(test)]
+        _queue_state
+            .reliable_scan_visits
+            .set(_queue_state.reliable_scan_visits.get().saturating_add(1));
+    })
+    .find(|queued| queued.class() == Some(DeliveryClass::Reliable))
+    .map(|queued| queued.enqueued_at)
 }
 
 fn scope_matches(state: &QueueState, generation: u64, room_id: Option<RoomId>) -> bool {
@@ -2802,6 +2879,16 @@ fn push_data_arrived_at(
         generation: state.enqueue_generation,
         transition_barrier: false,
     };
+    if effective_class == DeliveryClass::Reliable {
+        match lane {
+            DataLane::Legacy => {
+                state.oldest_reliable_legacy.get_or_insert(arrival);
+            }
+            DataLane::Classified => {
+                state.oldest_reliable_data.get_or_insert(arrival);
+            }
+        }
+    }
     let capacity_lane = match lane {
         DataLane::Legacy => {
             state.legacy.push_back(queued);
@@ -5582,7 +5669,8 @@ mod tests {
                         .filter(|row| row.class() == Some(DeliveryClass::Reliable))
                         .map(|row| row.enqueued_at)
                         .min();
-                    let actual = oldest_reliable_in_lane(lane.iter().inspect(|_| visits += 1));
+                    let actual =
+                        oldest_reliable_in_lane(&state, lane.iter().inspect(|_| visits += 1));
                     assert_eq!(actual, expected);
                     assert_eq!(oldest_reliable_enqueued_at(&state), expected);
                 }
@@ -5768,5 +5856,75 @@ mod tests {
             .await
             .expect("a simultaneous enqueue must not reset the overdue row's deadline");
         assert_eq!(rx.len(), 2, "the watcher must leave queue ownership intact");
+    }
+    #[tokio::test(start_paused = true)]
+    async fn live_writer_deadline_lookups_do_linear_work_across_lossy_backlogs() {
+        const DEPTH: usize = 1_024;
+        for mode in [
+            "volatile",
+            "latest",
+            "reliable",
+            "lossy_prefix",
+            "alternating",
+        ] {
+            for batched in [false, true] {
+                let (tx, mut rx) = channel(DEPTH, 4);
+                tx.set_protocol_version(3);
+                for seq in 1..=u64::try_from(DEPTH).unwrap() {
+                    let class = match mode {
+                        "latest" => DeliveryClass::Latest,
+                        "reliable" => DeliveryClass::Reliable,
+                        "lossy_prefix" if seq == u64::try_from(DEPTH).unwrap() => {
+                            DeliveryClass::Reliable
+                        }
+                        "alternating" if seq % 2 == 0 => DeliveryClass::Reliable,
+                        _ => DeliveryClass::Volatile,
+                    };
+                    let key =
+                        (class == DeliveryClass::Latest).then_some(u32::try_from(seq).unwrap());
+                    tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
+                    tokio::time::advance(Duration::from_micros(1)).await;
+                }
+                for seq in 1..=u64::try_from(DEPTH).unwrap() {
+                    let expected = rx
+                        .shared
+                        .state()
+                        .data
+                        .iter()
+                        .filter(|row| row.class() == Some(DeliveryClass::Reliable))
+                        .map(|row| row.enqueued_at)
+                        .min();
+                    assert_eq!(rx.oldest_reliable_enqueued_at(), expected);
+                    let item = if batched {
+                        rx.recv_batched(32, Duration::ZERO).await.unwrap().unwrap()
+                    } else {
+                        rx.try_recv().unwrap()
+                    };
+                    assert_eq!(message_id(&item), seq);
+                }
+                assert_eq!(rx.oldest_reliable_enqueued_at(), None);
+                let visits = rx.shared.state().reliable_scan_visits.get();
+                println!("RELIABLE_DEADLINE_SCAN mode={mode} batched={batched} depth={DEPTH} visits={visits}");
+                assert!(
+                    visits <= 2 * DEPTH,
+                    "{mode} batched={batched}: deadline scans must be linear, got {visits}"
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn queue_observers_do_not_keep_producers_open() {
+        let (sender, mut receiver) = channel(4, 4);
+        let observer = sender.observer();
+        sender.try_enqueue_control(message(1)).unwrap();
+        drop(sender);
+        assert_eq!(observer.depth_and_oldest().0, 1);
+        assert_eq!(message_id(&receiver.recv().await.unwrap().unwrap()), 1);
+        let end = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("observers must not extend the producer lifetime")
+            .unwrap();
+        assert!(end.is_none());
+        assert_eq!(observer.depth_and_oldest(), (0, None));
     }
 }

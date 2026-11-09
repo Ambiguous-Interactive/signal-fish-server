@@ -153,3 +153,8 @@ trickle and `TransportStatus` reporting proceed as before.
 - **An ex-host that reconnects** is paired as a client of the re-elected host, because the stored host is now the
   new one. The reconnecting member learns this from the fresh `SessionPlan` it receives on entry (see the
   [reconnection scenario](reconnection.md)).
+- **If host replacement fails**, the server retries it during room maintenance,
+  using the current members. No player needs to join or leave to trigger the
+  retry. The sweep interval is `server.room_cleanup_interval` (60 seconds by
+  default). Players can use the relay while they wait. A successful repair
+  sends a fresh plan generation; later sweeps do not repeat it.

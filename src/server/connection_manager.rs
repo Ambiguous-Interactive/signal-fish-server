@@ -1293,16 +1293,20 @@ impl ConnectionManager {
     /// Scrape-time walk over every live connection's classified outbound
     /// queue: total resident items and the oldest resident item's enqueue
     /// instant. This runs on the metrics endpoint, never the write path;
-    /// per-queue reads take each queue's state lock briefly and clone no
-    /// payload. Legacy senders carry no inspectable queue and contribute
-    /// nothing (every wire connection is classified; legacy entries exist
+    /// Queue observers are captured before taking any queue lock, so a busy
+    /// queue cannot retain a connection-registry guard. Observers clone no
+    /// payload and do not keep producers open. Legacy senders carry no
+    /// inspectable queue and contribute nothing (every wire connection is classified; legacy entries exist
     /// only in test harnesses).
     pub fn outbound_queue_sample(&self) -> OutboundQueueSample {
-        let mut sample = OutboundQueueSample::default();
+        let mut queues = Vec::with_capacity(self.clients.len());
         for client in self.clients.iter() {
-            let Some(queue) = client.sender.classified_queue() else {
-                continue;
-            };
+            if let Some(queue) = client.sender.classified_queue() {
+                queues.push(queue.observer());
+            }
+        }
+        let mut sample = OutboundQueueSample::default();
+        for queue in queues {
             let (depth, oldest) = queue.depth_and_oldest();
             sample.total_depth = sample.total_depth.saturating_add(depth as u64);
             if let Some(enqueued_at) = oldest {

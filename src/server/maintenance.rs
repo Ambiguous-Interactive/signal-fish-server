@@ -702,6 +702,7 @@ impl EnhancedGameServer {
 
             self.cleanup_abandoned_rooms().await;
             self.cleanup_pending_durable_player_detaches().await;
+            self.retry_pending_session_replans().await;
 
             // Cleanup empty rooms with idempotency
             match self

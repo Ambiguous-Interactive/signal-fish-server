@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server work when checking reliable delivery deadlines behind lossy gameplay backlogs (#1540).
 - Reduce P2P game-start memory use for players that do not support Direct transport (#636).
 - **Breaking:** Add native `EngineEvent::PairReady`, `EngineEvent::ChannelSendComplete`, and
   `EngineEvent::RemoteCandidateComplete` for pending work; exhaustive matches must handle them (#1510, #1512, #1516).
@@ -62,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retry failed P2P host replacement during room maintenance without waiting for another player action (#1539).
+- Keep queue metrics waits from blocking connection liveness updates (#1541).
 - Keep queued native P2P gameplay active during established SDP work, retain bounded transport diagnostics,
   and resolve fallback promptly after rejected SDP (#1525, #1527, #1531, #1532, #1533).
 - Avoid false or stalled browser P2P fallback when channel-open events wait behind output (#1526).

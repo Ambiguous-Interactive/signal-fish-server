@@ -15134,3 +15134,56 @@ provided these current sources. Server wire messages, channel modes and retry
 rules stay unchanged, so these three SDKs need no migration. Reference Engine
 callers with exhaustive event matches must handle `PairReady`; the original
 awaited readiness method remains available.
+
+### F294–F296 — Repair host failover and bound live queue observation
+
+Issues: #1539, #1540 and #1541. Baseline: `034734cc`.
+Campaigns #826 and #636 remain open.
+
+A failed host-departure check or refused exact-membership publication retained
+an active plan naming the departed host. Maintenance did not retry it. The
+paused-clock regression removes the host, fails its snapshot, restores storage,
+and starts the actual cleanup task. The original source emits no replacement
+plan within the one-second observation bound. Failed repairs now retain one
+revision per affected room until maintenance revalidates current membership.
+Successful repairs remove only their own revision. Read failures, publication
+errors, routing refusals, cancellation before publication, deleted rooms, repeated
+sweeps and concurrent attempts retain the sticky transport and topology.
+A separate real reservation history fills a recipient queue, removes its route
+while the plan waits for capacity, and releases the reservation. The refused
+publication changes no plan. Maintenance then elects the sole routed survivor
+without another membership action and emits exactly one replacement generation.
+The injected read failure is an adapter-path control; it does not establish a
+shipped in-memory storage incident.
+
+Reliable-deadline reads scanned every lossy row when no reliable row existed.
+A complete 1,024-frame Volatile drain required 524,800 row visits on the original
+source. The queue now caches the oldest reliable timestamp separately for its
+legacy and classified data lanes. Reads compare the two timestamps. Selecting
+a reliable row refreshes only that lane's cache. Lossy removal cannot change
+its reliable timestamp. This adds two optional timestamps per queue and no
+per-row heap storage. Complete drains cover Volatile, Latest, Reliable, a long
+lossy prefix and alternating classes with both receiver modes. An independent
+full scan checks exact deadline values. Existing expiry and generation controls
+retain their original bounds. These are algorithmic work counts, not measured
+remote-network latency or capacity gains.
+
+Metrics sampling held a connection-registry iteration guard while waiting for
+a queue lock. The original source blocks a concurrent live connection's ping
+update in the controlled contention history. Sampling now captures queue
+observers before locking any queue. Observers retain no producer count and
+clone no payload. They add temporary storage proportional to captured queues.
+The queue remains held while the live registry update completes; the eventual
+sample retains its exact resident depth and oldest timestamp. A separate
+control proves that an observer cannot delay queue EOF after all senders leave.
+This proves lock isolation under the tested contention, not a historical outage.
+
+The host-retry behavior keeps the current wire schema and uses the existing
+fresh-generation session-plan contract. External qualification remains tracked
+in Rust client [#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+These assessment issues stay open until client controls pass. Their current
+READMEs were inspected through the connected GitHub app. The queue cache and
+observer changes preserve wire payloads, ordering, delivery classes, deadlines
+and negotiation, so none of these SDKs needs a migration for those private changes.
