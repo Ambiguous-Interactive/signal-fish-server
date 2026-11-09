@@ -1505,12 +1505,13 @@ async fn saturate_held_reliable_callbacks(
     let mut progress = HeldRefusalProgress::default();
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(15), async {
+        /* Coarse timer wakes must not renew a relative wait for each packet. */
+        let mut pacing = tokio::time::interval(Duration::from_millis(1));
         for sequence in 0u32..2048 {
+            pacing.tick().await;
             payload[..4].copy_from_slice(&sequence.to_be_bytes());
             channel.send(payload.as_slice().into()).await.unwrap();
             sent += 1;
-            /* Keep callback saturation separate from an unpaced transport burst. */
-            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         let snapshot = wait_for_held_sctp_refusal(
             || pair.receiver.transport_diagnostic_snapshot(peer),
