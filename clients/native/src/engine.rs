@@ -1178,16 +1178,15 @@ impl Engine {
     pub fn connected_pair_count(&self) -> usize {
         self.peers
             .values()
-            .filter(|link| {
-                link.pair_connected && !link.receive_admission.terminal.load(Ordering::Relaxed)
-            })
+            .filter(|link| link.pair_connected)
+            .map(|link| &link.receive_admission)
+            .chain(
+                self.pending_negotiations
+                    .values()
+                    .filter_map(|pending| pending.established_admission.as_ref()),
+            )
+            .filter(|admission| !admission.terminal.load(Ordering::Relaxed))
             .count()
-            + self
-                .pending_negotiations
-                .values()
-                .filter_map(|pending| pending.established_admission.as_ref())
-                .filter(|admission| !admission.terminal.load(Ordering::Relaxed))
-                .count()
     }
 
     /// Create the peer connection toward `peer` per the server's pairing

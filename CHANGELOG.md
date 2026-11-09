@@ -62,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Preserve live native gameplay during pending SDP and avoid rebuilding links with queued readiness (#1521, #1522).
+- Keep established native gameplay available during pending SDP and avoid rebuilding links with queued readiness
+  (#1521, #1522).
 - Publish browser P2P offers and answers before their gathered ICE candidates (#1520).
 - Keep live native P2P gameplay, relay input, and keepalive responsive during pair creation, SDP work,
   channel readiness checks, exchange sends, live ICE, and old-link retirement (#1510, #1512, #1515, #1516, #1517).
