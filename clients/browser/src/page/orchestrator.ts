@@ -123,6 +123,11 @@ const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
 /** Defensive bounds for same-generation signals racing local pair creation. */
 const MAX_PENDING_SIGNALS_PER_PEER = 32;
 const MAX_PENDING_SIGNALS_TOTAL = 128;
+const MAX_LOCAL_CANDIDATES_PER_PEER = 128;
+const MAX_LOCAL_CANDIDATE_BYTES_PER_PEER = 64 * 1024;
+const MAX_LOCAL_CANDIDATE_BYTES = 4096;
+const MAX_PENDING_LOCAL_CANDIDATES = 512;
+const MAX_PENDING_LOCAL_CANDIDATE_BYTES = 256 * 1024;
 // Stale work keeps credits until consumption, across all peers and generations.
 const MAX_PENDING_CHANNEL_MESSAGES = 256;
 const MAX_PENDING_CHANNEL_MESSAGE_BYTES = 1024 * 1024;
@@ -131,6 +136,14 @@ const MAX_PENDING_SERVER_FRAMES = 256;
 const MAX_PENDING_SERVER_FRAME_BYTES = 128 * 1024 * 1024;
 
 type RetainedServerFrame = { frame: ServerFrame; release: () => void };
+interface LocalCandidates {
+  generation: number | undefined;
+  held: boolean;
+  scheduled: boolean;
+  draining: boolean;
+  backlog: Backlog;
+  pending: Array<{ json: string; release: () => void }>;
+}
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -799,7 +812,11 @@ class Orchestrator {
   private finishResolve: ((code: number) => void) | null = null;
   private finished = false;
   private readonly peerWorkStopped = new AbortController();
-  private readonly localDescriptionBarriers = new Map<string, Promise<void>>();
+  private readonly localCandidates = new Map<string, LocalCandidates>();
+  private readonly localCandidateBacklog = new Backlog(
+    MAX_PENDING_LOCAL_CANDIDATES,
+    MAX_PENDING_LOCAL_CANDIDATE_BYTES,
+  );
 
   // --- Session state (field-for-field mirror of the native Orchestrator) ---
   private readonly present = new Set<string>();
@@ -888,33 +905,30 @@ class Orchestrator {
     this.effectiveFormat = config.gameDataFormat;
     this.engine = new Engine(config.crippleIce, {
       onLocalCandidate: (peer, generation, candidateJson) => {
-        // Crippled mode never reaches here (the engine drops gathered
-        // candidates), so this is always a real trickle-ICE relay.
-        const enqueueCandidate = () => {
-          if (!this.engine.isCurrentGeneration(peer, generation)) return;
-          this.enqueue(
-            async () => {
-              if (!this.engine.isCurrentGeneration(peer, generation)) return;
-              this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidateJson });
-            },
-            undefined,
-            utf8Bytes(candidateJson),
-          );
-        };
-        const barrier = this.localDescriptionBarriers.get(peer);
-        if (barrier === undefined) {
-          enqueueCandidate();
+        if (this.finished || !this.engine.isCurrentGeneration(peer, generation)) return;
+        let candidates = this.localCandidates.get(peer);
+        if (candidates === undefined) {
+          candidates = this.newLocalCandidates(peer, false);
+        }
+        candidates.generation = generation;
+        const bytes = utf8Bytes(candidateJson);
+        const releasePeer =
+          bytes <= MAX_LOCAL_CANDIDATE_BYTES ? candidates.backlog.reserve(bytes) : null;
+        const releaseTotal =
+          releasePeer === null ? null : this.localCandidateBacklog.reserve(bytes);
+        if (releasePeer === null || releaseTotal === null) {
+          releasePeer?.();
+          this.retireLocalCandidateLink(peer, 'local ICE candidate buffer limit exceeded');
           return;
         }
-        const release = this.taskBacklog.reserve(utf8Bytes(candidateJson));
-        if (release === null) {
-          this.failFatal(FatalError.connection('browser input task backlog limit exceeded'));
-          return;
-        }
-        void barrier.then(() => {
-          release();
-          enqueueCandidate();
+        candidates.pending.push({
+          json: candidateJson,
+          release: () => {
+            releasePeer();
+            releaseTotal();
+          },
         });
+        if (!candidates.held) this.scheduleLocalCandidates(peer, candidates);
       },
       onPcState: (peer, generation, state) => {
         this.enqueue(async () => {
@@ -1424,12 +1438,18 @@ class Orchestrator {
    * timers run and the next wake is scheduled (the native loop's
    * `process_timers` + `next_wake` pattern).
    */
-  private enqueue(task: () => Promise<void>, release?: () => void, retainedBytes = 0): void {
+  private enqueue(
+    task: () => Promise<void>,
+    release?: () => void,
+    retainedBytes = 0,
+    reservedTask?: () => void,
+  ): void {
     if (this.finished) {
       release?.();
+      reservedTask?.();
       return;
     }
-    const releaseTask = this.taskBacklog.reserve(retainedBytes);
+    const releaseTask = reservedTask ?? this.taskBacklog.reserve(retainedBytes);
     if (releaseTask === null) {
       release?.();
       this.failFatal(FatalError.connection('browser input task backlog limit exceeded'));
@@ -1488,6 +1508,7 @@ class Orchestrator {
       return;
     }
     this.finished = true;
+    for (const peer of this.localCandidates.keys()) this.discardLocalCandidates(peer);
     this.peerWorkStopped.abort();
     if (this.wakeTimer !== null) {
       this.wakeTimer.cancel();
@@ -2290,7 +2311,9 @@ class Orchestrator {
     ) {
       return;
     }
-    const releaseLocalCandidates = this.holdLocalCandidates(peer);
+    const releaseLocalCandidates: (published?: boolean) => Promise<void> = needsConnection
+      ? this.holdLocalCandidates(peer)
+      : async () => {};
     try {
       const offerSdp = await this.awaitPeerOperation(
         peer,
@@ -2304,6 +2327,7 @@ class Orchestrator {
         return;
       if (offerSdp !== null) {
         this.sendSignal(peer, 'offer', { Offer: offerSdp });
+        await releaseLocalCandidates(true);
       }
     } catch (error) {
       if (error instanceof FatalError && error.code === EXIT_CONNECTION_ERROR) throw error;
@@ -2315,7 +2339,7 @@ class Orchestrator {
       // the P2P timeout; other peer links and relay traffic remain active.
       this.handlePeerTransportLoss(peer, 'initial negotiation failed');
     } finally {
-      releaseLocalCandidates();
+      await releaseLocalCandidates();
     }
     if (
       this.currentSessionGeneration !== sessionGeneration ||
@@ -2340,16 +2364,108 @@ class Orchestrator {
     }
   }
 
-  private holdLocalCandidates(peer: string): () => void {
-    let release!: () => void;
-    const barrier = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.localDescriptionBarriers.set(peer, barrier);
-    return () => {
-      if (this.localDescriptionBarriers.get(peer) === barrier)
-        this.localDescriptionBarriers.delete(peer);
-      release();
+  /** Create one physical link's bounded candidate FIFO. */
+  private newLocalCandidates(peer: string, held: boolean): LocalCandidates {
+    const candidates: LocalCandidates = {
+      generation: this.engine.generationOf(peer),
+      held,
+      scheduled: false,
+      draining: false,
+      backlog: new Backlog(MAX_LOCAL_CANDIDATES_PER_PEER, MAX_LOCAL_CANDIDATE_BYTES_PER_PEER),
+      pending: [],
+    };
+    this.localCandidates.set(peer, candidates);
+    return candidates;
+  }
+
+  /** Keep callback overflow local; surface a real signaling failure through the run result. */
+  private retireLocalCandidateLink(peer: string, reason: string): void {
+    try {
+      this.handlePeerTransportLoss(peer, reason);
+    } catch (error) {
+      this.failFatal(
+        error instanceof FatalError
+          ? error
+          : FatalError.connection(`peer teardown failed: ${describe(error)}`),
+      );
+    }
+  }
+
+  /** Release retained candidate bodies and credits when their link retires. */
+  private discardLocalCandidates(peer: string): void {
+    const candidates = this.localCandidates.get(peer);
+    this.localCandidates.delete(peer);
+    for (const candidate of candidates?.pending.splice(0) ?? []) candidate.release();
+  }
+
+  /** Publish current candidates after SDP, with acknowledged output pacing. */
+  private async flushLocalCandidates(peer: string, candidates: LocalCandidates): Promise<void> {
+    if (this.localCandidates.get(peer) !== candidates || candidates.held || candidates.draining)
+      return;
+    if (
+      candidates.generation === undefined ||
+      !this.engine.isCurrentGeneration(peer, candidates.generation)
+    ) {
+      this.discardLocalCandidates(peer);
+      return;
+    }
+    candidates.draining = true;
+    try {
+      const count = candidates.pending.length;
+      for (let index = 0; index < count; index += 1) {
+        if (
+          this.localCandidates.get(peer) !== candidates ||
+          candidates.held ||
+          !this.engine.isCurrentGeneration(peer, candidates.generation)
+        )
+          return;
+        const candidate = candidates.pending.shift();
+        if (candidate === undefined) break;
+        try {
+          this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidate.json });
+        } finally {
+          candidate.release();
+        }
+        await this.output.flush();
+      }
+    } finally {
+      candidates.draining = false;
+    }
+    if (this.localCandidates.get(peer) !== candidates) return;
+    if (candidates.pending.length === 0) this.localCandidates.delete(peer);
+    else this.scheduleLocalCandidates(peer, candidates);
+  }
+
+  /** Reserve one owner task; a full input queue retires only this link. */
+  private scheduleLocalCandidates(peer: string, candidates: LocalCandidates): void {
+    if (candidates.scheduled || candidates.draining) return;
+    const releaseTask = this.taskBacklog.reserve(0);
+    if (releaseTask === null) {
+      this.retireLocalCandidateLink(peer, 'local ICE drain cannot enter the input queue');
+      return;
+    }
+    candidates.scheduled = true;
+    this.enqueue(
+      async () => {
+        candidates.scheduled = false;
+        await this.flushLocalCandidates(peer, candidates);
+      },
+      undefined,
+      0,
+      releaseTask,
+    );
+  }
+
+  /** Hold gathered ICE until local SDP succeeds; discard canceled setup. */
+  private holdLocalCandidates(peer: string): (published?: boolean) => Promise<void> {
+    const candidates = this.localCandidates.get(peer) ?? this.newLocalCandidates(peer, true);
+    candidates.held = true;
+    return async (published = false) => {
+      if (this.localCandidates.get(peer) !== candidates) return;
+      if (published) {
+        candidates.held = false;
+        await this.flushLocalCandidates(peer, candidates);
+      } else if (candidates.held) this.discardLocalCandidates(peer);
     };
   }
 
@@ -2424,6 +2540,7 @@ class Orchestrator {
   }
 
   private removePairObligation(peer: string): void {
+    this.discardLocalCandidates(peer);
     this.exchangeLedger.invalidatePendingReceipts(peer);
     this.peerTasks.delete(peer);
     this.expectedPeers.delete(peer);
@@ -2442,6 +2559,7 @@ class Orchestrator {
 
   /** Retire physical state without publishing an interim transport decision. */
   private retirePeerLink(peer: string, invalidateTasks = true): void {
+    this.discardLocalCandidates(peer);
     if (invalidateTasks) this.peerTasks.delete(peer);
     this.connectedPairs.delete(peer);
     this.pendingExchangePeers.delete(peer);
@@ -2542,8 +2660,9 @@ class Orchestrator {
             this.assertActive();
             if (!isCurrentTask()) return;
             this.sendSignal(from, 'answer', { Answer: answerSdp });
+            await releaseLocalCandidates(true);
           } finally {
-            releaseLocalCandidates();
+            await releaseLocalCandidates();
           }
           break;
         }
@@ -2970,6 +3089,7 @@ class Orchestrator {
   /** Post-run cleanup: close the socket (Chromium teardown reaps the rest). */
   private teardown(): void {
     this.finished = true;
+    for (const peer of this.localCandidates.keys()) this.discardLocalCandidates(peer);
     this.peerWorkStopped.abort();
     this.wakeTimer?.cancel();
     this.wakeTimer = null;
