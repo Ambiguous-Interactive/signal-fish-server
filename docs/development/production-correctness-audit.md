@@ -15677,8 +15677,9 @@ as durable detach cleanup already does. The same regression passes without
 changing its assertions. Live host-repair workers still stop new admissions
 during drain.
 
-The F318 control now removes the room occupant and backdates room activity
-before holding storage. Reconnect protection keeps the eligible room alive.
+The F318 control now backdates room activity before holding storage. It covers
+empty rooms in both GC paths and an occupied idle room in expired-room GC.
+Reconnect protection keeps each eligible room alive.
 Removing that protection then deletes the same room with exact cleanup counts
 for both GC paths. This excludes room occupancy and a stationary paused clock
 as explanations for room survival. The focused maintenance, session-policy,

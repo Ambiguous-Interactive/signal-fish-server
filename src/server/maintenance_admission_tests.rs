@@ -825,7 +825,7 @@ async fn deleted_room_discovery_outlives_the_observation_deadline() {
 /// #1568: slow room storage must leave reconnect registration and replay writable.
 #[tokio::test(start_paused = true)]
 async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
-    for expired in [false, true] {
+    for (expired, occupied) in [(false, false), (true, false), (true, true)] {
         let server = server().await;
         let manager = server.reconnection_manager().unwrap();
         let player = PlayerId::new_v4();
@@ -835,11 +835,13 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
             .as_any()
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
-        server
-            .database
-            .remove_player_from_room(&room_id, &player)
-            .await
-            .unwrap();
+        if !occupied {
+            server
+                .database
+                .remove_player_from_room(&room_id, &player)
+                .await
+                .unwrap();
+        }
         database
             .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(1))
             .await;
@@ -890,8 +892,8 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
                 )
                 .await
                 .unwrap();
-            assert_eq!(outcome.empty_rooms_cleaned, 1);
-            assert_eq!(outcome.inactive_rooms_cleaned, 0);
+            assert_eq!(outcome.empty_rooms_cleaned, usize::from(!occupied));
+            assert_eq!(outcome.inactive_rooms_cleaned, usize::from(occupied));
         } else {
             assert_eq!(
                 server
