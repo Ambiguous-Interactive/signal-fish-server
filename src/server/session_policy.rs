@@ -59,6 +59,7 @@ pub(crate) use crate::session_admission::{joiner_supports_sticky_plan, ActiveSes
 
 /// Maximum concurrent room checks owned by one maintenance sweep.
 #[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
 pub(super) const SESSION_REPAIR_CONCURRENCY: usize = super::maintenance_workers::CONCURRENCY;
 /// Stop an unadmitted room wait before it can occupy every recovery worker.
 const SESSION_REPAIR_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(100);

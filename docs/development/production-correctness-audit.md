@@ -15685,3 +15685,9 @@ for both GC paths. This excludes room occupancy and a stationary paused clock
 as explanations for room survival. The focused maintenance, session-policy,
 and storage controls pass all 140 tests in Nextest
 `61247c06-1576-417a-b21b-51d2bd9d08aa`.
+
+The full hosted run at `46a4e835` passed 3,240 tests before package validation
+found an unused test-only concurrency alias. Its callers are repository-only
+tests, so the alias now uses their same configuration gate. The exact package
+inventory and strict packaged-library test build passes in Nextest
+`d15810c9-77f3-440e-8019-e7aaaa0205e2`. Full strict Clippy also passes.
