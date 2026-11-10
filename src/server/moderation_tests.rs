@@ -6,6 +6,7 @@ use crate::config::{
 use crate::coordination::{CloseReason, ConnectionCloseSignal};
 use crate::protocol::{PlayerId, RoomOperationId, RoomOperationResult, ServerMessage};
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
@@ -3527,5 +3528,64 @@ async fn transfer_authority_fences_routes_through_the_storage_commit() {
                 if matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(id), .. } if *id == target) { break; }
             }
         }).await.expect("committed authority must still be announced to the survivor");
+    }
+}
+
+/// #1554: a non-authority request keeps its role refusal before target errors.
+#[tokio::test]
+async fn transfer_authority_preserves_non_authority_error_precedence() {
+    for retained_target in [false, true] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48221".parse().unwrap()).await;
+        let (member, mut member_rx) =
+            register_client(&server, "127.0.0.1:48222".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "ORDER1", "host").await;
+        join_seated_player(&server, &member, &mut member_rx, "ORDER1", "peer").await;
+        drain_receiver(&mut authority_rx);
+        drain_receiver(&mut member_rx);
+        let target = if retained_target {
+            server
+                .message_coordinator
+                .unregister_local_client(&authority)
+                .await
+                .unwrap();
+            authority
+        } else {
+            PlayerId::new_v4()
+        };
+        let room_id = server.get_client_room(&member).await.unwrap();
+        let before = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        server
+            .handle_transfer_authority_operation(&member, RoomOperationId::new_v4(), target)
+            .await;
+        let response = member_rx.try_recv().unwrap();
+        assert_eq!(
+            operation_failed_code(&response),
+            ErrorCode::NotRoomAuthority,
+            "retained_target={retained_target}"
+        );
+        let after = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.authority_player, before.authority_player);
+        assert_eq!(after.last_activity, before.last_activity);
+        assert_eq!(
+            server
+                .metrics
+                .authority_transfer_conflicts
+                .load(Ordering::Relaxed),
+            0
+        );
+        let trailing = member_rx.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
     }
 }

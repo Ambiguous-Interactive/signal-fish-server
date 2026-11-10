@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep live lobby readiness stable while a player route is removed (#1553).
-- Refuse authority transfers to or from peers that are no longer routed in the room (#1554).
+- Preserve authority-transfer refusal codes and reject transfers involving peers that are no longer routed in the room (#1554).
 - Preserve reconnect peer metadata when delayed connection-info updates outlive their live route (#1555).
 - Keep P2P host recovery moving while expired connections wait for teardown (#1547).
 - Preserve room authority and lobby state when a delayed request outlives its live membership (#1548, #1549).

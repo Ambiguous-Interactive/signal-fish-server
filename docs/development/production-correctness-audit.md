@@ -15443,3 +15443,10 @@ The measured cargo-mutants 27.1.0 inventory increases from 563 to 567. The new
 metadata-store helper adds three return/predicate sites; the roster-lease default
 adds one return-value site. Scope, exclusions and oracle features stay unchanged.
 The 57-shard budget remains ten mutants per shard and 290 seconds of work.
+
+Review found that early route refusals changed the error order for non-authority
+senders. The lease is still acquired before validation, but route refusals now
+follow the existing authority and durable-target checks. A red control observes
+`TRANSFER_TARGET_NOT_FOUND` instead of `NOT_ROOM_AUTHORITY` on the first repair.
+The corrected order preserves the role refusal and conflict counter for absent
+and retained-but-pruned targets. The routing fence still spans the storage write.

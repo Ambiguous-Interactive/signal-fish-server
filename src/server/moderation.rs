@@ -547,26 +547,6 @@ impl EnhancedGameServer {
                 return;
             }
         };
-        if let Some(members) = routes.player_ids.as_ref() {
-            let rejection = if !members.contains(authority_id) {
-                Some(("Not currently routed in the room", ErrorCode::NotInRoom))
-            } else if !members.contains(&target_id) {
-                self.metrics.increment_authority_transfer_conflicts();
-                Some((
-                    "Transfer target is not a member of this room",
-                    ErrorCode::TransferTargetNotFound,
-                ))
-            } else {
-                None
-            };
-            if let Some((message, code)) = rejection {
-                drop(routes);
-                drop(transfer_event_guard);
-                self.fail_operation(authority_id, operation_id, message, code)
-                    .await;
-                return;
-            }
-        }
         let room = match self
             .database
             .get_room_player_snapshot(&room_id, &target_id)
@@ -623,6 +603,26 @@ impl EnhancedGameServer {
             )
             .await;
             return;
+        }
+        if let Some(members) = routes.player_ids.as_ref() {
+            let rejection = if !members.contains(authority_id) {
+                Some(("Not currently routed in the room", ErrorCode::NotInRoom))
+            } else if !members.contains(&target_id) {
+                self.metrics.increment_authority_transfer_conflicts();
+                Some((
+                    "Transfer target is not a member of this room",
+                    ErrorCode::TransferTargetNotFound,
+                ))
+            } else {
+                None
+            };
+            if let Some((message, code)) = rejection {
+                drop(routes);
+                drop(transfer_event_guard);
+                self.fail_operation(authority_id, operation_id, message, code)
+                    .await;
+                return;
+            }
         }
         // Fresh route read (issue #396 sweep, same class as the kick path's
         // target resolution): a durable row can outlive its membership as
