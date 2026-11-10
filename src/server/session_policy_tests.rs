@@ -6759,7 +6759,11 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
                 )
                 .await
                 .unwrap();
-            server.database.abandon_room(&room.id, &creator).await.unwrap();
+            server
+                .database
+                .abandon_room(&room.id, &creator)
+                .await
+                .unwrap();
             database.pause_next_get_room_by_id_for_test();
             Some(room.id)
         } else {
