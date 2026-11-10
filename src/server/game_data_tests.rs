@@ -153,6 +153,7 @@ mod handler_honesty {
         }
     }
 
+    /// #1555: delayed metadata cannot modify an unrouted reconnect seat.
     #[tokio::test]
     async fn peer_metadata_refuses_a_pruned_route_after_the_room_gate() {
         let server = create_test_server().await;

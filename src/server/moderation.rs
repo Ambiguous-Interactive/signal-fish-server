@@ -482,6 +482,7 @@ impl EnhancedGameServer {
             .await;
     }
 
+    /// Validate the acting connection and retain live routes through the authority transfer.
     pub(super) async fn handle_transfer_authority_from_lifecycle(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -665,6 +666,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Finish the role write and ordered announcement after caller cancellation.
     async fn transfer_authority_owned(
         self: &Arc<Self>,
         authority_id: PlayerId,

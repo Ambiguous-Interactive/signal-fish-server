@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority transfers.
+- **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority
+  transfers; peer metadata writes also require `lease_room_member_route`.
 - Reduce server work when checking reliable delivery deadlines across mixed and lossy gameplay backlogs (#1540).
 - Reduce P2P game-start memory use for players that do not support Direct transport (#636).
 - **Breaking:** Add native `EngineEvent::PairReady`, `EngineEvent::ChannelSendComplete`, and

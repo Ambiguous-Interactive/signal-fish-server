@@ -4758,6 +4758,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(Some(players))
     }
 
+    /// Retain the room routing read fence with its exact seated roster.
     async fn lease_room_routes(
         &self,
         room_id: &RoomId,

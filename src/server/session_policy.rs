@@ -1168,6 +1168,7 @@ impl EnhancedGameServer {
             .await
     }
 
+    /// Preserve duplicate endpoint writes and publish changed endpoints against exact routing.
     pub(super) async fn prepare_direct_endpoint_refresh(
         &self,
         room_id: &RoomId,
@@ -1240,6 +1241,7 @@ impl EnhancedGameServer {
         .await
     }
 
+    /// Keep the sender routed until an ordinary metadata write returns from storage.
     async fn store_routed_connection_info(
         &self,
         room_id: &RoomId,

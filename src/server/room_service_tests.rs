@@ -2321,6 +2321,7 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         })
     }
 
+    /// Freeze the fixture roster while a room state mutation waits on storage.
     async fn lease_room_routes(
         &self,
         room_id: &RoomId,
@@ -2344,6 +2345,7 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         ))
     }
 
+    /// Derive one member decision while retaining the fixture roster fence.
     async fn lease_room_member_route(
         &self,
         room_id: &RoomId,

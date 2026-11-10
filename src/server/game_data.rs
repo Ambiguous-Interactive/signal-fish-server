@@ -98,6 +98,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Store metadata for a live member or publish its Direct host endpoint change.
     async fn provide_connection_info_owned(
         &self,
         player_id: &PlayerId,

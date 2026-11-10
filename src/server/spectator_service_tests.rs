@@ -415,6 +415,7 @@ impl MessageCoordinator for RecordingCoordinator {
         Ok(Some((epoch, final_seq)))
     }
 
+    /// Retain the fixture routing mutex with its seated roster snapshot.
     async fn lease_room_routes(
         &self,
         room_id: &RoomId,
@@ -431,6 +432,7 @@ impl MessageCoordinator for RecordingCoordinator {
         ))
     }
 
+    /// Keep the fixture member decision stable through the caller's storage write.
     async fn lease_room_member_route(
         &self,
         room_id: &RoomId,

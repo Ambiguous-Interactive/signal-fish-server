@@ -3394,6 +3394,7 @@ async fn canceled_transfer_publishes_committed_authority_before_later_transfer()
     );
 }
 
+/// #1554: retained assignments cannot substitute for either live transfer route.
 #[tokio::test]
 async fn transfer_authority_refuses_pruned_source_or_target_routes() {
     for prune_target in [false, true] {
