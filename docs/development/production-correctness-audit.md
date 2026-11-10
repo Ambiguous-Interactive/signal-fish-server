@@ -15668,3 +15668,19 @@ The final local maintenance and GC selection passes all 81 tests in Nextest
 `a4e8326b-ffd9-4ad7-a1fd-650dde5bb53f`. The 33 focused host-recovery controls pass
 in `471d450e-d3e5-4192-9742-839fbd30bf51`. All 51 selected source-policy checks,
 strict full local Clippy, formatting, Markdown, and documentation checks pass.
+
+PR #1569 follow-up: hosted Linux testing found that the new abandoned-room
+worker incorrectly refused cleanup during shutdown drain. The existing
+`canceled_creator_baseline_with_failed_delete_is_repaired` regression fails
+with zero deletions. Abandoned-room cleanup now permits drain-time admission,
+as durable detach cleanup already does. The same regression passes without
+changing its assertions. Live host-repair workers still stop new admissions
+during drain.
+
+The F318 control now removes the room occupant and backdates room activity
+before holding storage. Reconnect protection keeps the eligible room alive.
+Removing that protection then deletes the same room with exact cleanup counts
+for both GC paths. This excludes room occupancy and a stationary paused clock
+as explanations for room survival. The focused maintenance, session-policy,
+and storage controls pass all 140 tests in Nextest
+`61247c06-1576-417a-b21b-51d2bd9d08aa`.

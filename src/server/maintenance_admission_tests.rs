@@ -835,6 +835,14 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
             .as_any()
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
+        server
+            .database
+            .remove_player_from_room(&room_id, &player)
+            .await
+            .unwrap();
+        database
+            .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(1))
+            .await;
         let storage = database.hold_room_writes_for_test().await;
         let mut cleanup = Box::pin(async {
             if expired {
@@ -873,5 +881,26 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
         assert!(server.database.room_exists(&room_id).await.unwrap());
         assert!(manager.has_pending_reconnection(&player).await);
         assert_eq!(manager.replay_sample().await.replay_events, 1);
+        manager.complete_reconnection(&player).await;
+        if expired {
+            let outcome = server
+                .cleanup_expired_rooms_protecting_reconnections(
+                    chrono::Duration::zero(),
+                    chrono::Duration::zero(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.empty_rooms_cleaned, 1);
+            assert_eq!(outcome.inactive_rooms_cleaned, 0);
+        } else {
+            assert_eq!(
+                server
+                    .cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero())
+                    .await
+                    .unwrap(),
+                vec![room_id]
+            );
+        }
+        assert!(!server.database.room_exists(&room_id).await.unwrap());
     }
 }

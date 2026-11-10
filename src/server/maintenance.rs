@@ -22,7 +22,7 @@ impl EnhancedGameServer {
             .ok()
     }
 
-    /// Reclaim unpublished rooms after a failed or interrupted creation.
+    /// Reclaim unpublished rooms after a failed or interrupted creation, including during drain.
     /// The code lock excludes a creator still preparing its first response;
     /// storage rechecks publication before deleting a stale scan result.
     pub(crate) async fn cleanup_abandoned_rooms(self: &Arc<Self>) -> usize {
@@ -30,7 +30,7 @@ impl EnhancedGameServer {
             .run_counted(
                 vec![(RoomId::nil(), PlayerId::nil())],
                 MaintenanceWorkers::deadline(),
-                Some(self.shutdown_drain_receiver()),
+                None,
                 |_| {
                     let server = Arc::clone(self);
                     async move { server.cleanup_abandoned_rooms_owned().await }
