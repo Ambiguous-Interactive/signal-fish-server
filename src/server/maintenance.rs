@@ -1,10 +1,11 @@
 use crate::coordination::{CloseReason, RoomEventCompletion, RoomEventMutationGuard};
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use super::maintenance_workers::MaintenanceWorkers;
 use super::room_service::ROOM_JOIN_LOCK_TTL;
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
@@ -74,29 +75,22 @@ impl EnhancedGameServer {
     /// unrouted. The room mutation gate orders this check with reconnect/join,
     /// preventing cleanup from deleting a newly restored live membership.
     pub(crate) async fn cleanup_pending_durable_player_detaches(self: &Arc<Self>) -> usize {
+        let deadline = MaintenanceWorkers::deadline();
         let candidates: Vec<(RoomId, PlayerId)> = self
             .pending_durable_player_detaches
             .iter()
             .map(|entry| *entry.key())
             .collect();
-        let mut cleaned = 0_usize;
-        for (room_id, player_id) in candidates {
-            let server = Arc::clone(self);
-            match tokio::spawn(async move {
-                server
-                    .cleanup_pending_durable_player_detach(room_id, player_id)
-                    .await
+        self.durable_detach_workers
+            .run(candidates, deadline, None, |(room_id, player_id)| {
+                let server = Arc::clone(self);
+                async move {
+                    server
+                        .cleanup_pending_durable_player_detach(room_id, player_id)
+                        .await
+                }
             })
             .await
-            {
-                Ok(true) => cleaned = cleaned.saturating_add(1),
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(%room_id, %player_id, %error, "Durable player cleanup task failed")
-                }
-            }
-        }
-        cleaned
     }
 
     /// Remove one unrouted residue and publish a confirmed authority departure.
@@ -329,41 +323,61 @@ impl EnhancedGameServer {
     /// room row each one was holding.
     ///
     /// The room mutation gate excludes fresh admissions. Revalidate the
-    /// expired record under the replay-state write lock, and keep that lock
-    /// through durable removal so a new disconnection cannot replace it.
+    /// expired record under the replay-state write lock, then retain its
+    /// record cleanup pin through storage so new disconnections cannot replace it.
     pub(crate) async fn cleanup_expired_reconnections(self: &Arc<Self>) -> usize {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return 0;
         };
 
-        self.cleanup_expired_reconnection_candidates(
-            reconnection_manager.expired_cleanup_candidates().await,
+        let deadline = MaintenanceWorkers::deadline();
+        let candidates = MaintenanceWorkers::observe(
+            deadline,
+            reconnection_manager.expired_cleanup_candidates(),
         )
         .await
+        .unwrap_or_default();
+        self.cleanup_expired_reconnection_candidates_until(candidates, deadline)
+            .await
     }
 
-    /// Process expired seats through transactions that survive caller cancellation.
+    /// Process supplied expiry hints through the same bounded worker queue.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn cleanup_expired_reconnection_candidates(
         self: &Arc<Self>,
         candidates: Vec<(PlayerId, RoomId)>,
     ) -> usize {
-        let mut count = 0_usize;
-        for (player_id, room_id) in candidates {
-            let server = Arc::clone(self);
-            match tokio::spawn(async move {
-                server
-                    .cleanup_expired_reconnection_candidate(player_id, room_id)
-                    .await
-            })
-            .await
-            {
-                Ok(true) => count = count.saturating_add(1),
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(%room_id, %player_id, %error, "Expired membership cleanup task failed")
-                }
-            }
-        }
+        self.cleanup_expired_reconnection_candidates_until(
+            candidates,
+            MaintenanceWorkers::deadline(),
+        )
+        .await
+    }
+
+    async fn cleanup_expired_reconnection_candidates_until(
+        self: &Arc<Self>,
+        candidates: Vec<(PlayerId, RoomId)>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> usize {
+        let count = self
+            .expired_reconnect_workers
+            .run(
+                candidates
+                    .into_iter()
+                    .map(|(player, room)| (room, player))
+                    .collect(),
+                deadline,
+                None,
+                |(room_id, player_id)| {
+                    let server = Arc::clone(self);
+                    async move {
+                        server
+                            .cleanup_expired_reconnection_candidate(player_id, room_id)
+                            .await
+                    }
+                },
+            )
+            .await;
         if count > 0 {
             tracing::info!(count, instance_id = %self.instance_id, "Cleaned up expired reconnection records");
         }
@@ -427,37 +441,37 @@ impl EnhancedGameServer {
     /// transition. This all-clients sweep is also the retry path if a cleanup
     /// task is cancelled after the durable delete but before local teardown.
     pub(crate) async fn cleanup_clients_in_missing_rooms(self: &Arc<Self>) -> usize {
-        let mut candidates = HashMap::<RoomId, Vec<PlayerId>>::new();
-        for player_id in self.connection_manager.client_ids() {
-            if let Some(room_id) = self.connection_manager.get_client_room(&player_id) {
-                candidates.entry(room_id).or_default().push(player_id);
-            }
-        }
-
-        let mut cleaned = 0usize;
-        for (room_id, player_ids) in candidates {
-            match self.database.room_exists(&room_id).await {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to verify assigned room during cleanup; retaining clients");
-                    continue;
-                }
-            }
-
-            for player_id in player_ids {
-                if self.is_draining() {
-                    return cleaned;
-                }
-                if self
-                    .cleanup_client_in_missing_room(player_id, room_id)
-                    .await
-                {
-                    cleaned = cleaned.saturating_add(1);
-                }
-            }
-        }
-        cleaned
+        let deadline = MaintenanceWorkers::deadline();
+        let candidates = self
+            .connection_manager
+            .client_ids()
+            .into_iter()
+            .filter_map(|player_id| {
+                self.connection_manager
+                    .get_client_room(&player_id)
+                    .map(|room_id| (room_id, player_id))
+            })
+            .collect();
+        self.missing_room_workers
+            .run(
+                candidates,
+                deadline,
+                Some(self.shutdown_drain_receiver()),
+                |(room_id, player_id)| {
+                    let server = Arc::clone(self);
+                    async move {
+                        match server.database.room_exists(&room_id).await {
+                            Ok(true) => false,
+                            Ok(false) => server.cleanup_client_in_missing_room(player_id, room_id).await,
+                            Err(error) => {
+                                tracing::warn!(%room_id, %player_id, %error, "Failed to verify assigned room during cleanup; retaining client");
+                                false
+                            }
+                        }
+                    }
+                },
+            )
+            .await
     }
 
     /// Revalidate the assigned room under the lifecycle gate before closing its client.

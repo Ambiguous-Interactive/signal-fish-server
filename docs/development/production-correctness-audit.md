@@ -15516,3 +15516,105 @@ Those reads now have named, asserted results; all six policy checks pass locally
 The final lock-order controls pass 22 tests in run
 `fdc736d3-c7e8-4bf5-9a36-777e83a1d365`; readiness and lobby-entry allocation
 controls also retain their existing limits without budget changes.
+
+### F313–F315 — Bound live peer maintenance across busy rooms
+
+Issues: #1561, #1562 and #1563. Baseline: `1d3a46c9`.
+Nextest `78a6aa65-2495-46e3-a3bf-68ceeb55241e` fails all three new batch
+regressions before the repair. Each holds 32 independent room or connection
+gates. The old serial loops exceed the 500 ms observation deadline because
+each candidate owns a separate 100 ms admission wait.
+
+Durable seat repair, expired reconnect cleanup and deleted-room reconciliation
+now use separate persistent worker queues. Each queue admits at most eight
+jobs and shares a 250 ms observation deadline across candidate discovery,
+worker admission and completion. The existing 100 ms candidate admission wait
+remains. Jobs retain their room or lifecycle guards and finish after an observer
+times out or is canceled. Repeated sweeps do not duplicate running candidates.
+Sorted scans rotate after the last admitted candidate. Completed and panicked
+jobs release their worker slots; failed state remains available for retry.
+Counts report completed jobs observed during the current sweep, including jobs
+admitted by a prior sweep.
+
+The existing durable-removal contract still permits quiet cleanup during drain.
+Deleted-room reconciliation stops new admissions during drain. Already admitted
+work retains its existing shutdown rules. A first candidate incorrectly stopped
+all three queues during drain; the existing authority-residue regression caught
+the change. The repair preserves the original quiet durable cleanup contract.
+
+Controls cover batch deadlines, retry rotation, bounded retained jobs, observer
+cancellation, panic recovery, shutdown drain, healthy neighbors, room movement,
+and storage completion after removal. Expired candidate scans share the observation deadline. Expired cleanup pins
+its own record through durable removal while releasing shared replay state,
+so unrelated seats can proceed. Deleted-room storage reads run inside the owned
+worker instead of a cancelable batch discovery barrier. Missing-room teardown remains
+owned after it pins its terminal close and waits for the room mutation gate.
+
+These are controlled in-process server histories. They do not prove network
+latency, arbitrary storage-adapter progress, or a bound on the complete maintenance
+loop. An adapter that never completes can occupy its bounded worker slots.
+Other maintenance phases retain their own contracts. No message schema, error
+code, reconnect window or session-selection rule changes.
+
+The Rust, .NET and Godot client README files were inspected through the connected
+GitHub app. Timing qualification is tracked in Rust client
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+No SDK migration is established. Runtime parity remains unproven until those
+client controls pass.
+
+Nextest `203599b5-b67f-4f40-8572-869a11589182` passes all 18 focused
+maintenance, worker-ownership and authority-residue controls. The 51 selected
+source-policy checks and strict full local Clippy pass. Main's two triggered
+push workflows (Docker Publish and Deploy Documentation) are successful.
+
+The live host-repair control also holds 32 unrelated durable-detach gates while
+the actual maintenance loop runs. The survivor must receive its repaired
+Host/WebRTC plan within the unchanged one-second deadline. It fails on the
+original base in an isolated checkout and passes on the repair in Nextest
+`eb243878-8356-42ea-a3d9-72eec0be0666`. The control also verifies sticky transport,
+quiet repeat sweeps and eventual cleanup after the held gates release.
+
+Review identified that the first repair still held the shared replay-state
+write lock through expired-seat storage. A controlled paused removal blocked
+a healthy expired neighbor. The repair now uses a lazily allocated record
+cleanup gate. Same-player registration, claim changes, completion, discard and
+individual expiry wait for that gate before taking replay-state write access.
+Bulk expiry skips pinned records; GC protects their rooms. Unrelated records,
+replay publication and read snapshots remain available. Cancellation and storage
+errors release the pin and preserve retry state.
+
+The first neighbor experiment also overlapped two observers of the same worker
+queue. It was narrowed to cancel the first observer after storage admission,
+which releases only observation ownership and keeps its removal running. The
+second sweep must remove the healthy seat before the first storage wait resumes.
+The corrected history fails on the first PR implementation in an isolated
+checkout. Focused controls additionally cover every same-player mutator, pending
+claims, room protection, bulk expiry and retry after cancellation.
+
+The corrected neighbor history fails on `b3b39203` in Nextest
+`f4d4606c-91d1-4ff2-994b-ff1825627a26`. The expanded reconnect, cleanup, worker,
+authority and live host controls pass all 69 tests in Nextest
+`dad46543-b2ff-4072-bbef-ae2386a9f5a6`.
+The three existing reconnect allocation controls also pass without budget changes
+in Nextest `fe3c8ee6-f5cb-42ee-8e2f-6f1e1ddcf514`. Strict full Clippy and all 51
+selected source-policy checks pass on the expanded repair.
+
+The review summary also identified a discovery barrier in missing-room cleanup.
+A slow scan could consume the deadline and discard its newly found candidates
+before any job started. The corrected storage-read control fails on `21d1cd2a`
+in Nextest `85e826f2-c393-4d14-ad06-8e29bb86dfbc`. An initial probe held a read
+guard that blocks writes; it passed because it tested the existing owned teardown,
+not discovery. The corrected probe holds the exclusive room guard that blocks
+reads, then requires teardown after release without invoking another sweep.
+
+Room existence checks now run inside each admitted missing-room worker. The
+observer remains bounded while the original check continues. Healthy rooms
+return before lifecycle admission; missing rooms retain the final lifecycle and
+storage rechecks. This performs one initial existence read per assigned player
+rather than sharing one read per room. Concurrency remains bounded by the worker
+queue, and retries retain its rotating cursor.
+The expanded missing-room, worker, authority and live host controls pass all 21
+tests in Nextest `9d71eddb-d8d5-4e1b-a275-e91d26548c3e`. Strict full Clippy,
+formatting, documentation and all 51 selected source-policy checks pass.

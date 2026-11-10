@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep live peer recovery moving when busy rooms delay seat removal, reconnect expiry, or deleted-room teardown
+  (#1561, #1562, #1563). Keep peer recovery responsive through slow seat removals and room reads.
 - Keep live P2P lobby entry on a stable roster and avoid false lobby events after room removal or game start (#1557, #1558).
 - Keep delayed inbound traffic from refreshing activity for a changed connection (#1559).
 - Keep live lobby readiness stable while a player route is removed (#1553).

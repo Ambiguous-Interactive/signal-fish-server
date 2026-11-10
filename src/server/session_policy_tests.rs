@@ -6629,6 +6629,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         "publication",
         "routing",
         "busy_detach",
+        "busy_detach_batch",
         "busy_activity",
     ] {
         let server = create_server_with_session(host_config()).await;
@@ -6659,7 +6660,9 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
         match failure {
-            "read" | "busy_detach" | "busy_activity" => database.fail_get_room_by_id_for_test(true),
+            "read" | "busy_detach" | "busy_detach_batch" | "busy_activity" => {
+                database.fail_get_room_by_id_for_test(true)
+            }
             "publication" => server
                 .message_coordinator
                 .fail_room_transactions_for_test(true),
@@ -6684,37 +6687,43 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         server
             .message_coordinator
             .fail_room_transactions_for_test(false);
-        let busy_room = if failure == "busy_detach" {
-            let player = PlayerId::new_v4();
-            let room = server
-                .database
-                .create_room(
-                    "busy-maintenance".into(),
-                    None,
-                    4,
-                    false,
-                    player,
-                    "relay".into(),
-                    "test".into(),
-                    None,
-                )
-                .await
-                .unwrap()
-                .id;
-            server
-                .pending_durable_player_detaches
-                .insert((room, player), None);
-            Some((
-                room,
-                player,
+        let mut busy_rooms = Vec::new();
+        if matches!(failure, "busy_detach" | "busy_detach_batch") {
+            let count = if failure == "busy_detach_batch" {
+                32
+            } else {
+                1
+            };
+            for _ in 0..count {
+                let player = PlayerId::new_v4();
+                let room = server
+                    .database
+                    .create_room(
+                        "busy-maintenance".into(),
+                        None,
+                        4,
+                        false,
+                        player,
+                        "relay".into(),
+                        "test".into(),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .id;
                 server
-                    .message_coordinator
-                    .lock_room_event_mutation(&room)
-                    .await,
-            ))
-        } else {
-            None
-        };
+                    .pending_durable_player_detaches
+                    .insert((room, player), None);
+                busy_rooms.push((
+                    room,
+                    player,
+                    server
+                        .message_coordinator
+                        .lock_room_event_mutation(&room)
+                        .await,
+                ));
+            }
+        }
         let busy_activity = if failure == "busy_activity" {
             let (player, receiver) = register_client(&server).await;
             let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
@@ -6759,12 +6768,18 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         assert_plan_queue_empty(&mut host_rx);
         assert_plan_queue_empty(&mut successor_rx);
         assert!(server.pending_session_replans.is_empty());
-        if let Some((room, player, guard)) = busy_room {
+        let busy_count = busy_rooms.len();
+        for (room, player, guard) in busy_rooms {
             assert!(server
                 .pending_durable_player_detaches
                 .contains_key(&(room, player)));
             drop(guard);
-            assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+        }
+        if busy_count > 0 {
+            assert_eq!(
+                server.cleanup_pending_durable_player_detaches().await,
+                busy_count
+            );
         }
         if let Some((player, _, _)) = &busy_activity {
             assert!(server.connection_manager.has_client(player));

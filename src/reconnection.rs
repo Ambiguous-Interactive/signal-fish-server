@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
-use tokio::sync::{RwLock, RwLockReadGuard};
+use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -367,6 +367,8 @@ struct ReconnectionRecord {
     disconnected: DisconnectedPlayer,
     identity: Option<Arc<str>>,
     claim: Option<ReconnectionClaimState>,
+    /// Allocate only for durable expiry work; its owner pins this record through storage.
+    cleanup_gate: Option<Arc<Mutex<()>>>,
     /// The single monotonic instant after which this record's reconnect window
     /// is closed. Captured once per GENUINE disconnect and carried verbatim
     /// through duplicate same-room registration, so a repeated teardown cannot
@@ -384,6 +386,13 @@ struct ReconnectionRecord {
 }
 
 impl ReconnectionRecord {
+    /// Include active storage pins in expiry and room-GC decisions.
+    fn cleanup_in_progress(&self) -> bool {
+        self.cleanup_gate
+            .as_ref()
+            .is_some_and(|gate| gate.try_lock().is_err())
+    }
+
     /// Whether the reconnect window is closed at `now`.
     ///
     /// Exactly at the deadline the record is still claimable; only a strictly
@@ -651,7 +660,7 @@ impl ReconnectionManager {
     }
 
     pub async fn discard_pending_reconnection(&self, player_id: &PlayerId) -> bool {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(player_id).await;
         // Same claim invariant as every expiry surface: a claimed record is
         // owned by its in-flight reconnect transaction, and removing it here
         // would strand that transaction (its completion would silently fail
@@ -700,7 +709,7 @@ impl ReconnectionManager {
         player_id: &PlayerId,
         room_id: &RoomId,
     ) -> bool {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(player_id).await;
         let same_room_unclaimed = state
             .disconnected_players
             .get(player_id)
@@ -738,7 +747,7 @@ impl ReconnectionManager {
     /// so a kick that races the claim still wins. Returns whether a record
     /// was marked.
     pub async fn mark_reconnection_kicked(&self, player_id: &PlayerId) -> bool {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(player_id).await;
         match state.disconnected_players.get_mut(player_id) {
             Some(record) => {
                 record.kicked = true;
@@ -770,6 +779,28 @@ impl ReconnectionManager {
             .disconnected_players
             .get(player_id)
             .map(|record| record.disconnected.room_id)
+    }
+
+    /// Wait for a same-player cleanup before returning the shared mutation guard.
+    async fn lock_record_mutation(
+        &self,
+        player_id: &PlayerId,
+    ) -> RwLockWriteGuard<'_, ReplayState> {
+        loop {
+            let state = self.replay_state.write().await;
+            let Some(gate) = state
+                .disconnected_players
+                .get(player_id)
+                .and_then(|record| record.cleanup_gate.clone())
+            else {
+                return state;
+            };
+            if gate.try_lock().is_ok() {
+                return state;
+            }
+            drop(state);
+            drop(gate.lock_owned().await);
+        }
     }
 
     /// Register a player disconnection.
@@ -812,7 +843,7 @@ impl ReconnectionManager {
         last_epoch: u32,
         identity: Option<Arc<str>>,
     ) -> String {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(&player_id).await;
         let fresh_last_sequence = state.next_sequence;
 
         // A same-room re-registration — the player registered a SECOND
@@ -980,6 +1011,7 @@ impl ReconnectionManager {
             },
             identity: credential_identity,
             claim: None,
+            cleanup_gate: None,
             deadline: existing_same_room.as_ref().map_or_else(
                 || monotonic_deadline(monotonic_now, self.reconnection_window),
                 |existing| existing.deadline,
@@ -1124,7 +1156,7 @@ impl ReconnectionManager {
         token: &str,
         identity: Option<&str>,
     ) -> Result<ClaimedReconnection, ReconnectionError> {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(player_id).await;
 
         let Some(record) = state.disconnected_players.get_mut(player_id) else {
             self.metrics.increment_reconnection_validation_failure();
@@ -1187,7 +1219,7 @@ impl ReconnectionManager {
 
     /// Complete reconnection and remove from disconnected players
     pub async fn complete_reconnection(&self, player_id: &PlayerId) {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(player_id).await;
         let removed = state.disconnected_players.remove(player_id);
         if let Some(record) = &removed {
             let room_id = record.disconnected.room_id;
@@ -1211,7 +1243,9 @@ impl ReconnectionManager {
     /// Complete a reconnection record that was already reserved by
     /// [`Self::claim_reconnection`].
     pub async fn complete_claimed_reconnection(&self, claim: &ClaimedReconnection) -> bool {
-        let mut state = self.replay_state.write().await;
+        let mut state = self
+            .lock_record_mutation(&claim.disconnected.player_id)
+            .await;
         let Some(record) = state
             .disconnected_players
             .get(&claim.disconnected.player_id)
@@ -1265,7 +1299,9 @@ impl ReconnectionManager {
 
     /// Release a reserved reconnection record after a failed restore attempt.
     pub async fn release_reconnection_claim(&self, claim: &ClaimedReconnection) -> bool {
-        let mut state = self.replay_state.write().await;
+        let mut state = self
+            .lock_record_mutation(&claim.disconnected.player_id)
+            .await;
         let Some(record) = state
             .disconnected_players
             .get_mut(&claim.disconnected.player_id)
@@ -1426,16 +1462,19 @@ impl ReconnectionManager {
             .await
             .disconnected_players
             .iter()
-            .filter(|(_, record)| record.claim.is_none() && record.window_closed_at(now))
+            .filter(|(_, record)| {
+                record.claim.is_none()
+                    && !record.cleanup_in_progress()
+                    && record.window_closed_at(now)
+            })
             .map(|(player_id, record)| (*player_id, record.disconnected.room_id))
             .collect()
     }
 
-    /// Keep an expired same-room record stable through durable seat cleanup.
-    /// The caller holds the room mutation gate before entering this method.
-    /// The write lock prevents a new disconnect from replacing the record
-    /// while the storage operation is suspended. Storage errors retain it.
-    /// `None` means ineligible. `Some` carries the removed seat, if one existed.
+    /// Keep an expired record stable without holding shared replay state during storage.
+    /// The caller retains the room mutation gate. Same-player mutations wait for
+    /// this record's cleanup pin; reads and unrelated players remain independent.
+    /// Storage failure or cancellation releases the pin and retains retry state.
     pub(crate) async fn cleanup_expired_membership<F>(
         &self,
         player_id: &PlayerId,
@@ -1445,28 +1484,37 @@ impl ReconnectionManager {
     where
         F: std::future::Future<Output = anyhow::Result<Option<PlayerInfo>>>,
     {
-        let mut state = self.replay_state.write().await;
-        let now = Instant::now();
-        let eligible = state
-            .disconnected_players
-            .get(player_id)
-            .is_some_and(|record| {
-                record.disconnected.room_id == *room_id
-                    && record.claim.is_none()
-                    && record.window_closed_at(now)
-            });
-        if !eligible {
-            return Ok(None);
-        }
+        let cleanup_pin = {
+            let mut state = self.replay_state.write().await;
+            let Some(record) = state.disconnected_players.get_mut(player_id) else {
+                return Ok(None);
+            };
+            if record.disconnected.room_id != *room_id
+                || record.claim.is_some()
+                || !record.window_closed_at(Instant::now())
+            {
+                return Ok(None);
+            }
+            let gate = record
+                .cleanup_gate
+                .get_or_insert_with(|| Arc::new(Mutex::new(())));
+            let Ok(pin) = Arc::clone(gate).try_lock_owned() else {
+                return Ok(None);
+            };
+            pin
+        };
         let removed = cleanup.await?;
+        let mut state = self.replay_state.write().await;
         self.remove_expired_reconnection_locked(&mut state, player_id);
+        drop(state);
+        drop(cleanup_pin);
         Ok(Some(removed))
     }
 
     /// Remove one record only if it is still expired and unclaimed after the
     /// caller completed its durable cleanup. Returns whether it was removed.
     pub async fn remove_expired_reconnection(&self, player_id: &PlayerId) -> bool {
-        let mut state = self.replay_state.write().await;
+        let mut state = self.lock_record_mutation(player_id).await;
         self.remove_expired_reconnection_locked(&mut state, player_id)
     }
 
@@ -1515,7 +1563,9 @@ impl ReconnectionManager {
 
         let now = Instant::now();
         state.disconnected_players.retain(|player_id, record| {
-            let expired = record.claim.is_none() && record.window_closed_at(now);
+            let expired = record.claim.is_none()
+                && !record.cleanup_in_progress()
+                && record.window_closed_at(now);
             if expired {
                 tracing::info!(%player_id, "Removing expired reconnection record");
                 expired_rooms.push(record.disconnected.room_id);
@@ -1577,14 +1627,19 @@ impl ReconnectionManager {
     /// corollary B). Expired records are excluded (they are swept by
     /// [`Self::cleanup_expired`] and no longer protect anything); claimed and
     /// unclaimed records both protect, since an in-flight claim still needs
-    /// the room to exist.
+    /// the room to exist. A durable cleanup pin also protects its room until
+    /// storage completion and pending-record removal agree.
     pub(crate) async fn room_gc_protection(&self) -> RoomGcProtection<'_> {
         let now = Instant::now();
         let state = self.replay_state.read().await;
         let room_ids = state
             .disconnected_players
             .values()
-            .filter(|record| record.claim.is_some() || !record.window_closed_at(now))
+            .filter(|record| {
+                record.claim.is_some()
+                    || record.cleanup_in_progress()
+                    || !record.window_closed_at(now)
+            })
             .map(|record| record.disconnected.room_id)
             .collect();
         RoomGcProtection {
