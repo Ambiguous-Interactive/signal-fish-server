@@ -1769,7 +1769,7 @@ impl GameDatabase for DrainAfterCreateDatabase {
         self.inner.get_game_player_percentiles().await
     }
 
-    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> anyhow::Result<()> {
+    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> anyhow::Result<bool> {
         self.inner.transition_room_to_lobby(room_id).await
     }
 

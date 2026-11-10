@@ -121,3 +121,11 @@ the front in `OutboundReceiver::try_pop_batched`. The non-batched `recv()` path
 preserves every queue semantic (priority lanes, generations, latest coalescing,
 gap reports, sojourn eviction) — the batch timer adds only the idle wait. The
 per-hop latency budget lives in `docs/architecture/scaling.md`.
+
+Lobby promotion retains `lease_room_routes` through the storage decision and
+releases it before publication. Storage adapters implement
+`transition_room_to_lobby -> Result<bool>` atomically: true means a nonempty
+Waiting room changed to Lobby; false leaves state and clocks unchanged. The
+coordinator publishes a new lobby event only for true. JSON router activity
+refreshes retain the source lifecycle gate through heartbeat persistence and
+release it before handler dispatch.

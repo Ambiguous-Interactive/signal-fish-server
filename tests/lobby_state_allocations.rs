@@ -50,7 +50,7 @@ async fn lobby_state_projection_allocates_only_its_async_result() {
         for expected in [Some(LobbyState::Waiting), Some(LobbyState::Lobby), None] {
             match expected {
                 Some(LobbyState::Lobby) => {
-                    database.transition_room_to_lobby(&room.id).await.unwrap()
+                    database.transition_room_to_lobby(&room.id).await.unwrap();
                 }
                 None => assert!(database.delete_room(&room.id).await.unwrap()),
                 _ => {}

@@ -1011,8 +1011,9 @@ pub trait GameDatabase: Send + Sync {
         })
     }
 
-    /// Transition a non-empty waiting room into its lobby state.
-    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()>;
+    /// Atomically promote a non-empty waiting room and return whether it changed.
+    /// Missing, empty, Lobby and Finalized rooms return false without changing clocks.
+    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool>;
 
     /// Toggle player ready state and return lobby information if successful
     /// Returns (lobby_state, ready_players, all_ready) for a present lobby member.
@@ -3509,15 +3510,14 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     /// Enter an occupied waiting room into its lobby and renew both clocks once.
-    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<()> {
+    async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
-        if let Some(room) = rooms.get_mut(room_id) {
-            if room.enter_lobby() {
-                liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
-            }
+        let changed = rooms.get_mut(room_id).is_some_and(Room::enter_lobby);
+        if changed {
+            liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Toggle a lobby member's readiness and renew both clocks on acceptance.
@@ -5884,7 +5884,7 @@ mod tests {
             age_room(&db, &room.id, chrono::Duration::hours(2)).await;
             let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
             match operation {
-                "lobby" => db.transition_room_to_lobby(&room.id).await.unwrap(),
+                "lobby" => assert!(db.transition_room_to_lobby(&room.id).await.unwrap()),
                 "ready" => assert!(db
                     .toggle_player_ready(&room.id, &member)
                     .await

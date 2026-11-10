@@ -529,8 +529,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         if room_players.is_empty() {
             return Ok(false);
         }
-        let routed_players = self.coordinator.routed_player_ids(room_id).await?;
-        let current_ids = effective_room_members(room_players, routed_players);
+        let mut routes = self.coordinator.lease_room_routes(room_id).await?;
+        let current_ids = effective_room_members(room_players, routes.player_ids.take());
         if current_ids.is_empty() {
             return Ok(false);
         }
@@ -564,10 +564,12 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 .database
                 .transition_room_to_lobby(&room_id)
                 .await;
+            drop(routes);
             let completion = match transition {
-                Ok(()) => {
+                Ok(true) => {
                     coordinator.enqueue_replayable_room_event(&room_id, message, mutation_guard)
                 }
+                Ok(false) => return Ok(false),
                 Err(error) => {
                     return Err(error);
                 }

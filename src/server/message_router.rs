@@ -178,33 +178,21 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        if source_lifecycle.as_ref().is_some_and(|lifecycle| {
-            !self
-                .connection_manager
-                .lifecycle_matches(player_id, lifecycle)
-        }) {
-            return;
-        }
-        // EVERY inbound message is liveness, not just `Ping`: the activity
-        // reaper (`server.ping_timeout`) must never disconnect a client that
-        // is actively streaming GameData/Signal traffic but not heartbeating.
-        // This matches the socket-level idle timeout, which already counts
-        // any inbound frame as activity.
-        self.record_client_activity(player_id);
-        // ...and every inbound message refreshes the sender's ROOM clock the
-        // same way (throttled), so a room stays alive as long as any member is
-        // doing ANYTHING — pinging, relaying GameData, OR exchanging WebRTC
-        // `Signal`s (a long handshake with no pings must not let GC reap an
-        // occupied room, BUG-1). This is the single room-liveness refresh site;
-        // it subsumes the former per-handler calls in `handle_ping` /
-        // `broadcast_game_data`. No-ops for a roomless sender (pre-join).
-        self.maybe_update_last_seen(player_id).await;
-        if source_lifecycle.as_ref().is_some_and(|lifecycle| {
-            !self
-                .connection_manager
-                .lifecycle_matches(player_id, lifecycle)
-        }) {
-            return;
+        {
+            let _source_guard = match source_lifecycle.as_ref() {
+                Some(lifecycle) => Some(lifecycle.lock().await),
+                None => None,
+            };
+            if source_lifecycle.as_ref().is_some_and(|lifecycle| {
+                lifecycle.player_id() != *player_id
+                    || !self
+                        .connection_manager
+                        .lifecycle_matches(player_id, lifecycle)
+            }) {
+                return;
+            }
+            self.record_client_activity(player_id);
+            self.maybe_update_last_seen(player_id).await;
         }
         #[cfg(all(test, signal_fish_repository_tests))]
         if let Some((_, pause)) = SOCKET_DISPATCH_PAUSES.remove(player_id) {

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Change storage adapters' `transition_room_to_lobby` result to `bool`; return true only for a new lobby entry.
 - **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority
   transfers; peer metadata writes also require `lease_room_member_route`.
 - Reduce server work when checking reliable delivery deadlines across mixed and lossy gameplay backlogs (#1540).
@@ -65,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep live P2P lobby entry on a stable roster and avoid false lobby events after room removal or game start (#1557, #1558).
+- Keep delayed inbound traffic from refreshing activity for a changed connection (#1559).
 - Keep live lobby readiness stable while a player route is removed (#1553).
 - Preserve authority-transfer refusal codes and reject transfers involving peers that are no longer routed in the room (#1554).
 - Preserve reconnect peer metadata when delayed connection-info updates outlive their live route (#1555).
