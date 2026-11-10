@@ -15273,3 +15273,113 @@ and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-cli
 These issues remain open until their client controls pass. Current SDK READMEs
 were inspected through the connected GitHub app; server regressions alone do
 not establish SDK qualification or remote-network behavior.
+
+### F303–F305 — Keep delayed room operations on current membership
+
+Issues: #1547, #1548 and #1549. Baseline: `e242b66d`.
+Campaign #826 remains open.
+
+The activity reaper awaited each expired connection's owned unregister task.
+A held lifecycle or room gate stopped the maintenance pass before pending P2P
+host repairs. Maintenance now shares one 100 ms observation deadline across
+all activity teardowns in a sweep. Every expired client still starts its owned
+unregister, even after the deadline. The task keeps running after its observer
+stops waiting or is canceled. The existing close pin prevents a later sweep
+from starting another activity eviction for that connection. The deadline does
+not bound farewell routing, a complete sweep or custom storage calls. A
+paused-clock control retains the busy connection, observes its ActivityTimeout
+farewell, completes the sweep, then releases each gate and requires the
+original unregister to finish. An eight-client batch
+fails the earlier per-client wait, then verifies the shared deadline, one
+farewell and eviction count per client across repeated sweeps, and completion
+of every owned teardown after maintenance stops. The actual maintenance task
+also repairs a pending WebRTC host election while unrelated activity teardown
+waits on a held lifecycle.
+
+A delayed authority request used durable membership alone. An unrouted retained
+seat could claim or release authority after waiting for the room gate. The
+coordinator now checks its live route before applying the storage decision.
+Refusal preserves the authority, activity timestamp and replay history. A later
+live request still commits one response and one live/replay authority event.
+Coordinators without routing snapshots retain their durable-membership fallback.
+The room gate orders ordinary membership changes; this check does not prove a
+whole-program atomic relation between routing and custom storage.
+
+Game-start preparation filtered the effective starting roster without checking
+its requester. At the public coordinator boundary, a request could start the
+survivors after its own route and row were removed during the wait. A retained
+unrouted row instead reached a storage snapshot mismatch. The same effective
+roster now refuses both cases with the existing Forbidden result. Refusal keeps
+lobby state and readiness; a surviving member can still start. The controlled
+row-removal history does not prove that a normal socket can race a voluntary
+leave while holding its lifecycle gate.
+
+All three initial regressions fail on the baseline in nextest run
+`192418fc-626f-456f-a554-ba38d28a600c`. Focused controls cover committed authority
+publication after cancellation, successful current-member starts, stale
+activity snapshots, existing close ownership, shutdown drain and busy-gate
+teardown. These findings do not establish the cause of historical #1352.
+
+Wire schemas, close reasons and reconnect windows stay unchanged. Existing
+AuthorityDenied and GameStartForbidden outcomes carry the refusals. Active SDK
+qualification was extended in Rust client
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Their current README files were inspected through the connected GitHub app.
+The assessment issues remain open until their client controls pass; these server
+controls do not establish SDK or remote-network qualification.
+
+### F306 — Observe unused Direct endpoints before finalization selection
+
+Issue: #1550. The weekly mutation run `42572994527` at `dd358151`
+reported a surviving `&&` to `||` fault in game-start member projection.
+The ordinary protocol result could stay unchanged while that projection
+retained an unused Direct endpoint. The fast unit-test mutation oracle did not
+observe that intermediate resource contract.
+
+The production builder now uses `SessionMember::from_finalized_player` for
+that same projection and predicate. A unit control checks deployment-disabled,
+legacy, WebRTC-only, mesh-only and eligible Direct-host profiles against the
+actual candidate data. It also preserves identity, authority, join time,
+capabilities and the original legacy metadata. The eligible profile keeps its
+validated endpoint; the other profiles retain none.
+
+A compiled `&&` to `||` fault in that constructor fails the deployment-disabled
+cohort: it returns a Direct endpoint instead of None. Restoring the predicate
+passes the control and surrounding production-builder tests. This observes
+projection contents; it is not a heap-allocation measurement or a whole-server
+proof. Existing dedicated allocation gates still qualify publication costs.
+
+The pinned cargo-mutants 27.1.0 inventory grows from 565 to 566 because the new
+constructor adds one return-value mutation site. The original predicate remains
+in the complete scope. No exclusion, oracle flag, feature or timeout changes.
+The 57-shard model remains ten mutants per shard and 290 seconds of work.
+Runtime values and wire behavior stay unchanged, so the extraction needs no
+SDK migration or new client tracking issue. The three existing SDK assessments
+above cover the session's observable runtime repairs separately.
+
+The first full run caught the endpoint predicate fault and exposed a separate
+survivor in `recipient_pairable`. That function was test-only and duplicated
+the production pairing predicate for one fixture precondition. The fixture now
+calls the production predicate for both its capable and incapable members;
+its actual plan and credential assertions remain. Removing that duplicate
+removes four test-helper mutation sites, so the complete measured inventory is
+562. Production decision scope, oracle flags and checks stay intact.
+
+The complete qualification run also exposed nine surviving faults in maintenance
+worker limits, host-read shortcuts, endpoint-read failures, and transport-specific
+snapshot requests. Focused tests now observe the exact worker bound and database
+read counts. A test-only counter records requests for Direct metadata, including
+metadata that would not affect the selected wire plan. No mutation exclusions,
+oracle flags, timeout limits, or shard counts changed. The final inventory has
+563 sites: four obsolete test-helper sites were removed and one unviable
+return-value site was added by the authority route-lease adapter.
+
+Review also identified route removal during an authority storage wait. Authority
+requests now retain the existing room routing read fence until storage returns.
+They release it before response and event delivery. A deterministic held-storage
+test covers both claim and release, while the earlier absent-route test still
+checks denial, unchanged activity, and empty replay. Unknown-routing coordinators
+retain their storage-only behavior. This closes the in-process routing gap; it
+does not add cross-process routing or change the wire format.

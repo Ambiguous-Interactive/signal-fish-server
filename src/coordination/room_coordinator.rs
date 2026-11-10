@@ -80,8 +80,8 @@ pub enum StartGameOutcome {
     Started(FinalizedRoom),
     /// Not every current player is ready (maps to `GAME_START_NOT_READY`).
     NotReady,
-    /// The sender is not permitted to start (the room has a designated
-    /// authority and the sender is not it; maps to `GAME_START_FORBIDDEN`).
+    /// The sender is absent from the effective room roster or another member
+    /// holds authority (maps to `GAME_START_FORBIDDEN`).
     Forbidden,
     /// The room is already `Finalized` (maps to `INVALID_ROOM_STATE`).
     AlreadyStarted,
@@ -625,6 +625,7 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         Ok(())
     }
 
+    /// Recheck live routing before committing and publishing an owned authority change.
     async fn handle_authority_request(
         &self,
         room_id: &RoomId,
@@ -632,6 +633,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
+        let route_lease = self
+            .coordinator
+            .lease_room_member_route(room_id, player_id)
+            .await?;
 
         // From the first durable mutation onward this owned task retains the
         // room mutation guard. Dropping the caller only detaches its join
@@ -642,11 +647,16 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         let transaction = tokio::spawn(async move {
             tracing::info!(%room_id, %player_id, %become_authority, "InMemory: Processing authority request");
 
-            let (result, response, authority_change) = match coordinator
-                .database
-                .request_room_authority(&room_id, &player_id, become_authority)
-                .await
-            {
+            let authority_result = if route_lease.is_routed.unwrap_or(true) {
+                coordinator
+                    .database
+                    .request_room_authority(&room_id, &player_id, become_authority)
+                    .await
+            } else {
+                Ok(AuthorityOutcome::Denied(AuthorityDenial::NotAMember))
+            };
+            drop(route_lease);
+            let (result, response, authority_change) = match authority_result {
                 Ok(outcome) => {
                     // The single site that turns a storage decision into the
                     // client's `AuthorityResponse`. Both fields come from the
@@ -807,6 +817,10 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                         .is_none_or(|routed| routed.binary_search(id).is_ok())
                 })
                 .collect();
+
+            if !member_ids.contains(player_id) {
+                return Ok(StartGameOutcome::Forbidden);
+            }
 
             let ready_map = self.ready_players.read().await;
             let ready_set = ready_map.get(room_id);

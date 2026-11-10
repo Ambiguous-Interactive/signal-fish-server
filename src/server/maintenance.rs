@@ -10,6 +10,8 @@ use super::{chrono_duration_from_std, EnhancedGameServer};
 
 /// Limit one candidate's wait before maintenance mutates durable or connection state.
 const MAINTENANCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// Share one observation deadline across every activity teardown in a sweep.
+const ACTIVITY_TEARDOWN_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl EnhancedGameServer {
     /// Abandon only admission waits; an admitted mutation retains its normal completion rules.
@@ -618,6 +620,8 @@ impl EnhancedGameServer {
                 );
                 break 'cleanup;
             }
+            let activity_teardown_deadline =
+                crate::deadline::after(tokio::time::Instant::now(), ACTIVITY_TEARDOWN_SWEEP_WAIT);
             let mut evicted_client_count = 0u64;
             let mut stop_for_drain = false;
             for player_id in expired_clients {
@@ -700,7 +704,17 @@ impl EnhancedGameServer {
 
                 evicted_client_count = evicted_client_count.saturating_add(1);
                 tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
-                self.unregister_client(&player_id).await;
+                /*
+                    Poll unregister first so an expired observation budget still
+                    starts its owned transaction. Dropping the wait leaves it running.
+                */
+                tokio::select! {
+                    biased;
+                    () = self.unregister_client(&player_id) => {}
+                    _ = crate::deadline::wait_until(activity_teardown_deadline) => {
+                        tracing::debug!(%player_id, "Activity-timeout teardown continues outside the maintenance wait");
+                    }
+                }
             }
             if evicted_client_count > 0 {
                 self.metrics

@@ -64,5 +64,5 @@ output_dir="$(dirname "$output")"
 output_name="$(basename "$output")"
 (
     cd "$output_dir"
-    printf '%s  %s\n' "$expected_sha256" "$output_name" | sha256sum --check
+    printf '%s  %s\n' "$expected_sha256" "$output_name" | sha256sum -c -
 )

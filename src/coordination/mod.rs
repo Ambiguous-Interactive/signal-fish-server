@@ -2047,6 +2047,23 @@ pub(crate) fn fail_delivery_closed(
     DeliveryOutcome::SlowConsumer
 }
 
+/// A routing decision whose owned fence stays held through a storage operation.
+/// Unknown routing preserves the storage-only coordinator contract.
+pub struct RoomMemberRouteLease {
+    pub is_routed: Option<bool>,
+    _fence: Box<dyn Send>,
+}
+
+impl RoomMemberRouteLease {
+    /// Retain an implementation-owned routing fence with its membership result.
+    pub fn new(is_routed: Option<bool>, fence: impl Send + 'static) -> Self {
+        Self {
+            is_routed,
+            _fence: Box::new(fence),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait MessageCoordinator: Send + Sync {
     /// Serialize the short mutation/enqueue portion of all room-derived state
@@ -2123,6 +2140,24 @@ pub trait MessageCoordinator: Send + Sync {
             .routed_player_ids(room_id)
             .await?
             .map(|members| [members.contains(first), members.contains(second)]))
+    }
+
+    /// Hold a member's routing decision through an authority storage operation.
+    /// The default accepts only unknown routing. Coordinators that report routes
+    /// must override this method and retain the fence that excludes route removal.
+    async fn lease_room_member_route(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> anyhow::Result<RoomMemberRouteLease> {
+        if self
+            .routed_player_pair(room_id, player_id, player_id)
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("Known routing requires a fenced room member lease");
+        }
+        Ok(RoomMemberRouteLease::new(None, ()))
     }
 
     /// Deliver a room-scoped control frame only if routing still contains the
@@ -3417,6 +3452,35 @@ mod tests {
         };
         assert!(coordinator
             .routed_player_pair(&RoomId::new_v4(), &PlayerId::new_v4(), &PlayerId::new_v4())
+            .await
+            .is_err());
+    }
+
+    /// Known routes require an override; unknown routes retain storage-only use.
+    #[tokio::test]
+    async fn default_route_lease_refuses_unfenced_known_routes() {
+        let player = PlayerId::new_v4();
+        for routed_player_ids in [None, Some(vec![]), Some(vec![player])] {
+            let unknown = routed_player_ids.is_none();
+            let coordinator = FallbackCoordinator {
+                routed_player_ids,
+                ..Default::default()
+            };
+            let result = coordinator
+                .lease_room_member_route(&RoomId::new_v4(), &player)
+                .await;
+            if unknown {
+                assert!(result.unwrap().is_routed.is_none());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        let coordinator = FallbackCoordinator {
+            fail_routed_player_ids: true,
+            ..Default::default()
+        };
+        assert!(coordinator
+            .lease_room_member_route(&RoomId::new_v4(), &player)
             .await
             .is_err());
     }

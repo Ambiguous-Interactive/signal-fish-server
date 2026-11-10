@@ -131,6 +131,7 @@ impl EnhancedGameServer {
         self.handle_start_game_from_lifecycle(player_id, None).await;
     }
 
+    /// Pin the requesting connection and report the coordinator's current-roster decision.
     pub(super) async fn handle_start_game_from_lifecycle(
         &self,
         player_id: &PlayerId,
@@ -175,7 +176,7 @@ impl EnhancedGameServer {
                         ErrorCode::GameStartNotReady,
                     ),
                     StartGameOutcome::Forbidden => (
-                        "Only the room's authority player may start the game.".to_string(),
+                        "Only a current member may start; when authority is set, that player must start.".to_string(),
                         ErrorCode::GameStartForbidden,
                     ),
                     StartGameOutcome::AlreadyStarted => (

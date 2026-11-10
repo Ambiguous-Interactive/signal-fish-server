@@ -117,7 +117,7 @@ Errors related to room lifecycle, capacity, and membership.
 | `MAX_ROOMS_PER_GAME_EXCEEDED` | The maximum number of rooms for this game has been reached. |
 | `INVALID_ROOM_STATE` | The room is in an invalid state for this operation. |
 | `GAME_START_NOT_READY` | `StartGame` was sent before every current player was ready. |
-| `GAME_START_FORBIDDEN` | `StartGame` was sent by a player not permitted to start (the room has a designated authority and the sender is not it). |
+| `GAME_START_FORBIDDEN` | The `StartGame` sender is absent from the current roster, or another member holds authority. |
 | `ROOM_SESSION_INCOMPATIBLE` | The room already finalized a peer-to-peer session whose sticky topology/transport pair this connection did not negotiate, so it cannot be joined mid-session (a seat-fill would silently split the room's data path). Reconnect advertising the session's capabilities or join another room; rooms that finalized to the relay floor remain open to everyone. |
 | `NOT_ROOM_AUTHORITY` | Only the room's authority player may perform this moderation operation (`KickPlayer` / `RegenerateRoomCode` / `SetRoomAccess` / `BanPlayer` / `UnbanPlayer` / `TransferAuthority`). |
 | `KICK_TARGET_NOT_FOUND` | The player named by the moderation operation (`KickPlayer` / `BanPlayer`) is not a seated member of this room. |
