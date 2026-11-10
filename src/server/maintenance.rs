@@ -39,7 +39,8 @@ impl EnhancedGameServer {
             .await
     }
 
-    async fn cleanup_abandoned_rooms_owned(&self) -> usize {
+    /// Discover pending rooms and observe their independently retained deletion jobs.
+    async fn cleanup_abandoned_rooms_owned(self: &Arc<Self>) -> usize {
         let room_ids = match self.database.pending_room_ids().await {
             Ok(ids) => ids,
             Err(error) => {
@@ -47,41 +48,56 @@ impl EnhancedGameServer {
                 return 0;
             }
         };
-        let mut deleted = 0_usize;
-        for room_id in room_ids {
-            let room = match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(room)) => room,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to read unpublished room for cleanup");
-                    continue;
-                }
-            };
-            let lock_key = format!("room_join:{}:{}", room.game_name, room.code);
-            let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
-            let lock_handle = match self.distributed_lock.try_acquire(&lock_key, ttl).await {
-                Ok(Some(handle)) => handle,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to lock unpublished room for cleanup");
-                    continue;
-                }
-            };
-            let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
-            let result = self.database.delete_room_if_pending(&room_id).await;
-            match result {
-                Ok(true) => {
-                    self.metrics.add_rooms_deleted(1);
-                    self.room_applications.remove(&room_id);
-                    deleted = deleted.saturating_add(1);
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to delete abandoned room; retaining it for retry");
-                }
+        self.abandoned_room_deletion_workers
+            .run(
+                room_ids
+                    .into_iter()
+                    .map(|room| (room, PlayerId::nil()))
+                    .collect(),
+                MaintenanceWorkers::deadline(),
+                None,
+                |(room, _)| {
+                    let server = Arc::clone(self);
+                    async move { server.cleanup_abandoned_room(room).await }
+                },
+            )
+            .await
+    }
+
+    /// Revalidate and reclaim one room without delaying other admitted rooms.
+    async fn cleanup_abandoned_room(&self, room_id: RoomId) -> bool {
+        let room = match self.database.get_room_by_id(&room_id).await {
+            Ok(Some(room)) => room,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Failed to read unpublished room for cleanup");
+                return false;
             }
-            self.release_renewed_lock(&mut lock_renewal).await;
-        }
+        };
+        let lock_key = format!("room_join:{}:{}", room.game_name, room.code);
+        let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
+        let lock_handle = match self.distributed_lock.try_acquire(&lock_key, ttl).await {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Failed to lock unpublished room for cleanup");
+                return false;
+            }
+        };
+        let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
+        let deleted = match self.database.delete_room_if_pending(&room_id).await {
+            Ok(true) => {
+                self.metrics.add_rooms_deleted(1);
+                self.room_applications.remove(&room_id);
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Failed to delete abandoned room; retaining it for retry");
+                false
+            }
+        };
+        self.release_renewed_lock(&mut lock_renewal).await;
         deleted
     }
 

@@ -905,6 +905,7 @@ pub struct EnhancedGameServer {
     /// authority lifecycle. Serialize them to prevent cycles across rooms.
     moderation_lifecycle_gate: Mutex<()>,
     abandoned_room_workers: maintenance_workers::MaintenanceWorkers,
+    abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers,
     durable_detach_workers: maintenance_workers::MaintenanceWorkers,
     expired_reconnect_workers: maintenance_workers::MaintenanceWorkers,
     session_repair_workers: maintenance_workers::MaintenanceWorkers,
@@ -1435,6 +1436,7 @@ impl EnhancedGameServer {
             pending_durable_player_detaches: Arc::new(DashMap::new()),
             moderation_lifecycle_gate: Mutex::new(()),
             abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
+            abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers::default(),
             durable_detach_workers: maintenance_workers::MaintenanceWorkers::default(),
             expired_reconnect_workers: maintenance_workers::MaintenanceWorkers::default(),
             session_repair_workers: maintenance_workers::MaintenanceWorkers::default(),

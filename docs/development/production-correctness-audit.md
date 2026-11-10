@@ -15691,3 +15691,18 @@ found an unused test-only concurrency alias. Its callers are repository-only
 tests, so the alias now uses their same configuration gate. The exact package
 inventory and strict packaged-library test build passes in Nextest
 `d15810c9-77f3-440e-8019-e7aaaa0205e2`. Full strict Clippy also passes.
+
+Further PR review identified incomplete F316 isolation inside the retained scan.
+A blocked room read prevented later abandoned rooms from being admitted. The
+new deterministic control fails with zero deletions instead of two while one
+read is held. Discovery still has one retained worker, but it now admits room
+IDs to a separate bounded, rotating deletion pool. Its bounded inner observer
+allows later discovery scans while earlier room jobs remain owned. Each room
+keeps its code lock and atomic pending-publication recheck.
+
+The green control reclaims two neighbors while one read stays blocked, then
+admits a newly abandoned room on a later sweep. It requires one read per room,
+completion of the original read without another sweep, and exactly four total
+cleanup counts. Cancellation, drain-time rollback, publication fencing, live
+host recovery and the surrounding maintenance selection pass all 65 tests in
+Nextest `68559f3e-ca5e-4539-becb-c04a8a1a7874`. Full strict Clippy passes.

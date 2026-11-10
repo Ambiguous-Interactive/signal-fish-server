@@ -145,8 +145,10 @@ A slow scan cannot discard all newly discovered work at the observation deadline
 Healthy rooms return before lifecycle admission; missing rooms revalidate the
 current lifecycle, assignment and storage before terminal teardown.
 
-Abandoned-room cleanup retains one owned scan through slow discovery and deletion.
-Its observer wait is bounded, and repeated observers do not start duplicate scans.
+Abandoned-room cleanup retains one owned discovery scan through slow storage.
+It admits each room to separate bounded, rotating deletion workers. A blocked
+room cannot stop another available room or a later scan. Observer waits are
+bounded, and repeated observers do not duplicate scans or admitted deletions.
 Host-repair maintenance retains bounded workers after room-gate admission; slow
 storage and caller cancellation do not discard an admitted recovery.
 
