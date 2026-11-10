@@ -6631,6 +6631,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         "busy_detach",
         "busy_detach_batch",
         "busy_activity",
+        "busy_abandoned_read",
     ] {
         let server = create_server_with_session(host_config()).await;
         let (host, mut host_rx) = register_client(&server).await;
@@ -6660,9 +6661,11 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
         match failure {
-            "read" | "busy_detach" | "busy_detach_batch" | "busy_activity" => {
-                database.fail_get_room_by_id_for_test(true)
-            }
+            "read"
+            | "busy_detach"
+            | "busy_detach_batch"
+            | "busy_activity"
+            | "busy_abandoned_read" => database.fail_get_room_by_id_for_test(true),
             "publication" => server
                 .message_coordinator
                 .fail_room_transactions_for_test(true),
@@ -6739,6 +6742,29 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         } else {
             None
         };
+        let abandoned_room = if failure == "busy_abandoned_read" {
+            let creator = PlayerId::new_v4();
+            let room = server
+                .database
+                .create_pending_room_classified(
+                    "abandoned-maintenance".into(),
+                    None,
+                    4,
+                    false,
+                    creator,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            server.database.abandon_room(&room.id, &creator).await.unwrap();
+            database.pause_next_get_room_by_id_for_test();
+            Some(room.id)
+        } else {
+            None
+        };
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let maintenance_server = Arc::clone(&server);
         let maintenance = tokio::spawn(async move {
@@ -6748,11 +6774,21 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
                 })
                 .await;
         });
+        if abandoned_room.is_some() {
+            timeout(
+                Duration::from_secs(1),
+                database.wait_for_paused_get_room_by_id_for_test(),
+            )
+            .await
+            .expect("the abandoned-room read must hold the storage seam");
+        }
         let repaired = timeout(Duration::from_secs(1), successor_rx.recv()).await;
         stop.send(()).unwrap();
         maintenance.await.unwrap();
         let message = repaired
-            .expect("maintenance must retry failed host election")
+            .unwrap_or_else(|error| {
+                panic!("{failure}: maintenance must retry failed host election: {error}")
+            })
             .unwrap();
         let ServerMessage::SessionPlan(plan) = message.as_ref() else {
             panic!("expected repaired plan: {message:?}");
@@ -6793,6 +6829,22 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
             })
             .await
             .expect("activity teardown continues after maintenance");
+        }
+        if let Some(abandoned_room) = abandoned_room {
+            assert!(server
+                .database
+                .pending_room_ids()
+                .await
+                .unwrap()
+                .contains(&abandoned_room));
+            database.release_paused_get_room_by_id_for_test();
+            timeout(Duration::from_secs(1), async {
+                while server.database.room_exists(&abandoned_room).await.unwrap() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the admitted abandoned-room read must finish after host recovery");
         }
         server.retry_pending_session_replans().await;
         assert_plan_queue_empty(&mut successor_rx);
@@ -7613,4 +7665,75 @@ async fn duplicate_direct_endpoint_rechecks_route_after_its_storage_read() {
     let trailing = host_rx.try_recv();
     assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
     assert_eq!(initial.transport, Transport::Direct);
+}
+
+/// #1567: A slow admitted host read must outlive its maintenance observer.
+#[tokio::test(start_paused = true)]
+async fn maintenance_host_repair_retains_slow_storage_after_observer_ends() {
+    for canceled in [false, true] {
+        let server = create_server_with_session(host_config()).await;
+        let (host, _host_rx) = register_client(&server).await;
+        let (successor, mut receiver) = register_client(&server).await;
+        for player in [host, successor] {
+            server.set_client_protocol(&player, v3_webrtc());
+        }
+        let room = finalized_db_room_with(&server, host, &[(successor, "Next")]).await;
+        publish_room_members(&server, &room, &[successor]).await;
+        server
+            .database
+            .remove_player_from_room(&room, &host)
+            .await
+            .unwrap();
+        server.active_session_plans.insert(
+            room,
+            ActiveSessionPlan {
+                topology: Topology::Host,
+                transport: Transport::WebRtc,
+                host: Some(host),
+            },
+        );
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        database.fail_get_room_by_id_for_test(true);
+        server.handle_session_member_departure(&room, &host).await;
+        database.fail_get_room_by_id_for_test(false);
+        let held_storage = database.hold_room_reads_for_test().await;
+        database.reset_get_room_by_id_calls_for_test();
+        let observer = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { server.retry_pending_session_replans().await })
+        };
+        for _ in 0..1000 {
+            if database.get_room_by_id_calls_for_test() > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(database.get_room_by_id_calls_for_test(), 1);
+        if canceled {
+            observer.abort();
+            assert!(observer.await.unwrap_err().is_cancelled());
+        } else {
+            observer.await.unwrap();
+        }
+        server.retry_pending_session_replans().await;
+        assert_eq!(
+            database.get_room_by_id_calls_for_test(),
+            1,
+            "a repeated sweep must not duplicate the admitted read"
+        );
+        drop(held_storage);
+        let plan = expect_plan(&mut receiver, "slow admitted repair after observer ends").await;
+        assert_eq!(plan.host, Some(successor));
+        assert_eq!(
+            server.active_session_plan(&room).unwrap().host,
+            Some(successor)
+        );
+        assert!(!server.pending_session_replans.contains_key(&room));
+        server.retry_pending_session_replans().await;
+        assert_plan_queue_empty(&mut receiver);
+    }
 }

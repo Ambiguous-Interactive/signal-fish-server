@@ -1009,3 +1009,29 @@ async fn session_host_snapshot_preserves_pending_membership_and_read_failures() 
         None
     );
 }
+
+/// #1568: canceling cleanup preparation releases every acquired storage fence.
+#[tokio::test]
+async fn canceled_cleanup_preparation_releases_partial_storage_fences() {
+    let database = InMemoryDatabase::new();
+    let room = create_test_room(&database, "gc-cancel", "GCCAN1")
+        .await
+        .unwrap();
+    let codes = database.room_codes.write().await;
+    let mut preparation = Box::pin(database.lease_room_cleanup());
+    assert!(futures_util::poll!(&mut preparation).is_pending());
+    let mut lookup = Box::pin(database.get_room_by_id(&room.id));
+    assert!(futures_util::poll!(&mut lookup).is_pending());
+    drop(preparation);
+    assert!(matches!(
+        futures_util::poll!(&mut lookup),
+        std::task::Poll::Ready(Ok(Some(_)))
+    ));
+    drop(lookup);
+    drop(codes);
+    let lease = database.lease_room_cleanup().await.unwrap().unwrap();
+    assert!(lease
+        .cleanup_empty(chrono::Duration::zero(), &HashSet::new())
+        .is_empty());
+    assert!(database.room_exists(&room.id).await.unwrap());
+}

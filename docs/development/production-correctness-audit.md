@@ -15618,3 +15618,53 @@ queue, and retries retain its rotating cursor.
 The expanded missing-room, worker, authority and live host controls pass all 21
 tests in Nextest `9d71eddb-d8d5-4e1b-a275-e91d26548c3e`. Strict full Clippy,
 formatting, documentation and all 51 selected source-policy checks pass.
+
+### F316–F318 — Preserve live recovery across slow maintenance storage
+
+Session 674 addresses three new first-party server defects under #826:
+[#1566](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1566),
+[#1567](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1567), and
+[#1568](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1568).
+
+F316: abandoned-room cleanup awaited each storage read and deletion before the
+maintenance loop could repair a departed host. A deterministic control holds
+storage, requires the cleanup observer to return, then releases storage and
+requires the admitted deletion to complete without another sweep. The original
+implementation fails the observer deadline. Cleanup now retains one owned scan
+with a bounded observer wait. Repeated observers share the scan. The room-code
+lock and atomic pending-publication recheck still authorize deletion. Cancellation
+and three-room controls require exact completion counts and deletion metrics.
+
+F317: pending host recovery used a local task set. Its one-second deadline aborted
+admitted storage reads. A delayed read could be restarted and canceled on every
+sweep while live peers retained the departed host. The red control detects the
+restarted read. Recovery now uses retained workers keyed by room. A short wait
+bounds room-gate admission; admitted reads and publication survive observation
+timeouts and caller cancellation. Revision checks preserve newer obligations.
+Controls require one successor Host/WebRTC plan after storage resumes and no
+duplicate read or plan across repeated observers. Busy-gate rotation and the
+existing worker limit remain covered.
+
+F318: both protected room GC paths acquired shared replay-state access before
+awaiting storage. A held storage writer blocked unrelated reconnect registration
+and replay publication. The red control detects the blocked registration.
+In-memory storage now prepares a cleanup lease before the server pins the current
+reconnect view. The commit performs no further asynchronous storage work. Both
+GC paths retain pending records and replay events admitted during the storage
+wait. Cancellation during preparation releases partial storage fences. Existing
+custom-adapter GC race controls retain the legacy path. Custom adapters that do
+not implement the optional lease remain correct but can still delay replay writes
+while their cleanup awaits storage.
+
+These changes preserve the wire schema, sticky topology and transport. They
+change recovery timing. External-client qualification remains tracked in Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153), and
+Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+No SDK migration is established. These bounded controls do not complete the
+broader A01–A22 audit.
+
+The final local maintenance and GC selection passes all 81 tests in Nextest
+`a4e8326b-ffd9-4ad7-a1fd-650dde5bb53f`. The 33 focused host-recovery controls pass
+in `471d450e-d3e5-4192-9742-839fbd30bf51`. All 51 selected source-policy checks,
+strict full local Clippy, formatting, Markdown, and documentation checks pass.

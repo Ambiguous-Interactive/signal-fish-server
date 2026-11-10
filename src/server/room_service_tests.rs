@@ -170,8 +170,10 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         pending_session_replans: DashMap::new(),
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         moderation_lifecycle_gate: tokio::sync::Mutex::new(()),
+        abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
         durable_detach_workers: maintenance_workers::MaintenanceWorkers::default(),
         expired_reconnect_workers: maintenance_workers::MaintenanceWorkers::default(),
+        session_repair_workers: maintenance_workers::MaintenanceWorkers::default(),
         missing_room_workers: maintenance_workers::MaintenanceWorkers::default(),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
         reconnect_teardown_test_gate: StdMutex::new(None),
@@ -14875,6 +14877,110 @@ async fn default_member_filter_preserves_backend_contract() {
         .await
         .unwrap();
     assert!(candidates.is_empty());
+}
+
+/// #1566: delayed abandoned-room deletion must not stop live maintenance.
+#[tokio::test(start_paused = true)]
+async fn abandoned_room_cleanup_returns_while_storage_is_busy_and_finishes_later() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.unwrap();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let creator = PlayerId::new_v4();
+    let pending = database
+        .create_pending_room_classified(
+            "delayed-abandon".into(),
+            Some("ABAN01".into()),
+            4,
+            false,
+            creator,
+            "relay".into(),
+            "test".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    database.abandon_room(&pending.id, &creator).await.unwrap();
+    let storage = database.hold_room_writes_for_test().await;
+    assert_eq!(
+        timeout(Duration::from_secs(1), server.cleanup_abandoned_rooms())
+            .await
+            .expect("abandoned-room deletion must release the maintenance observer"),
+        0,
+    );
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 0);
+    drop(storage);
+    timeout(Duration::from_secs(1), async {
+        while server.metrics.rooms_deleted.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admitted cleanup must finish without a new maintenance sweep");
+    assert!(!database.room_exists(&pending.id).await.unwrap());
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+}
+
+/// #1566: canceling a cleanup observer preserves all admitted deletion counts.
+#[tokio::test(start_paused = true)]
+async fn canceled_abandoned_room_observer_preserves_multi_room_cleanup_counts() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.unwrap();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let mut room_ids = Vec::new();
+    for code in ["ABAN11", "ABAN12", "ABAN13"] {
+        let creator = PlayerId::new_v4();
+        let pending = database
+            .create_pending_room_classified(
+                "canceled-abandon".into(),
+                Some(code.into()),
+                4,
+                false,
+                creator,
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        database.abandon_room(&pending.id, &creator).await.unwrap();
+        room_ids.push(pending.id);
+    }
+    let storage = database.hold_room_writes_for_test().await;
+    let mut observer = Box::pin(server.cleanup_abandoned_rooms());
+    assert!(futures_util::poll!(&mut observer).is_pending());
+    drop(observer);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 0);
+    drop(storage);
+    timeout(Duration::from_secs(1), async {
+        while server.metrics.rooms_deleted.load(Ordering::Relaxed) != 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cleanup must finish all rooms after its observer is canceled");
+    for room_id in room_ids {
+        assert!(!database.room_exists(&room_id).await.unwrap());
+    }
+    assert_eq!(server.cleanup_abandoned_rooms().await, 3);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 3);
 }
 
 #[path = "../../tests/support/room_leave_tracing_tests.rs"]

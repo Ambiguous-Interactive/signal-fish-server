@@ -904,8 +904,10 @@ pub struct EnhancedGameServer {
     /// Kick and ban can wait for a target lifecycle while holding the acting
     /// authority lifecycle. Serialize them to prevent cycles across rooms.
     moderation_lifecycle_gate: Mutex<()>,
+    abandoned_room_workers: maintenance_workers::MaintenanceWorkers,
     durable_detach_workers: maintenance_workers::MaintenanceWorkers,
     expired_reconnect_workers: maintenance_workers::MaintenanceWorkers,
+    session_repair_workers: maintenance_workers::MaintenanceWorkers,
     missing_room_workers: maintenance_workers::MaintenanceWorkers,
     #[cfg(test)]
     fail_retain_room_publication_snapshot: AtomicBool,
@@ -1432,8 +1434,10 @@ impl EnhancedGameServer {
             pending_session_replans: DashMap::new(),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
             moderation_lifecycle_gate: Mutex::new(()),
+            abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
             durable_detach_workers: maintenance_workers::MaintenanceWorkers::default(),
             expired_reconnect_workers: maintenance_workers::MaintenanceWorkers::default(),
+            session_repair_workers: maintenance_workers::MaintenanceWorkers::default(),
             missing_room_workers: maintenance_workers::MaintenanceWorkers::default(),
             #[cfg(test)]
             fail_retain_room_publication_snapshot: AtomicBool::new(false),

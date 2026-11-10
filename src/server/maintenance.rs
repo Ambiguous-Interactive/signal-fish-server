@@ -25,7 +25,21 @@ impl EnhancedGameServer {
     /// Reclaim unpublished rooms after a failed or interrupted creation.
     /// The code lock excludes a creator still preparing its first response;
     /// storage rechecks publication before deleting a stale scan result.
-    pub(crate) async fn cleanup_abandoned_rooms(&self) -> usize {
+    pub(crate) async fn cleanup_abandoned_rooms(self: &Arc<Self>) -> usize {
+        self.abandoned_room_workers
+            .run_counted(
+                vec![(RoomId::nil(), PlayerId::nil())],
+                MaintenanceWorkers::deadline(),
+                Some(self.shutdown_drain_receiver()),
+                |_| {
+                    let server = Arc::clone(self);
+                    async move { server.cleanup_abandoned_rooms_owned().await }
+                },
+            )
+            .await
+    }
+
+    async fn cleanup_abandoned_rooms_owned(&self) -> usize {
         let room_ids = match self.database.pending_room_ids().await {
             Ok(ids) => ids,
             Err(error) => {
@@ -245,41 +259,67 @@ impl EnhancedGameServer {
         &self,
         empty_timeout: chrono::Duration,
     ) -> anyhow::Result<Vec<RoomId>> {
+        let prepared = self.database.lease_room_cleanup().await?;
         match &self.reconnection_manager {
             Some(manager) => {
                 let protected = manager.room_gc_protection().await;
-                self.database
-                    .cleanup_empty_rooms(empty_timeout, protected.room_ids())
-                    .await
+                match prepared {
+                    Some(lease) => Ok(lease.cleanup_empty(empty_timeout, protected.room_ids())),
+                    None => {
+                        self.database
+                            .cleanup_empty_rooms(empty_timeout, protected.room_ids())
+                            .await
+                    }
+                }
             }
-            None => {
-                self.database
-                    .cleanup_empty_rooms(empty_timeout, &HashSet::new())
-                    .await
-            }
+            None => match prepared {
+                Some(lease) => Ok(lease.cleanup_empty(empty_timeout, &HashSet::new())),
+                None => {
+                    self.database
+                        .cleanup_empty_rooms(empty_timeout, &HashSet::new())
+                        .await
+                }
+            },
         }
     }
 
-    /// Run the count-only room sweep under a fresh pinned reconnection view.
-    /// Post-cleanup work can be slow, so each database sweep gets its own guard
-    /// rather than blocking new disconnect registrations for the whole tick.
+    /// Prepare storage before pinning the current reconnect view for an atomic commit.
     pub(crate) async fn cleanup_expired_rooms_protecting_reconnections(
         &self,
         empty_timeout: chrono::Duration,
         inactive_timeout: chrono::Duration,
     ) -> anyhow::Result<crate::database::RoomCleanupOutcome> {
+        let prepared = self.database.lease_room_cleanup().await?;
         match &self.reconnection_manager {
             Some(manager) => {
                 let protected = manager.room_gc_protection().await;
-                self.database
-                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, protected.room_ids())
-                    .await
+                match prepared {
+                    Some(lease) => Ok(lease.cleanup_expired(
+                        empty_timeout,
+                        inactive_timeout,
+                        protected.room_ids(),
+                    )),
+                    None => {
+                        self.database
+                            .cleanup_expired_rooms(
+                                empty_timeout,
+                                inactive_timeout,
+                                protected.room_ids(),
+                            )
+                            .await
+                    }
+                }
             }
-            None => {
-                self.database
-                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
-                    .await
-            }
+            None => match prepared {
+                Some(lease) => {
+                    Ok(lease.cleanup_expired(empty_timeout, inactive_timeout, &HashSet::new()))
+                }
+                None => {
+                    self.database
+                        .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
+                        .await
+                }
+            },
         }
     }
 

@@ -85,6 +85,55 @@ pub struct RoomCleanupOutcome {
     pub inactive_rooms_cleaned: usize,
 }
 
+type RoomCleanupCommit<'a> = dyn FnOnce(
+        chrono::Duration,
+        Option<chrono::Duration>,
+        &HashSet<RoomId>,
+    ) -> (Vec<RoomId>, RoomCleanupOutcome)
+    + Send
+    + 'a;
+
+/// A prepared storage cleanup whose commit does not await further storage work.
+pub struct RoomCleanupLease<'a> {
+    commit: Box<RoomCleanupCommit<'a>>,
+}
+
+impl<'a> RoomCleanupLease<'a> {
+    /// Retain all storage fences needed for an atomic synchronous cleanup.
+    pub fn new(
+        commit: impl FnOnce(
+                chrono::Duration,
+                Option<chrono::Duration>,
+                &HashSet<RoomId>,
+            ) -> (Vec<RoomId>, RoomCleanupOutcome)
+            + Send
+            + 'a,
+    ) -> Self {
+        Self {
+            commit: Box::new(commit),
+        }
+    }
+
+    /// Delete only empty rooms using the supplied current reconnect protection.
+    pub fn cleanup_empty(
+        self,
+        timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
+    ) -> Vec<RoomId> {
+        (self.commit)(timeout, None, protected).0
+    }
+
+    /// Delete empty and occupied expired rooms using current reconnect protection.
+    pub fn cleanup_expired(
+        self,
+        empty_timeout: chrono::Duration,
+        inactive_timeout: chrono::Duration,
+        protected: &HashSet<RoomId>,
+    ) -> RoomCleanupOutcome {
+        (self.commit)(empty_timeout, Some(inactive_timeout), protected).1
+    }
+}
+
 /// Room counts and occupancy percentiles for one dashboard sample.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoomMetricsSnapshot {
@@ -944,6 +993,14 @@ pub trait GameDatabase: Send + Sync {
         protected: &HashSet<RoomId>,
     ) -> Result<RoomCleanupOutcome>;
 
+    /// Prepare every storage fence before the caller pins reconnect protection.
+    /// The returned lease must commit without further storage waits. Returning
+    /// None keeps the legacy cleanup methods serialized with reconnect writes;
+    /// custom adapters retain correctness but may delay replay during storage.
+    async fn lease_room_cleanup(&self) -> Result<Option<RoomCleanupLease<'_>>> {
+        Ok(None)
+    }
+
     /// Update room activity timestamp
     async fn update_room_activity(&self, room_id: &RoomId) -> Result<()>;
 
@@ -1590,6 +1647,50 @@ impl InMemoryDatabase {
         &self,
     ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<RoomId, Room>> {
         self.rooms.write().await
+    }
+
+    async fn prepare_room_cleanup(&self) -> RoomCleanupLease<'_> {
+        let mut rooms = self.rooms.write().await;
+        let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
+        let publication = self.room_publication.read().await;
+        RoomCleanupLease::new(move |empty_timeout, inactive_timeout, protected| {
+            let mut deleted_ids = Vec::new();
+            let mut outcome = RoomCleanupOutcome::default();
+            for (room_id, room) in rooms.extract_if(|room_id, room| {
+                if protected.contains(room_id) || publication.contains_key(room_id) {
+                    return false;
+                }
+                let timeout = match (room.has_occupants(), inactive_timeout) {
+                    (true, None) => return false,
+                    (true, Some(timeout)) => timeout,
+                    (false, None) => empty_timeout.max(chrono::Duration::zero()),
+                    (false, Some(_)) => empty_timeout,
+                };
+                let expired =
+                    room_idle_for(liveness.get(room_id).cloned(), room.last_activity) > timeout;
+                if expired {
+                    liveness.remove(room_id);
+                }
+                expired
+            }) {
+                room_codes.remove(&room.game_name, &room.code);
+                let reason = if inactive_timeout.is_some() {
+                    if room.has_occupants() {
+                        outcome.inactive_rooms_cleaned =
+                            outcome.inactive_rooms_cleaned.saturating_add(1);
+                    } else {
+                        outcome.empty_rooms_cleaned = outcome.empty_rooms_cleaned.saturating_add(1);
+                    }
+                    crate::session_records::SessionCloseReason::Expired
+                } else {
+                    deleted_ids.push(room_id);
+                    crate::session_records::SessionCloseReason::Empty
+                };
+                self.session_records.record_closed(&room_id, reason);
+            }
+            (deleted_ids, outcome)
+        })
     }
 
     pub fn new() -> Self {
@@ -3142,82 +3243,27 @@ impl GameDatabase for InMemoryDatabase {
         empty_timeout: chrono::Duration,
         protected: &HashSet<RoomId>,
     ) -> Result<Vec<RoomId>> {
-        let mut rooms = self.rooms.write().await;
-        let mut room_codes = self.room_codes.write().await;
-
-        let effective_timeout = if empty_timeout <= chrono::Duration::zero() {
-            chrono::Duration::zero()
-        } else {
-            empty_timeout
-        };
-        let mut liveness = self.room_liveness_monotonic.write().await;
-        let publication = self.room_publication.read().await;
-
-        let mut deleted_ids = Vec::new();
-        for (room_id, room) in rooms.extract_if(|room_id, room| {
-            let expired = !publication.contains_key(room_id)
-                && !room.has_occupants()
-                && !protected.contains(room_id)
-                && room_idle_for(liveness.get(room_id).cloned(), room.last_activity)
-                    > effective_timeout;
-            if expired {
-                liveness.remove(room_id);
-            }
-            expired
-        }) {
-            room_codes.remove(&room.game_name, &room.code);
-            self.session_records
-                .record_closed(&room_id, crate::session_records::SessionCloseReason::Empty);
-            deleted_ids.push(room_id);
-        }
-
-        Ok(deleted_ids)
+        Ok(self
+            .prepare_room_cleanup()
+            .await
+            .cleanup_empty(empty_timeout, protected))
     }
 
-    /// Extract unprotected published rooms after their empty or occupied idle timeout.
     async fn cleanup_expired_rooms(
         &self,
         empty_timeout: chrono::Duration,
         inactive_timeout: chrono::Duration,
         protected: &HashSet<RoomId>,
     ) -> Result<RoomCleanupOutcome> {
-        let mut rooms = self.rooms.write().await;
-        let mut room_codes = self.room_codes.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
-        let publication = self.room_publication.read().await;
+        Ok(self.prepare_room_cleanup().await.cleanup_expired(
+            empty_timeout,
+            inactive_timeout,
+            protected,
+        ))
+    }
 
-        let mut outcome = RoomCleanupOutcome::default();
-        for (room_id, room) in rooms.extract_if(|room_id, room| {
-            if protected.contains(room_id) || publication.contains_key(room_id) {
-                return false;
-            }
-            let idle_for = room_idle_for(liveness.get(room_id).cloned(), room.last_activity);
-            let expired = idle_for
-                > if room.has_occupants() {
-                    inactive_timeout
-                } else {
-                    empty_timeout
-                };
-            if expired {
-                liveness.remove(room_id);
-            }
-            expired
-        }) {
-            let was_empty = !room.has_occupants();
-            room_codes.remove(&room.game_name, &room.code);
-            self.session_records.record_closed(
-                &room_id,
-                crate::session_records::SessionCloseReason::Expired,
-            );
-
-            if was_empty {
-                outcome.empty_rooms_cleaned = outcome.empty_rooms_cleaned.saturating_add(1);
-            } else {
-                outcome.inactive_rooms_cleaned = outcome.inactive_rooms_cleaned.saturating_add(1);
-            }
-        }
-
-        Ok(outcome)
+    async fn lease_room_cleanup(&self) -> Result<Option<RoomCleanupLease<'_>>> {
+        Ok(Some(self.prepare_room_cleanup().await))
     }
 
     async fn update_room_activity(&self, room_id: &RoomId) -> Result<()> {

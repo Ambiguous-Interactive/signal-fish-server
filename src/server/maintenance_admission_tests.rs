@@ -821,3 +821,57 @@ async fn deleted_room_discovery_outlives_the_observation_deadline() {
     .await
     .expect("the admitted room check must finish teardown without another sweep");
 }
+
+/// #1568: slow room storage must leave reconnect registration and replay writable.
+#[tokio::test(start_paused = true)]
+async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
+    for expired in [false, true] {
+        let server = server().await;
+        let manager = server.reconnection_manager().unwrap();
+        let player = PlayerId::new_v4();
+        let room_id = room(&server, player).await;
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        let storage = database.hold_room_writes_for_test().await;
+        let mut cleanup = Box::pin(async {
+            if expired {
+                server
+                    .cleanup_expired_rooms_protecting_reconnections(
+                        chrono::Duration::zero(),
+                        chrono::Duration::zero(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                server
+                    .cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero())
+                    .await
+                    .unwrap();
+            }
+        });
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        let mut registration =
+            Box::pin(manager.register_disconnection(player, room_id, false, None, 0));
+        assert!(
+            futures_util::poll!(&mut registration).is_ready(),
+            "room GC waiting for storage must not block reconnect registration: expired={expired}"
+        );
+        let message = ServerMessage::AuthorityChanged {
+            authority_player: None,
+            you_are_authority: false,
+        };
+        let mut replay = Box::pin(manager.record_room_event(&room_id, &message));
+        assert!(
+            futures_util::poll!(&mut replay).is_ready(),
+            "room GC waiting for storage must not block live room publication"
+        );
+        drop(storage);
+        cleanup.await;
+        assert!(server.database.room_exists(&room_id).await.unwrap());
+        assert!(manager.has_pending_reconnection(&player).await);
+        assert_eq!(manager.replay_sample().await.replay_events, 1);
+    }
+}
