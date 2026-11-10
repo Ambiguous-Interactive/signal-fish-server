@@ -15568,3 +15568,10 @@ Nextest `203599b5-b67f-4f40-8572-869a11589182` passes all 18 focused
 maintenance, worker-ownership and authority-residue controls. The 51 selected
 source-policy checks and strict full local Clippy pass. Main's two triggered
 push workflows (Docker Publish and Deploy Documentation) are successful.
+
+The live host-repair control also holds 32 unrelated durable-detach gates while
+the actual maintenance loop runs. The survivor must receive its repaired
+Host/WebRTC plan within the unchanged one-second deadline. It fails on the
+original base in an isolated checkout and passes on the repair in Nextest
+`eb243878-8356-42ea-a3d9-72eec0be0666`. The control also verifies sticky transport,
+quiet repeat sweeps and eventual cleanup after the held gates release.
