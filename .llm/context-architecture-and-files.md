@@ -144,3 +144,16 @@ Missing-room cleanup performs its first existence read inside the owned worker.
 A slow scan cannot discard all newly discovered work at the observation deadline.
 Healthy rooms return before lifecycle admission; missing rooms revalidate the
 current lifecycle, assignment and storage before terminal teardown.
+
+Abandoned-room cleanup retains one owned discovery scan through slow storage.
+It admits each room to separate bounded, rotating deletion workers. With a free
+deletion slot, a blocked room cannot stop another available room. Later discovery
+scans remain eligible while admitted deletions wait. Observer waits are bounded,
+and repeated observers do not duplicate scans or admitted deletions.
+Host-repair maintenance retains bounded workers after room-gate admission; slow
+storage and caller cancellation do not discard an admitted recovery.
+
+In-memory room GC prepares all storage locks before pinning reconnect protection.
+Deletion then commits synchronously against the current protected rooms. Custom
+storage adapters can implement `lease_room_cleanup` to use this order; adapters
+that return `None` retain the serialized legacy path and can delay replay writes.

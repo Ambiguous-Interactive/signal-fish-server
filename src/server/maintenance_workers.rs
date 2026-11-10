@@ -8,7 +8,7 @@ use crate::protocol::{PlayerId, RoomId};
 
 type Candidate = (RoomId, PlayerId);
 
-const CONCURRENCY: usize = 8;
+pub(super) const CONCURRENCY: usize = 8;
 const SWEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Keep admitted cleanup jobs alive across observation timeouts and caller cancellation.
@@ -19,18 +19,18 @@ pub(super) struct MaintenanceWorkers {
 
 #[derive(Default)]
 struct WorkerState {
-    tasks: JoinSet<bool>,
+    tasks: JoinSet<usize>,
     candidates: BTreeMap<Id, Candidate>,
     cursor: Option<Candidate>,
 }
 
 impl WorkerState {
     /// Retire one finished worker and count only confirmed cleanup.
-    fn complete(&mut self, result: Result<(Id, bool), JoinError>) -> usize {
+    fn complete(&mut self, result: Result<(Id, usize), JoinError>) -> usize {
         match result {
             Ok((id, cleaned)) => {
                 self.candidates.remove(&id);
-                usize::from(cleaned)
+                cleaned
             }
             Err(error) => {
                 let candidate = self.candidates.remove(&error.id());
@@ -69,9 +69,28 @@ impl MaintenanceWorkers {
         }
     }
 
+    /// Count one confirmed cleanup per successful candidate.
+    pub(super) async fn run<F, Fut>(
+        &self,
+        candidates: Vec<Candidate>,
+        deadline: Option<tokio::time::Instant>,
+        draining: Option<watch::Receiver<bool>>,
+        start: F,
+    ) -> usize
+    where
+        F: Fn(Candidate) -> Fut,
+        Fut: Future<Output = bool> + Send + 'static,
+    {
+        self.run_counted(candidates, deadline, draining, |candidate| {
+            let work = start(candidate);
+            async move { usize::from(work.await) }
+        })
+        .await
+    }
+
     /// Rotate scans, bound concurrency, and share one wait across the entire batch.
     /// Completed counts include previously admitted jobs observed by this sweep.
-    pub(super) async fn run<F, Fut>(
+    pub(super) async fn run_counted<F, Fut>(
         &self,
         mut candidates: Vec<Candidate>,
         deadline: Option<tokio::time::Instant>,
@@ -80,7 +99,7 @@ impl MaintenanceWorkers {
     ) -> usize
     where
         F: Fn(Candidate) -> Fut,
-        Fut: Future<Output = bool> + Send + 'static,
+        Fut: Future<Output = usize> + Send + 'static,
     {
         let mut state = tokio::select! {
             biased;

@@ -22,10 +22,25 @@ impl EnhancedGameServer {
             .ok()
     }
 
-    /// Reclaim unpublished rooms after a failed or interrupted creation.
+    /// Reclaim unpublished rooms after a failed or interrupted creation, including during drain.
     /// The code lock excludes a creator still preparing its first response;
     /// storage rechecks publication before deleting a stale scan result.
-    pub(crate) async fn cleanup_abandoned_rooms(&self) -> usize {
+    pub(crate) async fn cleanup_abandoned_rooms(self: &Arc<Self>) -> usize {
+        self.abandoned_room_workers
+            .run_counted(
+                vec![(RoomId::nil(), PlayerId::nil())],
+                MaintenanceWorkers::deadline(),
+                None,
+                |_| {
+                    let server = Arc::clone(self);
+                    async move { server.cleanup_abandoned_rooms_owned().await }
+                },
+            )
+            .await
+    }
+
+    /// Discover pending rooms and observe their independently retained deletion jobs.
+    async fn cleanup_abandoned_rooms_owned(self: &Arc<Self>) -> usize {
         let room_ids = match self.database.pending_room_ids().await {
             Ok(ids) => ids,
             Err(error) => {
@@ -33,41 +48,56 @@ impl EnhancedGameServer {
                 return 0;
             }
         };
-        let mut deleted = 0_usize;
-        for room_id in room_ids {
-            let room = match self.database.get_room_by_id(&room_id).await {
-                Ok(Some(room)) => room,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to read unpublished room for cleanup");
-                    continue;
-                }
-            };
-            let lock_key = format!("room_join:{}:{}", room.game_name, room.code);
-            let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
-            let lock_handle = match self.distributed_lock.try_acquire(&lock_key, ttl).await {
-                Ok(Some(handle)) => handle,
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to lock unpublished room for cleanup");
-                    continue;
-                }
-            };
-            let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
-            let result = self.database.delete_room_if_pending(&room_id).await;
-            match result {
-                Ok(true) => {
-                    self.metrics.add_rooms_deleted(1);
-                    self.room_applications.remove(&room_id);
-                    deleted = deleted.saturating_add(1);
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to delete abandoned room; retaining it for retry");
-                }
+        self.abandoned_room_deletion_workers
+            .run(
+                room_ids
+                    .into_iter()
+                    .map(|room| (room, PlayerId::nil()))
+                    .collect(),
+                MaintenanceWorkers::deadline(),
+                None,
+                |(room, _)| {
+                    let server = Arc::clone(self);
+                    async move { server.cleanup_abandoned_room(room).await }
+                },
+            )
+            .await
+    }
+
+    /// Revalidate and reclaim one room without delaying other admitted rooms.
+    async fn cleanup_abandoned_room(&self, room_id: RoomId) -> bool {
+        let room = match self.database.get_room_by_id(&room_id).await {
+            Ok(Some(room)) => room,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Failed to read unpublished room for cleanup");
+                return false;
             }
-            self.release_renewed_lock(&mut lock_renewal).await;
-        }
+        };
+        let lock_key = format!("room_join:{}:{}", room.game_name, room.code);
+        let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
+        let lock_handle = match self.distributed_lock.try_acquire(&lock_key, ttl).await {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Failed to lock unpublished room for cleanup");
+                return false;
+            }
+        };
+        let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
+        let deleted = match self.database.delete_room_if_pending(&room_id).await {
+            Ok(true) => {
+                self.metrics.add_rooms_deleted(1);
+                self.room_applications.remove(&room_id);
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Failed to delete abandoned room; retaining it for retry");
+                false
+            }
+        };
+        self.release_renewed_lock(&mut lock_renewal).await;
         deleted
     }
 
@@ -245,41 +275,67 @@ impl EnhancedGameServer {
         &self,
         empty_timeout: chrono::Duration,
     ) -> anyhow::Result<Vec<RoomId>> {
+        let prepared = self.database.lease_room_cleanup().await?;
         match &self.reconnection_manager {
             Some(manager) => {
                 let protected = manager.room_gc_protection().await;
-                self.database
-                    .cleanup_empty_rooms(empty_timeout, protected.room_ids())
-                    .await
+                match prepared {
+                    Some(lease) => Ok(lease.cleanup_empty(empty_timeout, protected.room_ids())),
+                    None => {
+                        self.database
+                            .cleanup_empty_rooms(empty_timeout, protected.room_ids())
+                            .await
+                    }
+                }
             }
-            None => {
-                self.database
-                    .cleanup_empty_rooms(empty_timeout, &HashSet::new())
-                    .await
-            }
+            None => match prepared {
+                Some(lease) => Ok(lease.cleanup_empty(empty_timeout, &HashSet::new())),
+                None => {
+                    self.database
+                        .cleanup_empty_rooms(empty_timeout, &HashSet::new())
+                        .await
+                }
+            },
         }
     }
 
-    /// Run the count-only room sweep under a fresh pinned reconnection view.
-    /// Post-cleanup work can be slow, so each database sweep gets its own guard
-    /// rather than blocking new disconnect registrations for the whole tick.
+    /// Prepare storage before pinning the current reconnect view for an atomic commit.
     pub(crate) async fn cleanup_expired_rooms_protecting_reconnections(
         &self,
         empty_timeout: chrono::Duration,
         inactive_timeout: chrono::Duration,
     ) -> anyhow::Result<crate::database::RoomCleanupOutcome> {
+        let prepared = self.database.lease_room_cleanup().await?;
         match &self.reconnection_manager {
             Some(manager) => {
                 let protected = manager.room_gc_protection().await;
-                self.database
-                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, protected.room_ids())
-                    .await
+                match prepared {
+                    Some(lease) => Ok(lease.cleanup_expired(
+                        empty_timeout,
+                        inactive_timeout,
+                        protected.room_ids(),
+                    )),
+                    None => {
+                        self.database
+                            .cleanup_expired_rooms(
+                                empty_timeout,
+                                inactive_timeout,
+                                protected.room_ids(),
+                            )
+                            .await
+                    }
+                }
             }
-            None => {
-                self.database
-                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
-                    .await
-            }
+            None => match prepared {
+                Some(lease) => {
+                    Ok(lease.cleanup_expired(empty_timeout, inactive_timeout, &HashSet::new()))
+                }
+                None => {
+                    self.database
+                        .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
+                        .await
+                }
+            },
         }
     }
 
