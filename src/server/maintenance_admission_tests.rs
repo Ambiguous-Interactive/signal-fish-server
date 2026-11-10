@@ -782,3 +782,42 @@ async fn expired_seat_storage_wait_preserves_healthy_neighbor_progress() {
     assert!(!manager.has_pending_reconnection(&blocked).await);
     assert!(!manager.has_pending_reconnection(&healthy).await);
 }
+
+/// #1563: room discovery must remain owned after its observer reaches the deadline.
+#[tokio::test(start_paused = true)]
+async fn deleted_room_discovery_outlives_the_observation_deadline() {
+    let server = server().await;
+    let player = PlayerId::from_u128(1);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(8);
+    server.connect_client(player, sender).await;
+    let room_id = room(&server, player).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&player, room_id)
+        .await;
+    server.database.delete_room(&room_id).await.unwrap();
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let storage = database.hold_room_reads_for_test().await;
+    assert_eq!(
+        timeout(
+            Duration::from_millis(500),
+            server.cleanup_clients_in_missing_rooms()
+        )
+        .await
+        .expect("a storage read must not hold the sweep observer"),
+        0
+    );
+    assert!(server.connection_manager.has_client(&player));
+    drop(storage);
+    timeout(Duration::from_secs(1), async {
+        while server.connection_manager.has_client(&player) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the admitted room check must finish teardown without another sweep");
+}

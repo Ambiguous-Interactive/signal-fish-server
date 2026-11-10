@@ -1,6 +1,6 @@
 use crate::coordination::{CloseReason, RoomEventCompletion, RoomEventMutationGuard};
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -442,39 +442,32 @@ impl EnhancedGameServer {
     /// task is cancelled after the durable delete but before local teardown.
     pub(crate) async fn cleanup_clients_in_missing_rooms(self: &Arc<Self>) -> usize {
         let deadline = MaintenanceWorkers::deadline();
-        let mut candidates = HashMap::<RoomId, Vec<PlayerId>>::new();
-        for player_id in self.connection_manager.client_ids() {
-            if let Some(room_id) = self.connection_manager.get_client_room(&player_id) {
-                candidates.entry(room_id).or_default().push(player_id);
-            }
-        }
-
-        let mut missing = Vec::new();
-        for (room_id, player_ids) in candidates {
-            let Some(exists) =
-                MaintenanceWorkers::observe(deadline, self.database.room_exists(&room_id)).await
-            else {
-                break;
-            };
-            match exists {
-                Ok(true) => continue,
-                Ok(false) => missing.extend(player_ids.into_iter().map(|player| (room_id, player))),
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to verify assigned room during cleanup; retaining clients");
-                }
-            }
-        }
+        let candidates = self
+            .connection_manager
+            .client_ids()
+            .into_iter()
+            .filter_map(|player_id| {
+                self.connection_manager
+                    .get_client_room(&player_id)
+                    .map(|room_id| (room_id, player_id))
+            })
+            .collect();
         self.missing_room_workers
             .run(
-                missing,
+                candidates,
                 deadline,
                 Some(self.shutdown_drain_receiver()),
                 |(room_id, player_id)| {
                     let server = Arc::clone(self);
                     async move {
-                        server
-                            .cleanup_client_in_missing_room(player_id, room_id)
-                            .await
+                        match server.database.room_exists(&room_id).await {
+                            Ok(true) => false,
+                            Ok(false) => server.cleanup_client_in_missing_room(player_id, room_id).await,
+                            Err(error) => {
+                                tracing::warn!(%room_id, %player_id, %error, "Failed to verify assigned room during cleanup; retaining client");
+                                false
+                            }
+                        }
                     }
                 },
             )

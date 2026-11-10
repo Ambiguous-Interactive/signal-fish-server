@@ -15544,10 +15544,10 @@ the change. The repair preserves the original quiet durable cleanup contract.
 
 Controls cover batch deadlines, retry rotation, bounded retained jobs, observer
 cancellation, panic recovery, shutdown drain, healthy neighbors, room movement,
-and storage completion after removal. Candidate scans share the observation
-deadline. Expired cleanup pins its own record through durable removal while
-releasing shared replay state, so unrelated seats can proceed. Deleted-room
-candidate storage reads share the same deadline. Missing-room teardown remains
+and storage completion after removal. Expired candidate scans share the observation deadline. Expired cleanup pins
+its own record through durable removal while releasing shared replay state,
+so unrelated seats can proceed. Deleted-room storage reads run inside the owned
+worker instead of a cancelable batch discovery barrier. Missing-room teardown remains
 owned after it pins its terminal close and waits for the room mutation gate.
 
 These are controlled in-process server histories. They do not prove network
@@ -15600,3 +15600,21 @@ authority and live host controls pass all 69 tests in Nextest
 The three existing reconnect allocation controls also pass without budget changes
 in Nextest `fe3c8ee6-f5cb-42ee-8e2f-6f1e1ddcf514`. Strict full Clippy and all 51
 selected source-policy checks pass on the expanded repair.
+
+The review summary also identified a discovery barrier in missing-room cleanup.
+A slow scan could consume the deadline and discard its newly found candidates
+before any job started. The corrected storage-read control fails on `21d1cd2a`
+in Nextest `85e826f2-c393-4d14-ad06-8e29bb86dfbc`. An initial probe held a read
+guard that blocks writes; it passed because it tested the existing owned teardown,
+not discovery. The corrected probe holds the exclusive room guard that blocks
+reads, then requires teardown after release without invoking another sweep.
+
+Room existence checks now run inside each admitted missing-room worker. The
+observer remains bounded while the original check continues. Healthy rooms
+return before lifecycle admission; missing rooms retain the final lifecycle and
+storage rechecks. This performs one initial existence read per assigned player
+rather than sharing one read per room. Concurrency remains bounded by the worker
+queue, and retries retain its rotating cursor.
+The expanded missing-room, worker, authority and live host controls pass all 21
+tests in Nextest `9d71eddb-d8d5-4e1b-a275-e91d26548c3e`. Strict full Clippy,
+formatting, documentation and all 51 selected source-policy checks pass.
