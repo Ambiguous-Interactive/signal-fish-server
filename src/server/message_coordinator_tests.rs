@@ -6346,3 +6346,58 @@ async fn canceled_two_room_route_move_releases_fences_without_changing_membershi
             .is_empty());
     }
 }
+
+/// #1553: a leased roster freezes seated routes and excludes nonplayers.
+#[tokio::test]
+async fn room_roster_lease_keeps_exact_seated_routes_until_drop() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::new_v4();
+    let other_room = RoomId::new_v4();
+    let mut receivers = Vec::new();
+    for (id, assigned) in [
+        (1, Some(room)),
+        (2, Some(room)),
+        (3, Some(room)),
+        (4, Some(other_room)),
+        (5, None),
+    ] {
+        let (sender, receiver) = mpsc::channel(4);
+        receivers.push(receiver);
+        coordinator
+            .register_local_client(
+                PlayerId::from_u128(id),
+                assigned,
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+    }
+    coordinator.set_spectator_route(PlayerId::from_u128(3), true);
+    let lease = coordinator.lease_room_routes(&room).await.unwrap();
+    assert_eq!(
+        lease.player_ids.as_deref(),
+        Some([PlayerId::from_u128(1), PlayerId::from_u128(2)].as_slice())
+    );
+    let removed = PlayerId::from_u128(2);
+    let mut removal = Box::pin(coordinator.unregister_local_client(&removed));
+    assert!(futures_util::poll!(&mut removal).is_pending());
+    drop(lease);
+    tokio::time::timeout(Duration::from_secs(1), removal)
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = coordinator.lease_room_routes(&room).await.unwrap();
+    assert_eq!(
+        lease.player_ids.as_deref(),
+        Some([PlayerId::from_u128(1)].as_slice())
+    );
+    drop(lease);
+    assert_eq!(
+        coordinator
+            .lease_room_routes(&RoomId::new_v4())
+            .await
+            .unwrap()
+            .player_ids,
+        Some(vec![])
+    );
+}

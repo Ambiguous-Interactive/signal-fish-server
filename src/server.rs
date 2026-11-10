@@ -4758,6 +4758,31 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         Ok(Some(players))
     }
 
+    async fn lease_room_routes(
+        &self,
+        room_id: &RoomId,
+    ) -> anyhow::Result<crate::coordination::RoomRoutesLease> {
+        let routing = self.room_routing_gates.read(*room_id).await;
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let spectators = self
+            .spectator_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let members = room_players
+            .get(room_id)
+            .into_iter()
+            .flat_map(|members| members.iter().copied())
+            .filter(|player| clients.contains_key(player) && !spectators.contains(player));
+        let mut player_ids = Vec::with_capacity(members.clone().count());
+        player_ids.extend(members);
+        player_ids.sort_unstable();
+        Ok(crate::coordination::RoomRoutesLease::new(
+            Some(player_ids),
+            routing,
+        ))
+    }
+
     async fn lease_room_member_route(
         &self,
         room_id: &RoomId,

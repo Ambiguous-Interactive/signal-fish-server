@@ -151,12 +151,44 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
+        let route = match self
+            .message_coordinator
+            .lease_room_member_route(&room_id, player_id)
+            .await
+        {
+            Ok(route) => route,
+            Err(error) => {
+                drop(room_event_guard);
+                tracing::warn!(%player_id, %room_id, %error, "Failed to check peer metadata route");
+                let _ = self
+                    .send_error_to_player(
+                        player_id,
+                        "Failed to check room membership".into(),
+                        Some(ErrorCode::InternalError),
+                    )
+                    .await;
+                return;
+            }
+        };
+        if route.is_routed == Some(false) {
+            drop(route);
+            drop(room_event_guard);
+            let _ = self
+                .send_error_to_player(
+                    player_id,
+                    "Not currently routed in the room".into(),
+                    Some(ErrorCode::NotInRoom),
+                )
+                .await;
+            return;
+        }
         let stored = self.active_session_plan(&room_id).filter(|plan| {
             plan.topology == crate::protocol::Topology::Host
                 && plan.transport == crate::protocol::Transport::Direct
                 && plan.host == Some(*player_id)
         });
         if let Some(stored) = stored {
+            drop(route);
             let result = self
                 .prepare_direct_endpoint_refresh(
                     &room_id,
@@ -181,11 +213,12 @@ impl EnhancedGameServer {
 
         tracing::info!(%player_id, %room_id, "Player provided legacy peer connection metadata");
 
-        match self
+        let result = self
             .database
             .update_player_connection_info(&room_id, player_id, connection_info)
-            .await
-        {
+            .await;
+        drop(route);
+        match result {
             // Confirmed write: the caller asked for no receipt, so silence is
             // the success contract.
             Ok(true) => return,

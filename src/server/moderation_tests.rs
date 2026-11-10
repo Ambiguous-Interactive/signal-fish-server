@@ -3392,3 +3392,140 @@ async fn canceled_transfer_publishes_committed_authority_before_later_transfer()
     }) if *id == authority)
     );
 }
+
+#[tokio::test]
+async fn transfer_authority_refuses_pruned_source_or_target_routes() {
+    for prune_target in [false, true] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48201".parse().unwrap()).await;
+        let (target, mut target_rx) =
+            register_client(&server, "127.0.0.1:48202".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "PRUNE1", "host").await;
+        join_seated_player(&server, &target, &mut target_rx, "PRUNE1", "peer").await;
+        drain_receiver(&mut authority_rx);
+        drain_receiver(&mut target_rx);
+        let room_id = server.get_client_room(&authority).await.unwrap();
+        let guard = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let mut transfer = Box::pin(server.handle_transfer_authority_operation(
+            &authority,
+            RoomOperationId::new_v4(),
+            target,
+        ));
+        assert!(futures_util::poll!(&mut transfer).is_pending());
+        let pruned = if prune_target { target } else { authority };
+        server
+            .message_coordinator
+            .unregister_local_client(&pruned)
+            .await
+            .unwrap();
+        assert_eq!(server.get_client_room(&pruned).await, Some(room_id));
+        let before = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(guard);
+        transfer.await;
+        let after = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.authority_player,
+            Some(authority),
+            "prune_target={prune_target}"
+        );
+        assert_eq!(after.last_activity, before.last_activity);
+        let messages = drain_receiver(&mut authority_rx);
+        assert!(messages
+            .iter()
+            .all(|message| !matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. })));
+        if prune_target {
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                operation_failed_code(&messages[0]),
+                ErrorCode::TransferTargetNotFound
+            );
+        }
+        assert!(drain_receiver(&mut target_rx).is_empty());
+    }
+}
+
+/// #1554: route loss waits until the role update has returned from storage.
+#[tokio::test]
+async fn transfer_authority_fences_routes_through_the_storage_commit() {
+    for remove_target in [false, true] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48211".parse().unwrap()).await;
+        let (target, mut target_rx) =
+            register_client(&server, "127.0.0.1:48212".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "FENCE1", "host").await;
+        join_seated_player(&server, &target, &mut target_rx, "FENCE1", "peer").await;
+        drain_receiver(&mut authority_rx);
+        drain_receiver(&mut target_rx);
+        let room_id = server.get_client_room(&authority).await.unwrap();
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        database.pause_authority_request_after_commit_for_test();
+        let caller = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .handle_transfer_authority_operation(
+                        &authority,
+                        RoomOperationId::new_v4(),
+                        target,
+                    )
+                    .await;
+            })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_authority_request_commit_for_test(),
+        )
+        .await
+        .unwrap();
+        let removed = if remove_target { target } else { authority };
+        let mut removal = Box::pin(server.message_coordinator.unregister_local_client(&removed));
+        assert!(futures_util::poll!(&mut removal).is_pending());
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(
+            futures_util::poll!(&mut removal).is_pending(),
+            "owned transfer must retain the fence after caller cancellation"
+        );
+        database.release_authority_request_commit_for_test();
+        timeout(Duration::from_secs(1), removal)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .authority_player,
+            Some(target)
+        );
+        timeout(Duration::from_secs(1), async {
+            let survivor_rx = if remove_target { &mut authority_rx } else { &mut target_rx };
+            loop {
+                let message = survivor_rx.recv().await.unwrap();
+                if matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(id), .. } if *id == target) { break; }
+            }
+        }).await.expect("committed authority must still be announced to the survivor");
+    }
+}

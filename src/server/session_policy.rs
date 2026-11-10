@@ -1185,10 +1185,8 @@ impl EnhancedGameServer {
             {
                 Ok(Some(previous)) if previous == *endpoint => {
                     return self
-                        .database
-                        .update_player_connection_info(room_id, player_id, connection_info)
-                        .await
-                        .unwrap_or(false);
+                        .store_routed_connection_info(room_id, player_id, connection_info)
+                        .await;
                 }
                 Err(_) => return false,
                 _ => {}
@@ -1204,10 +1202,8 @@ impl EnhancedGameServer {
         };
         if room.lobby_state != LobbyState::Finalized {
             return self
-                .database
-                .update_player_connection_info(room_id, player_id, connection_info)
-                .await
-                .unwrap_or(false);
+                .store_routed_connection_info(room_id, player_id, connection_info)
+                .await;
         }
         let Some(host) = room
             .players
@@ -1242,6 +1238,28 @@ impl EnhancedGameServer {
             Some((*player_id, connection_info)),
         )
         .await
+    }
+
+    async fn store_routed_connection_info(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        connection_info: ConnectionInfo,
+    ) -> bool {
+        let Ok(route) = self
+            .message_coordinator
+            .lease_room_member_route(room_id, player_id)
+            .await
+        else {
+            return false;
+        };
+        if route.is_routed == Some(false) {
+            return false;
+        }
+        self.database
+            .update_player_connection_info(room_id, player_id, connection_info)
+            .await
+            .unwrap_or(false)
     }
 
     async fn publish_host_session(

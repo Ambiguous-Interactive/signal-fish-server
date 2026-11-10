@@ -15383,3 +15383,63 @@ test covers both claim and release, while the earlier absent-route test still
 checks denial, unchanged activity, and empty replay. Unknown-routing coordinators
 retain their storage-only behavior. This closes the in-process routing gap; it
 does not add cross-process routing or change the wire format.
+
+### F307–F309 — Fence live room state through routing-sensitive commits
+
+Issues: #1553, #1554 and #1555. Baseline: `b0a32576`.
+These are new server findings. They do not establish the cause of
+issues #1352, #853 or #889.
+
+Readiness sampled the routed roster before waiting for lobby promotion and the
+ready-map write lock. Route removal could finish before the toggle committed.
+The owned toggle now retains a leased seated roster through those writes.
+A controlled ready-map wait blocks removal of either the actor or its peer.
+After release, the surviving peer and replay observe the same complete ready
+snapshot. The fence releases before fanout. Existing controls retain rejection
+of absent members and cancellation-independent ready publication.
+
+Authority transfer checked durable membership and the target connection's room
+assignment. A pruned route can leave both records behind until teardown finishes.
+A request delayed at the room gate could transfer from a pruned authority or to
+an unreachable target. Transfer now requires both live seated routes and keeps
+their room routing fence through the storage result. Refusal preserves the role
+and activity. A post-commit storage pause proves removal still waits after the
+caller is canceled; the owned transaction then announces the committed role.
+Existing controls retain response classification, replay and departure ordering.
+
+Peer metadata updates also trusted the retained assignment. A delayed update
+could change an unrouted reconnect seat. Ordinary writes now lease the sender's
+route. Direct endpoint refreshes retain their exact-membership publication;
+the duplicate-endpoint and pre-finalized write shortcuts acquire their own route
+lease. A controlled endpoint-read pause removes the route between the initial
+check and the duplicate shortcut. A second pause at metadata storage proves
+that this refused duplicate does not reach the write. Ordinary and duplicate
+Direct writes retain their fences after caller cancellation and release them
+when storage returns. Healthy endpoint refresh and reconnect controls still pass.
+
+All three initial regressions fail on the baseline in nextest run
+`dac4687f-8634-4e17-bdcb-c2630cddc5db`. The first repair passes them in run
+`d8d2d05d-2a4d-4182-a133-24881d86dfca`. Expanded controls also verify the leased
+roster excludes spectator, unassigned and other-room routes, and permits removal
+once dropped. These are controlled in-process histories, not remote-network or
+whole-program proofs.
+
+The new `MessageCoordinator::lease_room_routes` preserves unknown-routing
+adapters. Custom adapters that report known routes must override it and retain
+an owned fence that excludes route changes through readiness and transfer writes.
+An unfenced known-routing default returns an error. The existing member-route
+lease remains required for authority requests and peer metadata. Test adapters
+now retain their actual routing guards instead of reporting an unfenced snapshot.
+
+Wire schemas and enum values do not change. Existing `NOT_IN_ROOM` and
+`TRANSFER_TARGET_NOT_FOUND` outcomes carry live-route refusals. SDK qualification
+was extended in Rust [#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Their current README files were inspected through the connected GitHub app.
+Client runtime parity remains unproven; those assessments stay open.
+
+The measured cargo-mutants 27.1.0 inventory increases from 563 to 567. The new
+metadata-store helper adds three return/predicate sites; the roster-lease default
+adds one return-value site. Scope, exclusions and oracle features stay unchanged.
+The 57-shard budget remains ten mutants per shard and 290 seconds of work.

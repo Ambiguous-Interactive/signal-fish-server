@@ -35101,8 +35101,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     563 (was 566): remove four sites from an obsolete test-only pairing helper (#1550).
     Its fixture now calls the production pairing predicate directly.
     With 57 shards, ceil(563/57) * 29s remains 290s.
+    567 (was 563): route-fenced metadata storage adds four sites (#1555).
+    With 57 shards, ceil(567/57) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 563;
+const MUTATION_TOTAL_MUTANTS: u32 = 567;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

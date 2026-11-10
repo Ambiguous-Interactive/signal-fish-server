@@ -1878,7 +1878,7 @@ struct DrainTriggerCoordinator {
     transfer_announcement_started: Arc<Notify>,
     resume_transfer_announcement: Arc<Notify>,
     clients: RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
-    room_players: RwLock<HashMap<RoomId, HashSet<PlayerId>>>,
+    room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
 }
 
 impl DrainTriggerCoordinator {
@@ -1901,7 +1901,7 @@ impl DrainTriggerCoordinator {
             transfer_announcement_started: Arc::new(Notify::new()),
             resume_transfer_announcement: Arc::new(Notify::new()),
             clients: RwLock::new(HashMap::new()),
-            room_players: RwLock::new(HashMap::new()),
+            room_players: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -2319,6 +2319,44 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         } else {
             DeliveryOutcome::Canceled
         })
+    }
+
+    async fn lease_room_routes(
+        &self,
+        room_id: &RoomId,
+    ) -> anyhow::Result<crate::coordination::RoomRoutesLease> {
+        if self.trigger == DrainTrigger::UnknownRouting {
+            return Ok(crate::coordination::RoomRoutesLease::new(None, ()));
+        }
+        if self.trigger == DrainTrigger::SpectatorRoutingLookupFailure {
+            self.triggered.store(true, Ordering::Release);
+            anyhow::bail!("injected spectator routing lookup failure");
+        }
+        let routes = Arc::clone(&self.room_players).read_owned().await;
+        let members = routes
+            .get(room_id)
+            .into_iter()
+            .flat_map(|members| members.iter().copied())
+            .collect();
+        Ok(crate::coordination::RoomRoutesLease::new(
+            Some(members),
+            routes,
+        ))
+    }
+
+    async fn lease_room_member_route(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> anyhow::Result<crate::coordination::RoomMemberRouteLease> {
+        let routes = self.lease_room_routes(room_id).await?;
+        let present = routes
+            .player_ids
+            .as_ref()
+            .map(|members| members.contains(player_id));
+        Ok(crate::coordination::RoomMemberRouteLease::new(
+            present, routes,
+        ))
     }
 
     /// Return unknown routing for the fallback fixture, or its current seated roster.

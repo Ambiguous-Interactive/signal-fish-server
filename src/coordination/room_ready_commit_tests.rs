@@ -398,3 +398,54 @@ async fn start_game_rechecks_requester_membership_after_room_gate() {
         ));
     }
 }
+
+/// #1553: a member cannot disappear between the roster read and readiness mutation.
+#[tokio::test]
+async fn ready_commit_keeps_its_roster_while_waiting_for_ready_state() {
+    for remove_actor in [false, true] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let replay = Arc::new(crate::reconnection::ReconnectionManager::new(30, 16, Arc::new(crate::metrics::ServerMetrics::new())));
+        let member = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let room = database.create_room("ready-route-fence".into(), None, 4, false, member, "relay".into(), "test".into(), None).await.unwrap();
+        database.add_player_to_room(&room.id, player_fixture(peer, "peer", false, None)).await.unwrap();
+        replay.register_disconnection(PlayerId::from_u128(3), room.id, false, None, 0).await;
+        let mut receivers = Vec::new();
+        for player in [member, peer] {
+            let (sender, receiver) = mpsc::channel(8);
+            receivers.push(receiver);
+            messages.register_local_client(player, Some(room.id), ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached())).await.unwrap();
+        }
+        let coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), Some(replay.clone())));
+        coordinator.ready_players.write().await.insert(room.id, HashSet::from([peer]));
+        let ready = coordinator.ready_players.read().await;
+        let request = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move { coordinator.handle_player_ready(&room.id, &member, None).await })
+        };
+        timeout(Duration::from_secs(1), async {
+            while database.get_room_lobby_state(&room.id).await.unwrap() != Some(LobbyState::Lobby) {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let removed = if remove_actor { member } else { peer };
+        let mut removal = Box::pin(messages.unregister_local_client(&removed));
+        assert!(futures_util::poll!(&mut removal).is_pending(), "route removal must wait for the ready commit");
+        drop(ready);
+        let (result, removed) = tokio::join!(request, removal);
+        result.unwrap().unwrap();
+        removed.unwrap();
+        let mut ready = coordinator.current_ready_players(&room.id).await;
+        ready.sort_unstable();
+        assert_eq!(ready, vec![member, peer]);
+        let events = replay.get_missed_events(&room.id, 0).await.events;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ServerMessage::LobbyStateChanged { all_ready: true, ready_players, .. } if ready_players.len() == 2 && ready_players.contains(&member) && ready_players.contains(&peer)));
+        let survivor = if remove_actor { &mut receivers[1] } else { &mut receivers[0] };
+        let message = survivor.try_recv().unwrap();
+        assert_eq!(serde_json::to_value(message.as_ref()).unwrap(), serde_json::to_value(&events[0]).unwrap());
+        let trailing = survivor.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+    }
+}
