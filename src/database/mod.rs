@@ -307,6 +307,30 @@ pub struct RoomSpectatorSnapshot {
     pub spectators: Vec<SpectatorInfo>,
 }
 
+/// A storage snapshot retained until an external readiness commit finishes.
+pub struct RoomReadinessLease {
+    /// Current lobby state, or None when the room is missing.
+    pub lobby_state: Option<crate::protocol::LobbyState>,
+    /// Whether every expected effective member still has a seated row.
+    pub members_present: bool,
+    _fence: Box<dyn Send + Sync>,
+}
+
+impl RoomReadinessLease {
+    /// Retain a storage fence that excludes deletion, finalization and member removal.
+    pub fn new(
+        lobby_state: Option<crate::protocol::LobbyState>,
+        members_present: bool,
+        fence: impl Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            lobby_state,
+            members_present,
+            _fence: Box::new(fence),
+        }
+    }
+}
+
 /// Exact room state from which a game-start publication was prepared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeRoomGameExpectation {
@@ -1014,6 +1038,14 @@ pub trait GameDatabase: Send + Sync {
     /// Atomically promote a non-empty waiting room and return whether it changed.
     /// Missing, empty, Lobby and Finalized rooms return false without changing clocks.
     async fn transition_room_to_lobby(&self, room_id: &RoomId) -> Result<bool>;
+
+    /// Validate readiness storage and retain its fence through the caller's synchronous commit.
+    /// The lease must exclude room deletion, finalization and expected-member removal.
+    async fn lease_room_readiness(
+        &self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+    ) -> Result<RoomReadinessLease>;
 
     /// Toggle player ready state and return lobby information if successful
     /// Returns (lobby_state, ready_players, all_ready) for a present lobby member.
@@ -3518,6 +3550,24 @@ impl GameDatabase for InMemoryDatabase {
             liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }
         Ok(changed)
+    }
+
+    /// Keep the checked room rows and lobby state fixed until the ready-map commit ends.
+    async fn lease_room_readiness(
+        &self,
+        room_id: &RoomId,
+        expected_members: &[PlayerId],
+    ) -> Result<RoomReadinessLease> {
+        let rooms = std::sync::Arc::clone(&self.rooms).read_owned().await;
+        let room = rooms.get(room_id);
+        let lobby_state = room.map(|room| room.lobby_state.clone());
+        let members_present = !expected_members.is_empty()
+            && room.is_some_and(|room| {
+                expected_members
+                    .iter()
+                    .all(|id| room.players.contains_key(id))
+            });
+        Ok(RoomReadinessLease::new(lobby_state, members_present, rooms))
     }
 
     /// Toggle a lobby member's readiness and renew both clocks on acceptance.
@@ -6324,6 +6374,86 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// #1558: a readiness commit must exclude cleanup and membership invalidation.
+    #[tokio::test]
+    async fn readiness_storage_lease_blocks_room_invalidation_until_commit() {
+        for operation in ["delete", "remove", "finalize", "cleanup"] {
+            let database = InMemoryDatabase::new();
+            let room = create_test_room(&database, "ready-storage-lease", "LEASE1")
+                .await
+                .unwrap();
+            let member = *room.players.keys().next().unwrap();
+            assert!(database.transition_room_to_lobby(&room.id).await.unwrap());
+            database
+                .backdate_room_activity_for_test(&room.id, chrono::Duration::hours(2))
+                .await;
+            let room = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let lease = database
+                .lease_room_readiness(&room.id, &[member])
+                .await
+                .unwrap();
+            assert_eq!(lease.lobby_state, Some(crate::protocol::LobbyState::Lobby));
+            assert!(lease.members_present);
+            let mut invalidation = Box::pin(async {
+                match operation {
+                    "delete" => {
+                        assert!(database.delete_room(&room.id).await.unwrap());
+                    }
+                    "remove" => {
+                        assert!(database
+                            .remove_player_from_room(&room.id, &member)
+                            .await
+                            .unwrap()
+                            .is_some());
+                    }
+                    "finalize" => {
+                        assert!(matches!(
+                            database
+                                .finalize_room_game(
+                                    &room.id,
+                                    &FinalizeRoomGameExpectation::from_room(&room)
+                                )
+                                .await
+                                .unwrap(),
+                            FinalizeRoomGameOutcome::Finalized
+                        ));
+                    }
+                    "cleanup" => {
+                        assert_eq!(
+                            database
+                                .cleanup_expired_rooms(
+                                    chrono::Duration::minutes(5),
+                                    chrono::Duration::hours(1),
+                                    &HashSet::new()
+                                )
+                                .await
+                                .unwrap()
+                                .total_cleaned(),
+                            1
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            assert!(
+                futures_util::poll!(&mut invalidation).is_pending(),
+                "{operation}: mutation must wait for the ready commit"
+            );
+            drop(lease);
+            tokio::time::timeout(std::time::Duration::from_secs(1), invalidation)
+                .await
+                .unwrap();
+            let invalid = database
+                .lease_room_readiness(&room.id, &[member])
+                .await
+                .unwrap();
+            assert!(
+                invalid.lobby_state != Some(crate::protocol::LobbyState::Lobby)
+                    || !invalid.members_present
+            );
+        }
     }
 
     #[tokio::test]

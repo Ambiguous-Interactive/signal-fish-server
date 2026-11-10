@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** Change storage adapters' `transition_room_to_lobby` result to `bool`; return true only for a new lobby entry.
+- **Breaking:** Require storage adapters to implement `lease_room_readiness` and return `bool` from `transition_room_to_lobby`.
 - **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority
   transfers; peer metadata writes also require `lease_room_member_route`.
 - Reduce server work when checking reliable delivery deadlines across mixed and lossy gameplay backlogs (#1540).

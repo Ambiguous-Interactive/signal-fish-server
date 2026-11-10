@@ -470,7 +470,10 @@ async fn lobby_promotion_keeps_routes_until_storage_returns() {
     assert!(promoted.unwrap());
     removed.unwrap();
     assert_eq!(database.get_room_lobby_state(&room.id).await.unwrap(), Some(LobbyState::Lobby));
-    let _ = receiver.try_recv();
+    match receiver.try_recv() {
+        Ok(message) => assert!(matches!(message.as_ref(), ServerMessage::LobbyStateChanged { lobby_state: LobbyState::Lobby, ready_players, all_ready: false } if ready_players.is_empty())),
+        Err(error) => assert_eq!(error, mpsc::error::TryRecvError::Disconnected),
+    }
 }
 
 /// #1558: a stale promotion candidate cannot publish a storage no-op.
@@ -540,4 +543,41 @@ async fn canceled_lobby_promotion_keeps_routes_through_storage_and_replay() {
     assert_eq!(serde_json::to_value(delivered.as_ref()).unwrap(), serde_json::to_value(&events[0]).unwrap());
     let pending = receivers[1].try_recv();
     assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+}
+
+/// #1558: readiness keeps storage valid across the ready-map wait and commit.
+#[tokio::test]
+async fn ready_commit_keeps_storage_while_waiting_for_the_ready_map() {
+    for change in ["deleted", "empty", "finalized", "valid"] {
+        let database = Arc::new(InMemoryDatabase::new());
+        let messages = Arc::new(RecordingMessageCoordinator::default());
+        let member = PlayerId::from_u128(1);
+        let room = database.create_room("ready-storage-commit".into(), None, 4, false, member, "relay".into(), "test".into(), None).await.unwrap();
+        let coordinator = InMemoryRoomOperationCoordinator::new(messages.clone(), database.clone(), None);
+        let ready = coordinator.ready_players.read().await;
+        let guard = messages.lock_room_event_mutation(&room.id).await;
+        let mut request = Box::pin(coordinator.clone().apply_player_ready(room.id, member, guard));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        let current = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(current.lobby_state, LobbyState::Lobby);
+        let mut invalidation = Box::pin(async {
+            match change {
+                "deleted" => { database.delete_room(&room.id).await.unwrap(); }
+                "empty" => { database.remove_player_from_room(&room.id, &member).await.unwrap(); }
+                "finalized" => { database.finalize_room_game(&room.id, &crate::database::FinalizeRoomGameExpectation::from_room(&current)).await.unwrap(); }
+                "valid" => {},
+                _ => unreachable!(),
+            }
+        });
+        if change != "valid" {
+            assert!(futures_util::poll!(&mut invalidation).is_pending(), "{change}: storage must remain valid through the ready-map wait");
+        }
+        drop(ready);
+        request.await.unwrap();
+        timeout(Duration::from_secs(1), invalidation).await.unwrap();
+        assert_eq!(coordinator.ready_players.read().await[&room.id], HashSet::from([member]));
+        let events = messages.broadcasts().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0].message, ServerMessage::LobbyStateChanged { lobby_state: LobbyState::Lobby, ready_players, all_ready: true } if *ready_players == vec![member]));
+    }
 }

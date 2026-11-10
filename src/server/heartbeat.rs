@@ -201,10 +201,8 @@ mod tests {
             .connection_manager
             .collect_expired_clients(StdDuration::from_millis(5))
             .is_empty());
-        assert!(matches!(
-            receiver.try_recv().unwrap().as_ref(),
-            ServerMessage::Pong
-        ));
+        let response = receiver.try_recv().unwrap();
+        assert!(matches!(response.as_ref(), ServerMessage::Pong));
     }
 
     #[tokio::test(start_paused = true)]
@@ -283,10 +281,8 @@ mod tests {
         drop(transition);
         drop(storage);
         frame.await;
-        assert!(matches!(
-            receiver.try_recv().unwrap().as_ref(),
-            ServerMessage::Pong
-        ));
+        let response = receiver.try_recv().unwrap();
+        assert!(matches!(response.as_ref(), ServerMessage::Pong));
         assert!(futures_util::poll!(&mut Box::pin(lifecycle.lock())).is_ready());
     }
 

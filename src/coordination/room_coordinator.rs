@@ -434,6 +434,13 @@ impl InMemoryRoomOperationCoordinator {
             }
 
             // Toggle player ready state in ready_players map
+            let storage = self.database.lease_room_readiness(room_id, &current_ids).await
+                .map_err(PlayerReadyError::Internal)?;
+            match storage.lobby_state {
+                Some(crate::protocol::LobbyState::Finalized) => return Err(PlayerReadyError::Finalized),
+                Some(crate::protocol::LobbyState::Lobby) if storage.members_present => {},
+                _ => return Err(PlayerReadyError::RoomNotFound),
+            }
             let mut ready_map = self.ready_players.write().await;
             let room_ready_players = ready_map.entry(*room_id).or_insert_with(HashSet::new);
 
@@ -455,6 +462,7 @@ impl InMemoryRoomOperationCoordinator {
                     .iter()
                     .all(|player| room_ready_players.contains(player));
 
+            drop(storage);
             drop(ready_map);
             drop(routes);
 
