@@ -153,6 +153,94 @@ mod handler_honesty {
         }
     }
 
+    /// #1555: delayed metadata cannot modify an unrouted reconnect seat.
+    #[tokio::test]
+    async fn peer_metadata_refuses_a_pruned_route_after_the_room_gate() {
+        let server = create_test_server().await;
+        let (player, mut receiver) = register_client(&server).await;
+        server
+            .handle_join_room(
+                &player,
+                "metadata-route".into(),
+                Some("META01".into()),
+                "host".into(),
+                Some(2),
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await;
+        let room_id = server.get_client_room(&player).await.unwrap();
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => assert!(matches!(
+                    message.as_ref(),
+                    ServerMessage::RoomJoined(_)
+                        | ServerMessage::PlayerJoined { .. }
+                        | ServerMessage::LobbyStateChanged { .. }
+                )),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(error) => panic!("metadata setup receiver closed: {error}"),
+            }
+        }
+        let guard = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let task = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .handle_provide_connection_info(
+                        &player,
+                        ConnectionInfo::Direct {
+                            host: "127.0.0.1".into(),
+                            port: 7777,
+                        },
+                    )
+                    .await;
+            })
+        };
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let probe = lifecycle.lock();
+                tokio::pin!(probe);
+                if futures_util::poll!(&mut probe).is_pending() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("metadata must reach its room-gate wait");
+        server
+            .message_coordinator
+            .unregister_local_client(&player)
+            .await
+            .unwrap();
+        let before = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(guard);
+        task.await.unwrap();
+        let after = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.players[&player].connection_info.is_none(),
+            "unrouted metadata must not alter the retained reconnect seat"
+        );
+        assert_eq!(after.last_activity, before.last_activity);
+    }
+
     /// A registered client that never joined a room previously had its JSON
     /// game data vanish without any response: impossible to distinguish from
     /// "relayed". Every sibling surface (ProvideConnectionInfo, Signal,

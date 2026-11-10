@@ -303,6 +303,20 @@ let game_server = EnhancedGameServer::new(
 
 ```
 
+## Custom Routing Coordinators
+
+A custom `MessageCoordinator` that reports known routes must implement
+`lease_room_routes`. Return the seated player IDs and an owned routing fence in
+`RoomRoutesLease`. The fence must prevent route changes until the lease drops.
+Ready toggles and authority transfers hold this lease through their state writes
+and release it before message delivery. The default rejects known routes because
+an unfenced snapshot cannot protect those commits.
+
+Also implement `lease_room_member_route` for authority requests and peer metadata
+writes. Keep the member route stable until its lease drops. Adapters that return
+unknown routing retain their storage-only behavior. The shipped in-memory
+coordinator implements both leases; applications using it need no migration.
+
 ## Custom Router Integration
 
 This fragment needs `game_server` from the complete example, a

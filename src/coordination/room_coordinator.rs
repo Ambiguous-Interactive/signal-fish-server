@@ -414,12 +414,9 @@ impl InMemoryRoomOperationCoordinator {
                     ));
                 }
             };
-            let routed_players = self
-                .coordinator
-                .routed_player_ids(room_id)
-                .await
+            let mut routes = self.coordinator.lease_room_routes(room_id).await
                 .map_err(PlayerReadyError::Internal)?;
-            let current_ids = effective_room_members(room_players, routed_players);
+            let current_ids = effective_room_members(room_players, routes.player_ids.take());
 
             // Membership gates the toggle: a caller whose membership row just
             // vanished (teardown racing the toggle between the caller's room
@@ -458,7 +455,8 @@ impl InMemoryRoomOperationCoordinator {
                     .iter()
                     .all(|player| room_ready_players.contains(player));
 
-            drop(ready_map); // Release write lock
+            drop(ready_map);
+            drop(routes);
 
             // Readiness no longer starts the game. `max_players` is a ceiling,
             // not a required count, and the game begins only on an explicit

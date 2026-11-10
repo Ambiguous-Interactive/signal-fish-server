@@ -75,7 +75,7 @@ struct RecordingCoordinator {
     deliveries: Mutex<HashMap<PlayerId, crate::coordination::ClientDeliveryHandle>>,
     deliver_registered: AtomicBool,
     database: Arc<InMemoryDatabase>,
-    routed_players: Mutex<HashMap<RoomId, HashSet<PlayerId>>>,
+    routed_players: Arc<Mutex<HashMap<RoomId, HashSet<PlayerId>>>>,
     room_events: Arc<RoomEventSequencer>,
     mutation_lock_attempts: AtomicUsize,
     delay_first_spectator_broadcast: AtomicBool,
@@ -97,7 +97,7 @@ impl RecordingCoordinator {
             deliveries: Mutex::new(HashMap::new()),
             deliver_registered: AtomicBool::new(false),
             database,
-            routed_players: Mutex::new(HashMap::new()),
+            routed_players: Arc::new(Mutex::new(HashMap::new())),
             room_events: Arc::new(RoomEventSequencer::default()),
             mutation_lock_attempts: AtomicUsize::new(0),
             delay_first_spectator_broadcast: AtomicBool::new(false),
@@ -413,6 +413,39 @@ impl MessageCoordinator for RecordingCoordinator {
             !players.is_empty()
         });
         Ok(Some((epoch, final_seq)))
+    }
+
+    /// Retain the fixture routing mutex with its seated roster snapshot.
+    async fn lease_room_routes(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<crate::coordination::RoomRoutesLease> {
+        let routes = Arc::clone(&self.routed_players).lock_owned().await;
+        let members = routes
+            .get(room_id)
+            .into_iter()
+            .flat_map(|members| members.iter().copied())
+            .collect();
+        Ok(crate::coordination::RoomRoutesLease::new(
+            Some(members),
+            routes,
+        ))
+    }
+
+    /// Keep the fixture member decision stable through the caller's storage write.
+    async fn lease_room_member_route(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<crate::coordination::RoomMemberRouteLease> {
+        let routes = self.lease_room_routes(room_id).await?;
+        let present = routes
+            .player_ids
+            .as_ref()
+            .map(|members| members.contains(player_id));
+        Ok(crate::coordination::RoomMemberRouteLease::new(
+            present, routes,
+        ))
     }
 
     async fn routed_player_ids(&self, room_id: &RoomId) -> Result<Option<Vec<PlayerId>>> {

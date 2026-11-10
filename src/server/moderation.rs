@@ -482,6 +482,7 @@ impl EnhancedGameServer {
             .await;
     }
 
+    /// Validate the acting connection and retain live routes through the authority transfer.
     pub(super) async fn handle_transfer_authority_from_lifecycle(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -532,6 +533,21 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
+        let routes = match self.message_coordinator.lease_room_routes(&room_id).await {
+            Ok(routes) => routes,
+            Err(error) => {
+                drop(transfer_event_guard);
+                tracing::error!(%authority_id, %room_id, %error, "Failed to check authority transfer routes");
+                self.fail_operation(
+                    authority_id,
+                    operation_id,
+                    "Failed to check room membership",
+                    ErrorCode::InternalError,
+                )
+                .await;
+                return;
+            }
+        };
         let room = match self
             .database
             .get_room_player_snapshot(&room_id, &target_id)
@@ -539,6 +555,7 @@ impl EnhancedGameServer {
         {
             Ok(Some(room)) => room,
             Ok(None) => {
+                drop(routes);
                 drop(transfer_event_guard);
                 self.fail_operation(
                     authority_id,
@@ -550,6 +567,7 @@ impl EnhancedGameServer {
                 return;
             }
             Err(error) => {
+                drop(routes);
                 drop(transfer_event_guard);
                 tracing::error!(%authority_id, %room_id, %error, "Authority transfer failed to load room");
                 self.fail_operation(
@@ -563,6 +581,7 @@ impl EnhancedGameServer {
             }
         };
         if room.authority_player != Some(*authority_id) {
+            drop(routes);
             drop(transfer_event_guard);
             self.fail_operation(
                 authority_id,
@@ -574,6 +593,7 @@ impl EnhancedGameServer {
             return;
         }
         if room.player.is_none() {
+            drop(routes);
             drop(transfer_event_guard);
             self.metrics.increment_authority_transfer_conflicts();
             self.fail_operation(
@@ -585,6 +605,26 @@ impl EnhancedGameServer {
             .await;
             return;
         }
+        if let Some(members) = routes.player_ids.as_ref() {
+            let rejection = if !members.contains(authority_id) {
+                Some(("Not currently routed in the room", ErrorCode::NotInRoom))
+            } else if !members.contains(&target_id) {
+                self.metrics.increment_authority_transfer_conflicts();
+                Some((
+                    "Transfer target is not a member of this room",
+                    ErrorCode::TransferTargetNotFound,
+                ))
+            } else {
+                None
+            };
+            if let Some((message, code)) = rejection {
+                drop(routes);
+                drop(transfer_event_guard);
+                self.fail_operation(authority_id, operation_id, message, code)
+                    .await;
+                return;
+            }
+        }
         // Fresh route read (issue #396 sweep, same class as the kick path's
         // target resolution): a durable row can outlive its membership as
         // residue from a storage-failed detach while the player is routed —
@@ -594,6 +634,7 @@ impl EnhancedGameServer {
         // role silently when the residue is repaired — a stale view no event
         // would ever correct.
         if self.get_client_room(&target_id).await != Some(room_id) {
+            drop(routes);
             drop(transfer_event_guard);
             self.metrics.increment_authority_transfer_conflicts();
             self.fail_operation(
@@ -616,6 +657,7 @@ impl EnhancedGameServer {
                     room_id,
                     authority_lifecycle_guard,
                     transfer_event_guard,
+                    routes,
                 )
                 .await;
         });
@@ -624,6 +666,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Finish the role write and ordered announcement after caller cancellation.
     async fn transfer_authority_owned(
         self: &Arc<Self>,
         authority_id: PlayerId,
@@ -632,13 +675,15 @@ impl EnhancedGameServer {
         room_id: RoomId,
         _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
         transfer_event_guard: crate::coordination::RoomEventMutationGuard,
+        routes: crate::coordination::RoomRoutesLease,
     ) {
         let authority_id = &authority_id;
-        let granted = match self
+        let result = self
             .database
             .update_room_authority(&room_id, Some(target_id))
-            .await
-        {
+            .await;
+        drop(routes);
+        let granted = match result {
             Ok(granted) => granted,
             Err(error) => {
                 drop(transfer_event_guard);

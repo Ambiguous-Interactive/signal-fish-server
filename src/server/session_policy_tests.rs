@@ -7417,3 +7417,185 @@ async fn maintenance_repair_worker_limit_is_exact() {
     assert!(worker.await.unwrap_err().is_cancelled());
     drop(guard);
 }
+
+/// #1555: ordinary and duplicate-host metadata retain their route through storage.
+#[tokio::test]
+async fn metadata_route_fence_survives_cancellation_and_duplicate_direct_updates() {
+    for direct_host in [false, true] {
+        let server = create_server_with_session(SessionConfig {
+            default_topology: Topology::Host,
+            enable_webrtc: false,
+            enable_direct: true,
+            ..SessionConfig::default()
+        })
+        .await;
+        let (host, mut host_rx) = register_client(&server).await;
+        server.set_client_protocol(
+            &host,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::Direct],
+                topologies: vec![Topology::Relay, Topology::Host],
+            },
+        );
+        let room_id = finalized_db_room_with(&server, host, &[]).await;
+        publish_room_members(&server, &room_id, &[host]).await;
+        let endpoint = ConnectionInfo::Direct {
+            host: "192.0.2.10".into(),
+            port: 7777,
+        };
+        server
+            .handle_provide_connection_info(&host, endpoint.clone())
+            .await;
+        if direct_host {
+            let members = server.database.get_room_players(&room_id).await.unwrap();
+            server
+                .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
+                .await;
+            let plan = expect_plan(&mut host_rx, "host").await;
+            assert_eq!(plan.transport, Transport::Direct);
+        }
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        database.pause_next_update_player_connection_info_for_test();
+        let caller = {
+            let server = server.clone();
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                server.handle_provide_connection_info(&host, endpoint).await;
+            })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_update_player_connection_info_for_test(),
+        )
+        .await
+        .unwrap();
+        let mut removal = Box::pin(server.message_coordinator.unregister_local_client(&host));
+        assert!(
+            futures_util::poll!(&mut removal).is_pending(),
+            "direct_host={direct_host}"
+        );
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(futures_util::poll!(&mut removal).is_pending());
+        database.release_update_player_connection_info_for_test();
+        timeout(Duration::from_secs(1), removal)
+            .await
+            .unwrap()
+            .unwrap();
+        let room = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&room.players[&host].connection_info).unwrap(),
+            serde_json::to_value(Some(endpoint)).unwrap()
+        );
+        let trailing = host_rx.try_recv();
+        assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+    }
+}
+
+/// #1555: route loss during a Direct endpoint lookup cannot reach the duplicate write.
+#[tokio::test]
+async fn duplicate_direct_endpoint_rechecks_route_after_its_storage_read() {
+    let server = create_server_with_session(SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (host, mut host_rx) = register_client(&server).await;
+    server.set_client_protocol(
+        &host,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::Direct],
+            topologies: vec![Topology::Relay, Topology::Host],
+        },
+    );
+    let room_id = finalized_db_room_with(&server, host, &[]).await;
+    publish_room_members(&server, &room_id, &[host]).await;
+    let endpoint = ConnectionInfo::Direct {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    server
+        .handle_provide_connection_info(&host, endpoint.clone())
+        .await;
+    let members = server.database.get_room_players(&room_id).await.unwrap();
+    server
+        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
+        .await;
+    let initial = expect_plan(&mut host_rx, "host").await;
+    let before = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database
+        .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(1))
+        .await;
+    let before_activity = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_activity;
+    database.pause_next_get_room_by_id_for_test();
+    let update = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            server.handle_provide_connection_info(&host, endpoint).await;
+        })
+    };
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_get_room_by_id_for_test(),
+    )
+    .await
+    .unwrap();
+    server
+        .message_coordinator
+        .unregister_local_client(&host)
+        .await
+        .unwrap();
+    database.pause_next_update_player_connection_info_for_test();
+    database.release_paused_get_room_by_id_for_test();
+    timeout(Duration::from_secs(1), update)
+        .await
+        .expect("unrouted duplicate must finish without entering the paused metadata write")
+        .unwrap();
+    let after = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.last_activity, before_activity);
+    assert_eq!(
+        serde_json::to_value(&after.players[&host].connection_info).unwrap(),
+        serde_json::to_value(&before.players[&host].connection_info).unwrap()
+    );
+    assert_eq!(
+        server.active_session_plan(&room_id).unwrap().host,
+        Some(host)
+    );
+    let trailing = host_rx.try_recv();
+    assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
+    assert_eq!(initial.transport, Transport::Direct);
+}

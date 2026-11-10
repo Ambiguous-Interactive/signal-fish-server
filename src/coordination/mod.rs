@@ -2064,6 +2064,23 @@ impl RoomMemberRouteLease {
     }
 }
 
+/// A seated roster whose owned routing fence excludes membership changes.
+pub struct RoomRoutesLease {
+    /// `None` preserves storage-only behavior for coordinators without routing.
+    pub player_ids: Option<Vec<PlayerId>>,
+    _fence: Box<dyn Send>,
+}
+
+impl RoomRoutesLease {
+    /// Retain the routing snapshot and its implementation-owned fence.
+    pub fn new(player_ids: Option<Vec<PlayerId>>, fence: impl Send + 'static) -> Self {
+        Self {
+            player_ids,
+            _fence: Box::new(fence),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait MessageCoordinator: Send + Sync {
     /// Serialize the short mutation/enqueue portion of all room-derived state
@@ -2140,6 +2157,15 @@ pub trait MessageCoordinator: Send + Sync {
             .routed_player_ids(room_id)
             .await?
             .map(|members| [members.contains(first), members.contains(second)]))
+    }
+
+    /// Hold the seated routing snapshot through a room state mutation.
+    /// Known-routing implementations must retain a fence that excludes route changes.
+    async fn lease_room_routes(&self, room_id: &RoomId) -> anyhow::Result<RoomRoutesLease> {
+        if self.routed_player_ids(room_id).await?.is_some() {
+            anyhow::bail!("Known routing requires a fenced room roster lease");
+        }
+        Ok(RoomRoutesLease::new(None, ()))
     }
 
     /// Hold a member's routing decision through an authority storage operation.
@@ -3466,6 +3492,12 @@ mod tests {
                 routed_player_ids,
                 ..Default::default()
             };
+            let roster = coordinator.lease_room_routes(&RoomId::new_v4()).await;
+            if unknown {
+                assert!(roster.unwrap().player_ids.is_none());
+            } else {
+                assert!(roster.is_err());
+            }
             let result = coordinator
                 .lease_room_member_route(&RoomId::new_v4(), &player)
                 .await;
@@ -3479,6 +3511,10 @@ mod tests {
             fail_routed_player_ids: true,
             ..Default::default()
         };
+        assert!(coordinator
+            .lease_room_routes(&RoomId::new_v4())
+            .await
+            .is_err());
         assert!(coordinator
             .lease_room_member_route(&RoomId::new_v4(), &player)
             .await
