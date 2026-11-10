@@ -437,3 +437,277 @@ async fn activity_eviction_batch_shares_a_wait_budget_and_keeps_owned_teardowns(
     .await
     .expect("every teardown must outlive its observer and finish after gate release");
 }
+
+async fn busy_cleanup_batch_shares_one_wait(lane: &str) {
+    let server = server().await;
+    let mut room_guards = Vec::new();
+    let mut lifecycle_guards = Vec::new();
+    let mut receivers = Vec::new();
+    for id in 1..=32 {
+        let player = PlayerId::from_u128(id);
+        let room_id = room(&server, player).await;
+        match lane {
+            "detach" => {
+                server
+                    .pending_durable_player_detaches
+                    .insert((room_id, player), None);
+            }
+            "reconnect" => {
+                server
+                    .reconnection_manager()
+                    .unwrap()
+                    .register_disconnection(player, room_id, false, None, 0)
+                    .await;
+            }
+            "deleted" => {
+                let (sender, receiver) = tokio::sync::mpsc::channel(8);
+                server.connect_client(player, sender).await;
+                receivers.push(receiver);
+                server
+                    .connection_manager
+                    .assign_client_to_room(&player, room_id)
+                    .await;
+                let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+                lifecycle_guards.push(lifecycle.lock_owned().await);
+                server.database.delete_room(&room_id).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        if lane != "deleted" {
+            room_guards.push(
+                server
+                    .message_coordinator
+                    .lock_room_event_mutation(&room_id)
+                    .await,
+            );
+        }
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let sweep = async {
+        match lane {
+            "detach" => server.cleanup_pending_durable_player_detaches().await,
+            "reconnect" => server.cleanup_expired_reconnections().await,
+            "deleted" => server.cleanup_clients_in_missing_rooms().await,
+            _ => unreachable!(),
+        }
+    };
+    let result = timeout(Duration::from_millis(500), sweep).await;
+    assert!(
+        result.is_ok(),
+        "{lane}: one sweep must share its wait across all busy candidates"
+    );
+    assert_eq!(result.unwrap(), 0, "held candidates must remain intact");
+    drop(room_guards);
+    drop(lifecycle_guards);
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let remains = match lane {
+                "detach" => {
+                    server.cleanup_pending_durable_player_detaches().await;
+                    !server.pending_durable_player_detaches.is_empty()
+                }
+                "reconnect" => {
+                    server.cleanup_expired_reconnections().await;
+                    !server
+                        .reconnection_manager()
+                        .unwrap()
+                        .expired_cleanup_candidates()
+                        .await
+                        .is_empty()
+                }
+                "deleted" => {
+                    server.cleanup_clients_in_missing_rooms().await;
+                    !server.connection_manager.client_ids().is_empty()
+                }
+                _ => unreachable!(),
+            };
+            if !remains {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every retained candidate must finish after its gate releases");
+    drop(receivers);
+}
+
+#[tokio::test(start_paused = true)]
+async fn durable_detach_batch_shares_one_wait() {
+    busy_cleanup_batch_shares_one_wait("detach").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_reconnect_batch_shares_one_wait() {
+    busy_cleanup_batch_shares_one_wait("reconnect").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn deleted_room_batch_shares_one_wait() {
+    busy_cleanup_batch_shares_one_wait("deleted").await;
+}
+
+/// #1561/#1562: storage completion remains owned after the shared observation wait.
+#[tokio::test(start_paused = true)]
+async fn admitted_seat_cleanup_outlives_repeated_observers_while_storage_waits() {
+    for expired in [false, true] {
+        let server = server().await;
+        let player = PlayerId::from_u128(1);
+        let room_id = room(&server, player).await;
+        if expired {
+            server
+                .reconnection_manager()
+                .unwrap()
+                .register_disconnection(player, room_id, false, None, 0)
+                .await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+        } else {
+            server
+                .pending_durable_player_detaches
+                .insert((room_id, player), None);
+        }
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        database.pause_next_removed_player_for_test();
+        let observer = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                if expired {
+                    server.cleanup_expired_reconnections().await
+                } else {
+                    server.cleanup_pending_durable_player_detaches().await
+                }
+            })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_removed_player_for_test(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            timeout(Duration::from_millis(500), observer)
+                .await
+                .expect("a committed removal cannot hold its observer behind storage")
+                .unwrap(),
+            0
+        );
+        for _ in 0..2 {
+            let observed = timeout(Duration::from_millis(500), async {
+                if expired {
+                    server.cleanup_expired_reconnections().await
+                } else {
+                    server.cleanup_pending_durable_player_detaches().await
+                }
+            })
+            .await
+            .expect("a retained transaction must not block the next sweep or candidate scan");
+            assert_eq!(observed, 0);
+        }
+        database.release_removed_player_for_test();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if expired {
+                    server.cleanup_expired_reconnections().await;
+                } else {
+                    server.cleanup_pending_durable_player_detaches().await;
+                }
+                let pending = if expired {
+                    server
+                        .reconnection_manager()
+                        .unwrap()
+                        .has_pending_reconnection(&player)
+                        .await
+                } else {
+                    server
+                        .pending_durable_player_detaches
+                        .contains_key(&(room_id, player))
+                };
+                if !pending {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the admitted removal must finish after storage resumes");
+        let members = server.database.get_room_players(&room_id).await.unwrap();
+        assert!(members.is_empty());
+    }
+}
+
+/// #1563: admitted teardown must survive caller cancellation after the close is pinned.
+#[tokio::test(start_paused = true)]
+async fn canceled_deleted_room_observer_keeps_the_admitted_terminal_teardown() {
+    let server = server().await;
+    let player = PlayerId::from_u128(1);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    server.connect_client(player, sender).await;
+    let room_id = room(&server, player).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&player, room_id)
+        .await;
+    server.database.delete_room(&room_id).await.unwrap();
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+    let close = server.connection_manager.close_signal_for(&player).unwrap();
+    let observer = {
+        let server = server.clone();
+        tokio::spawn(async move { server.cleanup_clients_in_missing_rooms().await })
+    };
+    timeout(Duration::from_secs(1), async {
+        while close.requested_reason().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(close.requested_reason(), Some(CloseReason::RoomInactive));
+    observer.abort();
+    assert!(observer.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        timeout(
+            Duration::from_millis(500),
+            server.cleanup_clients_in_missing_rooms()
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert!(server.connection_manager.has_client(&player));
+    let farewell = receiver.try_recv().unwrap();
+    assert!(matches!(
+        farewell.as_ref(),
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::RoomNotFound),
+            ..
+        }
+    ));
+    let pending = receiver.try_recv();
+    assert!(matches!(
+        pending,
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    drop(gate);
+    timeout(Duration::from_secs(1), async {
+        while server.connection_manager.has_client(&player) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the original worker must finish without another cleanup invocation");
+    assert_eq!(close.requested_reason(), Some(CloseReason::RoomInactive));
+    assert!(
+        !server
+            .reconnection_manager()
+            .unwrap()
+            .has_pending_reconnection(&player)
+            .await
+    );
+}

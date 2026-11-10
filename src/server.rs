@@ -418,6 +418,7 @@ mod game_data;
 mod game_data_tests;
 mod heartbeat;
 mod maintenance;
+mod maintenance_workers;
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
 mod message_coordinator_tests;
@@ -903,6 +904,9 @@ pub struct EnhancedGameServer {
     /// Kick and ban can wait for a target lifecycle while holding the acting
     /// authority lifecycle. Serialize them to prevent cycles across rooms.
     moderation_lifecycle_gate: Mutex<()>,
+    durable_detach_workers: maintenance_workers::MaintenanceWorkers,
+    expired_reconnect_workers: maintenance_workers::MaintenanceWorkers,
+    missing_room_workers: maintenance_workers::MaintenanceWorkers,
     #[cfg(test)]
     fail_retain_room_publication_snapshot: AtomicBool,
     #[cfg(test)]
@@ -1428,6 +1432,9 @@ impl EnhancedGameServer {
             pending_session_replans: DashMap::new(),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
             moderation_lifecycle_gate: Mutex::new(()),
+            durable_detach_workers: maintenance_workers::MaintenanceWorkers::default(),
+            expired_reconnect_workers: maintenance_workers::MaintenanceWorkers::default(),
+            missing_room_workers: maintenance_workers::MaintenanceWorkers::default(),
             #[cfg(test)]
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
             #[cfg(test)]

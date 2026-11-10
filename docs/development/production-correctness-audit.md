@@ -15516,3 +15516,55 @@ Those reads now have named, asserted results; all six policy checks pass locally
 The final lock-order controls pass 22 tests in run
 `fdc736d3-c7e8-4bf5-9a36-777e83a1d365`; readiness and lobby-entry allocation
 controls also retain their existing limits without budget changes.
+
+### F313–F315 — Bound live peer maintenance across busy rooms
+
+Issues: #1561, #1562 and #1563. Baseline: `1d3a46c9`.
+Nextest `78a6aa65-2495-46e3-a3bf-68ceeb55241e` fails all three new batch
+regressions before the repair. Each holds 32 independent room or connection
+gates. The old serial loops exceed the 500 ms observation deadline because
+each candidate owns a separate 100 ms admission wait.
+
+Durable seat repair, expired reconnect cleanup and deleted-room reconciliation
+now use separate persistent worker queues. Each queue admits at most eight
+jobs and shares a 250 ms observation deadline across candidate discovery,
+worker admission and completion. The existing 100 ms candidate admission wait
+remains. Jobs retain their room or lifecycle guards and finish after an observer
+times out or is canceled. Repeated sweeps do not duplicate running candidates.
+Sorted scans rotate after the last admitted candidate. Completed and panicked
+jobs release their worker slots; failed state remains available for retry.
+Counts report completed jobs observed during the current sweep, including jobs
+admitted by a prior sweep.
+
+The existing durable-removal contract still permits quiet cleanup during drain.
+Deleted-room reconciliation stops new admissions during drain. Already admitted
+work retains its existing shutdown rules. A first candidate incorrectly stopped
+all three queues during drain; the existing authority-residue regression caught
+the change. The repair preserves the original quiet durable cleanup contract.
+
+Controls cover batch deadlines, retry rotation, bounded retained jobs, observer
+cancellation, panic recovery, shutdown drain, healthy neighbors, room movement,
+and storage completion after removal. Expired cleanup retains its replay-state
+lock through durable removal; its next candidate scan now shares the observation
+deadline so that lock cannot indefinitely park the observer. Deleted-room
+candidate storage reads share the same deadline. Missing-room teardown remains
+owned after it pins its terminal close and waits for the room mutation gate.
+
+These are controlled in-process server histories. They do not prove network
+latency, arbitrary storage-adapter progress, or a bound on the complete maintenance
+loop. An adapter that never completes can occupy its bounded worker slots.
+Other maintenance phases retain their own contracts. No message schema, error
+code, reconnect window or session-selection rule changes.
+
+The Rust, .NET and Godot client README files were inspected through the connected
+GitHub app. Timing qualification is tracked in Rust client
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+No SDK migration is established. Runtime parity remains unproven until those
+client controls pass.
+
+Nextest `203599b5-b67f-4f40-8572-869a11589182` passes all 18 focused
+maintenance, worker-ownership and authority-residue controls. The 51 selected
+source-policy checks and strict full local Clippy pass. Main's two triggered
+push workflows (Docker Publish and Deploy Documentation) are successful.
