@@ -323,8 +323,8 @@ impl EnhancedGameServer {
     /// room row each one was holding.
     ///
     /// The room mutation gate excludes fresh admissions. Revalidate the
-    /// expired record under the replay-state write lock, and keep that lock
-    /// through durable removal so a new disconnection cannot replace it.
+    /// expired record under the replay-state write lock, then retain its
+    /// record cleanup pin through storage so new disconnections cannot replace it.
     pub(crate) async fn cleanup_expired_reconnections(self: &Arc<Self>) -> usize {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return 0;

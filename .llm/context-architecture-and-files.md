@@ -133,3 +133,9 @@ storage lease before the ready-map write lock and release both before
 publication. JSON router activity
 refreshes retain the source lifecycle gate through heartbeat persistence and
 release it before handler dispatch.
+
+Expired reconnect seat removal pins one record through storage without retaining
+the shared replay-state write lock. Same-player record mutations wait for that
+pin before taking the write lock; unrelated players and replay reads can proceed.
+Bulk expiry skips pinned records, and room GC protects them until storage and
+record removal agree. Failed or canceled storage releases the pin for retry.

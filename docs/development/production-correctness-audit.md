@@ -15544,9 +15544,9 @@ the change. The repair preserves the original quiet durable cleanup contract.
 
 Controls cover batch deadlines, retry rotation, bounded retained jobs, observer
 cancellation, panic recovery, shutdown drain, healthy neighbors, room movement,
-and storage completion after removal. Expired cleanup retains its replay-state
-lock through durable removal; its next candidate scan now shares the observation
-deadline so that lock cannot indefinitely park the observer. Deleted-room
+and storage completion after removal. Candidate scans share the observation
+deadline. Expired cleanup pins its own record through durable removal while
+releasing shared replay state, so unrelated seats can proceed. Deleted-room
 candidate storage reads share the same deadline. Missing-room teardown remains
 owned after it pins its terminal close and waits for the room mutation gate.
 
@@ -15575,3 +15575,28 @@ Host/WebRTC plan within the unchanged one-second deadline. It fails on the
 original base in an isolated checkout and passes on the repair in Nextest
 `eb243878-8356-42ea-a3d9-72eec0be0666`. The control also verifies sticky transport,
 quiet repeat sweeps and eventual cleanup after the held gates release.
+
+Review identified that the first repair still held the shared replay-state
+write lock through expired-seat storage. A controlled paused removal blocked
+a healthy expired neighbor. The repair now uses a lazily allocated record
+cleanup gate. Same-player registration, claim changes, completion, discard and
+individual expiry wait for that gate before taking replay-state write access.
+Bulk expiry skips pinned records; GC protects their rooms. Unrelated records,
+replay publication and read snapshots remain available. Cancellation and storage
+errors release the pin and preserve retry state.
+
+The first neighbor experiment also overlapped two observers of the same worker
+queue. It was narrowed to cancel the first observer after storage admission,
+which releases only observation ownership and keeps its removal running. The
+second sweep must remove the healthy seat before the first storage wait resumes.
+The corrected history fails on the first PR implementation in an isolated
+checkout. Focused controls additionally cover every same-player mutator, pending
+claims, room protection, bulk expiry and retry after cancellation.
+
+The corrected neighbor history fails on `b3b39203` in Nextest
+`f4d4606c-91d1-4ff2-994b-ff1825627a26`. The expanded reconnect, cleanup, worker,
+authority and live host controls pass all 69 tests in Nextest
+`dad46543-b2ff-4072-bbef-ae2386a9f5a6`.
+The three existing reconnect allocation controls also pass without budget changes
+in Nextest `fe3c8ee6-f5cb-42ee-8e2f-6f1e1ddcf514`. Strict full Clippy and all 51
+selected source-policy checks pass on the expanded repair.

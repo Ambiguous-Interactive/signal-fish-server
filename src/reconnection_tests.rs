@@ -1942,3 +1942,97 @@ async fn only_room_uniform_control_events_are_replayable() {
         "GameData/GameStarting/Signal/directed messages must never buffer"
     );
 }
+
+/// #1562: a storage pin excludes only mutations of its own reconnect record.
+#[tokio::test(start_paused = true)]
+async fn expired_cleanup_pin_preserves_record_safety_without_blocking_neighbors() {
+    for mutation in [
+        "register",
+        "discard",
+        "discard_room",
+        "kick",
+        "complete",
+        "remove",
+        "claim",
+    ] {
+        let manager = ReconnectionManager::new(1, 100, Arc::new(ServerMetrics::new()));
+        let player = PlayerId::new_v4();
+        let room = RoomId::new_v4();
+        let token = manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        tokio::time::advance(StdDuration::from_secs(2)).await;
+        let mut cleanup =
+            Box::pin(manager.cleanup_expired_membership(&player, &room, std::future::pending()));
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        let neighbor = PlayerId::new_v4();
+        let neighbor_room = RoomId::new_v4();
+        tokio::time::timeout(
+            StdDuration::from_millis(100),
+            manager.register_disconnection(neighbor, neighbor_room, false, None, 0),
+        )
+        .await
+        .expect("another player's registration must not wait for storage");
+        tokio::time::timeout(
+            StdDuration::from_millis(100),
+            manager.record_room_event(&room, &control_event()),
+        )
+        .await
+        .expect("room replay must remain available during storage");
+        let protected = manager.rooms_with_active_reconnections().await;
+        assert!(
+            protected.contains(&room),
+            "the cleanup pin protects its room until storage completes"
+        );
+        assert!(protected.contains(&neighbor_room));
+        assert!(manager.expired_cleanup_candidates().await.is_empty());
+        assert_eq!(
+            manager.cleanup_expired().await,
+            0,
+            "bulk expiry must not remove a pinned record"
+        );
+        let mut changing = Box::pin(async {
+            match mutation {
+                "register" => {
+                    manager
+                        .register_disconnection(player, RoomId::new_v4(), false, None, 1)
+                        .await;
+                }
+                "discard" => {
+                    manager.discard_pending_reconnection(&player).await;
+                }
+                "discard_room" => {
+                    manager
+                        .discard_pending_reconnection_in_room(&player, &room)
+                        .await;
+                }
+                "kick" => {
+                    manager.mark_reconnection_kicked(&player).await;
+                }
+                "complete" => {
+                    manager.complete_reconnection(&player).await;
+                }
+                "remove" => {
+                    manager.remove_expired_reconnection(&player).await;
+                }
+                "claim" => {
+                    let result = manager
+                        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+                        .await;
+                    assert!(matches!(result, Err(ReconnectionError::WindowExpired)));
+                }
+                _ => unreachable!(),
+            }
+        });
+        assert!(
+            futures_util::poll!(&mut changing).is_pending(),
+            "{mutation} must wait for its record pin"
+        );
+        assert!(manager.has_pending_reconnection(&player).await);
+        drop(cleanup);
+        tokio::time::timeout(StdDuration::from_millis(100), changing)
+            .await
+            .expect("canceling storage must release the same-player mutation wait");
+        assert!(manager.has_pending_reconnection(&neighbor).await);
+    }
+}

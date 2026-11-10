@@ -438,6 +438,7 @@ async fn activity_eviction_batch_shares_a_wait_budget_and_keeps_owned_teardowns(
     .expect("every teardown must outlive its observer and finish after gate release");
 }
 
+/// Exercise bounded observations and eventual recovery across every cleanup queue.
 async fn busy_cleanup_batch_shares_one_wait(lane: &str) {
     let server = server().await;
     let mut room_guards = Vec::new();
@@ -532,16 +533,19 @@ async fn busy_cleanup_batch_shares_one_wait(lane: &str) {
     drop(receivers);
 }
 
+/// #1561: busy candidates share one observation wait and remain retryable.
 #[tokio::test(start_paused = true)]
 async fn durable_detach_batch_shares_one_wait() {
     busy_cleanup_batch_shares_one_wait("detach").await;
 }
 
+/// #1562: busy candidates share one observation wait and remain retryable.
 #[tokio::test(start_paused = true)]
 async fn expired_reconnect_batch_shares_one_wait() {
     busy_cleanup_batch_shares_one_wait("reconnect").await;
 }
 
+/// #1563: busy candidates share one observation wait and remain retryable.
 #[tokio::test(start_paused = true)]
 async fn deleted_room_batch_shares_one_wait() {
     busy_cleanup_batch_shares_one_wait("deleted").await;
@@ -710,4 +714,71 @@ async fn canceled_deleted_room_observer_keeps_the_admitted_terminal_teardown() {
             .has_pending_reconnection(&player)
             .await
     );
+}
+
+/// #1562: one admitted storage wait must not block a healthy expired seat.
+#[tokio::test(start_paused = true)]
+async fn expired_seat_storage_wait_preserves_healthy_neighbor_progress() {
+    let server = server().await;
+    let blocked = PlayerId::from_u128(1);
+    let healthy = PlayerId::from_u128(2);
+    let blocked_room = room(&server, blocked).await;
+    let healthy_room = room(&server, healthy).await;
+    let manager = server.reconnection_manager().unwrap();
+    for (player, room) in [(blocked, blocked_room), (healthy, healthy_room)] {
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_next_removed_player_for_test();
+    let blocked_observer = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            server
+                .cleanup_expired_reconnection_candidates(vec![(blocked, blocked_room)])
+                .await
+        })
+    };
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_removed_player_for_test(),
+    )
+    .await
+    .unwrap();
+    blocked_observer.abort();
+    assert!(blocked_observer.await.unwrap_err().is_cancelled());
+    let observed = timeout(
+        Duration::from_millis(500),
+        server.cleanup_expired_reconnections(),
+    )
+    .await;
+    let healthy_members = server
+        .database
+        .get_room_players(&healthy_room)
+        .await
+        .unwrap();
+    database.release_removed_player_for_test();
+    assert_eq!(
+        observed.unwrap(),
+        1,
+        "the healthy expired neighbor must finish while the first removal waits"
+    );
+    assert!(
+        healthy_members.is_empty(),
+        "the healthy room must recover its seat without releasing the blocked removal"
+    );
+    timeout(
+        Duration::from_secs(1),
+        server.cleanup_expired_reconnections(),
+    )
+    .await
+    .unwrap();
+    assert!(!manager.has_pending_reconnection(&blocked).await);
+    assert!(!manager.has_pending_reconnection(&healthy).await);
 }

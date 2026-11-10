@@ -25,6 +25,7 @@ struct WorkerState {
 }
 
 impl WorkerState {
+    /// Retire one finished worker and count only confirmed cleanup.
     fn complete(&mut self, result: Result<(Id, bool), JoinError>) -> usize {
         match result {
             Ok((id, cleaned)) => {
@@ -41,6 +42,7 @@ impl WorkerState {
 }
 
 impl MaintenanceWorkers {
+    /// Observe drain only for queues that stop new admissions during shutdown.
     async fn wait_for_drain(draining: &mut Option<watch::Receiver<bool>>) {
         match draining {
             Some(receiver) => {
@@ -50,10 +52,12 @@ impl MaintenanceWorkers {
         }
     }
 
+    /// Give candidate discovery and all worker waits one shared deadline.
     pub(super) fn deadline() -> Option<tokio::time::Instant> {
         crate::deadline::after(tokio::time::Instant::now(), SWEEP_WAIT)
     }
 
+    /// Stop a read-only candidate scan when the shared observation budget expires.
     pub(super) async fn observe<T>(
         deadline: Option<tokio::time::Instant>,
         read: impl Future<Output = T>,
@@ -141,12 +145,14 @@ mod tests {
     use tokio::sync::Semaphore;
     use tokio::time::{timeout, Duration};
 
+    /// Build stable room/player identities for bounded-worker histories.
     fn candidates(count: u128) -> Vec<Candidate> {
         (1..=count)
             .map(|id| (RoomId::from_u128(id), PlayerId::from_u128(id)))
             .collect()
     }
 
+    /// Retain admitted work when its caller ends and refuse duplicate admission.
     #[tokio::test(start_paused = true)]
     async fn canceled_observer_retains_bounded_jobs_without_duplicate_admission() {
         let workers = Arc::new(MaintenanceWorkers::default());
@@ -218,6 +224,7 @@ mod tests {
         assert!(workers.state.lock().await.candidates.is_empty());
     }
 
+    /// Give later candidates a turn before early busy rooms repeat.
     #[tokio::test(start_paused = true)]
     async fn bounded_scans_rotate_past_busy_candidates() {
         let workers = MaintenanceWorkers::default();
@@ -249,6 +256,7 @@ mod tests {
         );
     }
 
+    /// Release a panicked worker slot without consuming its retry obligation.
     #[tokio::test(start_paused = true)]
     async fn panic_releases_candidate_for_a_later_retry() {
         let workers = MaintenanceWorkers::default();
@@ -276,6 +284,7 @@ mod tests {
         );
     }
 
+    /// Stop new drain admissions while already admitted jobs finish.
     #[tokio::test(start_paused = true)]
     async fn drain_stops_new_jobs_and_preserves_already_admitted_work() {
         let workers = Arc::new(MaintenanceWorkers::default());
