@@ -15450,3 +15450,69 @@ follow the existing authority and durable-target checks. A red control observes
 `TRANSFER_TARGET_NOT_FOUND` instead of `NOT_ROOM_AUTHORITY` on the first repair.
 The corrected order preserves the role refusal and conflict counter for absent
 and retained-but-pruned targets. The routing fence still spans the storage write.
+
+### F310–F312 — Commit live lobby and inbound activity state on current sources
+
+Issues: #1557, #1558 and #1559. Baseline: `fa195a75`.
+All three initial regressions fail in nextest run
+`34dfcf73-c169-44bb-b845-91701d519ee9`.
+These are new server findings under #826.
+
+Lobby promotion sampled its seated routes, then waited for readiness and
+storage without retaining them. A controlled ready-map wait lets the last
+route disappear before promotion. The coordinator now retains its exact
+seated routing lease through storage and releases it before publication.
+A second control cancels the caller while storage is blocked. Removal still
+waits for the owned mutation; the surviving peer and reconnect replay receive
+one matching ready snapshot after the commit.
+
+Storage returned success even when lobby entry made no change. A room deleted
+while promotion waited could therefore produce a false Lobby event. The storage
+trait now returns `Result<bool>` from `transition_room_to_lobby`. Implementers
+must decide atomically and return true only when a nonempty Waiting room enters
+Lobby. False preserves state and clocks. The coordinator publishes only true.
+Controlled deletion, emptying, finalization and prior promotion all return false
+without a new event. Custom storage adapters must update their return type and
+supply this atomic decision; a separate read followed by an unchecked write does
+not satisfy the contract. Review found the same storage no-op on the ready-toggle path. A red control
+removes the room while the owned toggle waits for the ready-map lock. Readiness
+now acquires a storage lease before that wait and retains it through the synchronous
+ready-map commit. Missing members or rooms are refused; Finalized rooms keep their
+existing rejection; a valid Lobby remains eligible. The lease excludes deletion,
+member removal and finalization, including inactive-room cleanup, through commit.
+Custom storage adapters must implement `lease_room_readiness` with that fence.
+A storage read followed by an unfenced return is not sufficient. The room mutation
+gate alone does not exclude cleanup. Direct lease controls verify all four storage
+invalidation paths wait, then proceed after the lease drops.
+
+The JSON router refreshed connection and room activity before acquiring the
+source lifecycle gate. A frame waiting behind a source transition could thus
+refresh persistence and the inactivity timestamp before its source could act.
+The router now acquires and validates that gate before either update and retains
+it through persistence. It releases the gate before dispatch so the individual
+handlers can acquire their normal source guards. Controls cover healthy activity,
+a replaced source, a held room write, heartbeat persistence failure and
+cancellation retry, plus transport Ping/Pong behavior.
+
+The expanded focused run `b7626d91-512f-41a0-b1f1-3ce1b2fd24f5` passes all
+25 selected tests. These are controlled in-process histories, not a
+remote-network or whole-server proof. No wire field, message, error code or
+reconnect window changes. The storage-adapter API change does not apply to SDKs.
+Runtime qualification was extended in Rust client
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET client [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot client [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Their current README files were inspected through the connected GitHub app.
+Those issues remain open until client runtime controls pass.
+
+The review regression fails on the first PR head in run
+`f6302aee-63bf-42d2-b015-732a26aaf3dc`. The first expanded repair passes 22 focused
+controls in run `44cbcd94-a9b2-4d8c-8c29-6e9a7d39fc1d`. The final lock order takes
+the storage lease before the ready-map lock so a delayed storage read cannot hold
+the shared readiness lock. The lease pins validation through the ready-map wait;
+the ready commit releases both guards before publication. The hosted source-policy
+scanner also rejected discarded or macro-wrapped queue reads in the new tests.
+Those reads now have named, asserted results; all six policy checks pass locally.
+The final lock-order controls pass 22 tests in run
+`fdc736d3-c7e8-4bf5-9a36-777e83a1d365`; readiness and lobby-entry allocation
+controls also retain their existing limits without budget changes.

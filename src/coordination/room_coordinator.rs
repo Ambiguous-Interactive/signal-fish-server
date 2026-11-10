@@ -434,6 +434,13 @@ impl InMemoryRoomOperationCoordinator {
             }
 
             // Toggle player ready state in ready_players map
+            let storage = self.database.lease_room_readiness(room_id, &current_ids).await
+                .map_err(PlayerReadyError::Internal)?;
+            match storage.lobby_state {
+                Some(crate::protocol::LobbyState::Finalized) => return Err(PlayerReadyError::Finalized),
+                Some(crate::protocol::LobbyState::Lobby) if storage.members_present => {},
+                _ => return Err(PlayerReadyError::RoomNotFound),
+            }
             let mut ready_map = self.ready_players.write().await;
             let room_ready_players = ready_map.entry(*room_id).or_insert_with(HashSet::new);
 
@@ -455,6 +462,7 @@ impl InMemoryRoomOperationCoordinator {
                     .iter()
                     .all(|player| room_ready_players.contains(player));
 
+            drop(storage);
             drop(ready_map);
             drop(routes);
 
@@ -529,8 +537,8 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         if room_players.is_empty() {
             return Ok(false);
         }
-        let routed_players = self.coordinator.routed_player_ids(room_id).await?;
-        let current_ids = effective_room_members(room_players, routed_players);
+        let mut routes = self.coordinator.lease_room_routes(room_id).await?;
+        let current_ids = effective_room_members(room_players, routes.player_ids.take());
         if current_ids.is_empty() {
             return Ok(false);
         }
@@ -564,10 +572,12 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                 .database
                 .transition_room_to_lobby(&room_id)
                 .await;
+            drop(routes);
             let completion = match transition {
-                Ok(()) => {
+                Ok(true) => {
                     coordinator.enqueue_replayable_room_event(&room_id, message, mutation_guard)
                 }
+                Ok(false) => return Ok(false),
                 Err(error) => {
                     return Err(error);
                 }

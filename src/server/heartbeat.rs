@@ -166,6 +166,126 @@ mod tests {
         .expect("failed to construct test server")
     }
 
+    /// #1559: activity must wait behind the source connection transition.
+    #[tokio::test(start_paused = true)]
+    async fn routed_frame_waits_for_its_source_before_refreshing_activity() {
+        let server = create_test_server().await;
+        let player = uuid::Uuid::new_v4();
+        let (sender, mut receiver) = mpsc::channel(16);
+        server.connect_client(player, sender).await;
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        let guard = lifecycle.lock().await;
+        advance(Duration::from_secs(1)).await;
+        let before = server.metrics.heartbeat_updates.load(Ordering::Relaxed);
+        let mut frame = Box::pin(server.handle_client_message_from_lifecycle(
+            &player,
+            ClientMessage::Ping,
+            lifecycle.clone(),
+        ));
+        assert!(futures_util::poll!(&mut frame).is_pending());
+        assert_eq!(
+            server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+            before,
+            "a frame waiting behind a source transition must not refresh storage"
+        );
+        assert_eq!(
+            server
+                .connection_manager
+                .collect_expired_clients(StdDuration::from_millis(5)),
+            vec![player],
+            "pending source traffic cannot refresh a closing or changing connection"
+        );
+        drop(guard);
+        frame.await;
+        assert!(server
+            .connection_manager
+            .collect_expired_clients(StdDuration::from_millis(5))
+            .is_empty());
+        let response = receiver.try_recv().unwrap();
+        assert!(matches!(response.as_ref(), ServerMessage::Pong));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn routed_frame_rejects_a_source_replaced_while_waiting_for_activity() {
+        let server = create_test_server().await;
+        let player = uuid::Uuid::new_v4();
+        let (sender, _receiver) = mpsc::channel(16);
+        server.connect_client(player, sender).await;
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        let guard = lifecycle.lock().await;
+        let before = server.metrics.heartbeat_updates.load(Ordering::Relaxed);
+        let mut frame = Box::pin(server.handle_client_message_from_lifecycle(
+            &player,
+            ClientMessage::Ping,
+            lifecycle.clone(),
+        ));
+        assert!(futures_util::poll!(&mut frame).is_pending());
+        let (replacement, mut receiver) = mpsc::channel(16);
+        server.connect_client(player, replacement).await;
+        advance(Duration::from_secs(1)).await;
+        drop(guard);
+        frame.await;
+        assert_eq!(
+            server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+            before
+        );
+        assert_eq!(
+            server
+                .connection_manager
+                .collect_expired_clients(StdDuration::from_millis(5)),
+            vec![player]
+        );
+        let pending = receiver.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn routed_activity_retains_the_source_gate_through_room_persistence() {
+        let server = create_test_server().await;
+        let player = uuid::Uuid::new_v4();
+        let (sender, mut receiver) = mpsc::channel(16);
+        server.connect_client(player, sender).await;
+        let room = server
+            .database
+            .create_room(
+                "activity-fence".into(),
+                None,
+                2,
+                false,
+                player,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        server.assign_client_to_room(&player, room.id).await;
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .unwrap();
+        let storage = database.hold_room_writes_for_test().await;
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        let mut frame = Box::pin(server.handle_client_message_from_lifecycle(
+            &player,
+            ClientMessage::Ping,
+            lifecycle.clone(),
+        ));
+        assert!(futures_util::poll!(&mut frame).is_pending());
+        let mut transition = Box::pin(lifecycle.lock());
+        assert!(
+            futures_util::poll!(&mut transition).is_pending(),
+            "room activity persistence must retain the source gate"
+        );
+        drop(transition);
+        drop(storage);
+        frame.await;
+        let response = receiver.try_recv().unwrap();
+        assert!(matches!(response.as_ref(), ServerMessage::Pong));
+        assert!(futures_util::poll!(&mut Box::pin(lifecycle.lock())).is_ready());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn failed_heartbeat_persistence_retries_before_the_throttle_deadline() {
         for failed_update in ["player", "room"] {
