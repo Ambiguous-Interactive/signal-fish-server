@@ -15837,3 +15837,12 @@ source-policy checks pass. Separating the observers exposed a drain regression
 in the candidate: idle housekeeping waited for its next interval. Its interval
 wait now also observes drain notification. Both existing mid-farewell drain
 controls pass without changed assertions.
+
+PR #1584 follow-up: hosted Nextest at `ae32eeb4` passed 1,804 tests before the
+host-recovery control timed out. Its global next-read pause could now be taken
+by housekeeping before the independent abandoned-room worker. The control then
+awaited housekeeping shutdown before releasing that read. A narrow local run
+reproduced the hang. The fixture now admits and observes the abandoned-room read
+before starting maintenance. It retains the held read through host recovery and
+requires cleanup after release. Shutdown observation also has a one-second
+asserted deadline. The same narrow control passes with these fixture changes.
