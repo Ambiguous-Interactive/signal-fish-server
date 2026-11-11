@@ -6746,15 +6746,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         } else {
             None
         };
-        let mut repair_gate = None;
         let abandoned_room = if failure == "busy_abandoned_read" {
-            // The independent host observer can otherwise take this global test pause.
-            repair_gate = Some(
-                server
-                    .message_coordinator
-                    .lock_room_event_mutation(&room)
-                    .await,
-            );
             let creator = PlayerId::new_v4();
             let room = server
                 .database
@@ -6781,6 +6773,15 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         } else {
             None
         };
+        if abandoned_room.is_some() {
+            assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+            timeout(
+                Duration::from_secs(1),
+                database.wait_for_paused_get_room_by_id_for_test(),
+            )
+            .await
+            .expect("the abandoned-room read must hold the storage seam");
+        }
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let maintenance_server = Arc::clone(&server);
         let maintenance = tokio::spawn(async move {
@@ -6790,18 +6791,12 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
                 })
                 .await;
         });
-        if abandoned_room.is_some() {
-            timeout(
-                Duration::from_secs(1),
-                database.wait_for_paused_get_room_by_id_for_test(),
-            )
-            .await
-            .expect("the abandoned-room read must hold the storage seam");
-        }
-        drop(repair_gate);
         let repaired = timeout(Duration::from_secs(1), successor_rx.recv()).await;
         stop.send(()).unwrap();
-        maintenance.await.unwrap();
+        timeout(Duration::from_secs(1), maintenance)
+            .await
+            .unwrap_or_else(|error| panic!("{failure}: maintenance must observe shutdown: {error}"))
+            .unwrap();
         let message = repaired
             .unwrap_or_else(|error| {
                 panic!("{failure}: maintenance must retry failed host election: {error}")

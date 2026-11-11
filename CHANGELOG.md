@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close inactive and deleted-room peers, and recover abandoned room codes, while unrelated room cleanup waits
+  (#1581, #1582, #1583).
 - Free seats left by failed disconnect cleanup while other room cleanup waits (#1578).
 - Release expired replay buffers while live matches continue (#1577).
 - Close inactive connections on time when the server cannot deliver a farewell (#1579).

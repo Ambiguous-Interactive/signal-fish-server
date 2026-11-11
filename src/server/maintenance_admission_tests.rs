@@ -621,9 +621,9 @@ async fn activity_eviction_batch_shares_a_wait_budget_and_keeps_owned_teardowns(
     timeout(Duration::from_millis(500), async {
         while server
             .metrics
-            .maintenance_sweeps_total
+            .expired_players_cleaned
             .load(Ordering::Relaxed)
-            == 0
+            < 8
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -1168,4 +1168,255 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
         }
         assert!(!server.database.room_exists(&room_id).await.unwrap());
     }
+}
+
+/// Hold housekeeping without retaining any storage locks used by live rooms.
+async fn stalled_housekeeping(
+    server: &Arc<EnhancedGameServer>,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let (entered, release) = database.pause_next_room_cleanup_lease_for_test();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let maintenance = tokio::spawn({
+        let server = Arc::clone(server);
+        async move {
+            server
+                .cleanup_task_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    timeout(Duration::from_secs(1), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    (release, stop, maintenance)
+}
+
+/// Start a two-player WebRTC mesh and consume its initial lifecycle messages.
+async fn live_maintenance_mesh(
+    server: &Arc<EnhancedGameServer>,
+    players: [PlayerId; 2],
+) -> (RoomId, Vec<tokio::sync::mpsc::Receiver<Arc<ServerMessage>>>) {
+    let mut receivers = Vec::new();
+    for (index, player) in players.into_iter().enumerate() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(32);
+        server.connect_client(player, sender).await;
+        server.set_client_protocol(
+            &player,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+        receivers.push(receiver);
+        server
+            .handle_join_room(
+                &player,
+                "maintenance-mesh".into(),
+                Some("LIVE01".into()),
+                format!("Player{index}"),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                Some(index != 0),
+            )
+            .await;
+        server.handle_player_ready(&player).await;
+    }
+    server.handle_start_game(&players[0]).await;
+    let room_id = server.get_client_room(&players[0]).await.unwrap();
+    assert_eq!(server.get_client_room(&players[1]).await, Some(room_id));
+    assert_eq!(
+        server.active_session_plan(&room_id).unwrap().transport,
+        Transport::WebRtc
+    );
+    for receiver in &mut receivers {
+        let messages: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        assert!(messages.iter().any(|message| matches!(message.as_ref(),
+            ServerMessage::SessionPlan(plan) if plan.transport == Transport::WebRtc && plan.peers.len() == 1)));
+    }
+    (room_id, receivers)
+}
+
+/// Inactive peers must release their live room seats while GC is stalled.
+#[tokio::test(start_paused = true)]
+async fn maintenance_evicts_inactive_peer_while_room_gc_waits() {
+    let server = server_with_config(ServerConfig {
+        enable_reconnection: false,
+        ping_timeout: Duration::from_secs(10),
+        heartbeat_throttle: Duration::ZERO,
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (release, stop, maintenance) = stalled_housekeeping(&server).await;
+    let inactive = PlayerId::new_v4();
+    let active = PlayerId::new_v4();
+    let (room_id, mut receivers) = live_maintenance_mesh(&server, [active, inactive]).await;
+    let mut receiver = receivers.pop().unwrap();
+    let evicted = timeout(Duration::from_secs(12), async {
+        while server.connection_manager.has_client(&inactive) {
+            server.record_client_activity(&active);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if evicted.is_ok() {
+        assert!(server.connection_manager.has_client(&active));
+        let remaining = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remaining.players.len(), 1);
+        assert!(remaining.players.contains_key(&active));
+        assert_eq!(
+            server.active_session_plan(&room_id).unwrap().transport,
+            Transport::WebRtc
+        );
+        let farewell = receiver.try_recv().unwrap();
+        assert!(matches!(
+            farewell.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::ActivityTimeout),
+                ..
+            }
+        ));
+    }
+    release.send(()).unwrap();
+    stop.send(()).unwrap();
+    maintenance.await.unwrap();
+    evicted.expect("inactive peer must close while room GC remains held");
+}
+
+/// A deleted room cannot leave a connected peer waiting for its next P2P plan.
+#[tokio::test(start_paused = true)]
+async fn maintenance_closes_deleted_room_peer_while_room_gc_waits() {
+    let server = server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (release, stop, maintenance) = stalled_housekeeping(&server).await;
+    let players = [PlayerId::new_v4(), PlayerId::new_v4()];
+    let (room_id, mut receivers) = live_maintenance_mesh(&server, players).await;
+    server.database.delete_room(&room_id).await.unwrap();
+    let closed = timeout(Duration::from_millis(2_500), async {
+        while players
+            .iter()
+            .any(|player| server.connection_manager.has_client(player))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if closed.is_ok() {
+        for (player, receiver) in players.iter().zip(&mut receivers) {
+            assert!(
+                std::iter::from_fn(|| receiver.try_recv().ok()).any(|message| matches!(
+                    message.as_ref(),
+                    ServerMessage::Error {
+                        error_code: Some(ErrorCode::RoomNotFound),
+                        ..
+                    }
+                ))
+            );
+            assert!(
+                !server
+                    .reconnection_manager()
+                    .unwrap()
+                    .has_pending_reconnection(player)
+                    .await
+            );
+        }
+    }
+    release.send(()).unwrap();
+    stop.send(()).unwrap();
+    maintenance.await.unwrap();
+    closed.expect("deleted-room peer must close while room GC remains held");
+}
+
+/// Failed creation must release its room code while unrelated GC is stalled.
+#[tokio::test(start_paused = true)]
+async fn maintenance_recovers_abandoned_room_code_while_room_gc_waits() {
+    let server = server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (release, stop, maintenance) = stalled_housekeeping(&server).await;
+    let creator = PlayerId::new_v4();
+    let pending = server
+        .database
+        .create_pending_room_classified(
+            "maintenance-code".into(),
+            Some("REUSE1".into()),
+            2,
+            false,
+            creator,
+            "relay".into(),
+            "test".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    server
+        .database
+        .abandon_room(&pending.id, &creator)
+        .await
+        .unwrap();
+    let recovered = timeout(Duration::from_millis(2_500), async {
+        while server.database.room_exists(&pending.id).await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if recovered.is_ok() {
+        let replacement = PlayerId::new_v4();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        server.connect_client(replacement, sender).await;
+        server
+            .handle_join_room(
+                &replacement,
+                "maintenance-code".into(),
+                Some("REUSE1".into()),
+                "Replacement".into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                Some(false),
+            )
+            .await;
+        let replacement_room = server.get_client_room(&replacement).await.unwrap();
+        assert_ne!(replacement_room, pending.id);
+        assert!(
+            matches!(receiver.try_recv().unwrap().as_ref(), ServerMessage::RoomJoined(payload)
+            if payload.room_id == replacement_room)
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(server
+            .database
+            .room_exists(&replacement_room)
+            .await
+            .unwrap());
+    }
+    release.send(()).unwrap();
+    stop.send(()).unwrap();
+    maintenance.await.unwrap();
+    recovered.expect("failed creation must release its room code while GC remains held");
 }
