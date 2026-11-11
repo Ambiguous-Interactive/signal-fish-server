@@ -7828,3 +7828,95 @@ async fn maintenance_host_repair_retains_slow_storage_after_observer_ends() {
         assert_plan_queue_empty(&mut receiver);
     }
 }
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn host_leave_panic_after_terminal_retains_session_recovery() {
+    let server = create_server_with_session(host_config()).await;
+    let (host, mut host_receiver) = register_client(&server).await;
+    let (survivor, mut survivor_receiver) = register_client(&server).await;
+    let (peer, mut peer_receiver) = register_client(&server).await;
+    for player in [&host, &survivor, &peer] {
+        server.set_client_protocol(player, v3_webrtc());
+    }
+    let room_id =
+        finalized_db_room_with(&server, host, &[(survivor, "survivor"), (peer, "peer")]).await;
+    let players = server.database.get_room_players(&room_id).await.unwrap();
+    let finalized = finalized("host-game", players, Some(host));
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
+    assert_eq!(
+        expect_plan(&mut host_receiver, "host").await.host,
+        Some(host)
+    );
+    assert_eq!(
+        expect_plan(&mut survivor_receiver, "survivor").await.host,
+        Some(host)
+    );
+
+    assert_eq!(
+        expect_plan(&mut peer_receiver, "peer").await.host,
+        Some(host)
+    );
+
+    server.panic_owned_room_operation_for_test(
+        super::OwnedRoomOperationPanicPoint::LeaveAfterTerminal,
+    );
+    server.leave_room(&host).await;
+    assert!(matches!(
+        recv(&mut host_receiver).await.as_ref(),
+        ServerMessage::RoomLeft
+    ));
+    assert!(
+        matches!(recv(&mut survivor_receiver).await.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == host)
+    );
+    assert!(matches!(
+        recv(&mut survivor_receiver).await.as_ref(),
+        ServerMessage::AuthorityChanged {
+            authority_player: None,
+            ..
+        }
+    ));
+    assert_eq!(server.get_client_room(&host).await, None);
+    assert!(server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|player| player.id != host));
+
+    server.retry_pending_session_replans().await;
+    let repaired = expect_plan(&mut survivor_receiver, "survivor after host panic").await;
+    assert_eq!(repaired.topology, Topology::Host);
+    assert_eq!(repaired.transport, Transport::WebRtc);
+    assert_eq!(repaired.host, Some(survivor));
+    assert_eq!(repaired.peers.len(), 1);
+    assert_eq!(repaired.peers[0].player_id, peer);
+    assert!(!repaired.peers[0].initiate);
+    assert!(
+        matches!(recv(&mut peer_receiver).await.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == host)
+    );
+    assert!(matches!(
+        recv(&mut peer_receiver).await.as_ref(),
+        ServerMessage::AuthorityChanged {
+            authority_player: None,
+            ..
+        }
+    ));
+    let peer_plan = expect_plan(&mut peer_receiver, "peer after host panic").await;
+    assert_eq!(peer_plan.host, Some(survivor));
+    assert_eq!(peer_plan.topology, Topology::Host);
+    assert_eq!(peer_plan.transport, Transport::WebRtc);
+    assert_eq!(peer_plan.peers.len(), 1);
+    assert_eq!(peer_plan.peers[0].player_id, survivor);
+    assert!(peer_plan.peers[0].initiate);
+    assert_eq!(
+        server.active_session_plan(&room_id).unwrap().host,
+        Some(survivor)
+    );
+    assert!(server.pending_session_replans.is_empty());
+    assert_silent(&mut host_receiver).await;
+    server.retry_pending_session_replans().await;
+    assert_silent(&mut survivor_receiver).await;
+    assert_silent(&mut peer_receiver).await;
+}

@@ -66,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close peers in deleted P2P rooms when advisory routing is busy (#1585).
+- Close incomplete P2P joins and reconnects when server recovery fails (#1587, #1588).
+- Recover the live P2P host after a successful leave ends in a server error (#1586).
 - Close inactive and deleted-room peers, and recover abandoned room codes, while unrelated room cleanup waits
   (#1581, #1582, #1583).
 - Free seats left by failed disconnect cleanup while other room cleanup waits (#1578).

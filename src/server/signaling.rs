@@ -16,6 +16,8 @@
 //! Every code path is gated on negotiated v3 (plus the WebRTC transport for
 //! `Signal`) so v2 clients never observe `Signal` or `SessionPlan` (the v3 gate).
 
+use futures_util::FutureExt;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -444,14 +446,6 @@ impl EnhancedGameServer {
             return false;
         }
 
-        // Preserve a complete reconnect/expiry-cleanup record before the
-        // socket teardown can race a failing database read. The normal
-        // unregister path may register the same room again; that operation is
-        // idempotent and retains this complete snapshot.
-        let _ = self
-            .register_disconnection_for_reconnect(&player_id, room_id, was_authority, player_info)
-            .await;
-
         let initiated = self
             .connection_manager
             .request_close_for(&player_id, crate::coordination::CloseReason::Unregistered);
@@ -472,6 +466,23 @@ impl EnhancedGameServer {
         tokio::spawn(async move {
             server.unregister_client_with_lifecycle(lifecycle).await;
         });
+        // Preserve a complete reconnect/expiry-cleanup record before the
+        // socket teardown can race a failing database read. The normal
+        // unregister path may register the same room again; that operation is
+        // idempotent and retains this complete snapshot.
+        if AssertUnwindSafe(self.register_disconnection_for_reconnect(
+            &player_id,
+            room_id,
+            was_authority,
+            player_info,
+        ))
+        .catch_unwind()
+        .await
+        .is_err()
+        {
+            tracing::error!(%player_id, %room_id, publication, "Failed to preserve reconnect snapshot after publication failure");
+        }
+
         true
     }
 

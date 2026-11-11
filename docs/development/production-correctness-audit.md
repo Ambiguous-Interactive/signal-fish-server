@@ -15846,3 +15846,81 @@ reproduced the hang. The fixture now admits and observes the abandoned-room read
 before starting maintenance. It retains the held read through host recovery and
 requires cleanup after release. Shutdown observation also has a one-second
 asserted deadline. The same narrow control passes with these fixture changes.
+
+### F328–F331 — Recover live P2P departure and admission failures
+
+Session 678 records four new first-party server findings under #826.
+
+F328 ([#1585](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1585)).
+Missing-room cleanup waited for advisory routing before requesting the socket
+close. A two-player WebRTC mesh control deletes its room and holds the routing
+writer. Both close requests miss the deadline on original main. The repair
+bounds advisory lookup, then uses the existing lifecycle-fenced close and owned
+teardown. The control requires both close requests before routing resumes, no
+late advisory after cancellation, and no pending reconnect for the deleted room.
+The original red is Nextest `79d0fff5-ab2d-4bef-b70a-96e634505310`.
+
+F329 ([#1586](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1586)).
+A leave can commit its terminal result and departure publication, then unwind
+before recording host repair. Maintenance has no work to retry. The three-player
+Host/WebRTC control requires both survivors to receive one replacement host plan
+with reciprocal peer roles after the existing post-terminal panic injection.
+The final control fails on original source in Nextest
+`30d4c540-450c-43fb-8a98-d6e09d0bd1d1`.
+Recovery is now retained after confirmed `PlayerLeft` publication and before
+releasing the room gate. An initial candidate queued recovery at unroute; review
+rejected it because it could authorize plans after an unpublished departure.
+The existing failed-publication control now also requires no pending replan.
+The revised 17-control selection passes in Nextest
+`38eaffbd-2f74-4dfa-88c8-7dcb4a975cf1`; the negative control passes in
+`1a02aea8-8674-4c74-bc5a-cc65e37c71e2`.
+
+F330 ([#1587](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1587)).
+A reconnect can deliver its baseline, then fail both publication and its unwind
+supervisor. The final fallback consumes the delivered claim but leaves the
+restored connection live without room publication or a current plan. A live
+WebRTC control reproduces that incomplete generation in Nextest
+`8f84edda-a01d-468f-a969-def4c5d62de1`.
+Reconnect recovery retains the baseline room snapshot and starts a
+lifecycle-fenced close before further waits. A failed recovery snapshot read
+cannot keep the actor live. A local unwind boundary isolates snapshot
+registration after the recovered opening; a bookkeeping panic cannot repeat
+that opening. The final committed fallback also counts its logical opening
+once. Controls cover both the ordinary supervisor and its final fallback. Both
+original-source regressions fail in Nextest
+`4075b424-1c75-4a97-bedd-0db2fc863005`. Removing the local registration
+unwind boundary produces a duplicate opening in
+`22c7b656-1c76-492d-a86b-9924441e0f81`. The three final reconnect controls
+pass in `69facb0c-05d5-4454-a4ac-d037dfa6de4d`. The repaired teardown also
+removes the transient and restored routing aliases. Review also required local
+isolation of transient-route cleanup. Without that boundary, the adapter-panic
+control observes departure before opening in
+`38c448f0-abba-4c82-9b23-abcfa76e2dfe`. The final five reconnect controls
+pass in `3ff18fef-b033-4215-bf4c-40bbcdaf65f8`.
+
+F331 ([#1588](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1588)).
+The same recovery snapshot dependency affected successful joins. After
+`RoomJoined` commits, a publication panic followed by a failed room read leaves
+the actor live without its room opening or current P2P plan. The final control
+arms storage errors only after baseline admission and fails original repair in
+Nextest `65b33b03-9ae4-47a5-a73a-5d74a9f905cf`. An initial always-runnable
+paused-clock probe was terminated and is excluded from evidence.
+The strengthened finalized WebRTC control and registration-panic control both
+fail their original repair paths in Nextest
+`60b728bc-5d21-462a-9307-c8d619fa568f`: the first misses its close deadline;
+the second observes departure before opening. Join recovery now retains the
+existing baseline room snapshot. The shared publication-failure close starts
+before reconnect bookkeeping and isolates bookkeeping panics; the held actor
+lifecycle continues to fence teardown until snapshot registration finishes.
+The held-replay control proves that bookkeeping cannot delay the close signal.
+The final five-control selection passes in Nextest
+`b56c2ddb-7e8a-4c71-b211-74f36302703c`.
+
+The wire schema and close codes remain unchanged. External SDK qualification
+tracks Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+The assessment covers close handling without advisory messages, delayed host
+plans, and closure after a delivered reconnect baseline. These source repairs
+do not complete the broader audit or prove the SDK controls.

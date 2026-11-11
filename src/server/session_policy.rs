@@ -879,14 +879,7 @@ impl EnhancedGameServer {
         // snapshot stable through host election, stored-plan replacement, and
         // all exact-membership deliveries so a pending join/reconnect cannot
         // wedge the plan on a host that nobody was told about.
-        let revision = uuid::Uuid::new_v4();
-        self.pending_session_replans.insert(
-            *room_id,
-            PendingSessionReplan {
-                departed: *departed,
-                revision,
-            },
-        );
+        let revision = self.queue_session_member_departure(room_id, departed);
         let room_event_guard = self
             .message_coordinator
             .lock_room_event_mutation(room_id)
@@ -899,6 +892,23 @@ impl EnhancedGameServer {
             self.pending_session_replans
                 .remove_if(room_id, |_, pending| pending.revision == revision);
         }
+    }
+
+    /// Retain departure recovery until current room state is reconciled.
+    pub(super) fn queue_session_member_departure(
+        &self,
+        room_id: &RoomId,
+        departed: &PlayerId,
+    ) -> uuid::Uuid {
+        let revision = uuid::Uuid::new_v4();
+        self.pending_session_replans.insert(
+            *room_id,
+            PendingSessionReplan {
+                departed: *departed,
+                revision,
+            },
+        );
+        revision
     }
 
     /// Retain admitted recovery across bounded observation waits and caller cancellation.

@@ -2,7 +2,7 @@ use crate::protocol::{
     ErrorCode, PlayerId, PlayerInfo, ReconnectedPayload, ReplayStatus, RoomId, SenderWatermark,
     ServerMessage,
 };
-use crate::reconnection::{ClaimedReconnection, DisconnectedPlayer, ReconnectionManager};
+use crate::reconnection::{ClaimedReconnection, ReconnectionManager};
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -125,6 +125,8 @@ struct ReconnectPanicRecovery {
     restore: ReconnectRestoreState,
     reassigned: bool,
     room_event_guard: Option<RoomEventMutationGuard>,
+    room: Option<Arc<crate::protocol::Room>>,
+    was_authority: bool,
 }
 
 impl ReconnectionClaimGuard {
@@ -171,60 +173,91 @@ impl Drop for ReconnectionClaimGuard {
 }
 
 impl EnhancedGameServer {
-    /// Repair a delivered reconnect while the unwind supervisor retains the
-    /// connection lifecycle guard.
+    /// Close an unpublished reconnect and order its opening before owned teardown.
     async fn repair_panicked_reconnect_publication_locked(
         self: &Arc<Self>,
+        current_player_id: PlayerId,
         reconnect_player_id: PlayerId,
         room_id: RoomId,
-        disconnected: &DisconnectedPlayer,
-        _room_event_guard: RoomEventMutationGuard,
+        recovery: &ReconnectPanicRecovery,
     ) {
+        let Some(_room_event_guard) = recovery.room_event_guard.clone() else {
+            return;
+        };
         let Some(stamp) = self
             .connection_manager
             .current_relay_stamp_in_room(&reconnect_player_id, &room_id)
         else {
             return;
         };
-        let room = match self.database.get_room_by_id(&room_id).await {
-            Ok(Some(room)) => room,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::error!(%reconnect_player_id, %room_id, %error, "Failed to load room for panicked reconnect repair");
-                return;
-            }
+        let Some(lifecycle) = self
+            .connection_manager
+            .client_lifecycle(&reconnect_player_id)
+        else {
+            return;
         };
-        let player = room
-            .players
-            .get(&reconnect_player_id)
-            .cloned()
-            .or_else(|| disconnected.player_info.clone());
+        self.connection_manager.request_close_for(
+            &reconnect_player_id,
+            crate::coordination::CloseReason::Unregistered,
+        );
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            server.unregister_client_with_lifecycle(lifecycle).await;
+        });
+        match AssertUnwindSafe(
+            self.message_coordinator
+                .unregister_local_client(&current_player_id),
+        )
+        .catch_unwind()
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%current_player_id, %error, "Failed to remove transient reconnect route during publication repair");
+            }
+            Err(_) => {
+                tracing::error!(%current_player_id, "Transient reconnect route removal panicked during publication repair");
+            }
+        }
         let notification = Arc::new(ServerMessage::PlayerReconnected {
             player_id: reconnect_player_id,
             epoch: Some(stamp.epoch),
             player: None,
         });
-        if let Some(player) = player {
-            self.terminate_room_generation_after_publication_failure(
-                reconnect_player_id,
-                room_id,
-                stamp.epoch,
-                player,
-                room.authority_player == Some(reconnect_player_id) || disconnected.was_authority,
-                "reconnect_panic",
-            )
-            .await;
-        }
         if let Err(error) = self
             .publish_reconnect_lifecycle_fallback(
                 room_id,
                 reconnect_player_id,
                 notification,
-                room.authority_player == Some(reconnect_player_id),
+                recovery.was_authority,
             )
             .await
         {
             tracing::error!(%reconnect_player_id, %room_id, %error, "Failed to repair reconnect lifecycle after panic");
+        }
+        let player = recovery
+            .room
+            .as_ref()
+            .and_then(|room| room.players.get(&reconnect_player_id).cloned())
+            .or_else(|| {
+                recovery
+                    .claim
+                    .as_ref()
+                    .and_then(|claim| claim.disconnected.player_info.clone())
+            });
+        if let Some(player) = player {
+            if AssertUnwindSafe(self.register_disconnection_for_reconnect(
+                &reconnect_player_id,
+                room_id,
+                recovery.was_authority,
+                player,
+            ))
+            .catch_unwind()
+            .await
+            .is_err()
+            {
+                tracing::error!(%reconnect_player_id, %room_id, "Failed to retain reconnect snapshot after publication repair");
+            }
         }
     }
 
@@ -787,17 +820,11 @@ impl EnhancedGameServer {
                 Ok(result) => result,
                 Err(_) => {
                     tracing::error!(%current_player_id, %reconnect_player_id, %room_id, "Owned reconnect transaction panicked");
-                    // The unwind supervisor itself must not be able to unwind
-                    // past the task: a panic here escapes the transaction's
-                    // `catch_unwind` as a `JoinError` at the outer
-                    // `task.await` while this snapshot may still hold the
-                    // reserved claim, and a claimed record is exempt from
-                    // every expiry surface — the player would answer
-                    // `AlreadyInProgress` until restart (#738). Catch a
-                    // supervisor panic and release the claim directly as a
-                    // last resort. The full rollback is deliberately not
-                    // retried: whatever panicked inside the supervisor can
-                    // panic again, and the release path itself is panic-free.
+                    /*
+                        Retry no uncommitted rollback after a supervisor panic.
+                        A delivered baseline spends the claim and requires an
+                        ordered opening and close from the retained snapshot.
+                    */
                     let supervisor_outcome = AssertUnwindSafe(async {
                         #[cfg(test)]
                         server.trigger_owned_room_supervisor_panic_for_test();
@@ -806,10 +833,6 @@ impl EnhancedGameServer {
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .clone();
                         if terminal_response_committed.load(std::sync::atomic::Ordering::Acquire) {
-                            let _ = server
-                                .message_coordinator
-                                .unregister_local_client(&current_player_id)
-                                .await;
                             if let (Some(manager), Some(claim)) =
                                 (&server.reconnection_manager, recovery.claim.as_ref())
                             {
@@ -820,18 +843,14 @@ impl EnhancedGameServer {
                                     server.metrics.increment_players_joined();
                                 }
                                 if !lifecycle_finalized.load(std::sync::atomic::Ordering::Acquire) {
-                                    if let Some(room_event_guard) =
-                                        recovery.room_event_guard.clone()
-                                    {
-                                        server
-                                            .repair_panicked_reconnect_publication_locked(
-                                                reconnect_player_id,
-                                                room_id,
-                                                &claim.disconnected,
-                                                room_event_guard,
-                                            )
-                                            .await;
-                                    }
+                                    server
+                                        .repair_panicked_reconnect_publication_locked(
+                                            current_player_id,
+                                            reconnect_player_id,
+                                            room_id,
+                                            &recovery,
+                                        )
+                                        .await;
                                 }
                             }
                             true
@@ -888,7 +907,7 @@ impl EnhancedGameServer {
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .clone();
                             if let (Some(manager), Some(claim)) =
-                                (&server.reconnection_manager, recovery.claim)
+                                (&server.reconnection_manager, recovery.claim.as_ref())
                             {
                                 // The record action must mirror the
                                 // supervisor's own commit-state branch. A
@@ -906,9 +925,26 @@ impl EnhancedGameServer {
                                 if terminal_response_committed
                                     .load(std::sync::atomic::Ordering::Acquire)
                                 {
-                                    let _ = manager.complete_claimed_reconnection(&claim).await;
+                                    let _ = manager.complete_claimed_reconnection(claim).await;
+                                    if !opening_accounted
+                                        .swap(true, std::sync::atomic::Ordering::AcqRel)
+                                    {
+                                        server.metrics.increment_players_joined();
+                                    }
+                                    if !lifecycle_finalized
+                                        .load(std::sync::atomic::Ordering::Acquire)
+                                    {
+                                        server
+                                            .repair_panicked_reconnect_publication_locked(
+                                                current_player_id,
+                                                reconnect_player_id,
+                                                room_id,
+                                                &recovery,
+                                            )
+                                            .await;
+                                    }
                                 } else {
-                                    let _ = manager.release_reconnection_claim(&claim).await;
+                                    let _ = manager.release_reconnection_claim(claim).await;
                                 }
                             }
                             false
@@ -1424,6 +1460,13 @@ impl EnhancedGameServer {
         // Settled for the rest of this attempt: publication below reads it from
         // an owned copy so the rejection paths keep the whole restore state.
         let restored_authority = restore.restored_authority;
+        {
+            let mut recovery = panic_recovery
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            recovery.was_authority =
+                restored_authority || room.authority_player == Some(*reconnect_player_id);
+        }
 
         let room = match self
             .database
@@ -1587,6 +1630,7 @@ impl EnhancedGameServer {
         let reconnection_manager_for_baseline = Arc::clone(reconnection_manager);
         let baseline_publication = Arc::new(std::sync::Mutex::new(None));
         let baseline_publication_in_builder = Arc::clone(&baseline_publication);
+        let recovery_for_baseline = Arc::clone(&panic_recovery);
         let server = Arc::clone(&self);
         let should_commit = || !self.is_draining();
 
@@ -1656,6 +1700,11 @@ impl EnhancedGameServer {
                             player.epoch = None;
                             player.seq = None;
                         }
+
+                        recovery_for_baseline
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .room = Some(Arc::clone(&current_room));
 
                         if server.should_retain_room_publication_snapshot() {
                             let snapshot = ReconnectPublicationSnapshot {
@@ -2410,20 +2459,17 @@ impl EnhancedGameServer {
             }
             Err(error) => {
                 tracing::warn!(%reconnect_player_id, %room_id, %error, "Reconnect publication failed");
-                let repair_guard = panic_recovery
+                let recovery = panic_recovery
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .room_event_guard
                     .clone();
-                if let Some(repair_guard) = repair_guard {
-                    self.repair_panicked_reconnect_publication_locked(
-                        *reconnect_player_id,
-                        *room_id,
-                        disconnected,
-                        repair_guard,
-                    )
-                    .await;
-                }
+                self.repair_panicked_reconnect_publication_locked(
+                    *current_player_id,
+                    *reconnect_player_id,
+                    *room_id,
+                    &recovery,
+                )
+                .await;
             }
         }
         panic_recovery
