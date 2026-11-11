@@ -11,8 +11,8 @@ use super::{chrono_duration_from_std, EnhancedGameServer};
 
 /// Limit one candidate's wait before maintenance mutates durable or connection state.
 const MAINTENANCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-/// Share one observation deadline across every activity teardown in a sweep.
-const ACTIVITY_TEARDOWN_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// Share one observation deadline across activity farewells and teardowns.
+const ACTIVITY_EVICTION_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl EnhancedGameServer {
     /// Abandon only admission waits; an admitted mutation retains its normal completion rules.
@@ -637,7 +637,7 @@ impl EnhancedGameServer {
         let housekeeping = self.cleanup_housekeeping_until(shutdown, period);
         tokio::pin!(housekeeping);
 
-        // A storage wait in housekeeping must not suspend retries for live rooms.
+        // A storage wait in housekeeping must not suspend peer and seat recovery.
         let mut repairs = crate::deadline::interval(period);
         repairs.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -653,7 +653,13 @@ impl EnhancedGameServer {
             tokio::select! {
                 biased;
                 () = &mut housekeeping => return,
-                () = self.retry_pending_session_replans() => {}
+                () = async {
+                    tokio::join!(
+                        self.retry_pending_session_replans(),
+                        self.cleanup_pending_durable_player_detaches(),
+                        self.cleanup_expired_reconnections(),
+                    );
+                } => {}
             }
         }
     }
@@ -710,8 +716,8 @@ impl EnhancedGameServer {
                 );
                 break 'cleanup;
             }
-            let activity_teardown_deadline =
-                crate::deadline::after(tokio::time::Instant::now(), ACTIVITY_TEARDOWN_SWEEP_WAIT);
+            let activity_eviction_deadline =
+                crate::deadline::after(tokio::time::Instant::now(), ACTIVITY_EVICTION_SWEEP_WAIT);
             let mut evicted_client_count = 0u64;
             let mut stop_for_drain = false;
             for player_id in expired_clients {
@@ -745,20 +751,23 @@ impl EnhancedGameServer {
                     eviction_pinned.store(pinned, Ordering::Release);
                     pinned
                 };
-                let enqueued = self
-                    .send_farewell_to_player_if(
-                        &player_id,
-                        format!(
-                            "Disconnected: no activity received for {timeout_ms} ms \
-                             (server.ping_timeout)"
-                        ),
-                        // Deliberately NOT ConnectionIdleTimeout: that code is
-                        // the socket-level `websocket.idle_timeout_secs` close;
-                        // this eviction is the activity reaper's.
-                        Some(crate::protocol::ErrorCode::ActivityTimeout),
-                        &should_send,
-                    )
-                    .await;
+                let farewell = self.send_farewell_to_player_if(
+                    &player_id,
+                    format!(
+                        "Disconnected: no activity received for {timeout_ms} ms \
+                         (server.ping_timeout)"
+                    ),
+                    Some(crate::protocol::ErrorCode::ActivityTimeout),
+                    &should_send,
+                );
+                // Give an immediately available route a chance even when an
+                // earlier lookup used the batch's wait. The socket close owns
+                // the timeout reason if the best-effort lookup is still pending.
+                let enqueued = tokio::select! {
+                    biased;
+                    enqueued = farewell => enqueued,
+                    _ = crate::deadline::wait_until(activity_eviction_deadline) => false,
+                };
 
                 let mut pinned = eviction_pinned.load(Ordering::Acquire);
                 if !pinned {
@@ -770,10 +779,8 @@ impl EnhancedGameServer {
                         stop_for_drain = true;
                         break;
                     }
-                    // A missing coordinator route does not evaluate the
-                    // predicate. Close the still-expired socket without an
-                    // advisory, preserving the same pin-before-teardown
-                    // ordering.
+                    // A missing or delayed route may never evaluate the
+                    // predicate. Recheck liveness before closing without advice.
                     pinned = self
                         .connection_manager
                         .request_activity_timeout_if_expired(&player_id, self.config.ping_timeout);
@@ -801,7 +808,7 @@ impl EnhancedGameServer {
                 tokio::select! {
                     biased;
                     () = self.unregister_client(&player_id) => {}
-                    _ = crate::deadline::wait_until(activity_teardown_deadline) => {
+                    _ = crate::deadline::wait_until(activity_eviction_deadline) => {
                         tracing::debug!(%player_id, "Activity-timeout teardown continues outside the maintenance wait");
                     }
                 }
@@ -824,7 +831,6 @@ impl EnhancedGameServer {
             }
 
             self.cleanup_abandoned_rooms().await;
-            self.cleanup_pending_durable_player_detaches().await;
 
             // Cleanup empty rooms with idempotency
             match self
@@ -1005,8 +1011,6 @@ impl EnhancedGameServer {
                     tracing::error!("Failed to cleanup expired locks: {}", e);
                 }
             }
-
-            self.cleanup_expired_reconnections().await;
 
             // Cleanup old room cleanup events (idempotency tracking table)
             match self.database.cleanup_old_room_cleanup_events().await {

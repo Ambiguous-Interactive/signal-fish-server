@@ -6,16 +6,23 @@ use crate::config::{
     TransportSecurityConfig, TurnConfig,
 };
 use crate::database::DatabaseConfig;
-use crate::server::ServerConfig;
+use crate::protocol::{Topology, Transport};
+use crate::server::{NegotiatedProtocol, ServerConfig};
 use tokio::time::{timeout, Duration};
 
 /// Use a short reconnect window for paused-clock expiry histories.
 async fn server() -> Arc<EnhancedGameServer> {
+    server_with_config(ServerConfig {
+        reconnection_window: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await
+}
+
+/// Use the normal server constructor with a scenario-specific maintenance policy.
+async fn server_with_config(config: ServerConfig) -> Arc<EnhancedGameServer> {
     EnhancedGameServer::new(
-        ServerConfig {
-            reconnection_window: Duration::from_secs(1),
-            ..ServerConfig::default()
-        },
+        config,
         ProtocolConfig::default(),
         RelayTypeConfig::default(),
         SessionConfig::default(),
@@ -28,6 +35,185 @@ async fn server() -> Arc<EnhancedGameServer> {
     )
     .await
     .unwrap()
+}
+
+/// #1577: Reconnect expiry releases live-room replay state during stalled housekeeping.
+#[tokio::test(start_paused = true)]
+async fn maintenance_retires_expired_replay_while_room_gc_waits() {
+    recover_live_room_while_room_gc_waits(true).await;
+}
+
+/// #1578: Durable detach retries free a live room seat during stalled housekeeping.
+#[tokio::test(start_paused = true)]
+async fn maintenance_retries_failed_detach_while_room_gc_waits() {
+    recover_live_room_while_room_gc_waits(false).await;
+}
+
+/// Exercise reconnect and detach cleanup around a real disconnect and replacement join.
+async fn recover_live_room_while_room_gc_waits(expired_reconnect: bool) {
+    let server = server_with_config(ServerConfig {
+        enable_reconnection: expired_reconnect,
+        reconnection_window: Duration::from_secs(1),
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (host, departed, replacement) =
+        (PlayerId::new_v4(), PlayerId::new_v4(), PlayerId::new_v4());
+    let mut receivers = Vec::new();
+    for player in [host, departed, replacement] {
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        server.connect_client(player, sender).await;
+        server.set_client_protocol(
+            &player,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+        receivers.push(receiver);
+    }
+    for (player, name, join_only) in [(host, "Host", false), (departed, "Departed", true)] {
+        server
+            .handle_join_room(
+                &player,
+                "maintenance-seats".into(),
+                Some("SEAT01".into()),
+                name.into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                Some(join_only),
+            )
+            .await;
+    }
+    let room = server.get_client_room(&host).await.unwrap();
+    assert_eq!(server.get_client_room(&departed).await, Some(room));
+    for player in [host, departed] {
+        server.handle_player_ready(&player).await;
+    }
+    server.handle_start_game(&host).await;
+    assert_eq!(
+        server.active_session_plan(&room).unwrap().transport,
+        Transport::WebRtc
+    );
+    let join = || {
+        server.handle_join_room(
+            &replacement,
+            "maintenance-seats".into(),
+            Some("SEAT01".into()),
+            "Replacement".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            Some(true),
+        )
+    };
+
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let (entered, release) = database.pause_next_room_cleanup_lease_for_test();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let maintenance = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .cleanup_task_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    timeout(Duration::from_secs(1), entered)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Create the cleanup obligation after housekeeping has reached GC.
+    if !expired_reconnect {
+        database.fail_remove_player_from_room_for_test(true);
+    }
+    server.unregister_client(&departed).await;
+    database.fail_remove_player_from_room_for_test(false);
+    if let Some(manager) = server.reconnection_manager() {
+        assert!(manager.has_pending_reconnection(&departed).await);
+    }
+    assert_eq!(
+        server
+            .pending_durable_player_detaches
+            .contains_key(&(room, departed)),
+        !expired_reconnect
+    );
+    join().await;
+    let receiver = receivers.last_mut().unwrap();
+    let response = receiver.try_recv().unwrap();
+    let recovered = if let Some(manager) = server.reconnection_manager() {
+        assert!(
+            matches!(response.as_ref(), ServerMessage::RoomJoined(payload) if payload.room_id == room)
+        );
+        assert!(!manager.get_missed_events(&room, 0).await.events.is_empty());
+        let recovered = timeout(Duration::from_millis(2_500), async {
+            while manager.has_pending_reconnection(&departed).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if recovered.is_ok() {
+            assert!(manager.get_missed_events(&room, 0).await.events.is_empty());
+        }
+        recovered
+    } else {
+        assert!(
+            matches!(
+                response.as_ref(),
+                ServerMessage::RoomJoinFailed {
+                    error_code: Some(ErrorCode::RoomFull),
+                    ..
+                }
+            ),
+            "the failed detach must initially keep the room full: {response:?}"
+        );
+        let recovered = timeout(Duration::from_millis(2_500), async {
+            while server
+                .pending_durable_player_detaches
+                .contains_key(&(room, departed))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if recovered.is_ok() {
+            join().await;
+            let response = receiver.try_recv().unwrap();
+            assert!(
+                matches!(response.as_ref(), ServerMessage::RoomJoined(payload) if payload.room_id == room)
+            );
+        }
+        recovered
+    };
+    if recovered.is_ok() {
+        let plan = std::iter::from_fn(|| receiver.try_recv().ok())
+            .find(|message| matches!(message.as_ref(), ServerMessage::SessionPlan(_)))
+            .expect("replacement receives a session plan");
+        let ServerMessage::SessionPlan(plan) = plan.as_ref() else {
+            unreachable!();
+        };
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.peers.len(), 1);
+        assert_eq!(plan.peers[0].player_id, host);
+    }
+    assert_eq!(server.get_client_room(&host).await, Some(room));
+    release.send(()).unwrap();
+    stop.send(()).unwrap();
+    maintenance.await.unwrap();
+    recovered.expect("live room recovery must run while room GC waits");
 }
 
 /// Create an occupied durable room without registering a live connection.

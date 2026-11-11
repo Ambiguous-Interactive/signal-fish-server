@@ -15746,3 +15746,43 @@ the error returns. Held socket upgrade, authentication, and baseline controls
 verify the captured stages. The original room-replacement control passes under
 LLVM coverage on this source. The historical #1352 timeout remains under
 investigation. The workload and delivery oracle are unchanged.
+
+### F322–F324 — Recover live room seats and close inactive sockets on schedule
+
+F322 ([#1577](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1577)).
+Reconnect expiry ran after garbage collection and its bookkeeping. Holding a
+cleanup lease leaves room storage available but delays expiry. A normal
+disconnect frees the seat immediately. An expired record still keeps the
+room's replay buffer open and admits events that no reconnect can claim.
+The regression starts a WebRTC mesh, disconnects a player, and admits a
+replacement. It checks that replay is captured before expiry and released
+while garbage collection still waits.
+
+F323 ([#1578](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1578)).
+Housekeeping also delayed retrying a failed player removal. The socket no
+longer owns the seat, but a replacement receives `RoomFull`. The regression
+holds garbage collection during a real disconnect and fails one storage
+removal. It requires a later join to receive the same room and a WebRTC mesh
+plan naming the incumbent, while garbage collection still waits.
+
+Both seat cleanup queues now run with host repair on its separate maintenance
+timer. They keep their bounded workers, room gates, and record rechecks. The
+maintenance sweep duration measures housekeeping. The repair observers run
+on the same configured interval and finish independently of that sweep.
+
+F324 ([#1579](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1579)).
+The activity reaper bounded its wait for unregister but could still wait for
+the advisory routing lookup. Holding the in-memory coordinator writer delayed
+all eight activity-timeout closes in the control. The batch now shares one
+deadline across advisory lookup and unregister. An unavailable advisory
+triggers a fresh expiry check before the authoritative close. The control
+requires all closes while the route lock is held and no late advisory after
+release. Existing controls exercise refreshed activity, drain, and teardown
+ownership.
+
+All three original controls fail on main in Nextest
+`7e89a15f-5bec-40c3-bf89-80bda4f6d5fa`. The wire schema and close codes stay
+stable. External timing qualification tracks Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).

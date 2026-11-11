@@ -12151,6 +12151,74 @@ async fn zero_ping_timeout_disables_activity_reaper() {
         .expect("cleanup task should not panic");
 }
 
+/// #1579: A held advisory route must not delay authoritative activity timeout closes.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn activity_timeout_closes_batch_while_farewell_routes_wait() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::new(crate::metrics::ServerMetrics::new()),
+    ));
+    let ping_timeout = Duration::from_secs(1);
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig {
+            ping_timeout,
+            ..ServerConfig::default()
+        },
+        coordinator.clone(),
+    )
+    .await;
+    let mut clients = Vec::new();
+    for port in 48060..48068 {
+        let (sender, receiver) = mpsc::channel(8);
+        let (close, listener) = crate::coordination::ConnectionCloseSignal::channel();
+        let player = server
+            .register_client_with_close(sender, close, ([127, 0, 0, 1], port).into())
+            .await
+            .unwrap();
+        clients.push((player, listener, receiver));
+    }
+    tokio::time::advance(ping_timeout + Duration::from_millis(1)).await;
+    let coordinator_write = coordinator.local_clients.write().await;
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move { server.cleanup_task_until(shutdown.notified()).await }
+    });
+    let closed = timeout(Duration::from_millis(500), async {
+        while clients.iter().any(|(_, listener, _)| {
+            listener.requested_reason() != Some(CloseReason::ActivityTimeout)
+        }) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    drop(coordinator_write);
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .unwrap()
+        .unwrap();
+    closed.expect("all expired sockets must close within one shared advisory wait");
+    assert_eq!(
+        server
+            .metrics
+            .expired_players_cleaned
+            .load(Ordering::Relaxed),
+        8
+    );
+    for (player, _, mut receiver) in clients {
+        assert!(
+            timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .unwrap()
+                .is_none(),
+            "abandoned advisory lookup must not enqueue a late farewell for {player}"
+        );
+    }
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn activity_refresh_after_cleanup_snapshot_prevents_eviction() {

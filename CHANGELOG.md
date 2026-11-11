@@ -66,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Free seats left by failed disconnect cleanup while other room cleanup waits (#1578).
+- Release expired replay buffers while live matches continue (#1577).
+- Close inactive connections on time when the server cannot deliver a farewell (#1579).
 - Retry P2P host replacement on schedule while unrelated room cleanup waits (#1573).
 - Keep live room operations available when cleanup waits for reconnect state (#1574).
 - Finish native TURN gathering when the initial allocation fails so peer setup can continue to fallback (#1575).
