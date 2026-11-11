@@ -326,10 +326,15 @@ impl EnhancedGameServer {
                 // The final supervisor must still release this uncommitted
                 // claim when a storage adapter also panics during rollback.
                 // Preserve the inherited application-claim provenance for repair.
-                self.pending_durable_player_detaches.insert(
-                    (claim.disconnected.room_id, claim.disconnected.player_id),
-                    recovery.restore.cleared_pending_detach.clone().flatten(),
-                );
+                let rollback = recovery.restore.cleared_pending_detach.clone().flatten();
+                self.pending_durable_player_detaches
+                    .entry((claim.disconnected.room_id, claim.disconnected.player_id))
+                    .and_modify(|pending| {
+                        if pending.is_none() {
+                            *pending = rollback.clone();
+                        }
+                    })
+                    .or_insert(rollback);
                 // Removing the restored row also clears its role. If removal
                 // unwound, still undo this attempt's unpublished authority
                 // grant so an immediate retry can announce its fresh grant.
@@ -748,8 +753,17 @@ impl EnhancedGameServer {
             }
         }
         if let Some(rollback) = requeue_detach {
+            // Shutdown can reject before this attempt takes the existing
+            // detach. Preserve that entry's application debt while ensuring
+            // an inherited debt can upgrade an empty repair marker.
             self.pending_durable_player_detaches
-                .insert((disconnected.room_id, disconnected.player_id), rollback);
+                .entry((disconnected.room_id, disconnected.player_id))
+                .and_modify(|pending| {
+                    if pending.is_none() {
+                        *pending = rollback.clone();
+                    }
+                })
+                .or_insert(rollback);
         }
 
         let released = claim_guard

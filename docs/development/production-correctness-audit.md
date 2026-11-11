@@ -16089,3 +16089,17 @@ the code for a fresh creation. Both all-feature controls pass in
 pending-lifecycle requirement instead of promising visibility guarantees for
 nonconforming adapters. No process-local fence can establish a durable backend's
 cross-node atomic visibility contract.
+
+F332 final review confirmed a pre-takeover application cleanup loss. Shutdown
+can start after member restoration but before reconnect takes the existing
+durable-detach obligation. Failed rollback then replaced its application claim
+with an empty marker. The public-flow reds are
+`9fbec967-76f9-4077-ad73-6a31574edbab` for a typed removal error and
+`703082ac-24ae-4395-9641-07babdfa3a36` for repeated removal panics.
+Both retention sites now merge atomically: keep existing application provenance,
+upgrade an empty marker from captured provenance, and insert only when vacant.
+The regression checks the retained obligation and then requires maintenance to
+remove the stale seat and clear the matching stored and cached application claim.
+Five all-feature recovery controls pass in
+`66bc0cd8-fa9f-497b-9d66-2c5347497bd0`. This is part of the same uncommitted
+reconnect recovery contract, not a new wire or client requirement.

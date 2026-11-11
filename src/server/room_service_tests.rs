@@ -1263,6 +1263,7 @@ struct DrainAfterCreateDatabase {
     panic_rollback_once: AtomicBool,
     panic_rollback_always: AtomicBool,
     rollback_authority_fault: std::sync::atomic::AtomicU8,
+    drain_after_member_add_once: AtomicBool,
     panic_application_rollback_once: AtomicBool,
     conforming_pending_creation: bool,
     abandon_fault: std::sync::atomic::AtomicU8,
@@ -1293,6 +1294,7 @@ impl DrainAfterCreateDatabase {
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
+            drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
@@ -1330,6 +1332,7 @@ impl DrainAfterCreateDatabase {
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
+            drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
@@ -1360,6 +1363,7 @@ impl DrainAfterCreateDatabase {
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
+            drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
@@ -1390,6 +1394,7 @@ impl DrainAfterCreateDatabase {
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
+            drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
@@ -1420,6 +1425,7 @@ impl DrainAfterCreateDatabase {
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
+            drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
@@ -1737,7 +1743,15 @@ impl GameDatabase for DrainAfterCreateDatabase {
         room_id: &RoomId,
         player: PlayerInfo,
     ) -> anyhow::Result<bool> {
-        self.inner.add_player_to_room(room_id, player).await
+        let result = self.inner.add_player_to_room(room_id, player).await;
+        if result.as_ref().is_ok_and(|added| *added)
+            && self
+                .drain_after_member_add_once
+                .swap(false, Ordering::AcqRel)
+        {
+            self.begin_drain_once();
+        }
+        result
     }
 
     async fn remove_player_from_room(
@@ -17323,4 +17337,110 @@ async fn assert_immediate_reconnect_retry_republishes_authority(
     assert!(incumbent.iter().any(|message| matches!(message.as_ref(),
         ServerMessage::SessionPlan(plan) if plan.generation == actor_plan.generation
             && plan.peers.iter().any(|member| member.player_id == owner))));
+}
+
+/// #1590: rollback cannot erase application cleanup debt it never took over.
+#[tokio::test(start_paused = true)]
+async fn reconnect_shutdown_rollback_preserves_untaken_application_cleanup_debt() {
+    for removal_panics in [true, false] {
+        let inner = Arc::new(InMemoryDatabase::new());
+        inner.initialize().await.unwrap();
+        let mut wrapper = DrainAfterCreateDatabase::new(inner.clone());
+        wrapper.trigger_drain_after_create = false;
+        let database = Arc::new(wrapper);
+        let server = create_test_server_with_message_coordinator_and_lock(
+            ServerConfig::default(),
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        )
+        .await;
+        database.attach_server(&server);
+        let fixture = correlated_reconnect_panic_fixture_with_server(server).await;
+        let application_id = uuid::Uuid::new_v4();
+        let key = (fixture.room_id, fixture.reconnect_player_id);
+        fixture.server.pending_durable_player_detaches.insert(
+            key,
+            Some(PendingApplicationClaimRollback { application_id }),
+        );
+        database
+            .drain_after_member_add_once
+            .store(true, Ordering::Release);
+        database
+            .panic_rollback_always
+            .store(removal_panics, Ordering::Release);
+        inner.fail_remove_player_from_room_for_test(!removal_panics);
+        assert!(
+            !fixture
+                .server
+                .handle_reconnect_with_identity_operation(
+                    &fixture.current_player_id,
+                    &fixture.reconnect_player_id,
+                    &fixture.room_id,
+                    &fixture.token,
+                    fixture.effective_player_id.clone(),
+                    None,
+                )
+                .await
+        );
+        assert!(fixture.server.is_draining());
+        assert!(
+            !database.drain_after_member_add_once.load(Ordering::Acquire),
+            "the storage add must trigger shutdown"
+        );
+        assert!(
+            inner
+                .get_room_by_id(&fixture.room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .players
+                .contains_key(&fixture.reconnect_player_id),
+            "the rollback storage fault must leave the restored row behind"
+        );
+        let debt = fixture
+            .server
+            .pending_durable_player_detaches
+            .get(&key)
+            .unwrap()
+            .value()
+            .clone();
+        assert_eq!(debt.as_ref().map(|debt| debt.application_id), Some(application_id),
+            "rollback must retain application debt that remained in the map (panic={removal_panics})");
+        database
+            .panic_rollback_always
+            .store(false, Ordering::Release);
+        inner.fail_remove_player_from_room_for_test(false);
+        // Give the owed rollback an observable matching application claim.
+        inner
+            .set_room_application_id(&fixture.room_id, application_id)
+            .await
+            .unwrap();
+        fixture
+            .server
+            .room_applications
+            .insert(fixture.room_id, application_id);
+        assert_eq!(
+            fixture
+                .server
+                .cleanup_pending_durable_player_detaches()
+                .await,
+            1
+        );
+        let repaired = inner
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!repaired.players.contains_key(&fixture.reconnect_player_id));
+        assert_eq!(repaired.application_id, None);
+        assert!(!fixture
+            .server
+            .room_applications
+            .contains_key(&fixture.room_id));
+        assert!(!fixture
+            .server
+            .pending_durable_player_detaches
+            .contains_key(&key));
+    }
 }
