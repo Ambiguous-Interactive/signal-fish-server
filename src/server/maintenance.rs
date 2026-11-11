@@ -13,6 +13,8 @@ use super::{chrono_duration_from_std, EnhancedGameServer};
 const MAINTENANCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 /// Share one observation deadline across activity farewells and teardowns.
 const ACTIVITY_EVICTION_SWEEP_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+/// Bound deleted-room advice before requesting the authoritative socket close.
+const MISSING_ROOM_FAREWELL_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl EnhancedGameServer {
     /// Abandon only admission waits; an admitted mutation retains its normal completion rules.
@@ -584,14 +586,17 @@ impl EnhancedGameServer {
             close_pinned.store(pinned, Ordering::Release);
             pinned
         };
-        let enqueued = self
-            .send_farewell_to_player_if(
+        let enqueued = tokio::time::timeout(
+            MISSING_ROOM_FAREWELL_WAIT,
+            self.send_farewell_to_player_if(
                 &effective_player_id,
                 "Room closed after exceeding the inactivity timeout".to_string(),
                 Some(ErrorCode::RoomNotFound),
                 &should_send,
-            )
-            .await;
+            ),
+        )
+        .await
+        .unwrap_or(false);
 
         if self.is_draining() {
             self.connection_manager

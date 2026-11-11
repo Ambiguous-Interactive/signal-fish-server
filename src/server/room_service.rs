@@ -54,6 +54,7 @@ enum RoomAdmissionKind {
 #[derive(Clone, Default)]
 struct JoinPanicRecovery {
     room_id: Option<RoomId>,
+    publication_room: Option<Arc<Room>>,
     epoch: Option<u32>,
     admission_kind: Option<RoomAdmissionKind>,
     room_event_guard: Option<RoomEventMutationGuard>,
@@ -174,10 +175,11 @@ impl EnhancedGameServer {
     async fn repair_panicked_join_publication_locked(
         self: &Arc<Self>,
         player_id: PlayerId,
-        room_id: RoomId,
+        room: Arc<Room>,
         epoch: u32,
         _room_event_guard: RoomEventMutationGuard,
     ) {
+        let room_id = room.id;
         if self
             .connection_manager
             .current_relay_stamp_in_room(&player_id, &room_id)
@@ -188,14 +190,6 @@ impl EnhancedGameServer {
         // Keep subsequent room events behind the missing opening until the
         // fallback is committed. The teardown spawned below also waits for the
         // lifecycle guard, so its PlayerLeft cannot overtake it.
-        let room = match self.database.get_room_by_id(&room_id).await {
-            Ok(Some(room)) => room,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::error!(%player_id, %room_id, %error, "Failed to load room for panicked join repair");
-                return;
-            }
-        };
         let Some(mut player) = room.players.get(&player_id).cloned() else {
             return;
         };
@@ -458,13 +452,15 @@ impl EnhancedGameServer {
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
                             .clone();
-                        if let (Some(room_id), Some(epoch), Some(room_event_guard)) =
-                            (recovery.room_id, recovery.epoch, recovery.room_event_guard)
-                        {
+                        if let (Some(room), Some(epoch), Some(room_event_guard)) = (
+                            recovery.publication_room,
+                            recovery.epoch,
+                            recovery.room_event_guard,
+                        ) {
                             server
                                 .repair_panicked_join_publication_locked(
                                     player_id,
-                                    room_id,
+                                    room,
                                     epoch,
                                     room_event_guard,
                                 )
@@ -778,6 +774,7 @@ impl EnhancedGameServer {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = JoinPanicRecovery {
                     room_id: Some(room.id),
+                    publication_room: None,
                     epoch: Some(membership_stamp.epoch),
                     admission_kind: Some(admission_kind.clone()),
                     room_event_guard: Some(room_event_guard.clone()),
@@ -794,6 +791,7 @@ impl EnhancedGameServer {
                 let response_room_id = room.id;
                 let baseline_room = Arc::new(std::sync::Mutex::new(None));
                 let baseline_room_in_builder = Arc::clone(&baseline_room);
+                let panic_recovery_in_builder = Arc::clone(&panic_recovery);
                 let created_room = matches!(admission_kind, RoomAdmissionKind::Created { .. });
                 // Creation retains its code lock through the response commit
                 // and any rollback, so another instance cannot admit while
@@ -880,6 +878,10 @@ impl EnhancedGameServer {
                                         .iter()
                                         .any(|player| player.id == *ready_player_id)
                                 });
+                                panic_recovery_in_builder
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .publication_room = Some(Arc::clone(&current_room));
                                 if server.should_retain_room_publication_snapshot() {
                                     *baseline_room_in_builder
                                         .lock()
@@ -1145,7 +1147,7 @@ impl EnhancedGameServer {
                         if let Some(repair_guard) = repair_guard {
                             self.repair_panicked_join_publication_locked(
                                 *player_id,
-                                room.id,
+                                Arc::clone(&current_room),
                                 membership_stamp.epoch,
                                 repair_guard,
                             )
@@ -1933,6 +1935,9 @@ impl EnhancedGameServer {
             {
                 tracing::error!(%player_id, %room_id, %repair_error, "Failed to repair room-leave lifecycle after publication panic");
             }
+        }
+        if committed.load(Ordering::Acquire) {
+            self.queue_session_member_departure(&room_id, player_id);
         }
         drop(room_event_guard_for_recovery);
         #[cfg(test)]
