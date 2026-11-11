@@ -150,6 +150,7 @@ impl ReconnectionClaimGuard {
         self.claim.as_ref().map(Arc::clone)
     }
 
+    /// Return this reservation for retry with its current unpublished-role ownership.
     async fn release_with_unpublished_authority(mut self, unpublished_authority: bool) -> bool {
         let Some(claim) = self.claim.take() else {
             return false;
@@ -682,6 +683,7 @@ impl EnhancedGameServer {
         false
     }
 
+    /// Undo owned room changes and preserve unfinished cleanup before releasing the claim.
     async fn rollback_claimed_reconnect(
         &self,
         claim_guard: ReconnectionClaimGuard,
@@ -895,6 +897,7 @@ impl EnhancedGameServer {
         .await
     }
 
+    /// Own restoration and phase-aware unwind recovery beyond cancellation of the caller.
     async fn spawn_reconnect_transaction(
         self: &Arc<Self>,
         current_player_id: PlayerId,

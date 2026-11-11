@@ -16080,8 +16080,8 @@ F333 hosted review questioned failed abandonment after a creator rollback panic.
 The supported storage contract requires atomic hidden insertion through
 `GameDatabase::create_pending_room_classified`; its default refuses creation.
 The older fixture deliberately used a visible legacy insertion for unrelated
-adapter controls. The creator regression now forwards the first-party owned
-pending insertion. The new abandonment-error and abandonment-panic histories
+adapter controls. The creator regression now uses owned pending insertion from the shipped
+backend. The new abandonment-error and abandonment-panic histories
 prove the room remains hidden, another socket receives `RoomNotFound`, and the
 dropped creation owner keeps maintenance discovery eligible. Cleanup then frees
 the code for a fresh creation. Both all-feature controls pass in

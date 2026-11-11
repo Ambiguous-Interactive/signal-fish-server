@@ -855,6 +855,7 @@ impl ReconnectionManager {
         .await
     }
 
+    /// Preserve disconnect state and unpublished role provenance within the bound identity.
     pub(crate) async fn register_disconnection_with_identity(
         &self,
         player_id: PlayerId,
@@ -1173,6 +1174,7 @@ impl ReconnectionManager {
             .await
     }
 
+    /// Reserve the matching identity and copy its pending authority publication into the claim.
     pub(crate) async fn claim_reconnection_with_identity(
         &self,
         claimed_by: &PlayerId,

@@ -470,6 +470,7 @@ impl EnhancedGameServer {
         .await
     }
 
+    /// Share the worker deadline across expired seats and retained authority notices.
     async fn cleanup_expired_reconnection_candidates_until(
         self: &Arc<Self>,
         candidates: Vec<(PlayerId, RoomId)>,
