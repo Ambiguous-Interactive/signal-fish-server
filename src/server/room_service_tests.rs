@@ -12209,11 +12209,11 @@ async fn activity_timeout_closes_batch_while_farewell_routes_wait() {
         8
     );
     for (player, _, mut receiver) in clients {
+        let farewell = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("owned unregister closes the outbound queue");
         assert!(
-            timeout(Duration::from_secs(1), receiver.recv())
-                .await
-                .unwrap()
-                .is_none(),
+            farewell.is_none(),
             "abandoned advisory lookup must not enqueue a late farewell for {player}"
         );
     }
