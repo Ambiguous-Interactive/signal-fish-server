@@ -909,10 +909,33 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // This covers schedule, declared hooks, lag allowance, and delivery drain.
     let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
 
-    // Stop every evidence producer before either snapshot or error propagation.
-    let peer_result =
-        await_peers_or_stop(handles, hard_deadline, log.wait_record_budget_exhausted()).await;
+    // Stop every evidence producer before taking final records or propagating errors.
+    let mut interrupted = None;
+    let peer_result = await_peers_or_stop(
+        handles,
+        hard_deadline,
+        log.wait_record_budget_exhausted(),
+        || {
+            interrupted = Some((
+                micros(epoch.elapsed()),
+                peer_progress_snapshot(&peer_progress),
+            ));
+        },
+    )
+    .await;
     let auxiliary_result = abort_and_join(auxiliary_handles).await;
+    let interruption = interrupted.map(|(at_us, peers)| json!({"at_us": at_us, "peers": peers}));
+    let interruption_artifact = interruption.as_ref().map_or(Ok(()), |snapshot| {
+        artifacts::write_json(config.output_dir.join("peer-interruption.json"), snapshot)
+    });
+    if peer_result.is_err() || auxiliary_result.is_err() {
+        if let Some(snapshot) = &interruption {
+            eprintln!("capacity peer interruption: {snapshot}");
+        }
+        if let Err(error) = &interruption_artifact {
+            eprintln!("capacity peer interruption artifact: {error}");
+        }
+    }
     if !peer_result? && !log.record_budget_exhausted() {
         log.push_fault(InvalidReason::RunnerDeadlineExceeded {
             detail: "generator or receiver tasks outlived the quiescence margin".to_string(),
@@ -960,6 +983,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         );
         evidence["peer_lifecycle"] =
             serde_json::to_value(&lifecycle).expect("peer progress serializes");
+        if let Some(interruption) = &interruption {
+            evidence["peer_interruption"] = interruption.clone();
+        }
         eprintln!("capacity invalid run: {evidence}");
     }
 
@@ -967,6 +993,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     artifacts::write_histogram(&config.output_dir, &records)?;
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
+    interruption_artifact?;
     if config.receipt_timings {
         if let Some(timings) = log.take_receipt_timings() {
             // Every producer has joined. No formatting or diagnostic file writes
@@ -2692,18 +2719,21 @@ async fn arm_tasks(
     result
 }
 
+/// Wait for peer tasks without an external stop signal.
 #[cfg(test)]
 async fn await_peers(
     handles: Vec<tokio::task::JoinHandle<()>>,
     deadline: Instant,
 ) -> Result<bool, String> {
-    await_peers_or_stop(handles, deadline, std::future::pending()).await
+    await_peers_or_stop(handles, deadline, std::future::pending(), || {}).await
 }
 
+/// Observe unfinished peers before aborting them, then join every task.
 async fn await_peers_or_stop(
     handles: Vec<tokio::task::JoinHandle<()>>,
     deadline: Instant,
     stop: impl std::future::Future<Output = ()>,
+    observe_interruption: impl FnOnce(),
 ) -> Result<bool, String> {
     // Remove completed handles as they finish; a JoinHandle cannot be polled
     // again after yielding its result, including during deadline cleanup.
@@ -2723,6 +2753,8 @@ async fn await_peers_or_stop(
         () = stop => false,
     };
     if !completed {
+        // Capture the pending stage before cancellation can run task destructors.
+        observe_interruption();
         for handle in pending.iter() {
             handle.abort();
         }
@@ -3327,7 +3359,21 @@ mod session_poll_tests {
             assert!(before
                 .last_completed_us
                 .is_some_and(|at| at == before.stage_started_us));
-            assert!(!await_peers(vec![peer], Instant::now()).await.unwrap());
+            let mut interrupted = None;
+            assert!(!await_peers_or_stop(
+                vec![peer],
+                Instant::now(),
+                std::future::pending(),
+                || {
+                    interrupted = Some(progress.snapshot());
+                }
+            )
+            .await
+            .unwrap());
+            let interrupted = interrupted.expect("deadline must capture the interrupted stage");
+            assert_eq!(interrupted.stage, expected);
+            assert_eq!(interrupted.last_completed_stage, Some(completed));
+            assert!(!interrupted.task_returned);
             let after = progress.snapshot();
             assert_eq!(
                 serde_json::to_value(&after).unwrap(),
@@ -3365,11 +3411,12 @@ mod session_poll_tests {
         assert!(serde_json::to_vec(&snapshot).unwrap().len() < 700);
     }
 
+    /// Record-budget interruption observes live peers before joining them.
     #[tokio::test]
     async fn record_budget_stop_cancels_and_joins_peers_before_the_deadline() {
         let context = crate::unit_context_with_class(DeliveryClass::Reliable);
         let log = Arc::new(EventLog::for_plans(&context.plans, false).unwrap());
-        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel::<()>();
         let peer = tokio::spawn(async move {
             let _keep_until_cancelled = sender;
             std::future::pending::<()>().await;
@@ -3384,7 +3431,15 @@ mod session_poll_tests {
         assert!(log.record_budget_exhausted());
         let completed = tokio::time::timeout(
             Duration::from_secs(1),
-            await_peers_or_stop(vec![peer], Instant::now() + Duration::from_secs(60), stop),
+            await_peers_or_stop(
+                vec![peer],
+                Instant::now() + Duration::from_secs(60),
+                stop,
+                || match receiver.try_recv() {
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                    result => panic!("peer must still own its sender during capture: {result:?}"),
+                },
+            ),
         )
         .await
         .unwrap()
@@ -5340,6 +5395,7 @@ mod session_poll_tests {
         .expect("completed peer succeeds"));
     }
 
+    /// Capture live siblings before joining them after unexpected peer termination.
     #[tokio::test(start_paused = true)]
     async fn peer_panics_and_unexpected_cancellation_refuse_success_and_clean_up() {
         for panic_task in [false, true] {
@@ -5358,13 +5414,23 @@ mod session_poll_tests {
             if !panic_task {
                 failed.abort();
             }
-            let error = await_peers(
+            let mut observed = false;
+            let error = await_peers_or_stop(
                 vec![blocked, failed],
                 Instant::now() + Duration::from_secs(1),
+                std::future::pending(),
+                || {
+                    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+                    observed = true;
+                },
             )
             .await
             .expect_err("unexpected task termination cannot pass");
             assert!(error.contains("capacity peer task failed"), "{error}");
+            assert!(
+                observed,
+                "peer failure must preserve the interruption snapshot"
+            );
             assert_eq!(dropped.load(Ordering::SeqCst), 1);
         }
     }

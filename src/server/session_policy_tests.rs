@@ -17,7 +17,6 @@ use crate::protocol::{
     ConnectionInfo, IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage,
     Topology, Transport,
 };
-use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1589,10 +1588,15 @@ async fn create_server_with_session_and_turn(
     session: SessionConfig,
     turn: crate::config::TurnConfig,
 ) -> Arc<EnhancedGameServer> {
-    let config = ServerConfig {
-        rate_limit_config: RateLimitConfig::default(),
-        ..ServerConfig::default()
-    };
+    create_server_with_configs(session, turn, ServerConfig::default()).await
+}
+
+/// Build a session test server with explicit maintenance timing when needed.
+async fn create_server_with_configs(
+    session: SessionConfig,
+    turn: crate::config::TurnConfig,
+    config: ServerConfig,
+) -> Arc<EnhancedGameServer> {
     EnhancedGameServer::new(
         config,
         ProtocolConfig::default(),
@@ -6742,7 +6746,15 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         } else {
             None
         };
+        let mut repair_gate = None;
         let abandoned_room = if failure == "busy_abandoned_read" {
+            // The independent host observer can otherwise take this global test pause.
+            repair_gate = Some(
+                server
+                    .message_coordinator
+                    .lock_room_event_mutation(&room)
+                    .await,
+            );
             let creator = PlayerId::new_v4();
             let room = server
                 .database
@@ -6786,6 +6798,7 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
             .await
             .expect("the abandoned-room read must hold the storage seam");
         }
+        drop(repair_gate);
         let repaired = timeout(Duration::from_secs(1), successor_rx.recv()).await;
         stop.send(()).unwrap();
         maintenance.await.unwrap();
@@ -6853,6 +6866,85 @@ async fn maintenance_retries_failed_host_departure_without_another_membership_ch
         server.retry_pending_session_replans().await;
         assert_plan_queue_empty(&mut successor_rx);
     }
+}
+
+/// Retry a failed host departure on the next tick while unrelated housekeeping waits.
+#[tokio::test(start_paused = true)]
+async fn maintenance_retries_host_departure_while_room_gc_waits() {
+    let server = create_server_with_configs(
+        host_config(),
+        turn_off(),
+        ServerConfig {
+            room_cleanup_interval: Duration::from_secs(1),
+            ..ServerConfig::default()
+        },
+    )
+    .await;
+    let (host, _host_rx) = register_client(&server).await;
+    let (successor, mut successor_rx) = register_client(&server).await;
+    for player in [host, successor] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room = finalized_db_room_with(&server, host, &[(successor, "Next")]).await;
+    publish_room_members(&server, &room, &[host, successor]).await;
+    server.active_session_plans.insert(
+        room,
+        ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(host),
+        },
+    );
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let (gc_entered, release_gc) = database.pause_next_room_cleanup_lease_for_test();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let maintenance = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .cleanup_task_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    timeout(Duration::from_secs(1), gc_entered)
+        .await
+        .expect("housekeeping reaches room GC")
+        .unwrap();
+
+    server
+        .database
+        .remove_player_from_room(&room, &host)
+        .await
+        .unwrap();
+    unpublish_room_member(&server, &host).await;
+    database.fail_get_room_by_id_for_test(true);
+    server.handle_session_member_departure(&room, &host).await;
+    assert!(server.pending_session_replans.contains_key(&room));
+    assert_plan_queue_empty(&mut successor_rx);
+    database.fail_get_room_by_id_for_test(false);
+
+    let message = timeout(Duration::from_millis(1_500), successor_rx.recv()).await;
+    release_gc.send(()).unwrap();
+    stop.send(()).unwrap();
+    maintenance.await.unwrap();
+    let message = message
+        .expect("host repair must run while room GC is waiting")
+        .unwrap();
+    let ServerMessage::SessionPlan(plan) = message.as_ref() else {
+        panic!("expected repaired plan: {message:?}");
+    };
+    assert_eq!(plan.host, Some(successor));
+    assert_eq!(plan.topology, Topology::Host);
+    assert_eq!(plan.transport, Transport::WebRtc);
+    assert!(plan.peers.is_empty());
+    assert!(server.pending_session_replans.is_empty());
+    assert_plan_queue_empty(&mut successor_rx);
 }
 
 /// Retain canceled preparation across room-lock and storage waits, then clear resolved rooms.

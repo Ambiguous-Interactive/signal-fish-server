@@ -1,5 +1,12 @@
 # Signal Fish WebRTC wrapper patch
 
+The TURN relayer finishes gathering after an initial Allocate rejection or
+timeout. The RTC client reports those events with the original request ID and
+returns the challenge retry ID from `allocate`. The wrapper accepts the two
+related IDs for terminal failures and records the request stage and ID.
+See [#1575](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1575).
+Replacement qualification in #912 must retain this behavior.
+
 `SctpTransport::association_stats` exposes the RTC association observations
 through the existing core lock for #1244. It returns no association after
 removal and preserves stale-handle errors. Native fragmented-packet controls

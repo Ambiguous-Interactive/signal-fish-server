@@ -53,6 +53,20 @@ struct ManagedTurnClient {
     gather_finished: bool,
 }
 
+impl ManagedTurnClient {
+    /// rtc-turn returns the retry ID. The initial request uses the preceding ID.
+    fn allocation_stage(&self, tid: TransactionId) -> Option<&'static str> {
+        if tid == self.allocate_tid {
+            return Some("challenge retry");
+        }
+        let mut retry_tid = tid;
+        if let Some(last) = retry_tid.0.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        (retry_tid == self.allocate_tid).then_some("initial request")
+    }
+}
+
 pub(crate) struct RTCTurnRelayer {
     local_addrs: Vec<SocketAddr>,
     ice_servers: Vec<RTCIceServer>,
@@ -688,6 +702,7 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
         Ok(())
     }
 
+    /// Apply TURN transaction results and publish candidates or gathering completion.
     fn poll_event(&mut self) -> Option<Self::Eout> {
         let keys: Vec<FourTuple> = self.clients.keys().copied().collect();
         for four_tuple in keys {
@@ -713,15 +728,20 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
                             ));
                             gathered_complete = true;
                         }
-                        TurnEvent::AllocateError(tid, err)
-                            if tid == managed_client.allocate_tid =>
-                        {
-                            error!(
-                                "TURN allocation failed from {} to {}: {}",
-                                four_tuple.local_addr, four_tuple.peer_addr, err
-                            );
-                            managed_client.gather_finished = true;
-                            gathered_complete = true;
+                        TurnEvent::AllocateResponse(tid, _) => {
+                            warn!("Ignoring unexpected TURN AllocateResponse for {tid:?}");
+                        }
+                        TurnEvent::AllocateError(tid, err) => {
+                            if let Some(stage) = managed_client.allocation_stage(tid) {
+                                error!(
+                                    "TURN allocation failed from {} to {} ({stage}, {tid:?}): {}",
+                                    four_tuple.local_addr, four_tuple.peer_addr, err
+                                );
+                                managed_client.gather_finished = true;
+                                gathered_complete = true;
+                            } else {
+                                warn!("Ignoring unexpected TURN AllocateError for {tid:?}: {err}");
+                            }
                         }
                         TurnEvent::CreatePermissionResponse(tid, peer_addr) => {
                             if let Some(pending) = self.pending_permissions.remove(&tid) {
@@ -758,15 +778,17 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
                                 self.pending_permission_pairs
                                     .remove(&(pending.relay_addr, pending.peer_addr));
                                 pending_drop.push((pending.relay_addr, pending.peer_addr));
-                            } else if tid == managed_client.allocate_tid {
+                            } else if let Some(stage) = managed_client.allocation_stage(tid) {
+                                error!(
+                                    "TURN allocation failed from {} to {} ({stage}, {tid:?}): timed out",
+                                    four_tuple.local_addr, four_tuple.peer_addr
+                                );
                                 managed_client.gather_finished = true;
                                 gathered_complete = true;
                             }
                         }
                         TurnEvent::BindingResponse(_, _) | TurnEvent::BindingError(_, _) => {}
-                        _ => {
-                            warn!("Ignoring unknown TurnEvent variant");
-                        }
+                        _ => warn!("Ignoring unsupported TURN event"),
                     }
                 }
             }
@@ -887,6 +909,97 @@ mod tests {
         ])
         .expect("failed to build TURN unauthorized response");
         msg
+    }
+
+    /// A terminal rejection or timeout can occur before or after the TURN challenge.
+    #[test]
+    fn allocation_failure_finishes_gathering_at_either_stage() {
+        futures::executor::block_on(async {
+            for (challenge, timeout) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let local_addr = SocketAddr::from(([127, 0, 0, 1], 50000));
+                let turn_addr = SocketAddr::from(([127, 0, 0, 1], 3478));
+                let mut relayer = RTCTurnRelayer::new(
+                    vec![local_addr],
+                    vec![RTCIceServer {
+                        urls: vec![format!("turn:{turn_addr}?transport=udp")],
+                        username: "user".to_owned(),
+                        credential: "pass".to_owned(),
+                    }],
+                    RTCIceTransportPolicy::Relay,
+                    None,
+                    crate::runtime::default_runtime().expect("runtime"),
+                    rtc::crypto::default_provider().expect("built-in crypto provider"),
+                );
+                relayer.gather().await.expect("start TURN gathering");
+                let request_id = |relayer: &mut RTCTurnRelayer| {
+                    let request = relayer.poll_write().expect("Allocate request");
+                    let mut message = StunMessage::new();
+                    message.raw = request.message.to_vec();
+                    message.decode().expect("decode Allocate request");
+                    message.transaction_id
+                };
+                let initial_id = request_id(&mut relayer);
+                let rejected_id = if challenge {
+                    let response = build_turn_allocate_unauthorized(initial_id);
+                    relayer
+                        .handle_read(tagged(local_addr, turn_addr, &response.raw))
+                        .expect("process TURN challenge");
+                    assert!(
+                        relayer.poll_event().is_none(),
+                        "challenge keeps gathering open"
+                    );
+                    let retry_id = request_id(&mut relayer);
+                    assert_ne!(retry_id, initial_id);
+                    retry_id
+                } else {
+                    initial_id
+                };
+
+                if timeout {
+                    for _ in 0..16 {
+                        let Some(deadline) = relayer.poll_timeout() else {
+                            break;
+                        };
+                        relayer
+                            .handle_timeout(deadline)
+                            .expect("advance transaction deadline");
+                        while relayer.poll_write().is_some() {}
+                    }
+                    assert!(
+                        relayer.poll_timeout().is_none(),
+                        "transaction must time out"
+                    );
+                } else {
+                    let mut rejection = StunMessage::new();
+                    rejection
+                        .build(&[
+                            Box::new(rejected_id),
+                            Box::new(MessageType::new(
+                                rtc::stun::message::METHOD_ALLOCATE,
+                                CLASS_ERROR_RESPONSE,
+                            )),
+                            Box::new(CODE_UNAUTHORIZED),
+                        ])
+                        .expect("build terminal rejection");
+                    relayer
+                        .handle_read(tagged(local_addr, turn_addr, &rejection.raw))
+                        .expect("process terminal rejection");
+                }
+                assert!(
+                    matches!(
+                        relayer.poll_event(),
+                        Some(RTCTurnRelayEventOut::TurnGatheringComplete)
+                    ),
+                    "allocation failure must complete gathering (challenge={challenge}, timeout={timeout})"
+                );
+                assert!(relayer.poll_event().is_none(), "completion occurs once");
+                assert!(
+                    relayer.poll_write().is_none(),
+                    "no retry after terminal rejection"
+                );
+            }
+        });
     }
 
     #[test]

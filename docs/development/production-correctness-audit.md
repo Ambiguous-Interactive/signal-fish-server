@@ -15706,3 +15706,43 @@ completion of the original read without another sweep, and exactly four total
 cleanup counts. Cancellation, drain-time rollback, publication fencing, live
 host recovery and the surrounding maintenance selection pass all 65 tests in
 Nextest `68559f3e-ca5e-4539-becb-c04a8a1a7874`. Full strict Clippy passes.
+
+### F319–F321 — Keep live room recovery and native TURN gathering moving
+
+F319 ([#1573](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1573)).
+The serial housekeeping loop can prevent pending host repair from reaching its
+next tick. A paused cleanup lease leaves room storage available while a failed
+departure queues repair. The original loop misses the deadline. The repair
+observer now runs on its own maintenance interval. The control requires one
+replacement Host/WebRTC plan and an empty pending queue before cleanup resumes.
+
+F320 ([#1574](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1574)).
+Both in-memory GC paths held the prepared room lease while awaiting reconnect
+state. With a held reconnect writer, the original code blocks a live membership
+read. Cleanup now releases the lease when protection is busy and checks the
+current view on a later sweep. The control checks membership reads, room activity
+writes, and subsequent deletion of the same eligible room. Adapters that use the
+legacy cleanup methods retain their existing reconnect protection ordering.
+
+The server changes affect recovery timing. The wire schema and session selection
+stay stable. SDK qualification tracks Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+
+F321 ([#1575](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1575)).
+The native relayer dropped `AllocateError` from the initial request because
+the wrapper only matched the challenge retry ID. The original wire control
+fails to emit gathering completion. The repaired control checks rejections
+and timeouts before and after the challenge. The wrapper now records the stage
+and transaction ID. The retained historical #1565 log lacks the raw transaction
+history needed to identify its exact failed packet.
+
+The capacity runner also captures each peer's current and last completed stages
+before aborting tasks at a deadline or record-budget stop. The bounded snapshot
+is saved separately from the final post-join progress and included in the
+invalid-run log. An unexpected peer-task error also retains this snapshot before
+the error returns. Held socket upgrade, authentication, and baseline controls
+verify the captured stages. The original room-replacement control passes under
+LLVM coverage on this source. The historical #1352 timeout remains under
+investigation. The workload and delivery oracle are unchanged.
