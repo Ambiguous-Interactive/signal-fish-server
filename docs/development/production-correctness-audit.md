@@ -15786,3 +15786,54 @@ stable. External timing qualification tracks Rust
 [#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
 .NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
 and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+
+### F325–F327 — Keep live peer cleanup independent of room GC
+
+Session 677 records three new server findings under #826.
+
+F325 ([#1581](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1581)).
+The activity reaper ran inside serial housekeeping. A held room-cleanup lease
+prevented the next liveness sweep even though room storage remained available.
+The control starts a two-player WebRTC mesh after GC stalls. It lets one peer
+expire while refreshing the other. The repair closes the expired peer with the
+existing activity error, removes its seat, and preserves the active mesh member.
+
+F326 ([#1582](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1582)).
+Missing-room reconciliation ran after both GC paths. A room deleted through
+another path left its connected peers routed until the housekeeping wait ended.
+The control starts a WebRTC mesh while GC waits, deletes that room, and requires
+both peers to close with the existing room-not-found error. Neither peer may
+retain a pending reconnect record for the removed room.
+
+F327 ([#1583](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1583)).
+Abandoned-room discovery also ran inside housekeeping. A failed creation after
+the sweep reached GC could keep its room code reserved indefinitely. The control
+creates and abandons a pending room during the wait. It requires cleanup before
+GC resumes, then creates a replacement through the normal join handler with the
+same code. Later repair ticks must preserve the published replacement.
+
+All three paths now run with the independent maintenance observers. Activity
+eviction retains its shared farewell and teardown deadline. Missing-room and
+abandoned-room cleanup retain their bounded owned workers and current-state
+rechecks. Housekeeping metrics continue to describe the serial storage sweep.
+The existing batch-eviction control now observes confirmed evictions directly;
+a completed housekeeping sweep no longer implies the independent reaper finished.
+
+The schema, close codes, and transport selection stay stable. Client timing
+qualification remains open in Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Those issues include closure handling, stale P2P state, and creation retry checks.
+No SDK migration is established. These controls do not complete the broader audit.
+
+The final controls all fail on original main in Nextest
+`83624886-e57f-4da3-a4f5-fe95795785dd`. The first activity probe had an invalid
+timeout configuration and is excluded from the defect evidence.
+
+The final local selection passes all 45 maintenance, drain, worker, and rollback
+controls in Nextest `86d75187-6b9f-41d0-b54a-5a8a9fe6aca5`. All 11 selected
+source-policy checks pass. Separating the observers exposed a drain regression
+in the candidate: idle housekeeping waited for its next interval. Its interval
+wait now also observes drain notification. Both existing mid-farewell drain
+controls pass without changed assertions.

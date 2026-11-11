@@ -498,7 +498,7 @@ impl EnhancedGameServer {
                     .map(|room_id| (room_id, player_id))
             })
             .collect();
-        self.missing_room_workers
+        let cleaned = self.missing_room_workers
             .run(
                 candidates,
                 deadline,
@@ -517,7 +517,15 @@ impl EnhancedGameServer {
                     }
                 },
             )
-            .await
+            .await;
+        if cleaned > 0 {
+            tracing::info!(
+                count = cleaned,
+                instance_id = %self.instance_id,
+                "Closed clients assigned to removed rooms"
+            );
+        }
+        cleaned
     }
 
     /// Revalidate the assigned room under the lifecycle gate before closing its client.
@@ -658,9 +666,128 @@ impl EnhancedGameServer {
                         self.retry_pending_session_replans(),
                         self.cleanup_pending_durable_player_detaches(),
                         self.cleanup_expired_reconnections(),
+                        self.cleanup_inactive_clients(),
+                        self.cleanup_clients_in_missing_rooms(),
+                        self.cleanup_abandoned_rooms(),
                     );
                 } => {}
             }
+        }
+    }
+
+    /// Close inactive connections independently of room storage housekeeping.
+    async fn cleanup_inactive_clients(self: &Arc<Self>) {
+        // Cleanup expired clients
+        let expired_clients = if self.config.ping_timeout.is_zero() {
+            Vec::new()
+        } else {
+            self.connection_manager
+                .collect_expired_clients(self.config.ping_timeout)
+        };
+
+        if self.is_draining() {
+            tracing::info!(
+                instance_id = %self.instance_id,
+                "Cleanup task stopping for server shutdown drain before activity eviction"
+            );
+            return;
+        }
+        let activity_eviction_deadline =
+            crate::deadline::after(tokio::time::Instant::now(), ACTIVITY_EVICTION_SWEEP_WAIT);
+        let mut evicted_client_count = 0u64;
+        for player_id in expired_clients {
+            if self.is_draining() {
+                tracing::info!(
+                    instance_id = %self.instance_id,
+                    "Cleanup task stopping for server shutdown drain during activity eviction"
+                );
+                break;
+            }
+
+            // Loud eviction: tell this client WHY it is being closed
+            // before unregister tears its socket down. The final enqueue
+            // predicate atomically revalidates expiry and pins the close
+            // first, so terminal advice can never escape from a stale
+            // snapshot while a later pass rescues the connection.
+            let eviction_pinned = AtomicBool::new(false);
+            // Milliseconds, not truncated seconds: sub-second windows
+            // (tests, aggressive deployments) must not read as "0 seconds".
+            let timeout_ms = self.config.ping_timeout.as_millis();
+            let should_send = || {
+                if eviction_pinned.load(Ordering::Acquire) {
+                    return true;
+                }
+                let pinned = !self.is_draining()
+                    && self
+                        .connection_manager
+                        .request_activity_timeout_if_expired(&player_id, self.config.ping_timeout);
+                eviction_pinned.store(pinned, Ordering::Release);
+                pinned
+            };
+            let farewell = self.send_farewell_to_player_if(
+                &player_id,
+                format!(
+                    "Disconnected: no activity received for {timeout_ms} ms \
+                     (server.ping_timeout)"
+                ),
+                Some(crate::protocol::ErrorCode::ActivityTimeout),
+                &should_send,
+            );
+            // Give an immediately available route a chance even when an
+            // earlier lookup used the batch's wait. The socket close owns
+            // the timeout reason if the best-effort lookup is still pending.
+            let enqueued = tokio::select! {
+                biased;
+                enqueued = farewell => enqueued,
+                _ = crate::deadline::wait_until(activity_eviction_deadline) => false,
+            };
+
+            let mut pinned = eviction_pinned.load(Ordering::Acquire);
+            if !pinned {
+                if self.is_draining() {
+                    tracing::info!(
+                        instance_id = %self.instance_id,
+                        "Cleanup task stopping for server shutdown drain after activity farewell"
+                    );
+                    break;
+                }
+                // A missing or delayed route may never evaluate the
+                // predicate. Recheck liveness before closing without advice.
+                pinned = self
+                    .connection_manager
+                    .request_activity_timeout_if_expired(&player_id, self.config.ping_timeout);
+            }
+            if !pinned {
+                tracing::debug!(
+                    %player_id,
+                    "Client refreshed activity after the cleanup snapshot; skipping eviction"
+                );
+                continue;
+            }
+            if !enqueued {
+                tracing::debug!(
+                    %player_id,
+                    "Expired client did not receive the eviction farewell (queue full or gone)"
+                );
+            }
+
+            evicted_client_count = evicted_client_count.saturating_add(1);
+            tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
+            /*
+                Poll unregister first so an expired observation budget still
+                starts its owned transaction. Dropping the wait leaves it running.
+            */
+            tokio::select! {
+                biased;
+                () = self.unregister_client(&player_id) => {}
+                _ = crate::deadline::wait_until(activity_eviction_deadline) => {
+                    tracing::debug!(%player_id, "Activity-timeout teardown continues outside the maintenance wait");
+                }
+            }
+        }
+        if evicted_client_count > 0 {
+            self.metrics
+                .add_expired_players_cleaned(evicted_client_count);
         }
     }
 
@@ -671,11 +798,12 @@ impl EnhancedGameServer {
         period: std::time::Duration,
     ) {
         let mut interval = crate::deadline::interval(period);
+        let mut draining = self.shutdown_drain_receiver();
         let empty_timeout = chrono_duration_from_std(self.config.empty_room_timeout);
         let inactive_timeout = chrono_duration_from_std(self.config.inactive_room_timeout);
         tokio::pin!(shutdown);
 
-        'cleanup: loop {
+        loop {
             tokio::select! {
                 () = &mut shutdown => {
                     tracing::info!(
@@ -684,6 +812,7 @@ impl EnhancedGameServer {
                     );
                     break;
                 }
+                _ = draining.changed() => {}
                 _ = interval.tick() => {}
             }
 
@@ -692,7 +821,7 @@ impl EnhancedGameServer {
                     instance_id = %self.instance_id,
                     "Cleanup task stopping for server shutdown drain"
                 );
-                break 'cleanup;
+                break;
             }
 
             // The sweep is timed as one unit so the export shows what a
@@ -700,126 +829,6 @@ impl EnhancedGameServer {
             // maintenance-complexity signal). Drain exits skip the
             // stamp: an aborted pass is not a completed sweep.
             let sweep_started = tokio::time::Instant::now();
-
-            // Cleanup expired clients
-            let expired_clients = if self.config.ping_timeout.is_zero() {
-                Vec::new()
-            } else {
-                self.connection_manager
-                    .collect_expired_clients(self.config.ping_timeout)
-            };
-
-            if self.is_draining() {
-                tracing::info!(
-                    instance_id = %self.instance_id,
-                    "Cleanup task stopping for server shutdown drain before activity eviction"
-                );
-                break 'cleanup;
-            }
-            let activity_eviction_deadline =
-                crate::deadline::after(tokio::time::Instant::now(), ACTIVITY_EVICTION_SWEEP_WAIT);
-            let mut evicted_client_count = 0u64;
-            let mut stop_for_drain = false;
-            for player_id in expired_clients {
-                if self.is_draining() {
-                    tracing::info!(
-                        instance_id = %self.instance_id,
-                        "Cleanup task stopping for server shutdown drain during activity eviction"
-                    );
-                    stop_for_drain = true;
-                    break;
-                }
-
-                // Loud eviction: tell this client WHY it is being closed
-                // before unregister tears its socket down. The final enqueue
-                // predicate atomically revalidates expiry and pins the close
-                // first, so terminal advice can never escape from a stale
-                // snapshot while a later pass rescues the connection.
-                let eviction_pinned = AtomicBool::new(false);
-                // Milliseconds, not truncated seconds: sub-second windows
-                // (tests, aggressive deployments) must not read as "0 seconds".
-                let timeout_ms = self.config.ping_timeout.as_millis();
-                let should_send = || {
-                    if eviction_pinned.load(Ordering::Acquire) {
-                        return true;
-                    }
-                    let pinned = !self.is_draining()
-                        && self.connection_manager.request_activity_timeout_if_expired(
-                            &player_id,
-                            self.config.ping_timeout,
-                        );
-                    eviction_pinned.store(pinned, Ordering::Release);
-                    pinned
-                };
-                let farewell = self.send_farewell_to_player_if(
-                    &player_id,
-                    format!(
-                        "Disconnected: no activity received for {timeout_ms} ms \
-                         (server.ping_timeout)"
-                    ),
-                    Some(crate::protocol::ErrorCode::ActivityTimeout),
-                    &should_send,
-                );
-                // Give an immediately available route a chance even when an
-                // earlier lookup used the batch's wait. The socket close owns
-                // the timeout reason if the best-effort lookup is still pending.
-                let enqueued = tokio::select! {
-                    biased;
-                    enqueued = farewell => enqueued,
-                    _ = crate::deadline::wait_until(activity_eviction_deadline) => false,
-                };
-
-                let mut pinned = eviction_pinned.load(Ordering::Acquire);
-                if !pinned {
-                    if self.is_draining() {
-                        tracing::info!(
-                            instance_id = %self.instance_id,
-                            "Cleanup task stopping for server shutdown drain after activity farewell"
-                        );
-                        stop_for_drain = true;
-                        break;
-                    }
-                    // A missing or delayed route may never evaluate the
-                    // predicate. Recheck liveness before closing without advice.
-                    pinned = self
-                        .connection_manager
-                        .request_activity_timeout_if_expired(&player_id, self.config.ping_timeout);
-                }
-                if !pinned {
-                    tracing::debug!(
-                        %player_id,
-                        "Client refreshed activity after the cleanup snapshot; skipping eviction"
-                    );
-                    continue;
-                }
-                if !enqueued {
-                    tracing::debug!(
-                        %player_id,
-                        "Expired client did not receive the eviction farewell (queue full or gone)"
-                    );
-                }
-
-                evicted_client_count = evicted_client_count.saturating_add(1);
-                tracing::info!(%player_id, instance_id = %self.instance_id, "Removing expired client");
-                /*
-                    Poll unregister first so an expired observation budget still
-                    starts its owned transaction. Dropping the wait leaves it running.
-                */
-                tokio::select! {
-                    biased;
-                    () = self.unregister_client(&player_id) => {}
-                    _ = crate::deadline::wait_until(activity_eviction_deadline) => {
-                        tracing::debug!(%player_id, "Activity-timeout teardown continues outside the maintenance wait");
-                    }
-                }
-            }
-            if evicted_client_count > 0 {
-                self.metrics
-                    .add_expired_players_cleaned(evicted_client_count);
-            }
-            if stop_for_drain {
-                break 'cleanup;
-            }
 
             let detached_spectators = self.spectator_service.retry_disconnected_detaches().await;
             if detached_spectators > 0 {
@@ -829,8 +838,6 @@ impl EnhancedGameServer {
                     "Retried durable detach for disconnected spectators"
                 );
             }
-
-            self.cleanup_abandoned_rooms().await;
 
             // Cleanup empty rooms with idempotency
             match self
@@ -934,15 +941,6 @@ impl EnhancedGameServer {
                 Err(e) => {
                     tracing::error!("Failed to cleanup expired rooms: {}", e);
                 }
-            }
-
-            let cleaned_missing_room_clients = self.cleanup_clients_in_missing_rooms().await;
-            if cleaned_missing_room_clients > 0 {
-                tracing::info!(
-                    count = cleaned_missing_room_clients,
-                    instance_id = %self.instance_id,
-                    "Terminally closed clients assigned to removed rooms"
-                );
             }
 
             // Inactive cleanup may deliberately close an occupied room. Its
