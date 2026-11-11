@@ -16103,3 +16103,14 @@ remove the stale seat and clear the matching stored and cached application claim
 Five all-feature recovery controls pass in
 `66bc0cd8-fa9f-497b-9d66-2c5347497bd0`. This is part of the same uncommitted
 reconnect recovery contract, not a new wire or client requirement.
+
+F332 ownership review also found that a role-only rollback could schedule removal
+of a membership retained through the public reconnect-manager API. The attempt
+had not added that row or inherited its deletion obligation. The new control
+fails on prior source in `57026a98-88e7-4804-a38c-6d5dd0a21690`. Panic recovery now
+queues a detach only for an owned restored membership or inherited detach, and
+both queue sites use one provenance-preserving helper. The control checks that
+maintenance leaves the retained row intact and a complete retry succeeds.
+Independent all-feature review passes in
+`b42f2e8d-9b12-400d-87c1-f4c22bc82809`. This is a retained-row component history;
+it does not claim a new first-party socket incident.

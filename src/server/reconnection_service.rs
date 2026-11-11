@@ -185,6 +185,23 @@ impl Drop for ReconnectionClaimGuard {
 }
 
 impl EnhancedGameServer {
+    /// Retain stale-seat cleanup while preserving any existing application obligation.
+    fn retain_reconnect_detach(
+        &self,
+        room_id: RoomId,
+        player_id: PlayerId,
+        rollback: Option<PendingApplicationClaimRollback>,
+    ) {
+        self.pending_durable_player_detaches
+            .entry((room_id, player_id))
+            .and_modify(|pending| {
+                if pending.is_none() {
+                    *pending = rollback.clone();
+                }
+            })
+            .or_insert(rollback);
+    }
+
     /// Close an unpublished reconnect and order its opening before owned teardown.
     async fn repair_panicked_reconnect_publication_locked(
         self: &Arc<Self>,
@@ -326,15 +343,15 @@ impl EnhancedGameServer {
                 // The final supervisor must still release this uncommitted
                 // claim when a storage adapter also panics during rollback.
                 // Preserve the inherited application-claim provenance for repair.
-                let rollback = recovery.restore.cleared_pending_detach.clone().flatten();
-                self.pending_durable_player_detaches
-                    .entry((claim.disconnected.room_id, claim.disconnected.player_id))
-                    .and_modify(|pending| {
-                        if pending.is_none() {
-                            *pending = rollback.clone();
-                        }
-                    })
-                    .or_insert(rollback);
+                if recovery.restore.restored_membership
+                    || recovery.restore.cleared_pending_detach.is_some()
+                {
+                    self.retain_reconnect_detach(
+                        claim.disconnected.room_id,
+                        claim.disconnected.player_id,
+                        recovery.restore.cleared_pending_detach.clone().flatten(),
+                    );
+                }
                 // Removing the restored row also clears its role. If removal
                 // unwound, still undo this attempt's unpublished authority
                 // grant so an immediate retry can announce its fresh grant.
@@ -357,7 +374,7 @@ impl EnhancedGameServer {
                         unpublished_authority,
                     )
                     .await;
-                tracing::error!(%reconnect_player_id, "Reconnect storage rollback panicked; retaining durable detach for retry");
+                tracing::error!(%reconnect_player_id, "Reconnect storage rollback panicked; retaining unfinished recovery for retry");
             }
         }
         self.send_unexpected_room_operation_failure(
@@ -756,14 +773,7 @@ impl EnhancedGameServer {
             // Shutdown can reject before this attempt takes the existing
             // detach. Preserve that entry's application debt while ensuring
             // an inherited debt can upgrade an empty repair marker.
-            self.pending_durable_player_detaches
-                .entry((disconnected.room_id, disconnected.player_id))
-                .and_modify(|pending| {
-                    if pending.is_none() {
-                        *pending = rollback.clone();
-                    }
-                })
-                .or_insert(rollback);
+            self.retain_reconnect_detach(disconnected.room_id, disconnected.player_id, rollback);
         }
 
         let released = claim_guard

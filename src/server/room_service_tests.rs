@@ -17444,3 +17444,108 @@ async fn reconnect_shutdown_rollback_preserves_untaken_application_cleanup_debt(
             .contains_key(&key));
     }
 }
+
+/// A failed restore must not schedule deletion of a membership it did not add.
+#[tokio::test(start_paused = true)]
+async fn reconnect_role_rollback_panic_preserves_a_retained_membership() {
+    let mut wrapper = DrainAfterCreateDatabase::new(create_test_database().await);
+    wrapper.trigger_drain_after_create = false;
+    let database = Arc::new(wrapper);
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let mut fixture = correlated_reconnect_panic_fixture_with_server(server).await;
+    let manager = fixture.server.reconnection_manager().unwrap();
+    let claim = manager
+        .claim_reconnection(
+            &fixture.current_player_id,
+            &fixture.reconnect_player_id,
+            &fixture.room_id,
+            &fixture.token,
+        )
+        .await
+        .unwrap();
+    let player = claim.disconnected.player_info.clone().unwrap();
+    assert!(manager.release_reconnection_claim(&claim).await);
+    assert!(
+        manager
+            .discard_pending_reconnection(&fixture.reconnect_player_id)
+            .await
+    );
+    // The manager API also supports a disconnected member whose row is retained.
+    assert!(database
+        .add_player_to_room(&fixture.room_id, player.clone())
+        .await
+        .unwrap());
+    fixture.token = manager
+        .register_disconnection(
+            fixture.reconnect_player_id,
+            fixture.room_id,
+            true,
+            Some(player),
+            0,
+        )
+        .await;
+    fixture.server.panic_owned_room_operation_for_test(
+        OwnedRoomOperationPanicPoint::ReconnectAfterReassignment,
+    );
+    database
+        .rollback_authority_fault
+        .store(2, Ordering::Release);
+    assert!(
+        !fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                fixture.effective_player_id.clone(),
+                None,
+            )
+            .await
+    );
+    let key = (fixture.room_id, fixture.reconnect_player_id);
+    assert!(
+        !fixture
+            .server
+            .pending_durable_player_detaches
+            .contains_key(&key),
+        "a role-only rollback must not invent a stale-seat deletion obligation"
+    );
+    database
+        .rollback_authority_fault
+        .store(0, Ordering::Release);
+    assert_eq!(
+        fixture
+            .server
+            .cleanup_pending_durable_player_detaches()
+            .await,
+        0
+    );
+    assert!(database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .players
+        .contains_key(&fixture.reconnect_player_id));
+    assert!(
+        fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                fixture.effective_player_id.clone(),
+                None,
+            )
+            .await,
+        "the retained seat remains available to its reconnecting member"
+    );
+}
