@@ -49,6 +49,83 @@ async fn room(server: &EnhancedGameServer, player: PlayerId) -> RoomId {
         .id
 }
 
+/// A waiting reconnect view must not pin live room storage through either GC path.
+#[tokio::test(start_paused = true)]
+async fn room_gc_releases_storage_when_reconnect_view_is_busy() {
+    for expired in [false, true] {
+        let server = server().await;
+        let player = PlayerId::new_v4();
+        let live_room = room(&server, player).await;
+        let owner = PlayerId::new_v4();
+        let empty_room = room(&server, owner).await;
+        server
+            .database
+            .remove_player_from_room(&empty_room, &owner)
+            .await
+            .unwrap();
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        database
+            .backdate_room_activity_for_test(&empty_room, chrono::Duration::hours(1))
+            .await;
+        let manager = server.reconnection_manager().unwrap();
+        let cleanup = || async {
+            let timeout = chrono::Duration::minutes(1);
+            if expired {
+                server
+                    .cleanup_expired_rooms_protecting_reconnections(timeout, timeout)
+                    .await
+                    .unwrap()
+                    .total_cleaned()
+            } else {
+                server
+                    .cleanup_empty_rooms_protecting_reconnections(timeout)
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        {
+            let hold = manager.hold_replay_write_for_test(std::future::pending());
+            tokio::pin!(hold);
+            assert!(futures_util::poll!(&mut hold).is_pending());
+            let gc = cleanup();
+            tokio::pin!(gc);
+            let attempted = futures_util::poll!(&mut gc);
+            let snapshot = timeout(
+                Duration::from_millis(100),
+                server
+                    .database
+                    .get_room_player_snapshot(&live_room, &player),
+            )
+            .await
+            .expect("live membership reads must not wait behind GC for reconnect state")
+            .unwrap()
+            .unwrap();
+            assert_eq!(snapshot.player.unwrap().id, player);
+            timeout(
+                Duration::from_millis(100),
+                server.database.update_room_activity(&live_room),
+            )
+            .await
+            .expect("live room activity writes must remain available")
+            .unwrap();
+            assert_eq!(attempted, std::task::Poll::Ready(0));
+        }
+        assert!(server.database.room_exists(&empty_room).await.unwrap());
+        assert_eq!(
+            cleanup().await,
+            1,
+            "the next sweep must delete the eligible room"
+        );
+        assert!(!server.database.room_exists(&empty_room).await.unwrap());
+        assert!(server.database.room_exists(&live_room).await.unwrap());
+    }
+}
+
 /// Repair available rooms while retaining a busy room's durable detach for retry.
 #[tokio::test(start_paused = true)]
 async fn durable_detach_admission_skips_busy_room_and_retries_without_losing_seats() {

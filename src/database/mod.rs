@@ -1412,6 +1412,13 @@ pub struct InMemoryDatabase {
     session_host_snapshot_reads: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pause_room_cleanup_lease: std::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     #[cfg(test)]
     pause_room_metrics: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -1649,6 +1656,19 @@ impl InMemoryDatabase {
         self.rooms.write().await
     }
 
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_next_room_cleanup_lease_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, wait_for_entry) = tokio::sync::oneshot::channel();
+        let (release, wait_for_release) = tokio::sync::oneshot::channel();
+        *self.pause_room_cleanup_lease.lock().unwrap() = Some((entered, wait_for_release));
+        (wait_for_entry, release)
+    }
+
     async fn prepare_room_cleanup(&self) -> RoomCleanupLease<'_> {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
@@ -1743,6 +1763,8 @@ impl InMemoryDatabase {
             session_host_snapshot_reads: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             pause_get_room_by_id: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            pause_room_cleanup_lease: std::sync::Mutex::new(None),
             #[cfg(test)]
             pause_room_metrics: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -3263,6 +3285,14 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn lease_room_cleanup(&self) -> Result<Option<RoomCleanupLease<'_>>> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        {
+            let pause = self.pause_room_cleanup_lease.lock().unwrap().take();
+            if let Some((entered, release)) = pause {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+        }
         Ok(Some(self.prepare_room_cleanup().await))
     }
 

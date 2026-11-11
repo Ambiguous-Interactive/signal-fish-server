@@ -588,6 +588,15 @@ impl ReconnectionManager {
         self.release_record_room_event.notify_one();
     }
 
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn hold_replay_write_for_test(
+        &self,
+        wait: impl std::future::Future<Output = ()>,
+    ) {
+        let _state = self.replay_state.write().await;
+        wait.await;
+    }
+
     /// Scrape-time live-state counts for the metrics endpoint: pending
     /// reconnection records and the retained replay rings. Sampled when the
     /// endpoint is hit under one short read lock, never maintained on the
@@ -1630,8 +1639,19 @@ impl ReconnectionManager {
     /// the room to exist. A durable cleanup pin also protects its room until
     /// storage completion and pending-record removal agree.
     pub(crate) async fn room_gc_protection(&self) -> RoomGcProtection<'_> {
+        Self::build_room_gc_protection(self.replay_state.read().await)
+    }
+
+    /// A prepared storage lease must never wait for the reconnect lock.
+    pub(crate) fn try_room_gc_protection(&self) -> Option<RoomGcProtection<'_>> {
+        self.replay_state
+            .try_read()
+            .ok()
+            .map(Self::build_room_gc_protection)
+    }
+
+    fn build_room_gc_protection(state: RwLockReadGuard<'_, ReplayState>) -> RoomGcProtection<'_> {
         let now = Instant::now();
-        let state = self.replay_state.read().await;
         let room_ids = state
             .disconnected_players
             .values()

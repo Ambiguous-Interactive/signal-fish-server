@@ -276,26 +276,25 @@ impl EnhancedGameServer {
         empty_timeout: chrono::Duration,
     ) -> anyhow::Result<Vec<RoomId>> {
         let prepared = self.database.lease_room_cleanup().await?;
-        match &self.reconnection_manager {
-            Some(manager) => {
-                let protected = manager.room_gc_protection().await;
-                match prepared {
-                    Some(lease) => Ok(lease.cleanup_empty(empty_timeout, protected.room_ids())),
-                    None => {
-                        self.database
-                            .cleanup_empty_rooms(empty_timeout, protected.room_ids())
-                            .await
-                    }
-                }
+        match (prepared, &self.reconnection_manager) {
+            (Some(lease), Some(manager)) => {
+                let Some(protected) = manager.try_room_gc_protection() else {
+                    return Ok(Vec::new());
+                };
+                Ok(lease.cleanup_empty(empty_timeout, protected.room_ids()))
             }
-            None => match prepared {
-                Some(lease) => Ok(lease.cleanup_empty(empty_timeout, &HashSet::new())),
-                None => {
-                    self.database
-                        .cleanup_empty_rooms(empty_timeout, &HashSet::new())
-                        .await
-                }
-            },
+            (None, Some(manager)) => {
+                let protected = manager.room_gc_protection().await;
+                self.database
+                    .cleanup_empty_rooms(empty_timeout, protected.room_ids())
+                    .await
+            }
+            (Some(lease), None) => Ok(lease.cleanup_empty(empty_timeout, &HashSet::new())),
+            (None, None) => {
+                self.database
+                    .cleanup_empty_rooms(empty_timeout, &HashSet::new())
+                    .await
+            }
         }
     }
 
@@ -306,36 +305,27 @@ impl EnhancedGameServer {
         inactive_timeout: chrono::Duration,
     ) -> anyhow::Result<crate::database::RoomCleanupOutcome> {
         let prepared = self.database.lease_room_cleanup().await?;
-        match &self.reconnection_manager {
-            Some(manager) => {
-                let protected = manager.room_gc_protection().await;
-                match prepared {
-                    Some(lease) => Ok(lease.cleanup_expired(
-                        empty_timeout,
-                        inactive_timeout,
-                        protected.room_ids(),
-                    )),
-                    None => {
-                        self.database
-                            .cleanup_expired_rooms(
-                                empty_timeout,
-                                inactive_timeout,
-                                protected.room_ids(),
-                            )
-                            .await
-                    }
-                }
+        match (prepared, &self.reconnection_manager) {
+            (Some(lease), Some(manager)) => {
+                let Some(protected) = manager.try_room_gc_protection() else {
+                    return Ok(crate::database::RoomCleanupOutcome::default());
+                };
+                Ok(lease.cleanup_expired(empty_timeout, inactive_timeout, protected.room_ids()))
             }
-            None => match prepared {
-                Some(lease) => {
-                    Ok(lease.cleanup_expired(empty_timeout, inactive_timeout, &HashSet::new()))
-                }
-                None => {
-                    self.database
-                        .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
-                        .await
-                }
-            },
+            (None, Some(manager)) => {
+                let protected = manager.room_gc_protection().await;
+                self.database
+                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, protected.room_ids())
+                    .await
+            }
+            (Some(lease), None) => {
+                Ok(lease.cleanup_expired(empty_timeout, inactive_timeout, &HashSet::new()))
+            }
+            (None, None) => {
+                self.database
+                    .cleanup_expired_rooms(empty_timeout, inactive_timeout, &HashSet::new())
+                    .await
+            }
         }
     }
 
@@ -640,11 +630,40 @@ impl EnhancedGameServer {
 
     /// Cleanup task variant that exits when `shutdown` resolves.
     pub async fn cleanup_task_until(self: &Arc<Self>, shutdown: impl Future<Output = ()>) {
-        let mut interval = crate::deadline::interval(
-            self.config
-                .room_cleanup_interval
-                .max(std::time::Duration::from_secs(1)),
-        );
+        let period = self
+            .config
+            .room_cleanup_interval
+            .max(std::time::Duration::from_secs(1));
+        let housekeeping = self.cleanup_housekeeping_until(shutdown, period);
+        tokio::pin!(housekeeping);
+
+        // A storage wait in housekeeping must not suspend retries for live rooms.
+        let mut repairs = crate::deadline::interval(period);
+        repairs.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                () = &mut housekeeping => return,
+                _ = repairs.tick() => {}
+            }
+            if self.is_draining() {
+                housekeeping.await;
+                return;
+            }
+            tokio::select! {
+                biased;
+                () = &mut housekeeping => return,
+                () = self.retry_pending_session_replans() => {}
+            }
+        }
+    }
+
+    async fn cleanup_housekeeping_until(
+        self: &Arc<Self>,
+        shutdown: impl Future<Output = ()>,
+        period: std::time::Duration,
+    ) {
+        let mut interval = crate::deadline::interval(period);
         let empty_timeout = chrono_duration_from_std(self.config.empty_room_timeout);
         let inactive_timeout = chrono_duration_from_std(self.config.inactive_room_timeout);
         tokio::pin!(shutdown);
@@ -805,7 +824,6 @@ impl EnhancedGameServer {
 
             self.cleanup_abandoned_rooms().await;
             self.cleanup_pending_durable_player_detaches().await;
-            self.retry_pending_session_replans().await;
 
             // Cleanup empty rooms with idempotency
             match self
