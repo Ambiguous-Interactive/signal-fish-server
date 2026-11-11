@@ -16048,3 +16048,44 @@ pass in `745e3e65-89eb-465d-b0e6-d7e7f81d6439`. Independent review approves the
 join, reconnect, and room-scoped maintenance repairs with no remaining finding.
 Three real WebSocket controls also pass: token-only reconnect, signaling with
 the restored player identity, and a two-player authority release.
+
+F332 immediate-retry review found unpublished authority surviving a failed
+membership rollback. The incumbent had observed the real disconnect's cleared
+role. Immediate retry then reused the stored role without its required
+`AuthorityChanged` grant. The red is
+`cd84be1b-cf8a-4493-ab58-ea86a8758204`. The first probe had an overlong player
+name and is excluded from evidence.
+
+Recovery attempts the owned role rollback even when member removal panics.
+If role rollback also fails, the matching reconnect record retains private
+unpublished-grant provenance atomically with claim release. A later attempt
+inherits that ownership only if the actor still holds the stored role. It can
+then announce the grant after its baseline or undo it on rejection. A retained
+role that peers already saw has no such marker and emits no duplicate grant.
+The public disconnect snapshot and wire schema stay unchanged. Same-room
+registration and default claim release preserve the marker; another room resets
+it. Stale claims cannot set or erase a newer record's marker.
+
+Omitting only marker inheritance reproduces the missing grant in
+`7f0f7190-d13e-41ea-9077-b1291b0a8e44`, independently confirmed in `b6f61509`.
+The final six-history matrix passes in
+`b085e67b-c832-4735-8efe-a45006a86d93`: typed member-removal errors and panics
+cross role-clear success, error, and panic. Every history retries before
+maintenance and checks the baseline, authority event, and reciprocal WebRTC
+plans. Independent manager and retained-role controls pass in
+`97862278-45d2-40e5-b0f8-8d6f200da6e7`. A separate final-supervisor plus persistent
+storage-panic control retains the claim-release and full P2P retry assertions.
+
+F333 hosted review questioned failed abandonment after a creator rollback panic.
+The supported storage contract requires atomic hidden insertion through
+`GameDatabase::create_pending_room_classified`; its default refuses creation.
+The older fixture deliberately used a visible legacy insertion for unrelated
+adapter controls. The creator regression now forwards the first-party owned
+pending insertion. The new abandonment-error and abandonment-panic histories
+prove the room remains hidden, another socket receives `RoomNotFound`, and the
+dropped creation owner keeps maintenance discovery eligible. Cleanup then frees
+the code for a fresh creation. Both all-feature controls pass in
+`7a6258d4-6b89-4223-bf7d-088d7330a7c4`. The recovery comment now states this
+pending-lifecycle requirement instead of promising visibility guarantees for
+nonconforming adapters. No process-local fence can establish a durable backend's
+cross-node atomic visibility contract.

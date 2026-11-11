@@ -107,7 +107,8 @@ struct ReconnectionClaimGuard {
 struct ReconnectRestoreState {
     /// This attempt re-added the membership row that the disconnect removed.
     restored_membership: bool,
-    /// This attempt was granted the room's vacant authority back.
+    /// This restore owns a new or inherited unpublished authority grant.
+    /// Rejection must undo it; a committed restore must announce it.
     restored_authority: bool,
     /// This attempt took ownership of a queued durable detach: `Some(value)`
     /// is the retry it removed, carrying whatever application-claim rollback
@@ -149,11 +150,13 @@ impl ReconnectionClaimGuard {
         self.claim.as_ref().map(Arc::clone)
     }
 
-    async fn release(mut self) -> bool {
+    async fn release_with_unpublished_authority(mut self, unpublished_authority: bool) -> bool {
         let Some(claim) = self.claim.take() else {
             return false;
         };
-        self.manager.release_reconnection_claim(&claim).await
+        self.manager
+            .release_reconnection_claim_with_unpublished_authority(&claim, unpublished_authority)
+            .await
     }
 
     async fn complete(mut self) -> bool {
@@ -317,6 +320,8 @@ impl EnhancedGameServer {
             .catch_unwind()
             .await;
             if rollback.is_err() {
+                let mut unpublished_authority =
+                    claim.has_unpublished_authority() || recovery.restore.restored_authority;
                 // The final supervisor must still release this uncommitted
                 // claim when a storage adapter also panics during rollback.
                 // Preserve the inherited application-claim provenance for repair.
@@ -324,7 +329,28 @@ impl EnhancedGameServer {
                     (claim.disconnected.room_id, claim.disconnected.player_id),
                     recovery.restore.cleared_pending_detach.clone().flatten(),
                 );
-                let _ = manager.release_reconnection_claim(claim).await;
+                // Removing the restored row also clears its role. If removal
+                // unwound, still undo this attempt's unpublished authority
+                // grant so an immediate retry can announce its fresh grant.
+                if recovery.restore.restored_authority {
+                    let authority_rollback = AssertUnwindSafe(
+                        self.database
+                            .update_room_authority(&claim.disconnected.room_id, None),
+                    )
+                    .catch_unwind()
+                    .await;
+                    if matches!(authority_rollback, Ok(Ok(true))) {
+                        unpublished_authority = false;
+                    } else {
+                        tracing::error!(%reconnect_player_id, "Failed to roll back unpublished reconnect authority");
+                    }
+                }
+                let _ = manager
+                    .release_reconnection_claim_with_unpublished_authority(
+                        claim,
+                        unpublished_authority,
+                    )
+                    .await;
                 tracing::error!(%reconnect_player_id, "Reconnect storage rollback panicked; retaining durable detach for retry");
             }
         }
@@ -672,6 +698,8 @@ impl EnhancedGameServer {
         // "nothing left to repair"; `Some(rollback)` re-queues the retry with
         // the provenance it started with.
         let mut requeue_detach = restore.cleared_pending_detach.clone();
+        let mut unpublished_authority =
+            retained_claim.has_unpublished_authority() || restore.restored_authority;
         let mut authority_needs_rollback = !restore.restored_membership;
         if restore.restored_membership {
             if let Err(err) = self
@@ -690,6 +718,7 @@ impl EnhancedGameServer {
                     "Failed to roll back restored room membership after reconnect failure"
                 );
             } else {
+                unpublished_authority = false;
                 // The rollback removed the row, so only an outstanding
                 // application-claim rollback still needs a retry.
                 requeue_detach = requeue_detach.filter(Option::is_some);
@@ -699,17 +728,21 @@ impl EnhancedGameServer {
         // failed removal leaves its row behind, so release the granted role
         // while detach repair waits for storage to recover.
         if restore.restored_authority && authority_needs_rollback {
-            if let Err(err) = self
+            match self
                 .database
                 .update_room_authority(&disconnected.room_id, None)
                 .await
             {
-                tracing::warn!(
-                    player_id = %disconnected.player_id,
-                    room_id = %disconnected.room_id,
-                    error = %err,
-                    "Failed to roll back restored authority after reconnect failure"
-                );
+                Ok(true) => unpublished_authority = false,
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        player_id = %disconnected.player_id,
+                        room_id = %disconnected.room_id,
+                        error = %err,
+                        "Failed to roll back restored authority after reconnect failure"
+                    );
+                }
             }
         }
         if let Some(rollback) = requeue_detach {
@@ -717,7 +750,9 @@ impl EnhancedGameServer {
                 .insert((disconnected.room_id, disconnected.player_id), rollback);
         }
 
-        let released = claim_guard.release().await;
+        let released = claim_guard
+            .release_with_unpublished_authority(unpublished_authority)
+            .await;
         tracing::warn!(
             player_id = %disconnected.player_id,
             room_id = %disconnected.room_id,
@@ -1506,6 +1541,18 @@ impl EnhancedGameServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .restore = restore.clone();
 
+        // A prior failed attempt can leave its own grant in storage. Only
+        // claim-scoped evidence makes that role unpublished; retained roles
+        // from an ordinary disconnect must not emit duplicate grants.
+        if retained_claim.has_unpublished_authority()
+            && room.authority_player == Some(*reconnect_player_id)
+        {
+            restore.restored_authority = true;
+            panic_recovery
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .restore = restore.clone();
+        }
         if disconnected.was_authority && room.supports_authority && room.authority_player.is_none()
         {
             match self

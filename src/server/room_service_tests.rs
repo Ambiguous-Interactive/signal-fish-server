@@ -1262,7 +1262,10 @@ struct DrainAfterCreateDatabase {
     panic_room_exists_once: AtomicBool,
     panic_rollback_once: AtomicBool,
     panic_rollback_always: AtomicBool,
+    rollback_authority_fault: std::sync::atomic::AtomicU8,
     panic_application_rollback_once: AtomicBool,
+    conforming_pending_creation: bool,
+    abandon_fault: std::sync::atomic::AtomicU8,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
     trigger_drain_after_create: bool,
@@ -1289,7 +1292,10 @@ impl DrainAfterCreateDatabase {
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
+            rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             panic_application_rollback_once: AtomicBool::new(false),
+            conforming_pending_creation: false,
+            abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: true,
@@ -1323,7 +1329,10 @@ impl DrainAfterCreateDatabase {
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
+            rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             panic_application_rollback_once: AtomicBool::new(false),
+            conforming_pending_creation: false,
+            abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1350,7 +1359,10 @@ impl DrainAfterCreateDatabase {
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
+            rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             panic_application_rollback_once: AtomicBool::new(false),
+            conforming_pending_creation: false,
+            abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1377,7 +1389,10 @@ impl DrainAfterCreateDatabase {
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
+            rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             panic_application_rollback_once: AtomicBool::new(false),
+            conforming_pending_creation: false,
+            abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1404,7 +1419,10 @@ impl DrainAfterCreateDatabase {
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
+            rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             panic_application_rollback_once: AtomicBool::new(false),
+            conforming_pending_creation: false,
+            abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1532,11 +1550,61 @@ impl GameDatabase for DrainAfterCreateDatabase {
         Ok(room)
     }
 
+    async fn create_pending_room_owned_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<uuid::Uuid>,
+        join_password: Option<crate::protocol::RoomPasswordCredential>,
+        creation_owner: crate::database::PendingRoomCreation,
+    ) -> crate::database::CreateRoomResult {
+        if self.conforming_pending_creation {
+            self.inner
+                .create_pending_room_owned_classified(
+                    game_name,
+                    room_code,
+                    max_players,
+                    supports_authority,
+                    creator_id,
+                    relay_type,
+                    region_id,
+                    application_id,
+                    join_password,
+                    creation_owner,
+                )
+                .await
+        } else {
+            self.create_pending_room_classified(
+                game_name,
+                room_code,
+                max_players,
+                supports_authority,
+                creator_id,
+                relay_type,
+                region_id,
+                application_id,
+                join_password,
+            )
+            .await
+        }
+    }
+
     async fn publish_room(&self, room_id: &RoomId) -> anyhow::Result<()> {
         self.inner.publish_room(room_id).await
     }
 
     async fn abandon_room(&self, room_id: &RoomId, creator_id: &PlayerId) -> anyhow::Result<()> {
+        match self.abandon_fault.swap(0, Ordering::AcqRel) {
+            1 => anyhow::bail!("injected room abandonment failure"),
+            2 => panic!("injected room abandonment panic"),
+            _ => {}
+        }
+
         self.inner.abandon_room(room_id, creator_id).await
     }
 
@@ -1690,6 +1758,13 @@ impl GameDatabase for DrainAfterCreateDatabase {
         room_id: &RoomId,
         authority_player: Option<PlayerId>,
     ) -> anyhow::Result<bool> {
+        if authority_player.is_none() {
+            match self.rollback_authority_fault.load(Ordering::Acquire) {
+                1 => anyhow::bail!("injected authority rollback failure"),
+                2 => panic!("injected authority rollback panic"),
+                _ => {}
+            }
+        }
         self.inner
             .update_room_authority(room_id, authority_player)
             .await
@@ -2897,6 +2972,7 @@ async fn setup_joined_pair_with_reconnection_and_config(
     .await
 }
 
+/// Build the joined-room history with a caller-supplied publication fault.
 async fn setup_joined_pair_with_reconnection_config_and_coordinator(
     mutate_config: impl FnOnce(&mut ServerConfig),
     coordinator: Arc<dyn MessageCoordinator>,
@@ -6439,23 +6515,31 @@ async fn supervisor_panic_still_releases_the_reconnect_claim_for_a_fresh_retry()
 /// #1590: an uncommitted restored identity must be rolled back before retry.
 #[tokio::test(start_paused = true)]
 async fn reconnect_supervisor_panic_restores_a_retryable_live_webrtc_identity() {
-    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, false).await;
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, false, true).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn reconnect_route_rollback_panic_preserves_live_webrtc_retry() {
-    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(true, false).await;
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(true, false, true).await;
 }
 
 /// #1590: repeated storage panics cannot strand an uncommitted reconnect claim.
 #[tokio::test(start_paused = true)]
 async fn reconnect_storage_rollback_panics_preserve_live_webrtc_retry() {
-    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, true).await;
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, true, false).await;
 }
 
+/// #1590: the final supervisor also releases claims after repeated storage panics.
+#[tokio::test(start_paused = true)]
+async fn reconnect_final_supervisor_storage_panics_preserve_live_webrtc_retry() {
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, true, true).await;
+}
+
+/// Require a complete P2P retry after either unwind supervisor encounters rollback failure.
 async fn assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(
     route_panics: bool,
     storage_panics: bool,
+    supervisor_panics: bool,
 ) {
     use crate::protocol::{Topology, Transport};
     let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting));
@@ -6504,7 +6588,8 @@ async fn assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(
         database
             .panic_rollback_always
             .store(true, Ordering::Release);
-    } else {
+    }
+    if supervisor_panics {
         fixture.server.panic_owned_room_supervisor_for_test();
     }
     if route_panics {
@@ -14909,6 +14994,7 @@ async fn failed_authority_notice_does_not_delay_another_stale_seat() {
     }
 }
 
+/// Exercise delayed authority publication against live room and replay state.
 async fn assert_failed_authority_release_retries(expired: bool, case: AuthorityReleaseRetryCase) {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
         if case == AuthorityReleaseRetryCase::AlreadyCommitted {
@@ -16768,6 +16854,7 @@ async fn created_join_rollback_panic_releases_code_and_repairs_the_unpublished_r
     let inner = create_test_database().await;
     let mut wrapper = DrainAfterCreateDatabase::new(inner);
     wrapper.trigger_drain_after_create = false;
+    wrapper.conforming_pending_creation = true;
     let database = Arc::new(wrapper);
     let server = create_test_server_with_message_coordinator_and_lock(
         ServerConfig::default(),
@@ -16852,6 +16939,129 @@ async fn created_join_rollback_panic_releases_code_and_repairs_the_unpublished_r
     );
 }
 
+/// Supported creation remains hidden when both rollback and abandonment fail.
+#[tokio::test(start_paused = true)]
+async fn hidden_pending_creation_survives_abandonment_errors_and_panics() {
+    for abandonment_fault in [1, 2] {
+        let mut wrapper = DrainAfterCreateDatabase::new(create_test_database().await);
+        wrapper.trigger_drain_after_create = false;
+        wrapper.conforming_pending_creation = true;
+        wrapper
+            .abandon_fault
+            .store(abandonment_fault, Ordering::Release);
+        let database = Arc::new(wrapper);
+        let server = create_test_server_with_message_coordinator_and_lock(
+            ServerConfig::default(),
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        )
+        .await;
+        let (creator, mut creator_rx) =
+            register_client(&server, "127.0.0.1:48405".parse().unwrap()).await;
+        server.script_room_codes_for_test(["HIDRBK"]);
+        let operation_id = uuid::Uuid::new_v4();
+        server
+            .panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinAfterAdmission);
+        database.panic_rollback_once.store(true, Ordering::Release);
+        server
+            .handle_join_room_operation(
+                &creator,
+                Some(operation_id),
+                "hidden-rollback".into(),
+                None,
+                "creator".into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(
+            database.abandon_fault.load(Ordering::Acquire),
+            0,
+            "the rollback must reach the failed abandonment attempt"
+        );
+        expect_correlated_internal_operation_failure(
+            &mut creator_rx,
+            operation_id,
+            "hidden creation rollback",
+        )
+        .await;
+        assert_eq!(server.get_client_room(&creator).await, None);
+        let pending = database.pending_room_ids().await.unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "the dropped creation owner retains repair eligibility"
+        );
+        let room_id = pending[0];
+        assert!(!database.is_room_published(&room_id).await.unwrap());
+        assert!(database
+            .get_room("hidden-rollback", "HIDRBK")
+            .await
+            .unwrap()
+            .is_none());
+        let (other, mut other_rx) =
+            register_client(&server, "127.0.0.1:48406".parse().unwrap()).await;
+        server
+            .handle_join_room(
+                &other,
+                "hidden-rollback".into(),
+                Some("HIDRBK".into()),
+                "other".into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                Some(true),
+            )
+            .await;
+        let refused = drain_queued_messages(&mut other_rx);
+        assert!(
+            matches!(refused.as_slice(), [message] if matches!(message.as_ref(),
+            ServerMessage::RoomJoinFailed { error_code: Some(ErrorCode::RoomNotFound), .. })),
+            "another socket cannot join the unfinished creation: {refused:?}"
+        );
+        assert_eq!(server.get_client_room(&other).await, None);
+        assert_eq!(
+            database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .players
+                .len(),
+            1
+        );
+        assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+        assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+        assert!(database.get_room_by_id(&room_id).await.unwrap().is_none());
+        server
+            .handle_join_room(
+                &creator,
+                "hidden-rollback".into(),
+                Some("HIDRBK".into()),
+                "creator".into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+        let retried = drain_queued_messages(&mut creator_rx);
+        assert!(
+            retried.iter().any(
+                |message| matches!(message.as_ref(), ServerMessage::RoomJoined(payload)
+            if payload.room_code == "HIDRBK")
+            ),
+            "maintenance must release the code for a fresh creation"
+        );
+    }
+}
+
 /// #1592: retain the removed authority before application rollback can unwind.
 #[tokio::test(start_paused = true)]
 async fn authority_release_survives_application_rollback_panic() {
@@ -16924,4 +17134,193 @@ async fn authority_release_survives_application_rollback_panic() {
     assert!(!server.pending_authority_releases.contains_key(&room_id));
     assert_eq!(server.cleanup_pending_durable_player_detaches().await, 0);
     assert!(drain_queued_messages(&mut survivor_rx).is_empty());
+}
+
+/// #1590: an immediate retry must publish a role restored by an unpublished attempt.
+#[tokio::test(start_paused = true)]
+async fn reconnect_immediate_retry_republishes_authority_after_rollback_storage_panic() {
+    for row_removal_panics in [false, true] {
+        for authority_fault in [0, 1, 2] {
+            assert_immediate_reconnect_retry_republishes_authority(
+                authority_fault,
+                row_removal_panics,
+            )
+            .await;
+        }
+    }
+}
+
+/// Retry before maintenance across failed member and authority rollback combinations.
+async fn assert_immediate_reconnect_retry_republishes_authority(
+    authority_fault: u8,
+    row_removal_panics: bool,
+) {
+    use crate::protocol::{Topology, Transport};
+    let inner = create_test_database().await;
+    let mut wrapper = DrainAfterCreateDatabase::new(inner.clone());
+    wrapper.trigger_drain_after_create = false;
+    let database = Arc::new(wrapper);
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (owner, mut owner_rx) = register_client(&server, "127.0.0.1:48501".parse().unwrap()).await;
+    let (peer, mut peer_rx) = register_client(&server, "127.0.0.1:48502".parse().unwrap()).await;
+    let protocol = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc],
+        topologies: vec![Topology::Relay, Topology::Mesh],
+    };
+    for id in [owner, peer] {
+        server.set_client_protocol(&id, protocol.clone());
+        server
+            .handle_join_room(
+                &id,
+                "authority-retry".into(),
+                Some("AUTRET".into()),
+                if id == owner {
+                    "owner".into()
+                } else {
+                    "peer".into()
+                },
+                Some(4),
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await;
+    }
+    let room_id = server.get_client_room(&owner).await.unwrap();
+    let token = drain_queued_messages(&mut owner_rx)
+        .into_iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::RoomJoined(payload) => payload.reconnection_token.clone(),
+            _ => None,
+        })
+        .expect("owner has a preissued token");
+    server.handle_player_ready(&owner).await;
+    server.handle_player_ready(&peer).await;
+    server.handle_start_game(&owner).await;
+    let _old_owner_messages = drain_queued_messages(&mut owner_rx);
+    let _old_peer_messages = drain_queued_messages(&mut peer_rx);
+    server.unregister_client(&owner).await;
+    let departed = drain_queued_messages(&mut peer_rx);
+    assert!(
+        departed.iter().any(|message| matches!(
+            message.as_ref(),
+            ServerMessage::AuthorityChanged {
+                authority_player: None,
+                ..
+            }
+        )),
+        "the incumbent must observe the real disconnect's authority clear"
+    );
+    assert_eq!(
+        inner
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        None
+    );
+    let (transient, mut actor_rx) =
+        register_client(&server, "127.0.0.1:48503".parse().unwrap()).await;
+    server.set_client_protocol(&transient, protocol);
+    let identity = Arc::new(RwLock::new(transient));
+    server.panic_owned_room_operation_for_test(
+        OwnedRoomOperationPanicPoint::ReconnectAfterReassignment,
+    );
+    database
+        .panic_rollback_always
+        .store(row_removal_panics, Ordering::Release);
+    let memory = inner.as_any().downcast_ref::<InMemoryDatabase>().unwrap();
+    memory.fail_remove_player_from_room_for_test(!row_removal_panics);
+    let operation_id = uuid::Uuid::new_v4();
+    database
+        .rollback_authority_fault
+        .store(authority_fault, Ordering::Release);
+    assert!(
+        !server
+            .handle_reconnect_with_identity_operation(
+                &transient,
+                &owner,
+                &room_id,
+                &token,
+                identity.clone(),
+                Some(operation_id)
+            )
+            .await
+    );
+    database
+        .panic_rollback_always
+        .store(false, Ordering::Release);
+    memory.fail_remove_player_from_room_for_test(false);
+    database
+        .rollback_authority_fault
+        .store(0, Ordering::Release);
+    expect_correlated_internal_operation_failure(
+        &mut actor_rx,
+        operation_id,
+        "unpublished authority restore",
+    )
+    .await;
+    assert!(
+        drain_queued_messages(&mut peer_rx).is_empty(),
+        "the failed attempt must not publish its grant"
+    );
+    let after_rollback = inner.get_room_by_id(&room_id).await.unwrap().unwrap();
+    assert!(
+        after_rollback.players.contains_key(&owner),
+        "the failed row rollback must execute"
+    );
+    assert_eq!(
+        after_rollback.authority_player,
+        (authority_fault != 0).then_some(owner),
+        "the injected authority rollback outcome must match storage"
+    );
+    // Retry immediately. No maintenance call may clear the retained row first.
+    assert!(
+        server
+            .handle_reconnect_with_identity_operation(
+                &transient, &owner, &room_id, &token, identity, None
+            )
+            .await
+    );
+    let incumbent = drain_queued_messages(&mut peer_rx);
+    assert!(
+        incumbent.iter().any(|message| matches!(message.as_ref(),
+        ServerMessage::AuthorityChanged { authority_player: Some(id), .. } if *id == owner)),
+        "the immediate successful retry must publish its restored authority: {incumbent:?}"
+    );
+    let actor = drain_queued_messages(&mut actor_rx);
+    assert!(
+        matches!(actor.first().map(Arc::as_ref), Some(ServerMessage::Reconnected(payload))
+        if payload.player_id == owner && payload.is_authority)
+    );
+    let actor_plan = actor
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            _ => None,
+        })
+        .expect("the actor must receive its retried mesh plan");
+    assert_eq!(
+        (actor_plan.topology, actor_plan.transport),
+        (Topology::Mesh, Transport::WebRtc)
+    );
+    assert!(actor_plan
+        .peers
+        .iter()
+        .any(|member| member.player_id == peer));
+    assert!(incumbent.iter().any(|message| matches!(message.as_ref(),
+        ServerMessage::SessionPlan(plan) if plan.generation == actor_plan.generation
+            && plan.peers.iter().any(|member| member.player_id == owner))));
 }

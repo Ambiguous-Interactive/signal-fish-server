@@ -330,8 +330,8 @@ impl EnhancedGameServer {
         .await;
         if rollback.is_err() {
             if matches!(rollback_kind, RoomAdmissionKind::Created { .. }) {
-                // Legacy adapters may have made the failed creation visible.
-                // Revoke that visibility before deferred member removal.
+                // Mark the failed creation for repair. Backends must implement
+                // the pending lifecycle; a dropped owner also permits cleanup.
                 let abandoned = AssertUnwindSafe(self.database.abandon_room(&room_id, &player_id))
                     .catch_unwind()
                     .await;
