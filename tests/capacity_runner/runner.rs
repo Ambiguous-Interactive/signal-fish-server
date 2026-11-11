@@ -924,6 +924,18 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     )
     .await;
     let auxiliary_result = abort_and_join(auxiliary_handles).await;
+    let interruption = interrupted.map(|(at_us, peers)| json!({"at_us": at_us, "peers": peers}));
+    let interruption_artifact = interruption.as_ref().map_or(Ok(()), |snapshot| {
+        artifacts::write_json(config.output_dir.join("peer-interruption.json"), snapshot)
+    });
+    if peer_result.is_err() || auxiliary_result.is_err() {
+        if let Some(snapshot) = &interruption {
+            eprintln!("capacity peer interruption: {snapshot}");
+        }
+        if let Err(error) = &interruption_artifact {
+            eprintln!("capacity peer interruption artifact: {error}");
+        }
+    }
     if !peer_result? && !log.record_budget_exhausted() {
         log.push_fault(InvalidReason::RunnerDeadlineExceeded {
             detail: "generator or receiver tasks outlived the quiescence margin".to_string(),
@@ -958,7 +970,6 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     let lifecycle = peer_progress_snapshot(&peer_progress);
     artifacts::write_json(config.output_dir.join("peer-progress.json"), &lifecycle)?;
-    let interruption = interrupted.map(|(at_us, peers)| json!({"at_us": at_us, "peers": peers}));
     if !summary.valid {
         let mut evidence = invalid_run_diagnostics(
             &run_id,
@@ -982,12 +993,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     artifacts::write_histogram(&config.output_dir, &records)?;
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
-    if let Some(interruption) = &interruption {
-        artifacts::write_json(
-            config.output_dir.join("peer-interruption.json"),
-            interruption,
-        )?;
-    }
+    interruption_artifact?;
     if config.receipt_timings {
         if let Some(timings) = log.take_receipt_timings() {
             // Every producer has joined. No formatting or diagnostic file writes
@@ -5389,6 +5395,7 @@ mod session_poll_tests {
         .expect("completed peer succeeds"));
     }
 
+    /// Capture live siblings before joining them after unexpected peer termination.
     #[tokio::test(start_paused = true)]
     async fn peer_panics_and_unexpected_cancellation_refuse_success_and_clean_up() {
         for panic_task in [false, true] {
@@ -5407,13 +5414,23 @@ mod session_poll_tests {
             if !panic_task {
                 failed.abort();
             }
-            let error = await_peers(
+            let mut observed = false;
+            let error = await_peers_or_stop(
                 vec![blocked, failed],
                 Instant::now() + Duration::from_secs(1),
+                std::future::pending(),
+                || {
+                    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+                    observed = true;
+                },
             )
             .await
             .expect_err("unexpected task termination cannot pass");
             assert!(error.contains("capacity peer task failed"), "{error}");
+            assert!(
+                observed,
+                "peer failure must preserve the interruption snapshot"
+            );
             assert_eq!(dropped.load(Ordering::SeqCst), 1);
         }
     }

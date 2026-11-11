@@ -15741,7 +15741,8 @@ history needed to identify its exact failed packet.
 The capacity runner also captures each peer's current and last completed stages
 before aborting tasks at a deadline or record-budget stop. The bounded snapshot
 is saved separately from the final post-join progress and included in the
-invalid-run log. Held socket upgrade, authentication, and baseline controls
+invalid-run log. An unexpected peer-task error also retains this snapshot before
+the error returns. Held socket upgrade, authentication, and baseline controls
 verify the captured stages. The original room-replacement control passes under
 LLVM coverage on this source. The historical #1352 timeout remains under
 investigation. The workload and delivery oracle are unchanged.
