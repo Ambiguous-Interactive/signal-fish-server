@@ -223,6 +223,9 @@ impl EnhancedGameServer {
     ) {
         if let RoomAdmissionKind::Created { creation_owner, .. } = &admission_kind {
             creation_owner.record_creator_left();
+            // Publication may have committed before its response was lost.
+            // Retain discovery and admission refusal before any adapter call.
+            self.pending_creation_rollbacks.insert(room_id, player_id);
         }
         let created_room_is_still_exclusive = if matches!(
             admission_kind,
@@ -250,6 +253,7 @@ impl EnhancedGameServer {
                         self.metrics.add_rooms_deleted(1);
                     }
                     self.room_applications.remove(&room_id);
+                    self.pending_creation_rollbacks.remove(&room_id);
                     let _ = self.room_coordinator.clear_ready_players(&room_id).await;
                     return;
                 }
@@ -2167,6 +2171,10 @@ impl EnhancedGameServer {
                     }
                 };
 
+                if self.pending_creation_rollbacks.contains_key(&room.id) {
+                    self.release_renewed_lock(&mut lock_renewal).await;
+                    return Err(JoinRoomError::RoomNotFound);
+                }
                 match self.database.is_room_published(&room.id).await {
                     Ok(true) => {}
                     Ok(false) => {

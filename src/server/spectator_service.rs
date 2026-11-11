@@ -58,6 +58,8 @@ pub(crate) struct SpectatorService {
     /// own (a rollback that deleted its own row must still let the ghost
     /// correction converge).
     pending_unpublished_detaches: Arc<DashMap<(RoomId, PlayerId), PendingSpectatorDetachRepair>>,
+    /// Share failed creator admission refusals with the player service.
+    pub(super) pending_creation_rollbacks: Arc<DashMap<RoomId, PlayerId>>,
     database: Arc<dyn GameDatabase>,
     /// Readiness is coordinator state, not room-record state, until finalize
     /// writes it through. The spectator snapshot reads it from here so it
@@ -147,6 +149,7 @@ impl SpectatorService {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
             pending_unpublished_detaches: Arc::new(DashMap::new()),
+            pending_creation_rollbacks: Arc::new(DashMap::new()),
             database,
             room_coordinator,
             message_coordinator,
@@ -528,14 +531,15 @@ impl SpectatorService {
         };
         #[cfg(feature = "allocation-tracking")]
         super::allocation_benchmark::record_spectator_allocation_stage("policy_checks");
-        if !self
-            .database
-            .is_room_published(&room.id)
-            .await
-            .map_err(|err| {
-                warn!(room_id = %room.id, error = %err, "Failed to verify room publication");
-                SpectatorError::new("Storage error", Some(ErrorCode::StorageError))
-            })?
+        if self.pending_creation_rollbacks.contains_key(&room.id)
+            || !self
+                .database
+                .is_room_published(&room.id)
+                .await
+                .map_err(|err| {
+                    warn!(room_id = %room.id, error = %err, "Failed to verify room publication");
+                    SpectatorError::new("Storage error", Some(ErrorCode::StorageError))
+                })?
         {
             return Err(SpectatorError::new(
                 "Room not found",

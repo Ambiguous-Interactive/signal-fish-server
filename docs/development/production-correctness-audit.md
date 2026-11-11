@@ -16114,3 +16114,24 @@ maintenance leaves the retained row intact and a complete retry succeeds.
 Independent all-feature review passes in
 `b42f2e8d-9b12-400d-87c1-f4c22bc82809`. This is a retained-row component history;
 it does not claim a new first-party socket incident.
+
+F333 publication-boundary control reproduces a separate recovery gap. The
+first-party storage publishes the room, then an adapter loses the reply. Both
+creator deletion and abandonment fail. The original code admits another player
+to that room in Nextest `0a6b4738-b4dc-4995-8df0-e9a0183c2bfd`.
+
+Failed creator rollback now retains a local room-deletion obligation before any
+storage call. Player and spectator admission refuse that room. The existing
+bounded maintenance queue discovers the obligation independently of pending-room
+storage scans, takes the code lock and room lane, and deletes only an empty room
+or one still occupied solely by the failed creator. Other members prevent
+cleanup. Errors and panics retain the obligation for retry. Deletion clears it;
+a replacement room with the same code has a different room ID.
+
+The control crosses abandonment error and panic with maintenance before and
+after durable seat removal. It requires refusal during failed deletion, eventual
+cleanup, and fresh same-code creation. This record is local to the server
+process. It does not establish visibility revocation on another node while a
+storage adapter refuses abandonment, or persistence across process loss. The
+shipped in-memory backend does not emit the injected failure. No wire message
+or SDK requirement changes beyond the linked F332–F334 assessment.

@@ -1,7 +1,9 @@
 use crate::coordination::{CloseReason, RoomEventCompletion, RoomEventMutationGuard};
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
+use futures_util::FutureExt;
 use std::collections::HashSet;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -48,13 +50,20 @@ impl EnhancedGameServer {
 
     /// Discover pending rooms and observe their independently retained deletion jobs.
     async fn cleanup_abandoned_rooms_owned(self: &Arc<Self>) -> usize {
-        let room_ids = match self.database.pending_room_ids().await {
+        let mut room_ids = match self.database.pending_room_ids().await {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::warn!(%error, "Failed to list abandoned rooms for cleanup");
-                return 0;
+                Vec::new()
             }
         };
+        room_ids.extend(
+            self.pending_creation_rollbacks
+                .iter()
+                .map(|entry| *entry.key()),
+        );
+        room_ids.sort_unstable();
+        room_ids.dedup();
         self.abandoned_room_deletion_workers
             .run(
                 room_ids
@@ -75,7 +84,10 @@ impl EnhancedGameServer {
     async fn cleanup_abandoned_room(&self, room_id: RoomId) -> bool {
         let room = match self.database.get_room_by_id(&room_id).await {
             Ok(Some(room)) => room,
-            Ok(None) => return false,
+            Ok(None) => {
+                self.pending_creation_rollbacks.remove(&room_id);
+                return false;
+            }
             Err(error) => {
                 tracing::warn!(%room_id, %error, "Failed to read unpublished room for cleanup");
                 return false;
@@ -92,10 +104,48 @@ impl EnhancedGameServer {
             }
         };
         let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
-        let deleted = match self.database.delete_room_if_pending(&room_id).await {
+        // Follow admission's code-lock -> room-lane order. A failed baseline
+        // may already be published, so pending-only storage scans are not enough.
+        let Some(_room_guard) = self
+            .admit_maintenance(self.message_coordinator.lock_room_event_mutation(&room_id))
+            .await
+        else {
+            self.release_renewed_lock(&mut lock_renewal).await;
+            return false;
+        };
+        let failed_creator = self
+            .pending_creation_rollbacks
+            .get(&room_id)
+            .map(|entry| *entry.value());
+        let deletion = AssertUnwindSafe(async {
+            if let Some(creator) = failed_creator {
+                match self.database.get_room_by_id(&room_id).await? {
+                    None => {
+                        self.pending_creation_rollbacks.remove(&room_id);
+                        return Ok(false);
+                    }
+                    Some(current)
+                        if current.spectators.is_empty()
+                            && (current.players.is_empty()
+                                || (current.players.len() == 1
+                                    && current.players.contains_key(&creator))) =>
+                    {
+                        return self.database.delete_room(&room_id).await;
+                    }
+                    // Never remove another member admitted by an external writer.
+                    Some(_) => return Ok(false),
+                }
+            }
+            self.database.delete_room_if_pending(&room_id).await
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("Abandoned room deletion panicked")));
+        let deleted = match deletion {
             Ok(true) => {
                 self.metrics.add_rooms_deleted(1);
                 self.room_applications.remove(&room_id);
+                self.pending_creation_rollbacks.remove(&room_id);
                 true
             }
             Ok(false) => false,

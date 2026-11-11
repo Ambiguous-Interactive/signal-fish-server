@@ -170,6 +170,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         pending_session_replans: DashMap::new(),
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         pending_authority_releases: Arc::new(DashMap::new()),
+        pending_creation_rollbacks: Arc::clone(&spectator_service.pending_creation_rollbacks),
         moderation_lifecycle_gate: tokio::sync::Mutex::new(()),
         abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
         abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers::default(),
@@ -1265,6 +1266,7 @@ struct DrainAfterCreateDatabase {
     rollback_authority_fault: std::sync::atomic::AtomicU8,
     drain_after_member_add_once: AtomicBool,
     panic_application_rollback_once: AtomicBool,
+    lose_publication_response_once: AtomicBool,
     conforming_pending_creation: bool,
     abandon_fault: std::sync::atomic::AtomicU8,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
@@ -1296,6 +1298,7 @@ impl DrainAfterCreateDatabase {
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
+            lose_publication_response_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
@@ -1334,6 +1337,7 @@ impl DrainAfterCreateDatabase {
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
+            lose_publication_response_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
@@ -1365,6 +1369,7 @@ impl DrainAfterCreateDatabase {
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
+            lose_publication_response_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
@@ -1396,6 +1401,7 @@ impl DrainAfterCreateDatabase {
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
+            lose_publication_response_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
@@ -1427,6 +1433,7 @@ impl DrainAfterCreateDatabase {
             rollback_authority_fault: std::sync::atomic::AtomicU8::new(0),
             drain_after_member_add_once: AtomicBool::new(false),
             panic_application_rollback_once: AtomicBool::new(false),
+            lose_publication_response_once: AtomicBool::new(false),
             conforming_pending_creation: false,
             abandon_fault: std::sync::atomic::AtomicU8::new(0),
             server: StdMutex::new(None),
@@ -1601,7 +1608,14 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 
     async fn publish_room(&self, room_id: &RoomId) -> anyhow::Result<()> {
-        self.inner.publish_room(room_id).await
+        self.inner.publish_room(room_id).await?;
+        if self
+            .lose_publication_response_once
+            .swap(false, Ordering::AcqRel)
+        {
+            anyhow::bail!("injected lost publication response after commit");
+        }
+        Ok(())
     }
 
     async fn abandon_room(&self, room_id: &RoomId, creator_id: &PlayerId) -> anyhow::Result<()> {
@@ -1869,7 +1883,8 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn delete_room(&self, room_id: &RoomId) -> anyhow::Result<bool> {
         assert!(
-            !self.panic_rollback_once.swap(false, Ordering::AcqRel),
+            !self.panic_rollback_once.swap(false, Ordering::AcqRel)
+                && !self.panic_rollback_always.load(Ordering::Acquire),
             "injected creation rollback panic"
         );
         self.inner.delete_room(room_id).await
@@ -17548,4 +17563,195 @@ async fn reconnect_role_rollback_panic_preserves_a_retained_membership() {
             .await,
         "the retained seat remains available to its reconnecting member"
     );
+}
+
+/// Publication can commit before its storage response is lost.
+#[tokio::test(start_paused = true)]
+async fn committed_creation_with_failed_rollback_stays_closed_to_new_joiners() {
+    for abandonment_fault in [1, 2] {
+        for detach_first in [false, true] {
+            assert_failed_published_creation_repair(abandonment_fault, detach_first).await;
+        }
+    }
+}
+
+async fn assert_failed_published_creation_repair(abandonment_fault: u8, detach_first: bool) {
+    let mut wrapper = DrainAfterCreateDatabase::new(create_test_database().await);
+    wrapper.trigger_drain_after_create = false;
+    wrapper.conforming_pending_creation = true;
+    let database = Arc::new(wrapper);
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48418".parse().unwrap()).await;
+    server.script_room_codes_for_test(["PUBERR"]);
+    database
+        .lose_publication_response_once
+        .store(true, Ordering::Release);
+    database
+        .panic_rollback_always
+        .store(true, Ordering::Release);
+    database
+        .abandon_fault
+        .store(abandonment_fault, Ordering::Release);
+    server
+        .handle_join_room(
+            &creator,
+            "committed-create".into(),
+            None,
+            "creator".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(server.get_client_room(&creator).await, None);
+    assert!(!drain_queued_messages(&mut creator_rx)
+        .iter()
+        .any(|m| matches!(m.as_ref(), ServerMessage::RoomJoined(_))));
+    assert_eq!(database.abandon_fault.load(Ordering::Acquire), 0);
+    let (other, mut other_rx) = register_client(&server, "127.0.0.1:48419".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &other,
+            "committed-create".into(),
+            Some("PUBERR".into()),
+            "other".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            Some(true),
+        )
+        .await;
+    let messages = drain_queued_messages(&mut other_rx);
+    assert!(
+        matches!(messages.as_slice(), [message] if matches!(message.as_ref(),
+            ServerMessage::RoomJoinFailed { error_code: Some(ErrorCode::RoomNotFound), .. })),
+        "an unresolved published creation must not admit another player: {messages:?}"
+    );
+    assert_eq!(server.get_client_room(&other).await, None);
+    server
+        .handle_join_as_spectator(
+            &other,
+            "committed-create".into(),
+            "PUBERR".into(),
+            "watcher".into(),
+            None,
+        )
+        .await;
+    let spectator_reply = drain_queued_messages(&mut other_rx);
+    assert!(
+        matches!(spectator_reply.as_slice(), [message] if matches!(message.as_ref(),
+        ServerMessage::SpectatorJoinFailed { error_code: Some(ErrorCode::RoomNotFound), .. })),
+        "failed creator rooms also refuse spectator admission: {spectator_reply:?}"
+    );
+    let room_id = database
+        .get_room_id("committed-create", "PUBERR")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        database.is_room_published(&room_id).await.unwrap(),
+        "the storage publication committed before its response was lost"
+    );
+    assert!(
+        database.pending_room_ids().await.unwrap().is_empty(),
+        "storage alone cannot discover this published residue"
+    );
+    assert_eq!(
+        server
+            .pending_creation_rollbacks
+            .get(&room_id)
+            .map(|entry| *entry.value()),
+        Some(creator)
+    );
+    if detach_first {
+        database
+            .panic_rollback_always
+            .store(false, Ordering::Release);
+        assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+        assert!(database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .players
+            .is_empty());
+        database
+            .panic_rollback_always
+            .store(true, Ordering::Release);
+    }
+    // A further deletion panic must preserve discovery and admission refusal.
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(server.pending_creation_rollbacks.contains_key(&room_id));
+    database
+        .panic_rollback_always
+        .store(false, Ordering::Release);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert!(!server.pending_creation_rollbacks.contains_key(&room_id));
+    assert!(database.get_room_by_id(&room_id).await.unwrap().is_none());
+    server.cleanup_pending_durable_player_detaches().await;
+    server
+        .handle_join_room(
+            &creator,
+            "committed-create".into(),
+            Some("PUBERR".into()),
+            "creator".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let retry = drain_queued_messages(&mut creator_rx);
+    let replacement_id = retry
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::RoomJoined(payload) => Some(payload.room_id),
+            _ => None,
+        })
+        .expect("same-code creation retries successfully after cleanup");
+    assert_ne!(room_id, replacement_id);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(database.is_room_published(&replacement_id).await.unwrap());
+    server
+        .handle_join_room(
+            &other,
+            "committed-create".into(),
+            Some("PUBERR".into()),
+            "other".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            Some(true),
+        )
+        .await;
+    assert!(drain_queued_messages(&mut other_rx).iter().any(|message|
+        matches!(message.as_ref(), ServerMessage::RoomJoined(payload) if payload.room_id == replacement_id)));
+    // A retained obligation must never delete another admitted member's room.
+    server
+        .pending_creation_rollbacks
+        .insert(replacement_id, creator);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert_eq!(
+        database
+            .get_room_by_id(&replacement_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .players
+            .len(),
+        2
+    );
+    server.pending_creation_rollbacks.remove(&replacement_id);
 }
