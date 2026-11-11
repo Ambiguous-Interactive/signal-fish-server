@@ -15924,3 +15924,26 @@ and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-god
 The assessment covers close handling without advisory messages, delayed host
 plans, and closure after a delivered reconnect baseline. These source repairs
 do not complete the broader audit or prove the SDK controls.
+
+PR #1589 review added a consecutive-departure control. Failed maintenance
+retains host recovery; a later departure replaces the pending obligation;
+maintenance then elects the actual remaining member and clears the current
+obligation. The original single-departure case remains covered. Both pass in
+Nextest `f2ba9b41-11be-4988-8034-12a494b6906d`.
+
+The initial hosted Nextest run at `41f5a44a` passed 2,357 tests before the
+mutation-inventory guard found 568 sites against the previous 567-site pin.
+The measured inventory and its comment now match. All nine mutation guards
+pass locally. The unchanged 57-shard budget remains 290 seconds per shard.
+
+The review also identified publication-stage retries after a committed opening.
+A shared per-attempt tracker now records opening and authority commits inside
+both normal and fallback hooks. Recovery resumes only unfinished stages and
+announces authority only when that attempt restored it. The tracker reuses the
+existing accounting allocation. Both committed-source controls fail in Nextest
+`fbeb4f06-b61d-4fec-b087-a97db7ba0fca`; all 35 final reconnect controls pass in
+`edcbae23-ada1-4ce4-a73a-dba48a78b569`. An earlier actor-only test baseline
+never triggered its exact-publication fault and is excluded from evidence.
+The corrected baseline includes the incumbent and requires each fault latch
+to be consumed. Independent review approves these repairs and the consecutive
+departure control.

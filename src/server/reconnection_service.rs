@@ -119,6 +119,13 @@ struct ReconnectRestoreState {
     cleared_pending_detach: Option<Option<PendingApplicationClaimRollback>>,
 }
 
+#[derive(Default)]
+struct ReconnectPublicationProgress {
+    opening_committed: std::sync::atomic::AtomicBool,
+    opening_accounted: std::sync::atomic::AtomicBool,
+    authority_committed: std::sync::atomic::AtomicBool,
+}
+
 #[derive(Clone, Default)]
 struct ReconnectPanicRecovery {
     claim: Option<Arc<ClaimedReconnection>>,
@@ -127,6 +134,7 @@ struct ReconnectPanicRecovery {
     room_event_guard: Option<RoomEventMutationGuard>,
     room: Option<Arc<crate::protocol::Room>>,
     was_authority: bool,
+    publication_progress: Arc<ReconnectPublicationProgress>,
 }
 
 impl ReconnectionClaimGuard {
@@ -229,7 +237,8 @@ impl EnhancedGameServer {
                 room_id,
                 reconnect_player_id,
                 notification,
-                recovery.was_authority,
+                recovery.restore.restored_authority,
+                &recovery.publication_progress,
             )
             .await
         {
@@ -303,49 +312,65 @@ impl EnhancedGameServer {
         reconnect_player_id: PlayerId,
         notification: Arc<ServerMessage>,
         restored_authority: bool,
+        progress: &Arc<ReconnectPublicationProgress>,
     ) -> anyhow::Result<bool> {
-        let lifecycle_committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let lifecycle_committed_in_hook = Arc::clone(&lifecycle_committed);
-        let replay_notification = Arc::clone(&notification);
-        let (_drain_owner, drain) = tokio::sync::watch::channel(false);
-        let should_send = || true;
-        let _ = self
-            .message_coordinator
-            .broadcast_to_room_except_if_with_hook(
-                &room_id,
-                &reconnect_player_id,
-                notification,
-                &should_send,
-                drain,
-                Box::new(move || {
-                    Box::pin(async move {
-                        self.commit_reconnect_publication_state(
-                            room_id,
-                            replay_notification,
-                            None,
-                            false,
-                            false,
-                            0,
-                        )
-                        .await;
-                        lifecycle_committed_in_hook
-                            .store(true, std::sync::atomic::Ordering::Release);
-                    })
-                }),
-            )
-            .await?;
-        if restored_authority {
-            self.publish_reconnect_authority_change(room_id, reconnect_player_id)
+        if !progress
+            .opening_committed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let progress_in_hook = Arc::clone(progress);
+            let replay_notification = Arc::clone(&notification);
+            let (_drain_owner, drain) = tokio::sync::watch::channel(false);
+            let should_send = || true;
+            let _ = self
+                .message_coordinator
+                .broadcast_to_room_except_if_with_hook(
+                    &room_id,
+                    &reconnect_player_id,
+                    notification,
+                    &should_send,
+                    drain,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            self.commit_reconnect_publication_state(
+                                room_id,
+                                replay_notification,
+                                None,
+                                false,
+                                false,
+                                0,
+                            )
+                            .await;
+                            progress_in_hook
+                                .opening_committed
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        })
+                    }),
+                )
                 .await?;
         }
-        Ok(lifecycle_committed.load(std::sync::atomic::Ordering::Acquire))
+        if restored_authority {
+            self.publish_reconnect_authority_change(room_id, reconnect_player_id, progress)
+                .await?;
+        }
+        Ok(progress
+            .opening_committed
+            .load(std::sync::atomic::Ordering::Acquire))
     }
 
     async fn publish_reconnect_authority_change(
         &self,
         room_id: RoomId,
         authority_player: PlayerId,
+        progress: &Arc<ReconnectPublicationProgress>,
     ) -> anyhow::Result<bool> {
+        if progress
+            .authority_committed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(true);
+        }
+        let progress = Arc::clone(progress);
         let notification = Arc::new(ServerMessage::AuthorityChanged {
             authority_player: Some(authority_player),
             you_are_authority: false,
@@ -363,6 +388,9 @@ impl EnhancedGameServer {
                                 .record_room_event(&room_id, replay_notification.as_ref())
                                 .await;
                         }
+                        progress
+                            .authority_committed
+                            .store(true, std::sync::atomic::Ordering::Release);
                     })
                 }),
             )
@@ -782,9 +810,14 @@ impl EnhancedGameServer {
         let terminal_response_committed_in_task = Arc::clone(&terminal_response_committed);
         let lifecycle_finalized = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let lifecycle_finalized_in_task = Arc::clone(&lifecycle_finalized);
-        let opening_accounted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let opening_accounted_in_task = Arc::clone(&opening_accounted);
         let panic_recovery = Arc::new(std::sync::Mutex::new(ReconnectPanicRecovery::default()));
+        let publication_progress = Arc::clone(
+            &panic_recovery
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .publication_progress,
+        );
+        let publication_progress_in_task = Arc::clone(&publication_progress);
         let panic_recovery_in_task = Arc::clone(&panic_recovery);
         let task = tokio::spawn(async move {
             let Some(lifecycle) = source_lifecycle.or_else(|| {
@@ -811,7 +844,7 @@ impl EnhancedGameServer {
                 operation_id,
                 terminal_response_committed_in_task,
                 lifecycle_finalized_in_task,
-                opening_accounted_in_task,
+                publication_progress_in_task,
                 panic_recovery_in_task,
             ))
             .catch_unwind()
@@ -837,7 +870,8 @@ impl EnhancedGameServer {
                                 (&server.reconnection_manager, recovery.claim.as_ref())
                             {
                                 let _ = manager.complete_claimed_reconnection(claim).await;
-                                if !opening_accounted
+                                if !publication_progress
+                                    .opening_accounted
                                     .swap(true, std::sync::atomic::Ordering::AcqRel)
                                 {
                                     server.metrics.increment_players_joined();
@@ -926,7 +960,8 @@ impl EnhancedGameServer {
                                     .load(std::sync::atomic::Ordering::Acquire)
                                 {
                                     let _ = manager.complete_claimed_reconnection(claim).await;
-                                    if !opening_accounted
+                                    if !publication_progress
+                                        .opening_accounted
                                         .swap(true, std::sync::atomic::Ordering::AcqRel)
                                     {
                                         server.metrics.increment_players_joined();
@@ -982,7 +1017,7 @@ impl EnhancedGameServer {
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<std::sync::atomic::AtomicBool>,
         lifecycle_finalized: Arc<std::sync::atomic::AtomicBool>,
-        opening_accounted: Arc<std::sync::atomic::AtomicBool>,
+        publication_progress: Arc<ReconnectPublicationProgress>,
         panic_recovery: Arc<std::sync::Mutex<ReconnectPanicRecovery>>,
     ) -> bool {
         #[cfg(test)]
@@ -2052,6 +2087,7 @@ impl EnhancedGameServer {
                     *reconnect_player_id,
                     Arc::clone(&notification),
                     restored_authority,
+                    &publication_progress,
                 )
                 .await
             {
@@ -2089,6 +2125,7 @@ impl EnhancedGameServer {
                     *reconnect_player_id,
                     Arc::clone(&notification),
                     restored_authority,
+                    &publication_progress,
                 )
                 .await
             {
@@ -2147,6 +2184,7 @@ impl EnhancedGameServer {
                     *reconnect_player_id,
                     Arc::clone(&notification),
                     restored_authority,
+                    &publication_progress,
                 )
                 .await
             {
@@ -2155,6 +2193,7 @@ impl EnhancedGameServer {
             drop(fallback_guard);
             return true;
         };
+        let progress_for_publication = Arc::clone(&publication_progress);
         let completion = self.message_coordinator.enqueue_room_event(
             lifecycle_guard,
             Box::new(move || {
@@ -2242,6 +2281,7 @@ impl EnhancedGameServer {
                                     reconnect_player_for_publication,
                                     Arc::clone(&notification),
                                     restored_authority,
+                                    &progress_for_publication,
                                 )
                                 .await;
                         }
@@ -2249,6 +2289,7 @@ impl EnhancedGameServer {
                         let is_replan = resolved.is_replan;
                         let replay_notification = Arc::clone(&notification);
                         let server_for_hook = Arc::clone(&server_for_publication);
+                        let progress_for_hook = Arc::clone(&progress_for_publication);
                         let outcome = match server_for_publication
                             .message_coordinator
                             .commit_room_messages_if_members_with_hook(
@@ -2268,6 +2309,7 @@ impl EnhancedGameServer {
                                                 turn_credentials_issued,
                                             )
                                             .await;
+                                        progress_for_hook.opening_committed.store(true, std::sync::atomic::Ordering::Release);
                                         Ok(true)
                                     })
                                 }),
@@ -2304,6 +2346,7 @@ impl EnhancedGameServer {
                                         reconnect_player_for_publication,
                                         Arc::clone(&notification),
                                         restored_authority,
+                                        &progress_for_publication,
                                     )
                                     .await;
                             }
@@ -2315,6 +2358,7 @@ impl EnhancedGameServer {
                                         .publish_reconnect_authority_change(
                                             room_id_for_publication,
                                             reconnect_player_for_publication,
+                                            &progress_for_publication,
                                         )
                                         .await?;
                                 }
@@ -2331,6 +2375,7 @@ impl EnhancedGameServer {
                                         .publish_reconnect_authority_change(
                                             room_id_for_publication,
                                             reconnect_player_for_publication,
+                                            &progress_for_publication,
                                         )
                                         .await?;
                                 }
@@ -2355,6 +2400,7 @@ impl EnhancedGameServer {
                                         reconnect_player_for_publication,
                                         Arc::clone(&notification),
                                         restored_authority,
+                                        &progress_for_publication,
                                     )
                                     .await;
                             }
@@ -2444,6 +2490,7 @@ impl EnhancedGameServer {
                                     reconnect_player_for_publication,
                                     Arc::clone(&notification),
                                     restored_authority,
+                                    &progress_for_publication,
                                 )
                                 .await;
                         }
@@ -2477,7 +2524,10 @@ impl EnhancedGameServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .room_event_guard
             .take();
-        if !opening_accounted.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if !publication_progress
+            .opening_accounted
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
             self.metrics.increment_players_joined();
         }
         lifecycle_finalized.store(true, std::sync::atomic::Ordering::Release);

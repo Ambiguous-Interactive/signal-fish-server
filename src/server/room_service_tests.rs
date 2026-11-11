@@ -1901,6 +1901,10 @@ struct DrainTriggerCoordinator {
     fail_next_room_event_completion: AtomicBool,
     fail_snapshot_after_next_join: AtomicBool,
     panic_alias_unregister: StdMutex<Option<(PlayerId, usize)>>,
+    panic_reconnect_opening_after_delivery: AtomicBool,
+    panic_reconnect_exact_after_delivery: AtomicBool,
+    panic_reconnect_authority_after_delivery: AtomicBool,
+    panic_reconnect_authority_before_commit: AtomicBool,
     panic_room_exists_after_next_join: StdMutex<Option<Arc<DrainAfterCreateDatabase>>>,
     room_event_guard_released: Arc<Notify>,
     resume_failed_room_event: Arc<Notify>,
@@ -1927,6 +1931,10 @@ impl DrainTriggerCoordinator {
             fail_next_room_event_completion: AtomicBool::new(false),
             fail_snapshot_after_next_join: AtomicBool::new(false),
             panic_alias_unregister: StdMutex::new(None),
+            panic_reconnect_opening_after_delivery: AtomicBool::new(false),
+            panic_reconnect_exact_after_delivery: AtomicBool::new(false),
+            panic_reconnect_authority_after_delivery: AtomicBool::new(false),
+            panic_reconnect_authority_before_commit: AtomicBool::new(false),
             panic_room_exists_after_next_join: StdMutex::new(None),
             room_event_guard_released: Arc::new(Notify::new()),
             resume_failed_room_event: Arc::new(Notify::new()),
@@ -2131,6 +2139,13 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         for handle in self.recipients_for(room_id, Some(except_player)).await {
             let _ = handle.sender.try_send(Arc::clone(&message), None);
         }
+        assert!(
+            !(matches!(message.as_ref(), ServerMessage::PlayerReconnected { .. })
+                && self
+                    .panic_reconnect_opening_after_delivery
+                    .swap(false, Ordering::AcqRel)),
+            "injected panic after reconnect opening delivery"
+        );
         Ok(true)
     }
 
@@ -2151,6 +2166,12 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         if !before_send().await? {
             return Ok(crate::coordination::RoomMessageTransactionOutcome::HookRejected);
         }
+        let reconnect_publication = recipient_messages.iter().any(|batch| {
+            batch
+                .messages
+                .iter()
+                .any(|message| matches!(message.as_ref(), ServerMessage::PlayerReconnected { .. }))
+        });
         let max_phases = recipient_messages
             .iter()
             .map(crate::coordination::RoomRecipientMessages::phase_count)
@@ -2171,6 +2192,13 @@ impl MessageCoordinator for DrainTriggerCoordinator {
                 break;
             }
         }
+        assert!(
+            !(reconnect_publication
+                && self
+                    .panic_reconnect_exact_after_delivery
+                    .swap(false, Ordering::AcqRel)),
+            "injected panic after exact reconnect delivery"
+        );
         Ok(crate::coordination::RoomMessageTransactionOutcome::Committed)
     }
 
@@ -2220,8 +2248,29 @@ impl MessageCoordinator for DrainTriggerCoordinator {
             self.transfer_announcement_started.notify_one();
             self.resume_transfer_announcement.notified().await;
         }
+        let authority_grant = matches!(
+            message.as_ref(),
+            ServerMessage::AuthorityChanged {
+                authority_player: Some(_),
+                ..
+            }
+        );
+        assert!(
+            !(authority_grant
+                && self
+                    .panic_reconnect_authority_before_commit
+                    .swap(false, Ordering::AcqRel)),
+            "injected panic before reconnect authority commit"
+        );
         before_send().await;
         self.broadcast_to_room(room_id, message).await?;
+        assert!(
+            !(authority_grant
+                && self
+                    .panic_reconnect_authority_after_delivery
+                    .swap(false, Ordering::AcqRel)),
+            "injected panic after reconnect authority delivery"
+        );
         Ok(true)
     }
 
@@ -2298,7 +2347,18 @@ impl MessageCoordinator for DrainTriggerCoordinator {
     ) -> anyhow::Result<DeliveryOutcome> {
         // This test coordinator does not model concurrent routing. It does
         // model the drain/commit boundary needed by created-room joins.
-        let message = build_message(vec![player_id]).await?;
+        let mut routed: Vec<_> = self
+            .room_players
+            .read()
+            .await
+            .get(&room_id)
+            .into_iter()
+            .flat_map(|players| players.iter().copied())
+            .collect();
+        if !routed.contains(&player_id) {
+            routed.push(player_id);
+        }
+        let message = build_message(routed).await?;
         let outcome = {
             let _commit_guard = commit_gate
                 .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
@@ -15319,26 +15379,61 @@ async fn deleted_room_closes_peers_while_farewell_routes_wait() {
 #[cfg_attr(miri, ignore)]
 async fn reconnect_supervisor_failure_closes_the_unpublished_webrtc_generation() {
     for registration_panics in [false, true] {
-        reconnect_recovery_history(true, false, registration_panics, 0).await;
+        reconnect_recovery_history(true, false, registration_panics, 0, None).await;
     }
 }
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_publication_recovery_ignores_failed_room_reads() {
-    reconnect_recovery_history(false, true, false, 0).await;
+    reconnect_recovery_history(false, true, false, 0, None).await;
 }
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_snapshot_registration_panic_preserves_one_opening() {
-    reconnect_recovery_history(false, false, true, 0).await;
+    reconnect_recovery_history(false, false, true, 0, None).await;
 }
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_alias_cleanup_panic_preserves_opening_before_departure() {
-    reconnect_recovery_history(false, false, false, 2).await;
+    reconnect_recovery_history(false, false, false, 2, None).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReconnectPublicationPanic {
+    Opening,
+    Authority,
+    AuthorityBeforeCommit,
+    Exact,
+    RetainedAuthority,
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_publication_panic_resumes_only_uncommitted_stages() {
+    for phase in [
+        ReconnectPublicationPanic::Opening,
+        ReconnectPublicationPanic::Authority,
+        ReconnectPublicationPanic::AuthorityBeforeCommit,
+        ReconnectPublicationPanic::Exact,
+    ] {
+        reconnect_recovery_history(false, false, false, 0, Some(phase)).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_recovery_does_not_regrant_retained_authority() {
+    reconnect_recovery_history(
+        false,
+        false,
+        false,
+        0,
+        Some(ReconnectPublicationPanic::RetainedAuthority),
+    )
+    .await;
 }
 
 async fn reconnect_recovery_history(
@@ -15346,6 +15441,7 @@ async fn reconnect_recovery_history(
     snapshot_fails: bool,
     registration_panics: bool,
     alias_panic_count: usize,
+    publication_panic: Option<ReconnectPublicationPanic>,
 ) {
     use crate::protocol::{Topology, Transport};
     let mut database = DrainAfterCreateDatabase::new(create_test_database().await);
@@ -15354,7 +15450,7 @@ async fn reconnect_recovery_history(
     let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting));
     let live_coordinator = Arc::new(InMemoryMessageCoordinator::new());
     let (message_coordinator, storage): (Arc<dyn MessageCoordinator>, Arc<dyn GameDatabase>) =
-        if snapshot_fails || alias_panic_count > 0 {
+        if snapshot_fails || alias_panic_count > 0 || publication_panic.is_some() {
             (coordinator.clone(), database.inner.clone())
         } else {
             (live_coordinator.clone(), database.clone())
@@ -15407,9 +15503,77 @@ async fn reconnect_recovery_history(
     }
     assert!(saw_initial_plan);
     let operation_id = uuid::Uuid::from_u128(0x48202);
-    fixture
-        .server
-        .panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::ReconnectAfterTerminal);
+    if publication_panic != Some(ReconnectPublicationPanic::Exact) {
+        fixture.server.panic_owned_room_operation_for_test(
+            OwnedRoomOperationPanicPoint::ReconnectAfterTerminal,
+        );
+    }
+    coordinator.panic_reconnect_opening_after_delivery.store(
+        publication_panic == Some(ReconnectPublicationPanic::Opening),
+        Ordering::Release,
+    );
+    coordinator.panic_reconnect_exact_after_delivery.store(
+        publication_panic == Some(ReconnectPublicationPanic::Exact),
+        Ordering::Release,
+    );
+    coordinator.panic_reconnect_authority_after_delivery.store(
+        publication_panic == Some(ReconnectPublicationPanic::Authority),
+        Ordering::Release,
+    );
+    coordinator.panic_reconnect_authority_before_commit.store(
+        publication_panic == Some(ReconnectPublicationPanic::AuthorityBeforeCommit),
+        Ordering::Release,
+    );
+    if matches!(
+        publication_panic,
+        Some(
+            ReconnectPublicationPanic::Authority
+                | ReconnectPublicationPanic::AuthorityBeforeCommit
+                | ReconnectPublicationPanic::RetainedAuthority
+        )
+    ) {
+        let manager = fixture.server.reconnection_manager().unwrap();
+        let claim = manager
+            .claim_reconnection(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await
+            .unwrap();
+        let disconnected = claim.disconnected.clone();
+        manager.release_reconnection_claim(&claim).await;
+        assert!(
+            manager
+                .discard_pending_reconnection(&fixture.reconnect_player_id)
+                .await
+        );
+        if publication_panic == Some(ReconnectPublicationPanic::RetainedAuthority) {
+            fixture
+                .server
+                .database
+                .add_player_to_room(&fixture.room_id, disconnected.player_info.clone().unwrap())
+                .await
+                .unwrap();
+            assert!(fixture
+                .server
+                .database
+                .request_room_authority(&fixture.room_id, &fixture.reconnect_player_id, true)
+                .await
+                .unwrap()
+                .granted());
+        }
+        fixture.token = manager
+            .register_disconnection(
+                fixture.reconnect_player_id,
+                fixture.room_id,
+                true,
+                disconnected.player_info,
+                disconnected.last_epoch,
+            )
+            .await;
+    }
     if supervisor_panics {
         fixture.server.panic_owned_room_supervisor_for_test();
     }
@@ -15439,7 +15603,7 @@ async fn reconnect_recovery_history(
             Some(operation_id),
         )
         .await;
-    if !registration_panics && alias_panic_count == 0 {
+    if !registration_panics && alias_panic_count == 0 && publication_panic.is_none() {
         assert_eq!(reconnected, !supervisor_panics);
     }
     let result = expect_correlated_terminal_operation_result(
@@ -15448,10 +15612,16 @@ async fn reconnect_recovery_history(
         "reconnect supervisor failure",
     )
     .await;
-    assert!(matches!(
-        result.as_ref(),
-        crate::protocol::RoomOperationResult::Reconnected(_)
-    ));
+    let crate::protocol::RoomOperationResult::Reconnected(payload) = result.as_ref() else {
+        panic!("expected delivered reconnect baseline");
+    };
+    assert!(
+        payload
+            .current_players
+            .iter()
+            .any(|member| member.id == peer),
+        "the reconnect baseline must retain the incumbent"
+    );
     timeout(Duration::from_secs(1), async {
         while fixture
             .server
@@ -15465,6 +15635,7 @@ async fn reconnect_recovery_history(
     .expect("the partially published reconnect must close without maintenance");
     let mut saw_opening = false;
     let mut saw_departure = false;
+    let mut authority_grants = 0;
     loop {
         let message = match fixture.peer_receiver.try_recv() {
             Ok(message) => message,
@@ -15490,17 +15661,47 @@ async fn reconnect_recovery_history(
                 assert!(!saw_departure, "recovery publishes one departure");
                 saw_departure = true;
             }
+            ServerMessage::AuthorityChanged {
+                authority_player: Some(player),
+                ..
+            } if *player == fixture.reconnect_player_id => {
+                assert!(saw_opening && !saw_departure);
+                authority_grants += 1;
+            }
             ServerMessage::SessionPlan(plan) => assert!(
-                !plan
-                    .peers
-                    .iter()
-                    .any(|member| member.player_id == fixture.reconnect_player_id),
+                (publication_panic == Some(ReconnectPublicationPanic::Exact) && !saw_departure)
+                    || !plan
+                        .peers
+                        .iter()
+                        .any(|member| member.player_id == fixture.reconnect_player_id),
                 "no plan may retain the failed generation"
             ),
             _ => {}
         }
     }
     assert!(saw_opening && saw_departure);
+    assert_eq!(
+        authority_grants,
+        usize::from(matches!(
+            publication_panic,
+            Some(
+                ReconnectPublicationPanic::Authority
+                    | ReconnectPublicationPanic::AuthorityBeforeCommit
+            )
+        ))
+    );
+    assert!(!coordinator
+        .panic_reconnect_opening_after_delivery
+        .load(Ordering::Acquire));
+    assert!(!coordinator
+        .panic_reconnect_exact_after_delivery
+        .load(Ordering::Acquire));
+    assert!(!coordinator
+        .panic_reconnect_authority_after_delivery
+        .load(Ordering::Acquire));
+    assert!(!coordinator
+        .panic_reconnect_authority_before_commit
+        .load(Ordering::Acquire));
     if alias_panic_count > 0 {
         assert_eq!(
             coordinator
@@ -15514,7 +15715,7 @@ async fn reconnect_recovery_history(
             "recovery must isolate the first committed alias-removal panic"
         );
     }
-    if snapshot_fails || alias_panic_count > 0 {
+    if snapshot_fails || alias_panic_count > 0 || publication_panic.is_some() {
         let routes = coordinator.clients.read().await;
         assert!(!routes.contains_key(&fixture.current_player_id));
         assert!(!routes.contains_key(&fixture.reconnect_player_id));
