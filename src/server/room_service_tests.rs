@@ -169,6 +169,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         active_session_plans: Arc::new(DashMap::new()),
         pending_session_replans: DashMap::new(),
         pending_durable_player_detaches: Arc::new(DashMap::new()),
+        pending_authority_releases: Arc::new(DashMap::new()),
         moderation_lifecycle_gate: tokio::sync::Mutex::new(()),
         abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
         abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers::default(),
@@ -1259,6 +1260,9 @@ struct DrainAfterCreateDatabase {
     track_sessions: bool,
     fail_room_lookup: bool,
     panic_room_exists_once: AtomicBool,
+    panic_rollback_once: AtomicBool,
+    panic_rollback_always: AtomicBool,
+    panic_application_rollback_once: AtomicBool,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
     trigger_drain_after_create: bool,
@@ -1283,6 +1287,9 @@ impl DrainAfterCreateDatabase {
             track_sessions: false,
             fail_room_lookup: false,
             panic_room_exists_once: AtomicBool::new(false),
+            panic_rollback_once: AtomicBool::new(false),
+            panic_rollback_always: AtomicBool::new(false),
+            panic_application_rollback_once: AtomicBool::new(false),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: true,
@@ -1314,6 +1321,9 @@ impl DrainAfterCreateDatabase {
             track_sessions: false,
             fail_room_lookup: false,
             panic_room_exists_once: AtomicBool::new(false),
+            panic_rollback_once: AtomicBool::new(false),
+            panic_rollback_always: AtomicBool::new(false),
+            panic_application_rollback_once: AtomicBool::new(false),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1338,6 +1348,9 @@ impl DrainAfterCreateDatabase {
             track_sessions: false,
             fail_room_lookup: false,
             panic_room_exists_once: AtomicBool::new(false),
+            panic_rollback_once: AtomicBool::new(false),
+            panic_rollback_always: AtomicBool::new(false),
+            panic_application_rollback_once: AtomicBool::new(false),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1362,6 +1375,9 @@ impl DrainAfterCreateDatabase {
             track_sessions: false,
             fail_room_lookup: false,
             panic_room_exists_once: AtomicBool::new(false),
+            panic_rollback_once: AtomicBool::new(false),
+            panic_rollback_always: AtomicBool::new(false),
+            panic_application_rollback_once: AtomicBool::new(false),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1386,6 +1402,9 @@ impl DrainAfterCreateDatabase {
             track_sessions: false,
             fail_room_lookup: false,
             panic_room_exists_once: AtomicBool::new(false),
+            panic_rollback_once: AtomicBool::new(false),
+            panic_rollback_always: AtomicBool::new(false),
+            panic_application_rollback_once: AtomicBool::new(false),
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1605,6 +1624,12 @@ impl GameDatabase for DrainAfterCreateDatabase {
         room_id: &RoomId,
         application_id: uuid::Uuid,
     ) -> anyhow::Result<bool> {
+        assert!(
+            !self
+                .panic_application_rollback_once
+                .swap(false, Ordering::AcqRel),
+            "injected application rollback panic"
+        );
         self.inner
             .clear_room_application_id_if_matches(room_id, application_id)
             .await
@@ -1652,6 +1677,11 @@ impl GameDatabase for DrainAfterCreateDatabase {
         room_id: &RoomId,
         player_id: &PlayerId,
     ) -> anyhow::Result<Option<PlayerInfo>> {
+        assert!(
+            !self.panic_rollback_once.swap(false, Ordering::AcqRel)
+                && !self.panic_rollback_always.load(Ordering::Acquire),
+            "injected admission rollback panic"
+        );
         self.inner.remove_player_from_room(room_id, player_id).await
     }
 
@@ -1749,6 +1779,10 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 
     async fn delete_room(&self, room_id: &RoomId) -> anyhow::Result<bool> {
+        assert!(
+            !self.panic_rollback_once.swap(false, Ordering::AcqRel),
+            "injected creation rollback panic"
+        );
         self.inner.delete_room(room_id).await
     }
 
@@ -1905,6 +1939,8 @@ struct DrainTriggerCoordinator {
     panic_reconnect_exact_after_delivery: AtomicBool,
     panic_reconnect_authority_after_delivery: AtomicBool,
     panic_reconnect_authority_before_commit: AtomicBool,
+    panic_authority_release_after_delivery: AtomicBool,
+    fail_authority_release_publication: AtomicBool,
     panic_room_exists_after_next_join: StdMutex<Option<Arc<DrainAfterCreateDatabase>>>,
     room_event_guard_released: Arc<Notify>,
     resume_failed_room_event: Arc<Notify>,
@@ -1935,6 +1971,8 @@ impl DrainTriggerCoordinator {
             panic_reconnect_exact_after_delivery: AtomicBool::new(false),
             panic_reconnect_authority_after_delivery: AtomicBool::new(false),
             panic_reconnect_authority_before_commit: AtomicBool::new(false),
+            panic_authority_release_after_delivery: AtomicBool::new(false),
+            fail_authority_release_publication: AtomicBool::new(false),
             panic_room_exists_after_next_join: StdMutex::new(None),
             room_event_guard_released: Arc::new(Notify::new()),
             resume_failed_room_event: Arc::new(Notify::new()),
@@ -2106,6 +2144,19 @@ impl MessageCoordinator for DrainTriggerCoordinator {
                 + 'a,
         >,
     ) -> anyhow::Result<bool> {
+        if self
+            .fail_authority_release_publication
+            .load(Ordering::Acquire)
+            && matches!(
+                message.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                }
+            )
+        {
+            anyhow::bail!("injected repeated authority release failure");
+        }
         if self.trigger == DrainTrigger::AuthorityBroadcastFailure
             && matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. })
             && !self.triggered.swap(true, Ordering::AcqRel)
@@ -2139,6 +2190,18 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         for handle in self.recipients_for(room_id, Some(except_player)).await {
             let _ = handle.sender.try_send(Arc::clone(&message), None);
         }
+        assert!(
+            !(matches!(
+                message.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                }
+            ) && self
+                .panic_authority_release_after_delivery
+                .swap(false, Ordering::AcqRel)),
+            "injected panic after authority release delivery"
+        );
         assert!(
             !(matches!(message.as_ref(), ServerMessage::PlayerReconnected { .. })
                 && self
@@ -2827,12 +2890,22 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
 async fn setup_joined_pair_with_reconnection_and_config(
     mutate_config: impl FnOnce(&mut ServerConfig),
 ) -> JoinedPairFixture {
+    setup_joined_pair_with_reconnection_config_and_coordinator(
+        mutate_config,
+        Arc::new(InMemoryMessageCoordinator::new()),
+    )
+    .await
+}
+
+async fn setup_joined_pair_with_reconnection_config_and_coordinator(
+    mutate_config: impl FnOnce(&mut ServerConfig),
+    coordinator: Arc<dyn MessageCoordinator>,
+) -> JoinedPairFixture {
     let database = Arc::new(InMemoryDatabase::new());
     database
         .initialize()
         .await
         .expect("initialize lifecycle test database");
-    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
     let server_database: Arc<dyn GameDatabase> = database.clone();
     let mut server_config = ServerConfig {
@@ -6360,6 +6433,240 @@ async fn supervisor_panic_still_releases_the_reconnect_claim_for_a_fresh_retry()
         reconnection_manager
             .release_reconnection_claim(&retry_claim)
             .await
+    );
+}
+
+/// #1590: an uncommitted restored identity must be rolled back before retry.
+#[tokio::test(start_paused = true)]
+async fn reconnect_supervisor_panic_restores_a_retryable_live_webrtc_identity() {
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconnect_route_rollback_panic_preserves_live_webrtc_retry() {
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(true, false).await;
+}
+
+/// #1590: repeated storage panics cannot strand an uncommitted reconnect claim.
+#[tokio::test(start_paused = true)]
+async fn reconnect_storage_rollback_panics_preserve_live_webrtc_retry() {
+    assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(false, true).await;
+}
+
+async fn assert_reconnect_supervisor_rollback_allows_live_webrtc_retry(
+    route_panics: bool,
+    storage_panics: bool,
+) {
+    use crate::protocol::{Topology, Transport};
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting));
+    let mut wrapper = DrainAfterCreateDatabase::new(create_test_database().await);
+    wrapper.trigger_drain_after_create = false;
+    let database = Arc::new(wrapper);
+    let server = if storage_panics {
+        create_test_server_with_message_coordinator_and_lock(
+            ServerConfig::default(),
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        )
+        .await
+    } else if route_panics {
+        create_test_server_with_message_coordinator(ServerConfig::default(), coordinator.clone())
+            .await
+    } else {
+        create_test_server().await
+    };
+    let mut fixture = correlated_reconnect_panic_fixture_with_server(server).await;
+    let room = fixture
+        .server
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let peer = *room.players.keys().next().unwrap();
+    let protocol = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc],
+        topologies: vec![Topology::Relay, Topology::Mesh],
+    };
+    fixture.server.set_client_protocol(&peer, protocol.clone());
+    fixture
+        .server
+        .set_client_protocol(&fixture.current_player_id, protocol);
+    fixture.server.handle_player_ready(&peer).await;
+    fixture.server.handle_start_game(&peer).await;
+    drain_queued_messages(&mut fixture.peer_receiver);
+    fixture.server.panic_owned_room_operation_for_test(
+        OwnedRoomOperationPanicPoint::ReconnectAfterReassignment,
+    );
+    if storage_panics {
+        database
+            .panic_rollback_always
+            .store(true, Ordering::Release);
+    } else {
+        fixture.server.panic_owned_room_supervisor_for_test();
+    }
+    if route_panics {
+        *coordinator.panic_alias_unregister.lock().unwrap() =
+            Some((fixture.reconnect_player_id, 1));
+    }
+
+    assert!(
+        !fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                Arc::clone(&fixture.effective_player_id),
+                None,
+            )
+            .await
+    );
+    if storage_panics {
+        database
+            .panic_rollback_always
+            .store(false, Ordering::Release);
+        let manager = fixture.server.reconnection_manager().unwrap();
+        let claim = manager
+            .claim_reconnection(
+                &PlayerId::new_v4(),
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await
+            .expect("storage rollback panic must release the claim");
+        assert!(manager.release_reconnection_claim(&claim).await);
+        assert_eq!(
+            fixture
+                .server
+                .cleanup_pending_durable_player_detaches()
+                .await,
+            1
+        );
+    }
+    if route_panics {
+        assert_eq!(
+            coordinator
+                .panic_alias_unregister
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .1,
+            0,
+            "the rollback must reach the injected routing failure"
+        );
+    }
+    assert_eq!(
+        *fixture.effective_player_id.read().await,
+        fixture.current_player_id,
+        "the failed attempt must restore its socket identity before permitting retry"
+    );
+    assert!(!fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.reconnect_player_id));
+    assert!(!fixture
+        .server
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .players
+        .contains_key(&fixture.reconnect_player_id));
+    for message in drain_queued_messages(&mut fixture.receiver) {
+        assert!(
+            !matches!(
+                message.as_ref(),
+                ServerMessage::Reconnected(_) | ServerMessage::SessionPlan(_)
+            ),
+            "an uncommitted attempt cannot publish a baseline or actor plan"
+        );
+    }
+    for message in drain_queued_messages(&mut fixture.peer_receiver) {
+        assert!(
+            !matches!(
+                message.as_ref(),
+                ServerMessage::PlayerReconnected { .. } | ServerMessage::SessionPlan(_)
+            ),
+            "an uncommitted attempt cannot publish membership or peer plans"
+        );
+    }
+    assert!(
+        fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                Arc::clone(&fixture.effective_player_id),
+                None,
+            )
+            .await,
+        "a complete reconnect, rather than only a manager claim, must retry"
+    );
+    let mut saw_baseline = false;
+    let mut actor_plan = None;
+    for message in drain_queued_messages(&mut fixture.receiver) {
+        match message.as_ref() {
+            ServerMessage::Reconnected(payload) => {
+                assert!(payload
+                    .current_players
+                    .iter()
+                    .any(|player| player.id == peer));
+                saw_baseline = true;
+            }
+            ServerMessage::SessionPlan(plan) => {
+                assert!(saw_baseline, "the baseline must precede the restored plan");
+                actor_plan = Some(plan.clone());
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_baseline);
+    let actor_plan = actor_plan.expect("the retried actor gets a P2P plan");
+    assert_eq!(
+        (actor_plan.topology, actor_plan.transport),
+        (Topology::Mesh, Transport::WebRtc)
+    );
+    assert!(actor_plan
+        .peers
+        .iter()
+        .any(|member| member.player_id == peer));
+    let mut incumbent_plan = None;
+    for message in drain_queued_messages(&mut fixture.peer_receiver) {
+        if let ServerMessage::SessionPlan(plan) = message.as_ref() {
+            incumbent_plan = Some(plan.clone());
+        }
+    }
+    let incumbent_plan = incumbent_plan.expect("the incumbent gets the repaired P2P plan");
+    assert_eq!(incumbent_plan.generation, actor_plan.generation);
+    assert!(incumbent_plan
+        .peers
+        .iter()
+        .any(|member| member.player_id == fixture.reconnect_player_id));
+    fixture
+        .server
+        .handle_signal_in_generation(
+            &fixture.reconnect_player_id,
+            peer,
+            actor_plan.generation,
+            serde_json::json!({"candidate": "restored-live-peer"}),
+        )
+        .await;
+    let signal = timeout(Duration::from_secs(1), fixture.peer_receiver.recv())
+        .await
+        .expect("the restored route relays signals before the deadline")
+        .expect("the restored route remains open");
+    assert!(
+        matches!(signal.as_ref(), ServerMessage::Signal { from, generation, .. }
+        if *from == fixture.reconnect_player_id && *generation == actor_plan.generation)
     );
 }
 
@@ -14548,6 +14855,301 @@ async fn authority_residue_repair_publishes_committed_release(expired: bool) {
     assert!(successor.iter().any(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(player), you_are_authority: true } if *player == fixture.survivor)));
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthorityReleaseRetryCase {
+    Failed,
+    OtherSeat,
+    Superseded,
+    Draining,
+    AlreadyCommitted,
+}
+
+/// #1592: a failed event remains retryable after its seat record is gone.
+#[tokio::test(start_paused = true)]
+async fn durable_detach_retries_authority_release_after_publication_failure() {
+    assert_failed_authority_release_retries(false, AuthorityReleaseRetryCase::Failed).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_membership_retries_authority_release_after_publication_failure() {
+    assert_failed_authority_release_retries(true, AuthorityReleaseRetryCase::Failed).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_authority_release_retry_preserves_a_new_successor() {
+    for expired in [false, true] {
+        assert_failed_authority_release_retries(expired, AuthorityReleaseRetryCase::Superseded)
+            .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_authority_release_retry_suppresses_shutdown_traffic() {
+    for expired in [false, true] {
+        assert_failed_authority_release_retries(expired, AuthorityReleaseRetryCase::Draining).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn committed_authority_release_does_not_repeat_after_publication_panic() {
+    for expired in [false, true] {
+        assert_failed_authority_release_retries(
+            expired,
+            AuthorityReleaseRetryCase::AlreadyCommitted,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_authority_notice_does_not_delay_another_stale_seat() {
+    for expired in [false, true] {
+        assert_failed_authority_release_retries(expired, AuthorityReleaseRetryCase::OtherSeat)
+            .await;
+    }
+}
+
+async fn assert_failed_authority_release_retries(expired: bool, case: AuthorityReleaseRetryCase) {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        if case == AuthorityReleaseRetryCase::AlreadyCommitted {
+            DrainTrigger::UnknownRouting
+        } else {
+            DrainTrigger::AuthorityBroadcastFailure
+        },
+    ));
+    let mut fixture = setup_joined_pair_with_reconnection_config_and_coordinator(
+        |config| config.reconnection_window = Duration::from_secs(1),
+        coordinator.clone(),
+    )
+    .await;
+    for player in [fixture.leaver, fixture.survivor] {
+        fixture.server.set_client_protocol(
+            &player,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![
+                    crate::protocol::Transport::Relay,
+                    crate::protocol::Transport::WebRtc,
+                ],
+                topologies: vec![
+                    crate::protocol::Topology::Relay,
+                    crate::protocol::Topology::Mesh,
+                ],
+            },
+        );
+        fixture.server.handle_player_ready(&player).await;
+    }
+    fixture.server.handle_start_game(&fixture.leaver).await;
+    let plans = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(
+        plans.iter().any(
+            |message| matches!(message.as_ref(), ServerMessage::SessionPlan(plan)
+        if plan.transport == crate::protocol::Transport::WebRtc
+            && plan.peers.iter().any(|peer| peer.player_id == fixture.leaver))
+        ),
+        "the departing authority must be a live WebRTC peer before cleanup"
+    );
+    drain_queued_messages(&mut fixture.leaver_rx);
+    fixture.database.fail_remove_player_from_room_for_test(true);
+    fixture.database.fail_next_request_room_authority_for_test();
+    fixture.server.unregister_client(&fixture.leaver).await;
+    drain_queued_messages(&mut fixture.survivor_rx);
+    let manager = fixture.server.reconnection_manager().unwrap();
+    if expired {
+        tokio::time::advance(Duration::from_secs(2)).await;
+        manager
+            .register_disconnection(PlayerId::from_u128(99), fixture.room_id, false, None, 0)
+            .await;
+    }
+    fixture
+        .database
+        .fail_remove_player_from_room_for_test(false);
+    let before = manager.get_missed_events(&fixture.room_id, 0).await.events;
+    coordinator.panic_authority_release_after_delivery.store(
+        case == AuthorityReleaseRetryCase::AlreadyCommitted,
+        Ordering::Release,
+    );
+    assert_eq!(cleanup_authority_residue(&fixture.server, expired).await, 1);
+    let initial = drain_queued_messages(&mut fixture.survivor_rx);
+    let already_committed = case == AuthorityReleaseRetryCase::AlreadyCommitted;
+    if already_committed {
+        assert!(!coordinator
+            .panic_authority_release_after_delivery
+            .load(Ordering::Acquire));
+        assert!(
+            matches!(initial.as_slice(), [message] if matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: None, .. }))
+        );
+    } else {
+        assert!(
+            coordinator.triggered.load(Ordering::Acquire),
+            "the first publication must fail"
+        );
+        assert!(initial.is_empty());
+    }
+    assert_eq!(
+        manager
+            .get_missed_events(&fixture.room_id, 0)
+            .await
+            .events
+            .len(),
+        before.len() + usize::from(already_committed)
+    );
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.authority_player, None);
+    assert!(!room.players.contains_key(&fixture.leaver));
+    if case == AuthorityReleaseRetryCase::OtherSeat {
+        let (other, mut other_rx) =
+            register_client(&fixture.server, "127.0.0.1:48102".parse().unwrap()).await;
+        fixture
+            .server
+            .handle_join_room(
+                &other,
+                "leave-convergence".into(),
+                Some("LVC001".into()),
+                "other-stale-seat".into(),
+                Some(4),
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await;
+        drain_queued_messages(&mut other_rx);
+        drain_queued_messages(&mut fixture.survivor_rx);
+        fixture.database.fail_remove_player_from_room_for_test(true);
+        fixture.server.unregister_client(&other).await;
+        drain_queued_messages(&mut fixture.survivor_rx);
+        if expired {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            manager
+                .register_disconnection(PlayerId::from_u128(100), fixture.room_id, false, None, 0)
+                .await;
+        }
+        fixture
+            .database
+            .fail_remove_player_from_room_for_test(false);
+        coordinator
+            .fail_authority_release_publication
+            .store(true, Ordering::Release);
+        for _ in 0..3 {
+            cleanup_authority_residue(&fixture.server, expired).await;
+        }
+        assert!(
+            !fixture
+                .database
+                .get_room_by_id(&fixture.room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .players
+                .contains_key(&other),
+            "a failed advisory cannot retain another disconnected player's seat"
+        );
+        assert!(
+            drain_queued_messages(&mut fixture.survivor_rx).is_empty(),
+            "the authority notice still fails"
+        );
+        coordinator
+            .fail_authority_release_publication
+            .store(false, Ordering::Release);
+    }
+    if case == AuthorityReleaseRetryCase::Superseded {
+        fixture
+            .server
+            .handle_authority_request(&fixture.survivor, true)
+            .await;
+        let granted = drain_queued_messages(&mut fixture.survivor_rx);
+        assert!(granted.iter().any(|message| matches!(message.as_ref(),
+            ServerMessage::AuthorityChanged { authority_player: Some(id), .. }
+                if *id == fixture.survivor)));
+    }
+    let before_snapshot_retry = manager
+        .get_missed_events(&fixture.room_id, 0)
+        .await
+        .events
+        .len();
+    if matches!(
+        case,
+        AuthorityReleaseRetryCase::Failed | AuthorityReleaseRetryCase::OtherSeat
+    ) {
+        fixture.database.fail_get_room_by_id_for_test(true);
+        cleanup_authority_residue(&fixture.server, expired).await;
+        assert!(
+            drain_queued_messages(&mut fixture.survivor_rx).is_empty(),
+            "a failed retry snapshot cannot publish or discard the obligation"
+        );
+        assert_eq!(
+            manager
+                .get_missed_events(&fixture.room_id, 0)
+                .await
+                .events
+                .len(),
+            before_snapshot_retry
+        );
+        fixture.database.fail_get_room_by_id_for_test(false);
+    }
+    let replay_before_retry = manager
+        .get_missed_events(&fixture.room_id, 0)
+        .await
+        .events
+        .len();
+    if case == AuthorityReleaseRetryCase::Draining {
+        fixture.server.begin_shutdown_drain();
+    }
+    cleanup_authority_residue(&fixture.server, expired).await;
+    let messages = drain_queued_messages(&mut fixture.survivor_rx);
+    let replay = manager.get_missed_events(&fixture.room_id, 0).await.events;
+    if !matches!(
+        case,
+        AuthorityReleaseRetryCase::Failed | AuthorityReleaseRetryCase::OtherSeat
+    ) {
+        assert!(
+            messages.is_empty(),
+            "a delayed clear must not contradict a new authority"
+        );
+        assert_eq!(replay.len(), replay_before_retry);
+    } else {
+        assert!(
+            matches!(messages.as_slice(), [message] if matches!(message.as_ref(), ServerMessage::AuthorityChanged { authority_player: None, .. })),
+            "the lost event must retry after its original cleanup record is consumed: {messages:?}"
+        );
+        assert_eq!(replay.len(), replay_before_retry + 1);
+        assert!(matches!(
+            replay.last(),
+            Some(ServerMessage::AuthorityChanged {
+                authority_player: None,
+                ..
+            })
+        ));
+    }
+    cleanup_authority_residue(&fixture.server, expired).await;
+    assert!(
+        drain_queued_messages(&mut fixture.survivor_rx).is_empty(),
+        "a completed retry must not repeat"
+    );
+    if matches!(
+        case,
+        AuthorityReleaseRetryCase::Failed | AuthorityReleaseRetryCase::OtherSeat
+    ) {
+        fixture
+            .server
+            .handle_authority_request(&fixture.survivor, true)
+            .await;
+        let granted = drain_queued_messages(&mut fixture.survivor_rx);
+        assert!(
+            granted.iter().any(|message| matches!(message.as_ref(),
+            ServerMessage::AuthorityChanged { authority_player: Some(id), .. }
+                if *id == fixture.survivor)),
+            "the survivor must claim the released role"
+        );
+    }
+}
+
 /// Keep a successor's role and suppress normal authority traffic during shutdown.
 #[tokio::test(start_paused = true)]
 async fn authority_residue_repair_preserves_a_committed_successor_and_shutdown_drain() {
@@ -16001,4 +16603,325 @@ async fn publication_failure_closes_socket_before_reconnect_snapshot_wait() {
         .await
         .unwrap()
         .is_empty());
+}
+
+/// #1591: rollback adapter panics must leave a roomless actor that can retry P2P admission.
+#[tokio::test(start_paused = true)]
+async fn join_rollback_panic_preserves_terminal_failure_and_live_p2p_retry() {
+    let inner = create_test_database().await;
+    let mut wrapper = DrainAfterCreateDatabase::new(inner);
+    wrapper.trigger_drain_after_create = false;
+    let database = Arc::new(wrapper);
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48401".parse().unwrap()).await;
+    let (actor, mut actor_rx) = register_client(&server, "127.0.0.1:48402".parse().unwrap()).await;
+    let protocol = NegotiatedProtocol {
+        version: 3,
+        transports: vec![
+            crate::protocol::Transport::Relay,
+            crate::protocol::Transport::WebRtc,
+        ],
+        topologies: vec![
+            crate::protocol::Topology::Relay,
+            crate::protocol::Topology::Mesh,
+        ],
+    };
+    for id in [creator, actor] {
+        server.set_client_protocol(&id, protocol.clone());
+    }
+    server
+        .handle_join_room(
+            &creator,
+            "rollback-p2p".into(),
+            Some("RBKP2P".into()),
+            "creator".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room_id = server.get_client_room(&creator).await.unwrap();
+    server.handle_player_ready(&creator).await;
+    server.handle_start_game(&creator).await;
+    let _setup_messages = drain_queued_messages(&mut creator_rx);
+    let joined_before = server.metrics.players_joined.load(Ordering::Relaxed);
+    let left_before = server.metrics.players_left.load(Ordering::Relaxed);
+    let operation_id = uuid::Uuid::new_v4();
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinAfterAdmission);
+    database.panic_rollback_once.store(true, Ordering::Release);
+    server
+        .handle_join_room_operation(
+            &actor,
+            Some(operation_id),
+            "rollback-p2p".into(),
+            Some("RBKP2P".into()),
+            "actor".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        !database.panic_rollback_once.load(Ordering::Acquire),
+        "rollback fault must execute"
+    );
+    expect_correlated_internal_operation_failure(&mut actor_rx, operation_id, "rollback panic")
+        .await;
+    assert_eq!(
+        server.get_client_room(&actor).await,
+        None,
+        "a failed baseline must not strand its prepared assignment"
+    );
+    assert_eq!(
+        server.metrics.players_joined.load(Ordering::Relaxed),
+        joined_before + 1
+    );
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1
+    );
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1,
+        "durable repair must not count a second departure"
+    );
+    let pending = creator_rx.try_recv();
+    assert!(
+        matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+        "an unpublished admission must not emit an opening or plan: {pending:?}"
+    );
+    let repaired = database.get_room_by_id(&room_id).await.unwrap().unwrap();
+    assert_eq!(repaired.players.len(), 1);
+    assert!(repaired.players.contains_key(&creator));
+    server
+        .handle_join_room(
+            &actor,
+            "rollback-p2p".into(),
+            Some("RBKP2P".into()),
+            "actor".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let baseline = timeout(Duration::from_secs(1), actor_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(baseline.as_ref(), ServerMessage::RoomJoined(payload) if payload.room_id == room_id)
+    );
+    let plan = timeout(Duration::from_secs(1), actor_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerMessage::SessionPlan(actor_plan) = plan.as_ref() else {
+        panic!("expected actor plan: {plan:?}");
+    };
+    assert_eq!(actor_plan.transport, crate::protocol::Transport::WebRtc);
+    assert!(actor_plan
+        .peers
+        .iter()
+        .any(|peer| peer.player_id == creator));
+    let mut incumbent_plan = None;
+    for message in drain_queued_messages(&mut creator_rx) {
+        if let ServerMessage::SessionPlan(plan) = message.as_ref() {
+            incumbent_plan = Some(plan.clone());
+        }
+    }
+    let incumbent_plan = incumbent_plan.expect("incumbent must get refreshed P2P plan");
+    assert_eq!(incumbent_plan.generation, actor_plan.generation);
+    assert!(incumbent_plan
+        .peers
+        .iter()
+        .any(|peer| peer.player_id == actor));
+    let signal = serde_json::json!({"sdp": "retry-offer"});
+    server
+        .handle_signal_in_generation(&actor, creator, actor_plan.generation, signal.clone())
+        .await;
+    let delivered = timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(delivered.as_ref(), ServerMessage::Signal { from, generation, signal: body } if *from == actor && *generation == actor_plan.generation && *body == signal)
+    );
+}
+
+/// #1591: a failed creator rollback must release its code and local assignment for retry.
+#[tokio::test(start_paused = true)]
+async fn created_join_rollback_panic_releases_code_and_repairs_the_unpublished_room() {
+    let inner = create_test_database().await;
+    let mut wrapper = DrainAfterCreateDatabase::new(inner);
+    wrapper.trigger_drain_after_create = false;
+    let database = Arc::new(wrapper);
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (actor, mut receiver) = register_client(&server, "127.0.0.1:48403".parse().unwrap()).await;
+    let joined_before = server.metrics.players_joined.load(Ordering::Relaxed);
+    let left_before = server.metrics.players_left.load(Ordering::Relaxed);
+    let operation_id = uuid::Uuid::new_v4();
+    server.script_room_codes_for_test(["RBKNEW"]);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinAfterAdmission);
+    database.panic_rollback_once.store(true, Ordering::Release);
+    server
+        .handle_join_room_operation(
+            &actor,
+            Some(operation_id),
+            "rollback-new".into(),
+            None,
+            "creator".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(!database.panic_rollback_once.load(Ordering::Acquire));
+    expect_correlated_internal_operation_failure(
+        &mut receiver,
+        operation_id,
+        "creator rollback panic",
+    )
+    .await;
+    assert_eq!(server.get_client_room(&actor).await, None);
+    assert!(!server
+        .distributed_lock
+        .is_locked("room_join:rollback-new:RBKNEW")
+        .await
+        .unwrap());
+    assert_eq!(
+        server.metrics.players_joined.load(Ordering::Relaxed),
+        joined_before + 1
+    );
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1
+    );
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1,
+        "durable repair must not count a second departure"
+    );
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert!(database
+        .get_room("rollback-new", "RBKNEW")
+        .await
+        .unwrap()
+        .is_none());
+    server
+        .handle_join_room(
+            &actor,
+            "rollback-new".into(),
+            Some("RBKNEW".into()),
+            "creator".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let baseline = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(baseline.as_ref(), ServerMessage::RoomJoined(payload) if payload.room_code == "RBKNEW")
+    );
+}
+
+/// #1592: retain the removed authority before application rollback can unwind.
+#[tokio::test(start_paused = true)]
+async fn authority_release_survives_application_rollback_panic() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    inner.initialize().await.unwrap();
+    let mut wrapper = DrainAfterCreateDatabase::new(inner.clone());
+    wrapper.trigger_drain_after_create = false;
+    let database = Arc::new(wrapper);
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48404".parse().unwrap()).await;
+    let (survivor, mut survivor_rx) =
+        register_client(&server, "127.0.0.1:48405".parse().unwrap()).await;
+    for (player, name) in [(leaver, "leaver"), (survivor, "survivor")] {
+        server
+            .handle_join_room(
+                &player,
+                "authority-rollback".into(),
+                Some("ARBPAN".into()),
+                name.into(),
+                Some(2),
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await;
+    }
+    let room_id = server.get_client_room(&leaver).await.unwrap();
+    let _ = drain_queued_messages(&mut leaver_rx);
+    let _ = drain_queued_messages(&mut survivor_rx);
+    inner.fail_remove_player_from_room_for_test(true);
+    inner.fail_next_request_room_authority_for_test();
+    server.unregister_client(&leaver).await;
+    let _ = drain_queued_messages(&mut survivor_rx);
+    server.pending_durable_player_detaches.insert(
+        (room_id, leaver),
+        Some(PendingApplicationClaimRollback {
+            application_id: uuid::Uuid::new_v4(),
+        }),
+    );
+    inner.fail_remove_player_from_room_for_test(false);
+    database
+        .panic_application_rollback_once
+        .store(true, Ordering::Release);
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 0);
+    assert!(!database
+        .panic_application_rollback_once
+        .load(Ordering::Acquire));
+    let stored = inner.get_room_by_id(&room_id).await.unwrap().unwrap();
+    assert_eq!(stored.authority_player, None);
+    assert!(!stored.players.contains_key(&leaver));
+    assert!(server.pending_authority_releases.contains_key(&room_id));
+    assert!(drain_queued_messages(&mut survivor_rx).is_empty());
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    let messages = drain_queued_messages(&mut survivor_rx);
+    assert!(
+        matches!(messages.as_slice(), [message] if matches!(message.as_ref(),
+        ServerMessage::AuthorityChanged { authority_player: None, you_are_authority: false }))
+    );
+    assert!(!server.pending_authority_releases.contains_key(&room_id));
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 0);
+    assert!(drain_queued_messages(&mut survivor_rx).is_empty());
 }

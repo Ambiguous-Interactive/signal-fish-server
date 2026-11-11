@@ -901,6 +901,8 @@ pub struct EnhancedGameServer {
     /// reconnect support is enabled.
     pending_durable_player_detaches:
         Arc<DashMap<(RoomId, PlayerId), Option<PendingApplicationClaimRollback>>>,
+    /// Committed seat removals whose authority release still needs publication.
+    pending_authority_releases: Arc<DashMap<RoomId, Arc<maintenance::PendingAuthorityRelease>>>,
     /// Kick and ban can wait for a target lifecycle while holding the acting
     /// authority lifecycle. Serialize them to prevent cycles across rooms.
     moderation_lifecycle_gate: Mutex<()>,
@@ -1434,6 +1436,7 @@ impl EnhancedGameServer {
             active_session_plans: Arc::new(DashMap::new()),
             pending_session_replans: DashMap::new(),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
+            pending_authority_releases: Arc::new(DashMap::new()),
             moderation_lifecycle_gate: Mutex::new(()),
             abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
             abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers::default(),

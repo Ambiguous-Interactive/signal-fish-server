@@ -16,6 +16,11 @@ const ACTIVITY_EVICTION_SWEEP_WAIT: std::time::Duration = std::time::Duration::f
 /// Bound deleted-room advice before requesting the authoritative socket close.
 const MISSING_ROOM_FAREWELL_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// One room's latest confirmed role release awaiting publication.
+pub(super) struct PendingAuthorityRelease {
+    player_id: PlayerId,
+}
+
 impl EnhancedGameServer {
     /// Abandon only admission waits; an admitted mutation retains its normal completion rules.
     async fn admit_maintenance<T>(&self, admission: impl Future<Output = T>) -> Option<T> {
@@ -112,6 +117,11 @@ impl EnhancedGameServer {
             .pending_durable_player_detaches
             .iter()
             .map(|entry| *entry.key())
+            .chain(
+                self.pending_authority_releases
+                    .iter()
+                    .map(|entry| (*entry.key(), entry.value().player_id)),
+            )
             .collect();
         self.durable_detach_workers
             .run(candidates, deadline, None, |(room_id, player_id)| {
@@ -137,6 +147,22 @@ impl EnhancedGameServer {
         else {
             return false;
         };
+        if !self
+            .pending_durable_player_detaches
+            .contains_key(&(room_id, player_id))
+        {
+            if let Some(obligation) = self
+                .pending_authority_releases
+                .get(&room_id)
+                .map(|entry| Arc::clone(entry.value()))
+            {
+                let completion = self.enqueue_pending_authority_release(room_id, obligation, guard);
+                if let Err(error) = completion.await {
+                    tracing::warn!(%room_id, %player_id, %error, "Failed to retry repaired authority departure");
+                }
+            }
+            return false;
+        }
         if self
             .connection_manager
             .current_relay_stamp_in_room(&player_id, &room_id)
@@ -167,13 +193,23 @@ impl EnhancedGameServer {
                 return false;
             }
         };
+        // Keep the publication evidence before application rollback can wait
+        // or unwind after storage has removed the only authority snapshot.
+        let authority_release = self
+            .retain_removed_member_authority(&room_id, removed.as_ref())
+            .or_else(|| {
+                self.pending_authority_releases
+                    .get(&room_id)
+                    .map(|entry| Arc::clone(entry.value()))
+            });
         let rollback_result = if let Some(rollback) = application_claim_rollback.as_ref() {
             self.rollback_room_application_claim_if_unchanged(&room_id, rollback)
                 .await
         } else {
             Ok(())
         };
-        let completion = self.enqueue_removed_member_authority(&room_id, removed.as_ref(), guard);
+        let completion = authority_release
+            .map(|obligation| self.enqueue_pending_authority_release(room_id, obligation, guard));
         let cleaned = match rollback_result {
             Ok(()) => self
                 .pending_durable_player_detaches
@@ -192,24 +228,53 @@ impl EnhancedGameServer {
         cleaned
     }
 
-    /// Order a removed authority's live and replay event behind its departure.
-    fn enqueue_removed_member_authority(
+    /// Keep only the latest confirmed authority release for each room.
+    fn retain_removed_member_authority(
         &self,
         room_id: &RoomId,
         removed: Option<&PlayerInfo>,
+    ) -> Option<Arc<PendingAuthorityRelease>> {
+        let player_id = removed.filter(|player| player.is_authority)?.id;
+        let obligation = Arc::new(PendingAuthorityRelease { player_id });
+        self.pending_authority_releases
+            .insert(*room_id, Arc::clone(&obligation));
+        Some(obligation)
+    }
+
+    /// Retain the obligation until its replay and live publication commit.
+    fn enqueue_pending_authority_release(
+        &self,
+        room_id: RoomId,
+        obligation: Arc<PendingAuthorityRelease>,
         guard: RoomEventMutationGuard,
-    ) -> Option<RoomEventCompletion> {
-        let removed = removed.filter(|player| player.is_authority)?;
-        let player_id = removed.id;
+    ) -> RoomEventCompletion {
+        let player_id = obligation.player_id;
         let drain = self.shutdown_drain_receiver();
         let predicate_drain = drain.clone();
         let coordinator = Arc::clone(&self.message_coordinator);
         let replay = self.reconnection_manager.clone();
-        let room_id = *room_id;
-        Some(self.message_coordinator.enqueue_room_event(
+        let pending = Arc::clone(&self.pending_authority_releases);
+        let database = Arc::clone(&self.database);
+        self.message_coordinator.enqueue_room_event(
             guard,
             Box::new(move || {
                 Box::pin(async move {
+                    if !pending
+                        .get(&room_id)
+                        .is_some_and(|entry| Arc::ptr_eq(entry.value(), &obligation))
+                    {
+                        return Ok(false);
+                    }
+                    // A new authority supersedes the delayed clear. The room
+                    // gate keeps normal authority transitions behind this check.
+                    let authority_is_vacant = database
+                        .get_room_by_id(&room_id)
+                        .await?
+                        .is_some_and(|room| room.authority_player.is_none());
+                    if !authority_is_vacant || *predicate_drain.borrow() {
+                        pending.remove_if(&room_id, |_, current| Arc::ptr_eq(current, &obligation));
+                        return Ok(false);
+                    }
                     let message = Arc::new(ServerMessage::AuthorityChanged {
                         authority_player: None,
                         you_are_authority: false,
@@ -230,13 +295,16 @@ impl EnhancedGameServer {
                                             .record_room_event(&room_id, replay_message.as_ref())
                                             .await;
                                     }
+                                    pending.remove_if(&room_id, |_, current| {
+                                        Arc::ptr_eq(current, &obligation)
+                                    });
                                 })
                             }),
                         )
                         .await
                 })
             }),
-        ))
+        )
     }
 
     /// Drop process-local application mappings for rooms removed by any
@@ -407,24 +475,25 @@ impl EnhancedGameServer {
         candidates: Vec<(PlayerId, RoomId)>,
         deadline: Option<tokio::time::Instant>,
     ) -> usize {
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .map(|(player, room)| (room, player))
+            .chain(
+                self.pending_authority_releases
+                    .iter()
+                    .map(|entry| (*entry.key(), entry.value().player_id)),
+            )
+            .collect();
         let count = self
             .expired_reconnect_workers
-            .run(
-                candidates
-                    .into_iter()
-                    .map(|(player, room)| (room, player))
-                    .collect(),
-                deadline,
-                None,
-                |(room_id, player_id)| {
-                    let server = Arc::clone(self);
-                    async move {
-                        server
-                            .cleanup_expired_reconnection_candidate(player_id, room_id)
-                            .await
-                    }
-                },
-            )
+            .run(candidates, deadline, None, |(room_id, player_id)| {
+                let server = Arc::clone(self);
+                async move {
+                    server
+                        .cleanup_expired_reconnection_candidate(player_id, room_id)
+                        .await
+                }
+            })
             .await;
         if count > 0 {
             tracing::info!(count, instance_id = %self.instance_id, "Cleaned up expired reconnection records");
@@ -463,16 +532,36 @@ impl EnhancedGameServer {
             .await
         {
             Ok(Some(removed)) => {
-                if let Some(completion) =
-                    self.enqueue_removed_member_authority(&room_id, removed.as_ref(), guard)
-                {
+                let obligation = self
+                    .retain_removed_member_authority(&room_id, removed.as_ref())
+                    .or_else(|| {
+                        self.pending_authority_releases
+                            .get(&room_id)
+                            .map(|entry| Arc::clone(entry.value()))
+                    });
+                if let Some(obligation) = obligation {
+                    let completion =
+                        self.enqueue_pending_authority_release(room_id, obligation, guard);
                     if let Err(error) = completion.await {
                         tracing::warn!(%player_id, %room_id, %error, "Failed to publish expired authority departure");
                     }
                 }
                 true
             }
-            Ok(None) => false,
+            Ok(None) => {
+                if let Some(obligation) = self
+                    .pending_authority_releases
+                    .get(&room_id)
+                    .map(|entry| Arc::clone(entry.value()))
+                {
+                    let completion =
+                        self.enqueue_pending_authority_release(room_id, obligation, guard);
+                    if let Err(error) = completion.await {
+                        tracing::warn!(%player_id, %room_id, %error, "Failed to retry expired authority departure");
+                    }
+                }
+                false
+            }
             Err(error) => {
                 tracing::warn!(%player_id, %room_id, %error, "Failed durable cleanup for expired reconnection; retaining it for retry");
                 false

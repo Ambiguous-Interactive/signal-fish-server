@@ -319,13 +319,38 @@ impl EnhancedGameServer {
         {
             return;
         }
-        self.rollback_unpublished_player_admission(
+        let rollback_kind = admission_kind.clone();
+        let rollback = AssertUnwindSafe(self.rollback_unpublished_player_admission(
             room_id,
             player_id,
             admission_kind,
             "join_panic",
-        )
+        ))
+        .catch_unwind()
         .await;
+        if rollback.is_err() {
+            if matches!(rollback_kind, RoomAdmissionKind::Created { .. }) {
+                // Legacy adapters may have made the failed creation visible.
+                // Revoke that visibility before deferred member removal.
+                let abandoned = AssertUnwindSafe(self.database.abandon_room(&room_id, &player_id))
+                    .catch_unwind()
+                    .await;
+                if !matches!(abandoned, Ok(Ok(()))) {
+                    tracing::error!(%player_id, %room_id, "Failed to mark the panicked creation for cleanup");
+                }
+            }
+            // Adapter recovery can also unwind. Retain the durable removal
+            // obligation before clearing this unpublished local generation;
+            // a later retry must not inherit an assignment with no baseline.
+            self.pending_durable_player_detaches.insert(
+                (room_id, player_id),
+                rollback_kind.application_claim_rollback().cloned(),
+            );
+            if matches!(rollback_kind, RoomAdmissionKind::Existing { .. }) {
+                self.metrics.increment_players_left();
+            }
+            tracing::error!(%player_id, %room_id, "Join rollback panicked; retaining durable detach for retry");
+        }
         self.discard_pre_issued_reconnection_token(&player_id).await;
         self.connection_manager
             .rollback_prepared_room_assignment(&player_id, room_id, epoch);

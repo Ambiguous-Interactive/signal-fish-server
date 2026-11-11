@@ -270,6 +270,72 @@ impl EnhancedGameServer {
         }
     }
 
+    /// An uncommitted reconnect must restore all ownership before releasing its claim.
+    /// Both unwind supervisors use this path while retaining the room and source gates.
+    async fn rollback_panicked_reconnect_locked(
+        &self,
+        current_player_id: PlayerId,
+        reconnect_player_id: PlayerId,
+        effective_player_id: &Option<Arc<tokio::sync::RwLock<PlayerId>>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        recovery: &ReconnectPanicRecovery,
+    ) {
+        if recovery.reassigned {
+            self.discard_pre_issued_reconnection_token(&reconnect_player_id)
+                .await;
+            // Routing adapters must not prevent the local ownership rollback.
+            match AssertUnwindSafe(
+                self.message_coordinator
+                    .unregister_local_client(&reconnect_player_id),
+            )
+            .catch_unwind()
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(%reconnect_player_id, %error, "Reconnect rollback route removal failed")
+                }
+                Err(_) => {
+                    tracing::error!(%reconnect_player_id, "Reconnect rollback route removal panicked")
+                }
+            }
+            let _ = self
+                .connection_manager
+                .restore_reassigned_connection(&current_player_id, &reconnect_player_id);
+            if let Some(effective_player_id) = effective_player_id {
+                *effective_player_id.write().await = current_player_id;
+            }
+        }
+        if let (Some(manager), Some(claim)) = (&self.reconnection_manager, recovery.claim.as_ref())
+        {
+            let claim_guard = ReconnectionClaimGuard::new(Arc::clone(manager), Arc::clone(claim));
+            let rollback = AssertUnwindSafe(self.rollback_claimed_reconnect(
+                claim_guard,
+                &recovery.restore,
+                "Reconnect failed unexpectedly",
+            ))
+            .catch_unwind()
+            .await;
+            if rollback.is_err() {
+                // The final supervisor must still release this uncommitted
+                // claim when a storage adapter also panics during rollback.
+                // Preserve the inherited application-claim provenance for repair.
+                self.pending_durable_player_detaches.insert(
+                    (claim.disconnected.room_id, claim.disconnected.player_id),
+                    recovery.restore.cleared_pending_detach.clone().flatten(),
+                );
+                let _ = manager.release_reconnection_claim(claim).await;
+                tracing::error!(%reconnect_player_id, "Reconnect storage rollback panicked; retaining durable detach for retry");
+            }
+        }
+        self.send_unexpected_room_operation_failure(
+            current_player_id,
+            operation_id,
+            "Reconnect failed unexpectedly",
+        )
+        .await;
+    }
+
     async fn commit_reconnect_publication_state(
         &self,
         room_id: RoomId,
@@ -854,9 +920,10 @@ impl EnhancedGameServer {
                 Err(_) => {
                     tracing::error!(%current_player_id, %reconnect_player_id, %room_id, "Owned reconnect transaction panicked");
                     /*
-                        Retry no uncommitted rollback after a supervisor panic.
                         A delivered baseline spends the claim and requires an
                         ordered opening and close from the retained snapshot.
+                        An uncommitted attempt restores ownership before its
+                        claim is released, including after a supervisor panic.
                     */
                     let supervisor_outcome = AssertUnwindSafe(async {
                         #[cfg(test)]
@@ -889,42 +956,13 @@ impl EnhancedGameServer {
                             }
                             true
                         } else {
-                            if recovery.reassigned {
-                                server
-                                    .discard_pre_issued_reconnection_token(&reconnect_player_id)
-                                    .await;
-                                let _ = server
-                                    .message_coordinator
-                                    .unregister_local_client(&reconnect_player_id)
-                                    .await;
-                                let _ = server.connection_manager.restore_reassigned_connection(
-                                    &current_player_id,
-                                    &reconnect_player_id,
-                                );
-                                if let Some(effective_player_id) = &effective_player_id_for_recovery
-                                {
-                                    *effective_player_id.write().await = current_player_id;
-                                }
-                            }
-
-                            if let (Some(manager), Some(claim)) =
-                                (&server.reconnection_manager, recovery.claim)
-                            {
-                                let claim_guard =
-                                    ReconnectionClaimGuard::new(Arc::clone(manager), claim);
-                                server
-                                    .rollback_claimed_reconnect(
-                                        claim_guard,
-                                        &recovery.restore,
-                                        "Reconnect failed unexpectedly",
-                                    )
-                                    .await;
-                            }
                             server
-                                .send_unexpected_room_operation_failure(
+                                .rollback_panicked_reconnect_locked(
                                     current_player_id,
+                                    reconnect_player_id,
+                                    &effective_player_id_for_recovery,
                                     operation_id,
-                                    "Reconnect failed unexpectedly",
+                                    &recovery,
                                 )
                                 .await;
                             false
@@ -979,7 +1017,15 @@ impl EnhancedGameServer {
                                             .await;
                                     }
                                 } else {
-                                    let _ = manager.release_reconnection_claim(claim).await;
+                                    server
+                                        .rollback_panicked_reconnect_locked(
+                                            current_player_id,
+                                            reconnect_player_id,
+                                            &effective_player_id_for_recovery,
+                                            operation_id,
+                                            &recovery,
+                                        )
+                                        .await;
                                 }
                             }
                             false

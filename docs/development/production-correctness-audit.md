@@ -15947,3 +15947,104 @@ never triggered its exact-publication fault and is excluded from evidence.
 The corrected baseline includes the incumbent and requires each fault latch
 to be consumed. Independent review approves these repairs and the consecutive
 departure control.
+
+### F332–F333 — Keep unpublished P2P admissions retryable after recovery failures
+
+Session 679 starts from `2edf4117` and records new server findings under #826.
+
+F332 ([#1590](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1590)).
+A reconnect can restore membership and reassign the socket, then unwind before
+its baseline. If its supervisor also unwinds, the final fallback releases the
+claim while leaving the restored identity connected. A manager-only claim test
+passes in that state, but a full reconnect cannot recover the room. The new
+finalized Mesh/WebRTC control fails on original source in Nextest
+`5a088430-f09c-4bba-9426-7131ea8135bf`. Both uncommitted recovery paths now share
+identity, membership and claim rollback. Routing cleanup has a local unwind
+boundary so an adapter panic cannot skip local ownership restoration. The
+committed-baseline path retains its separate spent-claim rule.
+
+F333 ([#1591](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1591)).
+The join supervisor awaited storage rollback before clearing the prepared room
+assignment, discarding its provisional token, sending its failure, and releasing
+the creation lock. A rollback panic skipped those steps. The finalized WebRTC
+control fails on original source in Nextest
+`d7cf3e27-0081-4708-a8e2-198b2047a8da`: the correlated failure times out. A local
+unwind boundary retains durable cleanup and lets the supervisor finish. The
+control passes in `65ccf01d-175a-42c3-8855-e41b2e44142d`. A separate creator control
+checks abandoned-room cleanup and same-code creation retry.
+
+These histories use deterministic fault injection. They establish server
+recovery defects, not normal requests that trigger a production panic. The
+shipped in-memory backend does not produce the injected storage-adapter panic.
+The controls require complete admission retries and reciprocal WebRTC peer plans;
+they do not prove every runtime or socket schedule. The broader audit stays open.
+
+### F334 — Retain delayed authority notification after failed maintenance publication
+
+F334 ([#1592](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1592)).
+After a disconnect fails both member removal and authority release, maintenance
+can remove the retained authority-bearing row. Both durable-detach and expired
+reconnect cleanup consume their retry records before the authority event runs.
+A publication failure then loses the role evidence. Later cleanup cannot
+reconstruct the required event from the now-absent row. The two new live
+Mesh/WebRTC controls fail on original maintenance source in Nextest
+`907d9e37-8ec1-4cf6-8225-6fb3c5e962c0`. Each control refuses one authority
+publication after confirmed storage cleanup, then requires a later sweep to
+repair the live and replay views.
+
+This is a new failed-publication history after F222's normal authority cleanup.
+The injected storage and publication errors do not establish a shipped socket
+incident. The message schema and authority-request rules stay unchanged.
+
+#### External-client assessment for F332–F334
+
+The assessment reads Rust main `da8f2d16` (`src/client_core.rs`), .NET main
+`e467c871` (`Polling/FramePipeline.cs`), and Godot main `58f880b1`
+(`addons/signal_fish/signal_fish_client.gd`). They process admission failures,
+room baselines, and authority events through separate existing paths. The
+server changes preserve message schemas. They change recovery timing and
+permit a previously stranded admission to retry. Source inspection does not
+qualify the supported SDK runtime behavior.
+
+Runtime retry and P2P generation qualification remains open in Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+The checks require one successful baseline before the new plan, no peer opening
+from the failed attempt, reciprocal WebRTC plans, successful signaling, and
+same-code creation retry after abandoned-room cleanup. No SDK migration is
+established. These tracking issues stay open until the client controls pass.
+
+F332 review found a repeated-storage-panic gap in the first repair. If both
+supervisors retried the same failing rollback, the final unwind could leave its
+claim reserved and exempt from expiry. The new red is Nextest
+`b14f5c5c-9a59-445f-ab4e-def419dc4635`. Recovery now catches storage rollback
+locally, retains the inherited application-claim cleanup provenance, and releases
+the uncommitted claim explicitly. The full retry control also requires actual
+same-generation WebRTC signaling after admission. The in-memory controls remain
+in Miri scope; no runtime cost exclusion is inferred from neighboring tests.
+
+F334 retains one pending authority notice per room. Both existing bounded
+maintenance queues can retry it. Each job holds the room gate, verifies the
+current vacant role, and retires only its matching notice in the publication
+hook. A successor, deleted room, or shutdown suppresses the old notice. Durable
+cleanup records authority evidence before application-claim rollback can wait
+or unwind. Other stale seats still proceed when notification repeatedly fails.
+
+Review rejected the first room-scoped candidate because it retried the notice
+before every seat in that room and returned without removing those seats. The
+corrected order separates actual seat cleanup from notice-only retries. Controls
+cover both cleanup paths, a new public authority grant, transient snapshot read
+failure, a post-commit publication panic, and another stale seat during repeated
+publication failure. These claims concern current room truth and one committed
+notice; they do not promise a complete event history through arbitrary adapter
+or process failures.
+
+Final independent maintenance selection `603e5a9f-a1b7-4f45-8d94-9e31cff8e963`
+passes nine controls, including the second stale seat during repeated publication
+failure. The added application-rollback-panic control passes in
+`8ca00d5d-f2af-4173-9b91-e5e12c6c1f96`. The final three reconnect retry controls
+pass in `745e3e65-89eb-465d-b0e6-d7e7f81d6439`. Independent review approves the
+join, reconnect, and room-scoped maintenance repairs with no remaining finding.
+Three real WebSocket controls also pass: token-only reconnect, signaling with
+the restored player identity, and a two-player authority release.
