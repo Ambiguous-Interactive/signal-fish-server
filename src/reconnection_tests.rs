@@ -1459,6 +1459,163 @@ async fn same_room_reregistration_preserves_active_claim_and_rotated_token() {
     );
 }
 
+/// #1590: failed attempts preserve only their pending record's unpublished role.
+#[tokio::test]
+async fn unpublished_authority_provenance_survives_retries_and_same_room_registration() {
+    let manager = ReconnectionManager::new(300, 100, Arc::new(ServerMetrics::new()));
+    let player = PlayerId::new_v4();
+    let room = RoomId::new_v4();
+    let token = manager
+        .register_disconnection(player, room, true, None, 0)
+        .await;
+    let first = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(!first.has_unpublished_authority());
+    assert!(
+        manager
+            .release_reconnection_claim_with_unpublished_authority(&first, true)
+            .await
+    );
+    assert_eq!(
+        manager
+            .register_disconnection(player, room, true, None, 0)
+            .await,
+        token
+    );
+    let second = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(second.has_unpublished_authority());
+    assert!(
+        manager.release_reconnection_claim(&second).await,
+        "an ordinary rejection releases ownership without discarding unpublished-role evidence"
+    );
+    let third = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(third.has_unpublished_authority());
+    assert!(
+        manager
+            .release_reconnection_claim_with_unpublished_authority(&third, false)
+            .await
+    );
+    let fourth = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(
+        !fourth.has_unpublished_authority(),
+        "a confirmed role rollback clears provenance"
+    );
+    assert!(
+        manager
+            .release_reconnection_claim_with_unpublished_authority(&fourth, true)
+            .await
+    );
+    let replacement_room = RoomId::new_v4();
+    let replacement_token = manager
+        .register_disconnection(player, replacement_room, true, None, 0)
+        .await;
+    let replacement = manager
+        .claim_reconnection(
+            &PlayerId::new_v4(),
+            &player,
+            &replacement_room,
+            &replacement_token,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !replacement.has_unpublished_authority(),
+        "another room cannot inherit the old role"
+    );
+    assert!(manager.complete_claimed_reconnection(&replacement).await);
+    let fresh_token = manager
+        .register_disconnection(player, replacement_room, true, None, 0)
+        .await;
+    let fresh = manager
+        .claim_reconnection(
+            &PlayerId::new_v4(),
+            &player,
+            &replacement_room,
+            &fresh_token,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !fresh.has_unpublished_authority(),
+        "a completed record cannot taint a later disconnect"
+    );
+}
+
+/// #1590: a superseded claim cannot alter the next attempt's role provenance.
+#[tokio::test]
+async fn stale_claim_cannot_change_unpublished_authority_provenance() {
+    let manager = ReconnectionManager::new(300, 100, Arc::new(ServerMetrics::new()));
+    let player = PlayerId::new_v4();
+    let room = RoomId::new_v4();
+    let token = manager
+        .register_disconnection(player, room, true, None, 0)
+        .await;
+    let stale = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(manager.release_reconnection_claim(&stale).await);
+    let current = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(
+        !manager
+            .release_reconnection_claim_with_unpublished_authority(&stale, true)
+            .await
+    );
+    assert!(matches!(
+        manager
+            .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+            .await,
+        Err(ReconnectionError::AlreadyInProgress)
+    ));
+    assert!(manager.release_reconnection_claim(&current).await);
+    let next = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(
+        !next.has_unpublished_authority(),
+        "stale release cannot add provenance"
+    );
+    assert!(
+        manager
+            .release_reconnection_claim_with_unpublished_authority(&next, true)
+            .await
+    );
+    let owned = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(owned.has_unpublished_authority());
+    assert!(
+        !manager
+            .release_reconnection_claim_with_unpublished_authority(&stale, false)
+            .await
+    );
+    assert!(manager.release_reconnection_claim(&owned).await);
+    let retained = manager
+        .claim_reconnection(&PlayerId::new_v4(), &player, &room, &token)
+        .await
+        .unwrap();
+    assert!(
+        retained.has_unpublished_authority(),
+        "stale release cannot erase provenance"
+    );
+}
+
 #[tokio::test]
 async fn certificate_bound_claim_is_atomic_and_identity_preserving() {
     let metrics = Arc::new(ServerMetrics::new());

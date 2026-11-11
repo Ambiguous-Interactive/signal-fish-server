@@ -223,6 +223,9 @@ impl EnhancedGameServer {
     ) {
         if let RoomAdmissionKind::Created { creation_owner, .. } = &admission_kind {
             creation_owner.record_creator_left();
+            // Publication may have committed before its response was lost.
+            // Retain discovery and admission refusal before any adapter call.
+            self.pending_creation_rollbacks.insert(room_id, player_id);
         }
         let created_room_is_still_exclusive = if matches!(
             admission_kind,
@@ -250,6 +253,7 @@ impl EnhancedGameServer {
                         self.metrics.add_rooms_deleted(1);
                     }
                     self.room_applications.remove(&room_id);
+                    self.pending_creation_rollbacks.remove(&room_id);
                     let _ = self.room_coordinator.clear_ready_players(&room_id).await;
                     return;
                 }
@@ -319,13 +323,38 @@ impl EnhancedGameServer {
         {
             return;
         }
-        self.rollback_unpublished_player_admission(
+        let rollback_kind = admission_kind.clone();
+        let rollback = AssertUnwindSafe(self.rollback_unpublished_player_admission(
             room_id,
             player_id,
             admission_kind,
             "join_panic",
-        )
+        ))
+        .catch_unwind()
         .await;
+        if rollback.is_err() {
+            if matches!(rollback_kind, RoomAdmissionKind::Created { .. }) {
+                // Mark the failed creation for repair. Backends must implement
+                // the pending lifecycle; a dropped owner also permits cleanup.
+                let abandoned = AssertUnwindSafe(self.database.abandon_room(&room_id, &player_id))
+                    .catch_unwind()
+                    .await;
+                if !matches!(abandoned, Ok(Ok(()))) {
+                    tracing::error!(%player_id, %room_id, "Failed to mark the panicked creation for cleanup");
+                }
+            }
+            // Adapter recovery can also unwind. Retain the durable removal
+            // obligation before clearing this unpublished local generation;
+            // a later retry must not inherit an assignment with no baseline.
+            self.pending_durable_player_detaches.insert(
+                (room_id, player_id),
+                rollback_kind.application_claim_rollback().cloned(),
+            );
+            if matches!(rollback_kind, RoomAdmissionKind::Existing { .. }) {
+                self.metrics.increment_players_left();
+            }
+            tracing::error!(%player_id, %room_id, "Join rollback panicked; retaining durable detach for retry");
+        }
         self.discard_pre_issued_reconnection_token(&player_id).await;
         self.connection_manager
             .rollback_prepared_room_assignment(&player_id, room_id, epoch);
@@ -2142,6 +2171,10 @@ impl EnhancedGameServer {
                     }
                 };
 
+                if self.pending_creation_rollbacks.contains_key(&room.id) {
+                    self.release_renewed_lock(&mut lock_renewal).await;
+                    return Err(JoinRoomError::RoomNotFound);
+                }
                 match self.database.is_room_published(&room.id).await {
                     Ok(true) => {}
                     Ok(false) => {

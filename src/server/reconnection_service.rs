@@ -107,7 +107,8 @@ struct ReconnectionClaimGuard {
 struct ReconnectRestoreState {
     /// This attempt re-added the membership row that the disconnect removed.
     restored_membership: bool,
-    /// This attempt was granted the room's vacant authority back.
+    /// This restore owns a new or inherited unpublished authority grant.
+    /// Rejection must undo it; a committed restore must announce it.
     restored_authority: bool,
     /// This attempt took ownership of a queued durable detach: `Some(value)`
     /// is the retry it removed, carrying whatever application-claim rollback
@@ -149,11 +150,14 @@ impl ReconnectionClaimGuard {
         self.claim.as_ref().map(Arc::clone)
     }
 
-    async fn release(mut self) -> bool {
+    /// Return this reservation for retry with its current unpublished-role ownership.
+    async fn release_with_unpublished_authority(mut self, unpublished_authority: bool) -> bool {
         let Some(claim) = self.claim.take() else {
             return false;
         };
-        self.manager.release_reconnection_claim(&claim).await
+        self.manager
+            .release_reconnection_claim_with_unpublished_authority(&claim, unpublished_authority)
+            .await
     }
 
     async fn complete(mut self) -> bool {
@@ -181,6 +185,23 @@ impl Drop for ReconnectionClaimGuard {
 }
 
 impl EnhancedGameServer {
+    /// Retain stale-seat cleanup while preserving any existing application obligation.
+    fn retain_reconnect_detach(
+        &self,
+        room_id: RoomId,
+        player_id: PlayerId,
+        rollback: Option<PendingApplicationClaimRollback>,
+    ) {
+        self.pending_durable_player_detaches
+            .entry((room_id, player_id))
+            .and_modify(|pending| {
+                if pending.is_none() {
+                    *pending = rollback.clone();
+                }
+            })
+            .or_insert(rollback);
+    }
+
     /// Close an unpublished reconnect and order its opening before owned teardown.
     async fn repair_panicked_reconnect_publication_locked(
         self: &Arc<Self>,
@@ -268,6 +289,100 @@ impl EnhancedGameServer {
                 tracing::error!(%reconnect_player_id, %room_id, "Failed to retain reconnect snapshot after publication repair");
             }
         }
+    }
+
+    /// An uncommitted reconnect must restore all ownership before releasing its claim.
+    /// Both unwind supervisors use this path while retaining the room and source gates.
+    async fn rollback_panicked_reconnect_locked(
+        &self,
+        current_player_id: PlayerId,
+        reconnect_player_id: PlayerId,
+        effective_player_id: &Option<Arc<tokio::sync::RwLock<PlayerId>>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        recovery: &ReconnectPanicRecovery,
+    ) {
+        if recovery.reassigned {
+            self.discard_pre_issued_reconnection_token(&reconnect_player_id)
+                .await;
+            // Routing adapters must not prevent the local ownership rollback.
+            match AssertUnwindSafe(
+                self.message_coordinator
+                    .unregister_local_client(&reconnect_player_id),
+            )
+            .catch_unwind()
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(%reconnect_player_id, %error, "Reconnect rollback route removal failed")
+                }
+                Err(_) => {
+                    tracing::error!(%reconnect_player_id, "Reconnect rollback route removal panicked")
+                }
+            }
+            let _ = self
+                .connection_manager
+                .restore_reassigned_connection(&current_player_id, &reconnect_player_id);
+            if let Some(effective_player_id) = effective_player_id {
+                *effective_player_id.write().await = current_player_id;
+            }
+        }
+        if let (Some(manager), Some(claim)) = (&self.reconnection_manager, recovery.claim.as_ref())
+        {
+            let claim_guard = ReconnectionClaimGuard::new(Arc::clone(manager), Arc::clone(claim));
+            let rollback = AssertUnwindSafe(self.rollback_claimed_reconnect(
+                claim_guard,
+                &recovery.restore,
+                "Reconnect failed unexpectedly",
+            ))
+            .catch_unwind()
+            .await;
+            if rollback.is_err() {
+                let mut unpublished_authority =
+                    claim.has_unpublished_authority() || recovery.restore.restored_authority;
+                // The final supervisor must still release this uncommitted
+                // claim when a storage adapter also panics during rollback.
+                // Preserve the inherited application-claim provenance for repair.
+                if recovery.restore.restored_membership
+                    || recovery.restore.cleared_pending_detach.is_some()
+                {
+                    self.retain_reconnect_detach(
+                        claim.disconnected.room_id,
+                        claim.disconnected.player_id,
+                        recovery.restore.cleared_pending_detach.clone().flatten(),
+                    );
+                }
+                // Removing the restored row also clears its role. If removal
+                // unwound, still undo this attempt's unpublished authority
+                // grant so an immediate retry can announce its fresh grant.
+                if recovery.restore.restored_authority {
+                    let authority_rollback = AssertUnwindSafe(
+                        self.database
+                            .update_room_authority(&claim.disconnected.room_id, None),
+                    )
+                    .catch_unwind()
+                    .await;
+                    if matches!(authority_rollback, Ok(Ok(true))) {
+                        unpublished_authority = false;
+                    } else {
+                        tracing::error!(%reconnect_player_id, "Failed to roll back unpublished reconnect authority");
+                    }
+                }
+                let _ = manager
+                    .release_reconnection_claim_with_unpublished_authority(
+                        claim,
+                        unpublished_authority,
+                    )
+                    .await;
+                tracing::error!(%reconnect_player_id, "Reconnect storage rollback panicked; retaining unfinished recovery for retry");
+            }
+        }
+        self.send_unexpected_room_operation_failure(
+            current_player_id,
+            operation_id,
+            "Reconnect failed unexpectedly",
+        )
+        .await;
     }
 
     async fn commit_reconnect_publication_state(
@@ -590,6 +705,7 @@ impl EnhancedGameServer {
         false
     }
 
+    /// Undo owned room changes and preserve unfinished cleanup before releasing the claim.
     async fn rollback_claimed_reconnect(
         &self,
         claim_guard: ReconnectionClaimGuard,
@@ -606,6 +722,8 @@ impl EnhancedGameServer {
         // "nothing left to repair"; `Some(rollback)` re-queues the retry with
         // the provenance it started with.
         let mut requeue_detach = restore.cleared_pending_detach.clone();
+        let mut unpublished_authority =
+            retained_claim.has_unpublished_authority() || restore.restored_authority;
         let mut authority_needs_rollback = !restore.restored_membership;
         if restore.restored_membership {
             if let Err(err) = self
@@ -624,6 +742,7 @@ impl EnhancedGameServer {
                     "Failed to roll back restored room membership after reconnect failure"
                 );
             } else {
+                unpublished_authority = false;
                 // The rollback removed the row, so only an outstanding
                 // application-claim rollback still needs a retry.
                 requeue_detach = requeue_detach.filter(Option::is_some);
@@ -633,25 +752,33 @@ impl EnhancedGameServer {
         // failed removal leaves its row behind, so release the granted role
         // while detach repair waits for storage to recover.
         if restore.restored_authority && authority_needs_rollback {
-            if let Err(err) = self
+            match self
                 .database
                 .update_room_authority(&disconnected.room_id, None)
                 .await
             {
-                tracing::warn!(
-                    player_id = %disconnected.player_id,
-                    room_id = %disconnected.room_id,
-                    error = %err,
-                    "Failed to roll back restored authority after reconnect failure"
-                );
+                Ok(true) => unpublished_authority = false,
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        player_id = %disconnected.player_id,
+                        room_id = %disconnected.room_id,
+                        error = %err,
+                        "Failed to roll back restored authority after reconnect failure"
+                    );
+                }
             }
         }
         if let Some(rollback) = requeue_detach {
-            self.pending_durable_player_detaches
-                .insert((disconnected.room_id, disconnected.player_id), rollback);
+            // Shutdown can reject before this attempt takes the existing
+            // detach. Preserve that entry's application debt while ensuring
+            // an inherited debt can upgrade an empty repair marker.
+            self.retain_reconnect_detach(disconnected.room_id, disconnected.player_id, rollback);
         }
 
-        let released = claim_guard.release().await;
+        let released = claim_guard
+            .release_with_unpublished_authority(unpublished_authority)
+            .await;
         tracing::warn!(
             player_id = %disconnected.player_id,
             room_id = %disconnected.room_id,
@@ -794,6 +921,7 @@ impl EnhancedGameServer {
         .await
     }
 
+    /// Own restoration and phase-aware unwind recovery beyond cancellation of the caller.
     async fn spawn_reconnect_transaction(
         self: &Arc<Self>,
         current_player_id: PlayerId,
@@ -854,9 +982,10 @@ impl EnhancedGameServer {
                 Err(_) => {
                     tracing::error!(%current_player_id, %reconnect_player_id, %room_id, "Owned reconnect transaction panicked");
                     /*
-                        Retry no uncommitted rollback after a supervisor panic.
                         A delivered baseline spends the claim and requires an
                         ordered opening and close from the retained snapshot.
+                        An uncommitted attempt restores ownership before its
+                        claim is released, including after a supervisor panic.
                     */
                     let supervisor_outcome = AssertUnwindSafe(async {
                         #[cfg(test)]
@@ -889,42 +1018,13 @@ impl EnhancedGameServer {
                             }
                             true
                         } else {
-                            if recovery.reassigned {
-                                server
-                                    .discard_pre_issued_reconnection_token(&reconnect_player_id)
-                                    .await;
-                                let _ = server
-                                    .message_coordinator
-                                    .unregister_local_client(&reconnect_player_id)
-                                    .await;
-                                let _ = server.connection_manager.restore_reassigned_connection(
-                                    &current_player_id,
-                                    &reconnect_player_id,
-                                );
-                                if let Some(effective_player_id) = &effective_player_id_for_recovery
-                                {
-                                    *effective_player_id.write().await = current_player_id;
-                                }
-                            }
-
-                            if let (Some(manager), Some(claim)) =
-                                (&server.reconnection_manager, recovery.claim)
-                            {
-                                let claim_guard =
-                                    ReconnectionClaimGuard::new(Arc::clone(manager), claim);
-                                server
-                                    .rollback_claimed_reconnect(
-                                        claim_guard,
-                                        &recovery.restore,
-                                        "Reconnect failed unexpectedly",
-                                    )
-                                    .await;
-                            }
                             server
-                                .send_unexpected_room_operation_failure(
+                                .rollback_panicked_reconnect_locked(
                                     current_player_id,
+                                    reconnect_player_id,
+                                    &effective_player_id_for_recovery,
                                     operation_id,
-                                    "Reconnect failed unexpectedly",
+                                    &recovery,
                                 )
                                 .await;
                             false
@@ -979,7 +1079,15 @@ impl EnhancedGameServer {
                                             .await;
                                     }
                                 } else {
-                                    let _ = manager.release_reconnection_claim(claim).await;
+                                    server
+                                        .rollback_panicked_reconnect_locked(
+                                            current_player_id,
+                                            reconnect_player_id,
+                                            &effective_player_id_for_recovery,
+                                            operation_id,
+                                            &recovery,
+                                        )
+                                        .await;
                                 }
                             }
                             false
@@ -1460,6 +1568,18 @@ impl EnhancedGameServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .restore = restore.clone();
 
+        // A prior failed attempt can leave its own grant in storage. Only
+        // claim-scoped evidence makes that role unpublished; retained roles
+        // from an ordinary disconnect must not emit duplicate grants.
+        if retained_claim.has_unpublished_authority()
+            && room.authority_player == Some(*reconnect_player_id)
+        {
+            restore.restored_authority = true;
+            panic_recovery
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .restore = restore.clone();
+        }
         if disconnected.was_authority && room.supports_authority && room.authority_player.is_none()
         {
             match self

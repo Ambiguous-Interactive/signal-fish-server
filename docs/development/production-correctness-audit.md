@@ -15947,3 +15947,191 @@ never triggered its exact-publication fault and is excluded from evidence.
 The corrected baseline includes the incumbent and requires each fault latch
 to be consumed. Independent review approves these repairs and the consecutive
 departure control.
+
+### F332–F333 — Keep unpublished P2P admissions retryable after recovery failures
+
+Session 679 starts from `2edf4117` and records new server findings under #826.
+
+F332 ([#1590](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1590)).
+A reconnect can restore membership and reassign the socket, then unwind before
+its baseline. If its supervisor also unwinds, the final fallback releases the
+claim while leaving the restored identity connected. A manager-only claim test
+passes in that state, but a full reconnect cannot recover the room. The new
+finalized Mesh/WebRTC control fails on original source in Nextest
+`5a088430-f09c-4bba-9426-7131ea8135bf`. Both uncommitted recovery paths now share
+identity, membership and claim rollback. Routing cleanup has a local unwind
+boundary so an adapter panic cannot skip local ownership restoration. The
+committed-baseline path retains its separate spent-claim rule.
+
+F333 ([#1591](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1591)).
+The join supervisor awaited storage rollback before clearing the prepared room
+assignment, discarding its provisional token, sending its failure, and releasing
+the creation lock. A rollback panic skipped those steps. The finalized WebRTC
+control fails on original source in Nextest
+`d7cf3e27-0081-4708-a8e2-198b2047a8da`: the correlated failure times out. A local
+unwind boundary retains durable cleanup and lets the supervisor finish. The
+control passes in `65ccf01d-175a-42c3-8855-e41b2e44142d`. A separate creator control
+checks abandoned-room cleanup and same-code creation retry.
+
+These histories use deterministic fault injection. They establish server
+recovery defects, not normal requests that trigger a production panic. The
+shipped in-memory backend does not produce the injected storage-adapter panic.
+The controls require complete admission retries and reciprocal WebRTC peer plans;
+they do not prove every runtime or socket schedule. The broader audit stays open.
+
+### F334 — Retain delayed authority notification after failed maintenance publication
+
+F334 ([#1592](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1592)).
+After a disconnect fails both member removal and authority release, maintenance
+can remove the retained authority-bearing row. Both durable-detach and expired
+reconnect cleanup consume their retry records before the authority event runs.
+A publication failure then loses the role evidence. Later cleanup cannot
+reconstruct the required event from the now-absent row. The two new live
+Mesh/WebRTC controls fail on original maintenance source in Nextest
+`907d9e37-8ec1-4cf6-8225-6fb3c5e962c0`. Each control refuses one authority
+publication after confirmed storage cleanup, then requires a later sweep to
+repair the live and replay views.
+
+This is a new failed-publication history after F222's normal authority cleanup.
+The injected storage and publication errors do not establish a shipped socket
+incident. The message schema and authority-request rules stay unchanged.
+
+#### External-client assessment for F332–F334
+
+The assessment reads Rust main `da8f2d16` (`src/client_core.rs`), .NET main
+`e467c871` (`Polling/FramePipeline.cs`), and Godot main `58f880b1`
+(`addons/signal_fish/signal_fish_client.gd`). They process admission failures,
+room baselines, and authority events through separate existing paths. The
+server changes preserve message schemas. They change recovery timing and
+permit a previously stranded admission to retry. Source inspection does not
+qualify the supported SDK runtime behavior.
+
+Runtime retry and P2P generation qualification remains open in Rust
+[#300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+.NET [#153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and Godot [#578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+The checks require one successful baseline before the new plan, no peer opening
+from the failed attempt, reciprocal WebRTC plans, successful signaling, and
+same-code creation retry after abandoned-room cleanup. No SDK migration is
+established. These tracking issues stay open until the client controls pass.
+
+F332 review found a repeated-storage-panic gap in the first repair. If both
+supervisors retried the same failing rollback, the final unwind could leave its
+claim reserved and exempt from expiry. The new red is Nextest
+`b14f5c5c-9a59-445f-ab4e-def419dc4635`. Recovery now catches storage rollback
+locally, retains the inherited application-claim cleanup provenance, and releases
+the uncommitted claim explicitly. The full retry control also requires actual
+same-generation WebRTC signaling after admission. The in-memory controls remain
+in Miri scope; no runtime cost exclusion is inferred from neighboring tests.
+
+F334 retains one pending authority notice per room. Both existing bounded
+maintenance queues can retry it. Each job holds the room gate, verifies the
+current vacant role, and retires only its matching notice in the publication
+hook. A successor, deleted room, or shutdown suppresses the old notice. Durable
+cleanup records authority evidence before application-claim rollback can wait
+or unwind. Other stale seats still proceed when notification repeatedly fails.
+
+Review rejected the first room-scoped candidate because it retried the notice
+before every seat in that room and returned without removing those seats. The
+corrected order separates actual seat cleanup from notice-only retries. Controls
+cover both cleanup paths, a new public authority grant, transient snapshot read
+failure, a post-commit publication panic, and another stale seat during repeated
+publication failure. These claims concern current room truth and one committed
+notice; they do not promise a complete event history through arbitrary adapter
+or process failures.
+
+Final independent maintenance selection `603e5a9f-a1b7-4f45-8d94-9e31cff8e963`
+passes nine controls, including the second stale seat during repeated publication
+failure. The added application-rollback-panic control passes in
+`8ca00d5d-f2af-4173-9b91-e5e12c6c1f96`. The final three reconnect retry controls
+pass in `745e3e65-89eb-465d-b0e6-d7e7f81d6439`. Independent review approves the
+join, reconnect, and room-scoped maintenance repairs with no remaining finding.
+Three real WebSocket controls also pass: token-only reconnect, signaling with
+the restored player identity, and a two-player authority release.
+
+F332 immediate-retry review found unpublished authority surviving a failed
+membership rollback. The incumbent had observed the real disconnect's cleared
+role. Immediate retry then reused the stored role without its required
+`AuthorityChanged` grant. The red is
+`cd84be1b-cf8a-4493-ab58-ea86a8758204`. The first probe had an overlong player
+name and is excluded from evidence.
+
+Recovery attempts the owned role rollback even when member removal panics.
+If role rollback also fails, the matching reconnect record retains private
+unpublished-grant provenance atomically with claim release. A later attempt
+inherits that ownership only if the actor still holds the stored role. It can
+then announce the grant after its baseline or undo it on rejection. A retained
+role that peers already saw has no such marker and emits no duplicate grant.
+The public disconnect snapshot and wire schema stay unchanged. Same-room
+registration and default claim release preserve the marker; another room resets
+it. Stale claims cannot set or erase a newer record's marker.
+
+Omitting only marker inheritance reproduces the missing grant in
+`7f0f7190-d13e-41ea-9077-b1291b0a8e44`, independently confirmed in `b6f61509`.
+The final six-history matrix passes in
+`b085e67b-c832-4735-8efe-a45006a86d93`: typed member-removal errors and panics
+cross role-clear success, error, and panic. Every history retries before
+maintenance and checks the baseline, authority event, and reciprocal WebRTC
+plans. Independent manager and retained-role controls pass in
+`97862278-45d2-40e5-b0f8-8d6f200da6e7`. A separate final-supervisor plus persistent
+storage-panic control retains the claim-release and full P2P retry assertions.
+
+F333 hosted review questioned failed abandonment after a creator rollback panic.
+The supported storage contract requires atomic hidden insertion through
+`GameDatabase::create_pending_room_classified`; its default refuses creation.
+The older fixture deliberately used a visible legacy insertion for unrelated
+adapter controls. The creator regression now uses owned pending insertion from the shipped
+backend. The new abandonment-error and abandonment-panic histories
+prove the room remains hidden, another socket receives `RoomNotFound`, and the
+dropped creation owner keeps maintenance discovery eligible. Cleanup then frees
+the code for a fresh creation. Both all-feature controls pass in
+`7a6258d4-6b89-4223-bf7d-088d7330a7c4`. The recovery comment now states this
+pending-lifecycle requirement instead of promising visibility guarantees for
+nonconforming adapters. No process-local fence can establish a durable backend's
+cross-node atomic visibility contract.
+
+F332 final review confirmed a pre-takeover application cleanup loss. Shutdown
+can start after member restoration but before reconnect takes the existing
+durable-detach obligation. Failed rollback then replaced its application claim
+with an empty marker. The public-flow reds are
+`9fbec967-76f9-4077-ad73-6a31574edbab` for a typed removal error and
+`703082ac-24ae-4395-9641-07babdfa3a36` for repeated removal panics.
+Both retention sites now merge atomically: keep existing application provenance,
+upgrade an empty marker from captured provenance, and insert only when vacant.
+The regression checks the retained obligation and then requires maintenance to
+remove the stale seat and clear the matching stored and cached application claim.
+Five all-feature recovery controls pass in
+`66bc0cd8-fa9f-497b-9d66-2c5347497bd0`. This is part of the same uncommitted
+reconnect recovery contract, not a new wire or client requirement.
+
+F332 ownership review also found that a role-only rollback could schedule removal
+of a membership retained through the public reconnect-manager API. The attempt
+had not added that row or inherited its deletion obligation. The new control
+fails on prior source in `57026a98-88e7-4804-a38c-6d5dd0a21690`. Panic recovery now
+queues a detach only for an owned restored membership or inherited detach, and
+both queue sites use one provenance-preserving helper. The control checks that
+maintenance leaves the retained row intact and a complete retry succeeds.
+Independent all-feature review passes in
+`b42f2e8d-9b12-400d-87c1-f4c22bc82809`. This is a retained-row component history;
+it does not claim a new first-party socket incident.
+
+F333 publication-boundary control reproduces a separate recovery gap. The
+first-party storage publishes the room, then an adapter loses the reply. Both
+creator deletion and abandonment fail. The original code admits another player
+to that room in Nextest `0a6b4738-b4dc-4995-8df0-e9a0183c2bfd`.
+
+Failed creator rollback now retains a local room-deletion obligation before any
+storage call. Player and spectator admission refuse that room. The existing
+bounded maintenance queue discovers the obligation independently of pending-room
+storage scans, takes the code lock and room lane, and deletes only an empty room
+or one still occupied solely by the failed creator. Other members prevent
+cleanup. Errors and panics retain the obligation for retry. Deletion clears it;
+a replacement room with the same code has a different room ID.
+
+The control crosses abandonment error and panic with maintenance before and
+after durable seat removal. It requires refusal during failed deletion, eventual
+cleanup, and fresh same-code creation. This record is local to the server
+process. It does not establish visibility revocation on another node while a
+storage adapter refuses abandonment, or persistence across process loss. The
+shipped in-memory backend does not emit the injected failure. No wire message
+or SDK requirement changes beyond the linked F332–F334 assessment.

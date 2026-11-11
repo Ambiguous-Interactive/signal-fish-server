@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retry delayed authority notifications after maintenance publication fails (#1592).
+- Preserve P2P reconnect retries and authority updates, and complete pending room cleanup after recovery fails (#1590).
+  Keep an existing reserved seat available when reconnection fails.
+- Keep failed P2P joins retryable and reclaim rooms after initial publication or storage rollback fails (#1591).
 - Close peers in deleted P2P rooms when advisory routing is busy (#1585).
 - Close incomplete P2P joins and reconnects without repeating room events when server recovery fails (#1587, #1588).
 - Recover the live P2P host after a successful leave ends in a server error (#1586).

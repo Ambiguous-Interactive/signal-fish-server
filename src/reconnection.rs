@@ -331,6 +331,7 @@ pub struct DisconnectedPlayer {
 /// `None`) second `register_disconnection` call would clobber the real capture.
 /// See [`ReconnectionManager::register_disconnection`].
 struct PreservedPending {
+    unpublished_authority: bool,
     token: String,
     token_created_at: DateTime<Utc>,
     token_expires_at: DateTime<Utc>,
@@ -364,6 +365,8 @@ impl DisconnectedPlayer {
 
 #[derive(Debug, Clone)]
 struct ReconnectionRecord {
+    /// A failed restore still owns an authority grant that peers have not seen.
+    unpublished_authority: bool,
     disconnected: DisconnectedPlayer,
     identity: Option<Arc<str>>,
     claim: Option<ReconnectionClaimState>,
@@ -436,6 +439,14 @@ impl ReconnectionClaimState {
 pub struct ClaimedReconnection {
     pub disconnected: DisconnectedPlayer,
     claim_id: Uuid,
+    unpublished_authority: bool,
+}
+
+impl ClaimedReconnection {
+    /// Whether this claim owns a restored authority grant that peers have not seen.
+    pub(crate) fn has_unpublished_authority(&self) -> bool {
+        self.unpublished_authority
+    }
 }
 
 /// Scrape-time live-state counts from [`ReconnectionManager::replay_sample`].
@@ -844,6 +855,7 @@ impl ReconnectionManager {
         .await
     }
 
+    /// Preserve disconnect state and unpublished role provenance within the bound identity.
     pub(crate) async fn register_disconnection_with_identity(
         &self,
         player_id: PlayerId,
@@ -868,6 +880,7 @@ impl ReconnectionManager {
             .get(&player_id)
             .filter(|existing| existing.disconnected.room_id == room_id)
             .map(|existing| PreservedPending {
+                unpublished_authority: existing.unpublished_authority,
                 token: existing.disconnected.token.token.clone(),
                 token_created_at: existing.disconnected.token.created_at,
                 token_expires_at: existing.disconnected.token.expires_at,
@@ -1007,6 +1020,9 @@ impl ReconnectionManager {
         }
 
         let record = ReconnectionRecord {
+            unpublished_authority: existing_same_room
+                .as_ref()
+                .is_some_and(|existing| existing.unpublished_authority),
             disconnected: DisconnectedPlayer {
                 player_id,
                 room_id,
@@ -1158,6 +1174,7 @@ impl ReconnectionManager {
             .await
     }
 
+    /// Reserve the matching identity and copy its pending authority publication into the claim.
     pub(crate) async fn claim_reconnection_with_identity(
         &self,
         claimed_by: &PlayerId,
@@ -1221,6 +1238,7 @@ impl ReconnectionManager {
         let claimed = ClaimedReconnection {
             disconnected: record.disconnected.clone(),
             claim_id: claim.claim_id,
+            unpublished_authority: record.unpublished_authority,
         };
         record.claim = Some(claim);
 
@@ -1309,6 +1327,26 @@ impl ReconnectionManager {
 
     /// Release a reserved reconnection record after a failed restore attempt.
     pub async fn release_reconnection_claim(&self, claim: &ClaimedReconnection) -> bool {
+        self.release_reconnection_claim_with_authority_state(claim, None)
+            .await
+    }
+
+    /// Retain an unpublished role grant atomically with releasing its matching claim.
+    pub(crate) async fn release_reconnection_claim_with_unpublished_authority(
+        &self,
+        claim: &ClaimedReconnection,
+        unpublished_authority: bool,
+    ) -> bool {
+        self.release_reconnection_claim_with_authority_state(claim, Some(unpublished_authority))
+            .await
+    }
+
+    /// Update role provenance only for the matching reservation, then release it.
+    async fn release_reconnection_claim_with_authority_state(
+        &self,
+        claim: &ClaimedReconnection,
+        unpublished_authority: Option<bool>,
+    ) -> bool {
         let mut state = self
             .lock_record_mutation(&claim.disconnected.player_id)
             .await;
@@ -1339,6 +1377,9 @@ impl ReconnectionManager {
             return false;
         }
 
+        if let Some(unpublished_authority) = unpublished_authority {
+            record.unpublished_authority = unpublished_authority;
+        }
         record.claim = None;
         tracing::debug!(
             player_id = %claim.disconnected.player_id,
