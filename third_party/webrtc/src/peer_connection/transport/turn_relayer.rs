@@ -702,6 +702,7 @@ impl Protocol<TaggedBytesMut, TaggedBytesMut, RTCTurnRelayEventIn> for RTCTurnRe
         Ok(())
     }
 
+    /// Apply TURN transaction results and publish candidates or gathering completion.
     fn poll_event(&mut self) -> Option<Self::Eout> {
         let keys: Vec<FourTuple> = self.clients.keys().copied().collect();
         for four_tuple in keys {

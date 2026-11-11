@@ -588,6 +588,7 @@ impl ReconnectionManager {
         self.release_record_room_event.notify_one();
     }
 
+    /// Keep the replay writer held until the supplied test wait finishes.
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) async fn hold_replay_write_for_test(
         &self,
@@ -1650,6 +1651,7 @@ impl ReconnectionManager {
             .map(Self::build_room_gc_protection)
     }
 
+    /// Build the protected room set from the current view and retain its guard.
     fn build_room_gc_protection(state: RwLockReadGuard<'_, ReplayState>) -> RoomGcProtection<'_> {
         let now = Instant::now();
         let room_ids = state

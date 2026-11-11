@@ -2713,6 +2713,7 @@ async fn arm_tasks(
     result
 }
 
+/// Wait for peer tasks without an external stop signal.
 #[cfg(test)]
 async fn await_peers(
     handles: Vec<tokio::task::JoinHandle<()>>,
@@ -2721,6 +2722,7 @@ async fn await_peers(
     await_peers_or_stop(handles, deadline, std::future::pending(), || {}).await
 }
 
+/// Observe unfinished peers before aborting them, then join every task.
 async fn await_peers_or_stop(
     handles: Vec<tokio::task::JoinHandle<()>>,
     deadline: Instant,
@@ -3403,6 +3405,7 @@ mod session_poll_tests {
         assert!(serde_json::to_vec(&snapshot).unwrap().len() < 700);
     }
 
+    /// Record-budget interruption observes live peers before joining them.
     #[tokio::test]
     async fn record_budget_stop_cancels_and_joins_peers_before_the_deadline() {
         let context = crate::unit_context_with_class(DeliveryClass::Reliable);

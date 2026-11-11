@@ -658,6 +658,7 @@ impl EnhancedGameServer {
         }
     }
 
+    /// Run the serial cleanup sweep and finish its current work before exiting.
     async fn cleanup_housekeeping_until(
         self: &Arc<Self>,
         shutdown: impl Future<Output = ()>,

@@ -1591,6 +1591,7 @@ async fn create_server_with_session_and_turn(
     create_server_with_configs(session, turn, ServerConfig::default()).await
 }
 
+/// Build a session test server with explicit maintenance timing when needed.
 async fn create_server_with_configs(
     session: SessionConfig,
     turn: crate::config::TurnConfig,

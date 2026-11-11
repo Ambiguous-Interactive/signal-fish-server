@@ -1656,6 +1656,7 @@ impl InMemoryDatabase {
         self.rooms.write().await
     }
 
+    /// Pause the next cleanup before it acquires room storage locks.
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn pause_next_room_cleanup_lease_for_test(
         &self,
@@ -3284,6 +3285,7 @@ impl GameDatabase for InMemoryDatabase {
         ))
     }
 
+    /// Prepare the in-memory lease for a synchronous cleanup commit.
     async fn lease_room_cleanup(&self) -> Result<Option<RoomCleanupLease<'_>>> {
         #[cfg(all(test, signal_fish_repository_tests))]
         {

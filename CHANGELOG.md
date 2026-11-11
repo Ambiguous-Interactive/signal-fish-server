@@ -66,8 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Retry P2P host replacement while room cleanup waits, and keep live room operations available during reconnect contention
-  (#1573, #1574).
+- Retry P2P host replacement on schedule while unrelated room cleanup waits (#1573).
+- Keep live room operations available when cleanup waits for reconnect state (#1574).
 - Finish native TURN gathering when the initial allocation fails so peer setup can continue to fallback (#1575).
 - Keep live P2P host recovery and reconnects moving when room cleanup or storage is slow (#1566, #1567, #1568).
   Reclaim abandoned rooms independently, including during shutdown drain.
