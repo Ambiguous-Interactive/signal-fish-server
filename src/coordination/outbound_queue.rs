@@ -5959,6 +5959,7 @@ mod tests {
             for batched in [false, true] {
                 let (tx, mut rx) = channel(DEPTH, 4);
                 tx.set_protocol_version(3);
+                let mut reliable_deadlines = std::collections::VecDeque::new();
                 for seq in 1..=u64::try_from(DEPTH).unwrap() {
                     let class = match mode {
                         "latest" => DeliveryClass::Latest,
@@ -5971,18 +5972,14 @@ mod tests {
                     };
                     let key =
                         (class == DeliveryClass::Latest).then_some(u32::try_from(seq).unwrap());
+                    if class == DeliveryClass::Reliable {
+                        reliable_deadlines.push_back((seq, Instant::now()));
+                    }
                     tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
                     tokio::time::advance(Duration::from_micros(1)).await;
                 }
                 for seq in 1..=u64::try_from(DEPTH).unwrap() {
-                    let expected = rx
-                        .shared
-                        .state()
-                        .data
-                        .iter()
-                        .filter(|row| row.class() == Some(DeliveryClass::Reliable))
-                        .map(|row| row.enqueued_at)
-                        .min();
+                    let expected = reliable_deadlines.front().map(|(_, deadline)| *deadline);
                     assert_eq!(rx.oldest_reliable_enqueued_at(), expected);
                     let item = if batched {
                         rx.recv_batched(32, Duration::ZERO).await.unwrap().unwrap()
@@ -5990,7 +5987,14 @@ mod tests {
                         rx.try_recv().unwrap()
                     };
                     assert_eq!(message_id(&item), seq);
+                    if reliable_deadlines
+                        .front()
+                        .is_some_and(|(reliable_seq, _)| *reliable_seq == seq)
+                    {
+                        reliable_deadlines.pop_front();
+                    }
                 }
+                assert!(reliable_deadlines.is_empty());
                 assert_eq!(rx.oldest_reliable_enqueued_at(), None);
                 let visits = rx.shared.state().reliable_scan_visits.get();
                 println!("RELIABLE_DEADLINE_SCAN mode={mode} batched={batched} depth={DEPTH} visits={visits}");
