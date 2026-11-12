@@ -48,23 +48,25 @@ func unpack(bytes: PackedByteArray) -> Variant:
 	require(result.status == null, "MessagePack decoding failed")
 	return result.value
 
-func samples(operation: Callable) -> Dictionary:
+func warmup(operation: Callable) -> Dictionary:
 	var checksum := 0
-	var iterations := 0
+	var count := 0
 	var start := Time.get_ticks_usec()
 	while Time.get_ticks_usec() - start < 1000000:
 		var value: Variant = operation.call()
 		checksum += value.size()
-		iterations += 1
-	iterations = maxi(1, iterations / 10)
-	var times := []
-	for sample in 10:
-		start = Time.get_ticks_usec()
-		for i in iterations:
-			var value: Variant = operation.call()
-			checksum += value.size()
-		times.append(float(Time.get_ticks_usec() - start) * 1000.0 / iterations)
-	return {"iterations": iterations, "samples_ns": times, "checksum": checksum}
+		count += 1
+	return {"iterations": maxi(1, count / 10), "warmup_iterations": count,
+		"warmup_ns": (Time.get_ticks_usec() - start) * 1000,
+		"samples_ns": [], "order_positions": [], "checksum": checksum}
+
+func sample(operation: Callable, timing: Dictionary, position: int) -> void:
+	var start := Time.get_ticks_usec()
+	for i in timing.iterations:
+		var value: Variant = operation.call()
+		timing.checksum += value.size()
+	timing.samples_ns.append(float(Time.get_ticks_usec() - start) * 1000.0 / timing.iterations)
+	timing.order_positions.append(position)
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
@@ -75,9 +77,21 @@ func _initialize() -> void:
 	var root: String = args[0]
 	var output := FileAccess.open(args[1], FileAccess.WRITE)
 	var check_only := "--check" in args
+	var seed := 1524
+	for argument in args:
+		if argument.begins_with("--seed="):
+			var text: String = argument.substr(7)
+			require(text.is_valid_int() and not text.begins_with("-"), "Seed must be an unsigned 32-bit integer")
+			seed = int(text)
+			require(seed >= 0 and seed <= 4294967295, "Seed exceeds uint32")
+	if failed:
+		output.close()
+		quit(1)
+		return
 	var corpus := root.path_join("test-fixtures/encoding")
 	var manifest: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(corpus.path_join("manifest.json")))
-	for fixture in manifest.fixtures:
+	for fixture_index in manifest.fixtures.size():
+		var fixture: Dictionary = manifest.fixtures[fixture_index]
 		var path: String = corpus.path_join(fixture.file)
 		var source_bytes := FileAccess.get_file_as_bytes(path)
 		var hash := HashingContext.new()
@@ -87,6 +101,7 @@ func _initialize() -> void:
 		require(hash.finish().hex_encode() == fixture.sha256, "Source hash differs")
 		var source: Variant = normalize(JSON.parse_string(source_bytes.get_string_from_utf8()))
 		var varint := Varint.new()
+		var prepared := []
 		for codec in ["msgpack-f32", "schema-varint"]:
 			var encoder: Callable = pack.bind(source) if codec == "msgpack-f32" else varint.encode.bind(fixture.name, source)
 			var wire: PackedByteArray = encoder.call()
@@ -98,11 +113,31 @@ func _initialize() -> void:
 			var record := {"language": "gdscript", "runtime": Engine.get_version_info().string,
 				"fixture": fixture.name, "codec": codec, "bytes": wire.size(),
 				"wire_base64": Marshalls.raw_to_base64(wire), "logical": decoded,
-				"float_bits": bits(decoded), "encode": null, "decode": null}
-			if not check_only and not failed:
-				record.encode = samples(encoder)
-				record.decode = samples(decoder)
-			output.store_line(JSON.stringify(record))
+				"float_bits": bits(decoded), "encode": null, "decode": null, "benchmark": null}
+			prepared.append({"encoder": encoder, "decoder": decoder, "record": record})
+		if not check_only and not failed:
+			var benchmark := {"method": "seeded-alternating", "seed": seed,
+				"warmup_ms": 1000, "warmup_order": [], "sample_orders": []}
+			var ordered: Array = prepared.duplicate()
+			if (seed + fixture_index) % 2 != 0:
+				ordered.reverse()
+			for item in ordered:
+				benchmark.warmup_order.append(item.record.codec)
+				item.record.encode = warmup(item.encoder)
+				item.record.decode = warmup(item.decoder)
+				item.record.benchmark = benchmark
+			for index in 10:
+				if index != 0:
+					ordered.reverse()
+				var executed := []
+				for position in ordered.size():
+					var item: Dictionary = ordered[position]
+					executed.append(item.record.codec)
+					sample(item.encoder, item.record.encode, position)
+					sample(item.decoder, item.record.decode, position)
+				benchmark.sample_orders.append(executed)
+		for item in prepared:
+			output.store_line(JSON.stringify(item.record))
 	# Expose the library's float32 precision limit. Do not repair it in the study.
 	var edge: Variant = unpack(pack(0.1))
 	require(edge != 0.1, "Expected the pinned MessagePack float32 limitation")

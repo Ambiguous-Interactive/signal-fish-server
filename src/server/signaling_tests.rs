@@ -7949,3 +7949,303 @@ fn routed_roster_reuses_storage_and_preserves_membership() {
         assert_eq!(actual, expected);
     }
 }
+
+async fn register_refusal_source(
+    server: &Arc<EnhancedGameServer>,
+) -> (
+    PlayerId,
+    crate::coordination::outbound_queue::OutboundReceiver,
+    uuid::Uuid,
+) {
+    let (sender, mut receiver) = crate::coordination::outbound_queue::channel(1, 4);
+    let player = server
+        .connection_manager
+        .register_classified_client(
+            crate::coordination::DeliverySender::classified(sender),
+            crate::coordination::ConnectionCloseSignal::detached(),
+            next_addr(),
+            server.instance_id,
+        )
+        .await
+        .unwrap();
+    server.set_client_protocol(&player, v3_webrtc());
+    server
+        .handle_join_room(
+            &player,
+            "refusal-room".into(),
+            Some("RPL685".into()),
+            "Alice".into(),
+            Some(3),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let baseline = recv_refusal_source(&mut receiver).await;
+    let ServerMessage::RoomJoined(payload) = baseline.as_ref() else {
+        panic!("expected the source's real joined baseline: {baseline:?}");
+    };
+    assert_eq!(payload.player_id, player);
+    let room = payload.room_id;
+    loop {
+        match receiver.try_recv() {
+            Ok(queued) => assert!(matches!(queued.payload,
+                crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                if matches!(message.as_ref(), ServerMessage::LobbyStateChanged { .. }))),
+            Err(crate::coordination::outbound_queue::TryReceiveError::Empty) => break,
+            Err(error) => panic!("source queue closed during join: {error:?}"),
+        }
+    }
+    (player, receiver, room)
+}
+
+async fn recv_refusal_source(
+    receiver: &mut crate::coordination::outbound_queue::OutboundReceiver,
+) -> Arc<ServerMessage> {
+    let queued = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let crate::coordination::outbound_queue::OutboundPayload::Message(message) = queued.payload
+    else {
+        panic!("expected a control message");
+    };
+    message
+}
+
+async fn assert_signal_refusal_releases_room(refusal: &str) {
+    let server = create_test_server_with_signals(1).await;
+    let (alice, mut alice_rx, room) = register_refusal_source(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let (charlie, mut charlie_rx) = register_client(&server).await;
+    for (player, name) in [(bob, "Bob"), (charlie, "Charlie")] {
+        assert!(server
+            .database
+            .add_player_to_room(&room, player_info(player, name))
+            .await
+            .unwrap());
+        server.set_client_protocol(&player, v3_webrtc());
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room)
+            .await;
+    }
+    if refusal == "valid_budget_spent" {
+        server
+            .handle_signal(&alice, bob, json!({"candidate": "first"}))
+            .await;
+        assert!(
+            matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal { signal, .. }
+                if *signal == json!({"candidate": "first"}))
+        );
+    }
+    for _ in 0..4 {
+        server
+            .message_coordinator
+            .send_to_player(&alice, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&room)
+        .await;
+    let mut rejected = Box::pin(server.handle_signal(&alice, bob, json!({"candidate": "refused"})));
+    assert!(futures_util::poll!(&mut rejected).is_pending());
+    match refusal {
+        "sender_unrouted" => server
+            .message_coordinator
+            .register_local_client(
+                alice,
+                None,
+                server
+                    .connection_manager
+                    .client_delivery_handle(&alice)
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        "target_replaced" => server
+            .connection_manager
+            .bump_game_data_epoch_for_test(&bob),
+        "valid_budget_spent" => {}
+        _ => unreachable!(),
+    }
+    drop(guard);
+    assert!(futures_util::poll!(&mut rejected).is_pending());
+    assert_eq!(
+        server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed),
+        1
+    );
+    let mut room_available = Box::pin(server.message_coordinator.lock_room_event_mutation(&room));
+    let released = futures_util::poll!(&mut room_available);
+    assert!(
+        released.is_ready(),
+        "{refusal}: the reply queue must not retain the room gate"
+    );
+    drop(released);
+    drop(room_available);
+    let generation = uuid::Uuid::new_v4();
+    server
+        .handle_signal_in_generation(&bob, charlie, generation, json!({"Offer": "healthy"}))
+        .await;
+    assert!(
+        matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal }
+            if *from == bob && *actual == generation && *signal == json!({"Offer": "healthy"}))
+    );
+    for _ in 0..4 {
+        assert!(matches!(
+            recv_refusal_source(&mut alice_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    rejected.await;
+    assert_eq!(
+        error_code(recv_refusal_source(&mut alice_rx).await.as_ref()),
+        Some(match refusal {
+            "sender_unrouted" => ErrorCode::NotInRoom,
+            "target_replaced" => ErrorCode::SignalTargetNotFound,
+            "valid_budget_spent" => ErrorCode::SignalRateLimited,
+            _ => unreachable!(),
+        })
+    );
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(
+        alice_tail,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let charlie_tail = charlie_rx.try_recv();
+    assert!(matches!(
+        charlie_tail,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+/// A stale source refusal cannot delay another peer's offer.
+#[tokio::test(start_paused = true)]
+async fn unrouted_signal_source_releases_room_before_reply_backpressure() {
+    assert_signal_refusal_releases_room("sender_unrouted").await;
+}
+
+/// A changed target refusal cannot delay another peer's offer.
+#[tokio::test(start_paused = true)]
+async fn replaced_signal_target_releases_room_before_reply_backpressure() {
+    assert_signal_refusal_releases_room("target_replaced").await;
+}
+
+/// A refused dispatch cannot delay another peer's offer.
+#[tokio::test(start_paused = true)]
+async fn spent_signal_budget_releases_room_before_reply_backpressure() {
+    assert_signal_refusal_releases_room("valid_budget_spent").await;
+}
+
+/// A failed metadata write must not keep healthy offers behind the reply queue.
+#[tokio::test(start_paused = true)]
+async fn failed_peer_metadata_releases_the_room_before_reply_backpressure() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, room) = register_refusal_source(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let (charlie, mut charlie_rx) = register_client(&server).await;
+    for (player, name) in [(bob, "Bob"), (charlie, "Charlie")] {
+        assert!(server
+            .database
+            .add_player_to_room(&room, player_info(player, name))
+            .await
+            .unwrap());
+        server.set_client_protocol(&player, v3_webrtc());
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room)
+            .await;
+    }
+    assert!(server
+        .database
+        .remove_player_from_room(&room, &alice)
+        .await
+        .unwrap()
+        .is_some());
+    for _ in 0..4 {
+        server
+            .message_coordinator
+            .send_to_player(&alice, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let caller = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            server
+                .handle_provide_connection_info(
+                    &alice,
+                    ConnectionInfo::Direct {
+                        host: "192.0.2.1".into(),
+                        port: 7777,
+                    },
+                )
+                .await;
+        })
+    };
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("failed metadata reaches its full reply queue");
+    let mut available = Box::pin(server.message_coordinator.lock_room_event_mutation(&room));
+    let released = futures_util::poll!(&mut available);
+    assert!(
+        released.is_ready(),
+        "failed metadata must release the room gate before replying"
+    );
+    drop(released);
+    drop(available);
+    let generation = uuid::Uuid::new_v4();
+    server
+        .handle_signal_in_generation(
+            &bob,
+            charlie,
+            generation,
+            json!({"Offer": "after-metadata-failure"}),
+        )
+        .await;
+    assert!(
+        matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal {from, generation: actual, signal}
+        if *from == bob && *actual == generation && *signal == json!({"Offer": "after-metadata-failure"}))
+    );
+    for _ in 0..4 {
+        assert!(matches!(
+            recv_refusal_source(&mut alice_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    caller.await.unwrap();
+    assert_eq!(
+        error_code(recv_refusal_source(&mut alice_rx).await.as_ref()),
+        Some(ErrorCode::InternalError)
+    );
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(
+        alice_tail,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let charlie_tail = charlie_rx.try_recv();
+    assert!(matches!(
+        charlie_tail,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}

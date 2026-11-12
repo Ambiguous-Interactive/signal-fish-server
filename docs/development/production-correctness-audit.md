@@ -16544,3 +16544,92 @@ changes only its internal completion path after the same messages enter the same
 queues. Public outcomes, payloads, sequence stamps, recipient selection, and
 cancellation ownership remain unchanged. This does not qualify the outstanding
 SDK timing work from earlier sessions.
+
+### F345–F346: release live room publication before refusal replies
+
+Session 685 baseline: `b51554eb`. The existing-issue sweep inspected all 47 open
+issues, with no open PR. The first-party server work advances #826 and #636.
+Existing #1524 receives separate encoding measurement controls. New findings
+Findings #1612 and #1613 are session-created repairs; they do not count as existing issues.
+
+- F345 ([#1612](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1612)):
+  `handle_signal_in_generation_from_lifecycle` retained the room publication
+  guard while an under-gate refusal waited for the source's full output queue.
+  This affected an unrouted source, a changed target epoch, and a spent valid
+  dispatch budget. Another pair's offers and plans waited behind that reply.
+- F346 ([#1613](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1613)):
+  `provide_connection_info_owned` retained the same guard after an ordinary
+  metadata write failed. A full reply queue delayed healthy players' signaling.
+
+The first combined signaling regression fails on original production code in
+`2007b12f-bd96-4ca7-b8a5-333423b32e65`. All three independent refusal histories
+fail with only the signaling body restored in
+`e2b3c235-f5fa-4ebe-8948-2a1943716503`. Each observes actual reply backpressure
+before its room-gate assertion. The metadata regression uses a real in-memory
+missing membership row and fails in `05e12abe-b4f8-4b7a-a8af-8a2d48024fdc`.
+No network incident or historical #1352 cause is inferred from these histories.
+
+The repair releases publication after the refusal or storage decision, before
+waiting for Error delivery. Source lifecycle ownership stays held. Accepted
+signals still transfer the source and room guards to their owned publication.
+The controls keep the failed reply pending while two healthy members exchange
+an offer with exact source, payload, and session generation. Draining the
+original filler then yields one unchanged coded Error and no extra messages.
+The initial nine selected all-feature controls pass in
+`88a4fbfa-9b12-4fc4-aeff-2b5a066ac4a8`: the four new histories plus existing
+plan-before-signal, accepted-offer cancellation, departure/rejoin, relay-order
+readiness, and old-epoch relay controls. The earlier two-test fixed run is
+`92776fce-a793-46e1-982e-f705f07db996`. Strict full Clippy passes.
+
+SDK timing assessment stays open in
+[Rust #300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+[.NET #153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and [Godot #578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Each includes the new held-reply histories. No schema, command, Error code, or
+accepted-signal generation rule changes. These are server-component controls;
+they do not prove SDK runtime parity or remote-network gameplay.
+
+The main-state check found a current macOS failure in CI run `43214790577`,
+job `131172716564`, at `b51554eb`. Same-room registration used five allocations
+and 864 bytes against its unchanged `3 + native_lock_initialization` allocation
+ceiling. Its separate native mutex control used one allocation and 64 bytes.
+Ordinary player and room routing guards called `Notify::notify_waiters` despite
+having no relay-order observers. The pinned Tokio implementation locks its
+waiter list on that call. Only the new `RelayOrderGuard` retains that wakeup;
+ordinary routing guards now release without it. The guard sizes and storage
+ownership stay the same. A cold/repeated unused-notification control measures
+that separate native-mutex cost without changing the registration ceiling.
+Linux baseline and repaired samples both use three allocations and 704 bytes.
+They do not prove the macOS allocation cause or repair; hosted macOS evidence
+remains required. Existing release-allocation ceilings remain unchanged.
+
+The unchanged #1352 replacement workload passes in
+`011b5728-7a52-4d92-86fc-ec04cc14880a`. This repeats the existing plain-control
+result and does not establish the historical stalled stage. Its investigation
+remains open; it is not counted as a repaired issue. The broader #826 and #636
+campaigns also remain open.
+
+The final fixtures use a real joined baseline and a classified source queue with
+four held control messages. The first classified attempt omitted the queue's
+join transition, so its stale generation canceled the filler and reply. Its
+metadata observer then spun on ready yields under paused time. That invalid
+attempt was stopped explicitly and is excluded from defect evidence. The fixed
+observer parks on a one-millisecond virtual timer while waiting for actual
+backpressure. It changes no production window or expected Error. The four
+classified controls pass in `99bbf0c7-d9cd-4b72-88d0-a4b17589c6fd` and fail
+at their room-gate assertions with original production bodies in
+`4aa7c118-4d7c-478a-9216-034a1bcf85f2`. The final empty-queue checks require
+an open queue rather than accepting a disconnected one.
+
+Both release allocation benches pass every existing ceiling and exact wire
+digest. The unchanged two-player mixed-rkyv projection remains 284,672 bytes
+for 1,024 relays. The metadata success, missing-row refusal, failed lookup, and
+atomic Direct endpoint refresh controls also pass. Hosted macOS and complete
+PR verification remain the publication gate.
+
+Final unique-name classified histories fail against both original handler bodies
+in `2314a76a-165f-4491-9af3-48344b72d2ea` and pass after repair in
+`434d02c3-974f-4b07-a358-98f44c12c1ea`. The final twelve all-feature controls pass
+in `9abb75f5-ff5a-4535-841f-9b7630b5783b`. Strict full Clippy passes. Three
+production source-policy checks pass in `794fd092-654f-4902-b0ab-0d832797d64f`;
+queue reads use named results and require explicit open-empty states.

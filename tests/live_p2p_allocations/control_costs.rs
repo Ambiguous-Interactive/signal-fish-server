@@ -229,6 +229,29 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
         drop(native_lock.lock().unwrap());
         let native_lock_initialization = lock_region.change();
         println!("SAME_ROOM_NATIVE_LOCK_INITIALIZATION {native_lock_initialization:?}");
+        let unused_notification = tokio::sync::Notify::new();
+        for attempt in 0..2 {
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            unused_notification.notify_waiters();
+            let notification = region.change();
+            println!("SAME_ROOM_UNUSED_NOTIFICATION attempt={attempt} stats={notification:?}");
+            assert_eq!(
+                notification.allocations,
+                if attempt == 0 {
+                    native_lock_initialization.allocations
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                notification.bytes_allocated,
+                if attempt == 0 {
+                    native_lock_initialization.bytes_allocated
+                } else {
+                    0
+                }
+            );
+        }
         let coordinator = InMemoryMessageCoordinator::new();
         let room = Uuid::from_u128(1);
         let player = Uuid::from_u128(2);
