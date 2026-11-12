@@ -33842,12 +33842,14 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "the Fortress WASM policy must not restore the obsolete bincode advisory exception"
     );
 
+    assert!(bridge.contains("Engine.physics_ticks_per_second = 60"));
+    assert!(!source.contains("fn process(&mut self, _delta: f64)"));
     assert!(project.contains("variant/thread_support=false"));
     assert!(project.contains("variant/extensions_support=true"));
     assert!(!source.contains("transport-websocket-emscripten"));
     for required in [
         "impl INode for FortressWasmPeer",
-        "fn process(&mut self, _delta: f64)",
+        "fn physics_process(&mut self, _delta: f64)",
         "let events = self.client.poll();",
         "self.poll_count = self.poll_count.saturating_add(1)",
         "#[path = \"../../fortress/src/relay.rs\"]",

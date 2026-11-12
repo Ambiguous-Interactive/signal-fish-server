@@ -1284,7 +1284,7 @@ impl INode for FortressWasmPeer {
         }
     }
 
-    fn process(&mut self, _delta: f64) {
+    fn physics_process(&mut self, _delta: f64) {
         if self.completed || self.report_json.is_some() {
             return;
         }

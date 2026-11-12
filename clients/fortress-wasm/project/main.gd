@@ -18,11 +18,10 @@ var overflow_send_started := false
 
 
 func _ready() -> void:
-	# The fixture has no visual oracle. Avoid spending the shared runner's two
-	# browser CPU slices on blank-frame rendering, while retaining Godot's real
-	# main loop and a production-like 60 Hz engine cap for `_process` callbacks.
+	# Render pacing must not change the fixed gameplay tick rate.
 	RenderingServer.set_render_loop_enabled(false)
 	Engine.max_fps = 60
+	Engine.physics_ticks_per_second = 60
 	var config_json: Variant = JavaScriptBridge.eval(
 		"JSON.stringify(globalThis.%s ?? null)" % CONFIG_KEY,
 		true,
@@ -54,8 +53,8 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
-	# Networking and Fortress progression live solely in the Rust Node's process
-	# callback. This bridge only exports Rust-origin strings to the harness.
+	# The Rust physics callback owns networking and gameplay.
+	# This render callback only exports Rust reports to the harness.
 	if not room_published:
 		var room_json: String = peer.take_room_json()
 		if not room_json.is_empty():

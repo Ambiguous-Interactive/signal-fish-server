@@ -1,26 +1,11 @@
 {
-  "base": "f34dbb3477b9096ca9e18f940f7d577ef5871e88",
-  "reason": "Extract the unchanged deployment protocol bounds decision into the private production proof core. Preserve the room-code-first check, refusal order, exact errors, supported versions, defaults, wire behavior and public constant paths. Documentation records source-linked contracts and explicit remaining boundaries. Rust, .NET and Godot clients require no changes.",
+  "base": "3e7b16df0197b72db231d2b97e5b0bd0a7cbb8d4",
+  "reason": "Update documentation for the internal Godot compatibility fixture. The declared README changes no shipped server behavior, SDK API, wire format, or default. Fixture source paths are already internal. The separate relay improvement keeps its user-facing changelog entry.",
   "files": [
     {
-      "path": "src/protocol_core.rs",
-      "before": "45f3aac227161151c2d572068287ee1055f59daa",
-      "after": "c1a180b6f8302e7b6cc61d1e5393b0b7b18aec2d"
-    },
-    {
-      "path": "src/config/protocol.rs",
-      "before": "6ea0c338f8a1c8f18913bcc164c1470d5fb53ca6",
-      "after": "9c7ceaf368dd742a482fa62e0548c6c61e7e79b2"
-    },
-    {
-      "path": "formal/source-linked/README.md",
-      "before": "3b58239ead915d36f05e9bea4bf6d65b10d03ebe",
-      "after": "9ba2134b319343af5ad6361a30d9bbd70f18ebea"
-    },
-    {
-      "path": "formal/source-linked/obligations.md",
-      "before": "d4562452d9240d5610370303ae8d38f2843bcd74",
-      "after": "bf4a4232186995224cf19f0250032c10589e50bf"
+      "path": "clients/fortress-wasm/README.md",
+      "before": "c4b066756c136bea721bc02d2c03337a7df01066",
+      "after": "5bad6d1e1556f8fe26dec9290c1f1569675afd88"
     }
   ]
 }
