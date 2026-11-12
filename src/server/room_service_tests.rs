@@ -171,7 +171,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         pending_authority_releases: Arc::new(DashMap::new()),
         pending_creation_rollbacks: Arc::clone(&spectator_service.pending_creation_rollbacks),
-        moderation_lifecycle_gate: tokio::sync::Mutex::new(()),
+        moderation_player_gates: super::RoutingGateRegistry::default(),
         abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
         abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers::default(),
         durable_detach_workers: maintenance_workers::MaintenanceWorkers::default(),

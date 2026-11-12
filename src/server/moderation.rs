@@ -70,9 +70,34 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let moderation_lifecycle_guard = self.moderation_lifecycle_gate.lock().await;
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
+        else {
+            return;
+        };
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let task = tokio::spawn(async move {
+            server
+                .kick_player_owned(&authority_id, operation_id, target_id, lifecycle)
+                .await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%authority_id, %target_id, %error, "Player kick transaction failed");
+        }
+    }
+
+    async fn kick_player_owned(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
+        let moderation_lifecycle_guard =
+            self.lock_moderation_players(*authority_id, target_id).await;
         let resolved = self
-            .resolve_kick_style_target(authority_id, &target_id, source_lifecycle)
+            .resolve_kick_style_target(authority_id, &target_id, Some(lifecycle))
             .await;
         let Some(ModerationTarget {
             room_id,
@@ -100,7 +125,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
-            _authority_lifecycle_guard,
+            &_authority_lifecycle_guard,
         )
         .await;
         drop(moderation_lifecycle_guard);
@@ -147,7 +172,8 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let moderation_lifecycle_guard = self.moderation_lifecycle_gate.lock().await;
+        let moderation_lifecycle_guard =
+            self.lock_moderation_players(*authority_id, target_id).await;
         let resolved = self
             .resolve_kick_style_target(authority_id, &target_id, source_lifecycle)
             .await;
@@ -216,7 +242,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
-            _authority_lifecycle_guard,
+            &_authority_lifecycle_guard,
         )
         .await;
         drop(moderation_lifecycle_guard);
@@ -851,6 +877,24 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let task = tokio::spawn(async move {
+            server
+                .regenerate_room_code_owned(&authority_id, operation_id, lifecycle)
+                .await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%authority_id, %error, "Room-code change transaction failed");
+        }
+    }
+
+    async fn regenerate_room_code_owned(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
         let _authority_lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *authority_id
             || !self
@@ -1048,6 +1092,23 @@ impl EnhancedGameServer {
         .await;
     }
 
+    /// Exclude overlapping evictions without blocking disjoint player pairs.
+    async fn lock_moderation_players(
+        &self,
+        authority: PlayerId,
+        target: PlayerId,
+    ) -> (super::RoutingWriteGuard, Option<super::RoutingWriteGuard>) {
+        let first = authority.min(target);
+        let second = authority.max(target);
+        let first_guard = self.moderation_player_gates.write(first).await;
+        let second_guard = if first == second {
+            None
+        } else {
+            Some(self.moderation_player_gates.write(second).await)
+        };
+        (first_guard, second_guard)
+    }
+
     /// Shared prologue for the authority-only seat-targeting moderation
     /// operations (`KickPlayer`, `BanPlayer`): fixes the authority's
     /// identity under its lifecycle gate, resolves the room, re-checks
@@ -1198,7 +1259,7 @@ impl EnhancedGameServer {
         target_seated_in_row: bool,
         pending_record_room: Option<RoomId>,
         target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-        _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
+        _authority_lifecycle_guard: &tokio::sync::OwnedMutexGuard<()>,
     ) {
         #[cfg(test)]
         self.pause_after_moderation_resolve_for_test().await;
@@ -1398,7 +1459,6 @@ impl EnhancedGameServer {
             }
         }
         drop(target_lifecycle_guard);
-        drop(_authority_lifecycle_guard);
     }
 
     /// Refuse unless the room's current authority is `authority_id`.

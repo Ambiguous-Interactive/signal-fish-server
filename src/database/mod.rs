@@ -1399,7 +1399,7 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     release_get_total_room_count: tokio::sync::Notify,
     #[cfg(test)]
-    pause_update_room_code: std::sync::atomic::AtomicBool,
+    pause_update_room_code: std::sync::atomic::AtomicU8,
     #[cfg(test)]
     update_room_code_reached: tokio::sync::Notify,
     #[cfg(test)]
@@ -1751,7 +1751,7 @@ impl InMemoryDatabase {
             #[cfg(test)]
             release_get_total_room_count: tokio::sync::Notify::new(),
             #[cfg(test)]
-            pause_update_room_code: std::sync::atomic::AtomicBool::new(false),
+            pause_update_room_code: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             update_room_code_reached: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -1951,7 +1951,13 @@ impl InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn pause_next_update_room_code_for_test(&self) {
         self.pause_update_room_code
-            .store(true, std::sync::atomic::Ordering::Release);
+            .store(1, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_after_update_room_code_commit_for_test(&self) {
+        self.pause_update_room_code
+            .store(2, std::sync::atomic::Ordering::Release);
     }
 
     #[cfg(all(test, signal_fish_repository_tests))]
@@ -2582,7 +2588,13 @@ impl GameDatabase for InMemoryDatabase {
         #[cfg(test)]
         if self
             .pause_update_room_code
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
+            .compare_exchange(
+                1,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
         {
             self.update_room_code_reached.notify_one();
             self.release_update_room_code.notified().await;
@@ -2625,7 +2637,25 @@ impl GameDatabase for InMemoryDatabase {
         self.session_records
             .record_room_code_changed(room_id, &room.code);
 
-        Ok(room.clone())
+        let updated_room = room.clone();
+        #[cfg(test)]
+        if self
+            .pause_update_room_code
+            .compare_exchange(
+                2,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            drop(liveness);
+            drop(room_codes);
+            drop(rooms);
+            self.update_room_code_reached.notify_one();
+            self.release_update_room_code.notified().await;
+        }
+        Ok(updated_room)
     }
 
     async fn set_room_max_spectators(

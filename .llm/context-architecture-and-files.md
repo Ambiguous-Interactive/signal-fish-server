@@ -157,3 +157,9 @@ In-memory room GC prepares all storage locks before pinning reconnect protection
 Deletion then commits synchronously against the current protected rooms. Custom
 storage adapters can implement `lease_room_cleanup` to use this order; adapters
 that return `None` retain the serialized legacy path and can delay replay writes.
+
+Kicks and room-code changes capture their source lifecycle before starting an owned
+transaction. Caller cancellation must not interrupt admitted storage, publication,
+close attribution, or the correlated result. Evictions acquire logical player gates
+in UUID order before either physical lifecycle; disjoint pairs remain independent.
+Keep the acting lifecycle through the correlated result and release idle player gates.
