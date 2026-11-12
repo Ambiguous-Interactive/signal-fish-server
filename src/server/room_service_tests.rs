@@ -18068,30 +18068,40 @@ async fn maintenance_recovers_panicked_unregister_without_activity_expiry() {
 /// #1595 review: retain the confirmed authority removal before terminal unroute.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_retains_departure_before_unroute_callback() {
-    assert_unregister_unroute_panic_recovery(1, false, false).await;
+    assert_unregister_unroute_panic_recovery(1, false, false, false).await;
 }
 
 /// #1595 review: retain the terminal tail after assignment clear has committed.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_retains_departure_after_unroute_callback() {
-    assert_unregister_unroute_panic_recovery(2, false, false).await;
+    assert_unregister_unroute_panic_recovery(2, false, false, false).await;
 }
 
 /// A repaired departure must not clear an authority granted during the retry wait.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_preserves_a_new_authority_after_unroute_panic() {
     for fault in [1, 2] {
-        assert_unregister_unroute_panic_recovery(fault, true, false).await;
+        assert_unregister_unroute_panic_recovery(fault, true, false, false).await;
     }
 }
 
 /// A physically departing source cannot admit a second room while retry is pending.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_cannot_reuse_the_socket_for_a_new_membership() {
-    assert_unregister_unroute_panic_recovery(2, false, true).await;
+    assert_unregister_unroute_panic_recovery(2, false, true, false).await;
 }
 
-async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool, reuse_socket: bool) {
+#[tokio::test(start_paused = true)]
+async fn unregister_retry_queued_leave_resumes_the_retained_departure() {
+    assert_unregister_unroute_panic_recovery(1, false, false, true).await;
+}
+
+async fn assert_unregister_unroute_panic_recovery(
+    fault: u8,
+    superseded: bool,
+    reuse_socket: bool,
+    queued_leave: bool,
+) {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
         DrainTrigger::PauseAuthorityTransferAnnouncement,
     ));
@@ -18146,6 +18156,9 @@ async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool, r
         left_before + u64::from(fault == 2),
         "only a captured tail counts before retry"
     );
+    if queued_leave {
+        fixture.server.leave_room(&fixture.leaver).await;
+    }
     if reuse_socket {
         fixture
             .server
@@ -18174,6 +18187,11 @@ async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool, r
             .await;
     }
     let left_before_retry = fixture.server.metrics.players_left.load(Ordering::Relaxed);
+    let capture_pending = fixture
+        .server
+        .get_client_room(&fixture.leaver)
+        .await
+        .is_some();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let maintenance = tokio::spawn({
         let server = fixture.server.clone();
@@ -18239,7 +18257,7 @@ async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool, r
     );
     assert_eq!(
         fixture.server.metrics.players_left.load(Ordering::Relaxed),
-        left_before_retry + u64::from(fault == 1),
+        left_before_retry + u64::from(capture_pending),
         "retry counts the old departure only if its callback had not run"
     );
     let (new_id, mut receiver) =
@@ -18300,4 +18318,64 @@ async fn unregister_retry_drain_discards_the_prior_reconnect_registration() {
         message.as_ref(),
         ServerMessage::PlayerLeft { .. } | ServerMessage::AuthorityChanged { .. }
     )));
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_room_locked_unregister_retains_an_interrupted_departure() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig {
+            ping_timeout: Duration::ZERO,
+            enable_reconnection: false,
+            room_cleanup_interval: Duration::from_secs(1),
+            ..ServerConfig::default()
+        },
+        coordinator.clone(),
+    )
+    .await;
+    let (player, _receiver) = register_client(&server, "127.0.0.1:48506".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &player,
+            "missing-retry".into(),
+            Some("MISS01".into()),
+            "actor".into(),
+            Some(2),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room = server.get_client_room(&player).await.unwrap();
+    let close = server.connection_manager.close_signal_for(&player).unwrap();
+    server.database.delete_room(&room).await.unwrap();
+    coordinator.unroute_panic_once.store(2, Ordering::Release);
+    server.cleanup_clients_in_missing_rooms().await;
+    assert!(server.connection_manager.has_client(&player));
+    assert_eq!(server.get_client_room(&player).await, None);
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let maintenance = tokio::spawn({
+        let server = server.clone();
+        async move {
+            server
+                .cleanup_task_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    let recovered = timeout(Duration::from_secs(3), async {
+        while server.connection_manager.has_client(&player) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let _ = stop.send(());
+    maintenance.await.unwrap();
+    recovered.expect("roomless interrupted cleanup must stay eligible for retry");
+    assert_eq!(server.metrics.active_connections.load(Ordering::Relaxed), 0);
+    assert_eq!(close.requested_reason(), Some(CloseReason::RoomInactive));
 }

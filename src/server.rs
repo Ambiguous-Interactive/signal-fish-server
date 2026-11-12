@@ -2058,11 +2058,12 @@ impl EnhancedGameServer {
 
     /// Capture reconnect state and detach the client while its lifecycle is locked.
     async fn unregister_client_locked(self: &Arc<Self>, player_id: &PlayerId) {
+        let lifecycle = self.connection_manager.client_lifecycle(player_id);
+        if let Some(lifecycle) = &lifecycle {
+            lifecycle.retain_unregister_retry();
+        }
         let room_id_opt = self.get_client_room(player_id).await;
-        let departure = self
-            .connection_manager
-            .client_lifecycle(player_id)
-            .and_then(|lifecycle| lifecycle.unregister_departure(room_id_opt));
+        let departure = lifecycle.and_then(|lifecycle| lifecycle.unregister_departure(room_id_opt));
         // One authoritative snapshot supplies every reconnect-restoration
         // field. A missing player/room or storage error must not degrade into a
         // pending record with `was_authority = false` and no player metadata.

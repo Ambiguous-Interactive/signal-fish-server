@@ -1390,20 +1390,15 @@ impl EnhancedGameServer {
             self.handle_session_member_departure(&room_id, target_id)
                 .await;
         }
-        // Capture the socket's close signal while the target's lifecycle gate
-        // still fences the reconnect rekey. The pin below then follows the
-        // physical socket even when a blocked claim rekeys the entry after
-        // the gate drops — the kick pin is one-shot and never retries, so a
-        // map-key lookup could lose the `4007` close frame (issue #697 class).
+        // The kick must win before a queued unregister can acquire this gate.
         let kicked_close = self.connection_manager.close_signal_for(target_id);
-        drop(target_lifecycle_guard);
-        drop(_authority_lifecycle_guard);
-
         if !evicts_live_membership_elsewhere {
             if let Some(close) = kicked_close {
                 close.request_close(CloseReason::Kicked);
             }
         }
+        drop(target_lifecycle_guard);
+        drop(_authority_lifecycle_guard);
     }
 
     /// Refuse unless the room's current authority is `authority_id`.

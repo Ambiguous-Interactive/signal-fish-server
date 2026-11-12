@@ -247,6 +247,10 @@ impl ClientLifecycle {
         })
     }
 
+    pub(super) fn retain_unregister_retry(&self) {
+        self.unregister_pending.store(true, Ordering::Release);
+    }
+
     pub(super) fn unregister_needs_retry(&self) -> bool {
         self.unregister_pending.load(Ordering::Acquire)
             && !self.unregister_running.load(Ordering::Acquire)

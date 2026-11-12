@@ -16248,3 +16248,17 @@ Independent close/rekey controls pass in
 shutdown retains priority, and a transient closing socket cannot reassign.
 A reconnect that committed before unregister acquired the lifecycle gate still
 finishes before that physical socket is closed.
+
+F336 full review found two additional retained-entry gaps on `114d6911`.
+Missing-room cleanup entered the locked unregister method without marking retry
+state. A queued ordinary leave could also clear an assignment outside the cached
+journal. Both histories fail in
+`026e04ec-da0f-475b-a503-3d8c32e0a0ed`. The locked entry now retains retry state
+without reacquiring its gate. An ordinary leave adopts an existing departure
+journal; it does not create one or skip a kick merely waiting ahead of unregister.
+
+The captured kick close is pinned before releasing its lifecycle guards, so a
+queued unregister cannot win the first-close attribution. All 70 selected
+departure, retry, shutdown, and kick controls pass in
+`e3f0e7db-f3de-4dfd-bb54-83dca5bc71e3`. Independent review found no remaining blocker
+in these changes. The final hosted gate remains separate from this local proof.

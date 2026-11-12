@@ -1561,6 +1561,11 @@ impl EnhancedGameServer {
         terminal_response_committed: Arc<AtomicBool>,
         departure: Option<Arc<UnregisterDeparture>>,
     ) {
+        let departure = departure.or_else(|| {
+            self.connection_manager
+                .client_lifecycle(player_id)
+                .and_then(|lifecycle| lifecycle.unregister_departure(None))
+        });
         let leave_span = tracing::Span::current();
         let Some(room_id) = departure
             .as_ref()
