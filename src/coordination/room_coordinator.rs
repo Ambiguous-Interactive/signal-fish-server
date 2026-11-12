@@ -321,7 +321,7 @@ impl InMemoryRoomOperationCoordinator {
         room_id: &RoomId,
         player_id: PlayerId,
         response: crate::protocol::ServerMessage,
-        authority_player: Option<Option<PlayerId>>,
+        authority_player: Option<PlayerId>,
         mutation_guard: RoomEventMutationGuard,
     ) -> RoomEventCompletion {
         let coordinator = Arc::clone(&self.coordinator);
@@ -335,9 +335,6 @@ impl InMemoryRoomOperationCoordinator {
                         .send_to_player(&player_id, Arc::new(response))
                         .await;
 
-                    let Some(authority_player) = authority_player else {
-                        return response_result.map(|()| true);
-                    };
                     let message = Arc::new(crate::protocol::ServerMessage::AuthorityChanged {
                         authority_player,
                         you_are_authority: false,
@@ -705,18 +702,25 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
                     )
                 }
             };
-            let completion = coordinator.enqueue_authority_result(
-                &room_id,
-                player_id,
-                response,
-                authority_change,
-                mutation_guard,
-            );
-
-            // Delivery backpressure never holds the room mutation gate. The
-            // FIFO job owns it and sends exactly one response before any
-            // room-scoped AuthorityChanged.
-            if let Err(error) = completion.await {
+            let delivery = if let Some(authority_player) = authority_change {
+                coordinator
+                    .enqueue_authority_result(
+                        &room_id,
+                        player_id,
+                        response,
+                        authority_player,
+                        mutation_guard,
+                    )
+                    .await
+                    .map(|_| ())
+            } else {
+                drop(mutation_guard);
+                coordinator
+                    .coordinator
+                    .send_to_player(&player_id, Arc::new(response))
+                    .await
+            };
+            if let Err(error) = delivery {
                 tracing::error!(%room_id, %player_id, %error, "Failed to emit authority result");
             }
             result

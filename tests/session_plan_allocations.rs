@@ -448,6 +448,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
 fn main() {
     allocation_harness::run_trials(vec![
         allocation_harness::trial(
+            "authority_denial_avoids_room_publication",
+            control_costs::authority_denial_avoids_room_publication,
+        ),
+        allocation_harness::trial(
             "bus_exclusions_do_not_grow_recipient_storage",
             live_p2p_allocations::bus_exclusions_do_not_grow_recipient_storage,
         ),

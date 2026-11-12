@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server memory use for refused authority requests (#636).
 - Avoid unused routing wakeups during live room changes (#636).
 - Reduce server work for gameplay relays that finish after routing contention (#636).
 - **Breaking:** Add an `OrderingBlocked` outcome to the public relay handoff enums for custom server integrations (#1605).
@@ -69,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep healthy P2P room operations moving while another peer waits for a refused authority request (#826).
 - Keep healthy peers signaling while another peer waits for a signal refusal or metadata error reply (#1612, #1613).
 - Preserve accepted reliable relay frames and their sender order across canceled or overlapping sends, and avoid extra
   heap use in compatibility relays (#1604, #1605).
