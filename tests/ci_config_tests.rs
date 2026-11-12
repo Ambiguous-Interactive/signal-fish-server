@@ -26723,6 +26723,7 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
             "-Command",
             r#"
                 . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                $script:OriginalHeadTextGetter = ${function:Get-HeadText}
                 function Reset-State {
                     $script:Passed = 0
                     $script:Failed = 0
@@ -26731,6 +26732,7 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
                     $script:WorktreeTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
                     $script:PreloadError = $null
                     $script:InspectWorktree = $false
+                    $script:RepoRoot = (Get-Location).Path
                     $script:FixtureHeadTextByPath = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
                     $script:FixtureContextMarkersChanged = $false
                     $script:FixturePanicMacroDiffChanged = $true
@@ -26754,13 +26756,19 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
                 }
                 function Set-Candidates([object[]]$staged, [object[]]$head = @()) {
                     $script:FixtureStagedCandidates = [object[]]$staged
-                    $script:FixtureHeadCandidates = [object[]]$head
+                    $script:FixtureHeadCandidates = [object[]]@($head | Where-Object { $null -ne $_ })
                 }
                 function Get-StagedRustPanicMacroCandidates {
-                    return [object[]]$script:FixtureStagedCandidates
+                    param([string[]]$Pathspecs)
+                    return [object[]]@($script:FixtureStagedCandidates | Where-Object { Test-RustPanicMacroLine -Line $_.Text })
+                }
+                function Get-WorktreeRustPanicMacroCandidates {
+                    param([string[]]$Pathspecs)
+                    return [object[]]@($script:FixtureStagedCandidates | Where-Object { Test-RustPanicMacroLine -Line $_.Text })
                 }
                 function Get-HeadRustPanicMacroCandidates {
-                    return [object[]]$script:FixtureHeadCandidates
+                    param([string[]]$Pathspecs)
+                    return [object[]]@($script:FixtureHeadCandidates | Where-Object { Test-RustPanicMacroLine -Line $_.Text })
                 }
                 function Get-HeadText([string]$Path) {
                     if ($script:FixtureHeadTextByPath.ContainsKey($Path)) {
@@ -27017,6 +27025,122 @@ pub fn docs() {
                     "}`n"
                 $rawLines = Get-RustExecutablePanicMacroLineSet -Content $multiLineRawString -CandidateLines ([int[]]@(3))
                 Assert (-not $rawLines.Contains(3)) "multi-line raw strings should not be executable candidates"
+
+                $script:OriginalProductionSelector = ${function:Select-ProductionRustPanicMacroCandidates}
+                function Select-ProductionRustPanicMacroCandidates {
+                    param([object[]]$Candidates, [switch]$Head)
+                    $script:SelectorCalls++
+                    if ($script:RequireUnchangedPrefix) { throw "unchanged candidate prefix was reparsed" }
+                    & $script:OriginalProductionSelector -Candidates $Candidates -Head:$Head
+                }
+                function Content-Candidates([string]$content) {
+                    $number = 0
+                    foreach ($line in $content -split "`n") {
+                        $number++
+                        if (Test-RustPanicMacroLine -Line $line) {
+                            Candidate "src/lib.rs" $number ($line.TrimEnd("`r"))
+                        }
+                    }
+                }
+                $suffix = "`n#[cfg(test)]`nmod trailing {}"
+                $rawPrefix = $productionContent + "`n" + $multiLineRawString
+                $exposedRaw = "pub fn docs() {`n`n" + '    panic!("not code");' + "`n`n}`n"
+                foreach ($worktree in @($false, $true)) {
+                    foreach ($case in @(
+                        @{Name="later test guard"; Old=$productionContent + $suffix; New=$productionContent + "`n" + $suffix; Fast=$true; Count=0},
+                        @{Name="raw literal before later guard"; Old=$rawPrefix + $suffix; New=$rawPrefix + "`n" + $suffix; Fast=$true; Count=0},
+                        @{Name="removed test guard"; Old=$headTestContextContent; New=$currentProductionContextContent; Fast=$false; Count=1},
+                        @{Name="new later macro"; Old=$productionContent; New=$productionContent + "`npub fn added() { todo!(); }"; Fast=$false; Count=1},
+                        @{Name="shifted candidate"; Old=$productionContent; New="`n" + $productionContent + $suffix; Fast=$false; Count=0},
+                        @{Name="missing HEAD"; Old=$null; New=$productionContent + $suffix; Fast=$false; Count=1},
+                        @{Name="ordinal prefix change"; Old=$productionContent; New=$productionContent.Replace("production", "Production") + $suffix; Fast=$false; Count=0},
+                        @{Name="line ending change"; Old=$productionContent.Replace("`n", "`r`n"); New=$productionContent + $suffix; Fast=$false; Count=0},
+                        @{Name="raw literal exposed"; Old=$multiLineRawString; New=$exposedRaw + $suffix; Fast=$false; Count=1},
+                        @{Name="removed later candidate"; Old=$rawPrefix + $suffix; New=$productionContent + $suffix; Fast=$false; Count=0}
+                    )) {
+                        Reset-State
+                        $script:InspectWorktree = $worktree
+                        $script:IndexTextCache["src/lib.rs"] = if ($worktree) { $headTestContextContent } else { $case.New }
+                        $script:WorktreeTextCache["src/lib.rs"] = if ($worktree) { $case.New } else { $headTestContextContent }
+                        if ($null -ne $case.Old) { $script:FixtureHeadTextByPath["src/lib.rs"] = $case.Old }
+                        $current = @(Content-Candidates $case.New)
+                        Set-Candidates -staged $current -head @(Content-Candidates $case.Old)
+                        $script:SelectorCalls = 0
+                        $script:RequireUnchangedPrefix = $case.Fast
+                        $script:StagedFiles = @("src/lib.rs")
+                        $script:FixtureContextMarkersChanged = $true
+                        Test-RustAddedPanicPatterns
+                        Assert ($script:Failed -eq [int]($case.Count -gt 0)) "$($case.Name), worktree=${worktree}: wrong production panic verdict"
+                        Assert (($script:SelectorCalls -eq 0) -eq $case.Fast) "$($case.Name), worktree=${worktree}: wrong prefix proof decision"
+                    }
+                }
+                $script:OriginalPanicLine = ${function:Test-RustPanicMacroLine}
+                function Test-RustPanicMacroLine {
+                    param([AllowEmptyString()][string]$Line)
+                    $script:LineFilterCalls++
+                    if ($script:RequireNoLineFilter) { throw "source prefix proof must precede the line filter" }
+                    & $script:OriginalPanicLine -Line $Line
+                }
+                $literal = 'const SAMPLE: &str = "panic!(not code)";'
+                $rawPrefix = $productionContent + "`n" + $literal + "`n"
+                foreach ($worktree in @($false, $true)) {
+                    foreach ($missingHead in @($false, $true)) {
+                        Reset-State
+                        $script:InspectWorktree = $worktree
+                        $script:StagedFiles = @("src/lib.rs")
+                        $currentText = $rawPrefix + "`n" + $suffix
+                        $script:IndexTextCache["src/lib.rs"] = if ($worktree) { $testContent } else { $currentText }
+                        $script:WorktreeTextCache["src/lib.rs"] = if ($worktree) { $currentText } else { $testContent }
+                        $real = Candidate "src/lib.rs" 2 'panic!("boom");'
+                        Set-Candidates -staged @($real) -head $(if ($missingHead) { @() } else { @($real) })
+                        if (-not $missingHead) { $script:FixtureHeadTextByPath["src/lib.rs"] = $rawPrefix + $suffix }
+                        $script:FixtureContextMarkersChanged = $true
+                        $script:SelectorCalls = 0
+                        $script:LineFilterCalls = 0
+                        $script:RequireUnchangedPrefix = -not $missingHead
+                        $script:RequireNoLineFilter = -not $missingHead
+                        if (-not $missingHead) {
+                            $caughtFilter = $false
+                            try { Get-StagedRustPanicMacroCandidates -Pathspecs @("src/lib.rs") | Out-Null } catch { $caughtFilter = $true }
+                            Assert $caughtFilter "negative control must detect the filtered getter"
+                            $script:LineFilterCalls = 0
+                        }
+                        Test-RustAddedPanicPatterns
+                        Assert ($script:Failed -eq [int]$missingHead) "source-prefix frontend must preserve missing HEAD refusal"
+                        Assert (($script:LineFilterCalls -eq 0) -eq (-not $missingHead)) "source-prefix frontend must skip only proven unchanged prefixes (worktree=$worktree missingHead=$missingHead calls=$script:LineFilterCalls)"
+                        Assert (($script:SelectorCalls -eq 0) -eq (-not $missingHead)) "source-prefix frontend must preserve full classifier fallback"
+                    }
+                }
+                $script:InspectWorktree = $false
+                $script:CacheOldText = $productionContent + $suffix
+                $script:CacheNewText = $productionContent + $suffix.Replace("trailing {}", "trailing { }")
+                $script:CacheBlobReads = 0
+                function Invoke-Native {
+                    param([string]$FileName, [string[]]$Arguments)
+                    if ($Arguments[0] -eq "diff") {
+                        return [pscustomobject]@{ ExitCode=0; Stdout="@@ -5 +5 @@`n-mod trailing {}`n+mod trailing { }`n" }
+                    }
+                    if ($Arguments[0] -ne "show") { throw "unexpected cache fixture command" }
+                    $script:CacheBlobReads++
+                    $text = if ($Arguments[1].StartsWith("HEAD:")) { $script:CacheOldText } else { $script:CacheNewText }
+                    [pscustomobject]@{ ExitCode=0; Stdout=$text }
+                }
+                Assert (Test-FileDiffIsTestOnly -Path "src/cache.rs") "cache fixture must retain the test-only classification"
+                Assert ((Get-PolicyText -Path "src/cache.rs") -ceq $script:CacheNewText) "panic policy must receive the exact index blob"
+                Assert ((& $script:OriginalHeadTextGetter -Path "src/cache.rs") -ceq $script:CacheOldText) "panic policy must receive the exact HEAD blob"
+                Assert ($script:CacheBlobReads -eq 2) "changelog and panic policy must share exact immutable blob reads"
+                $temporaryRust = Join-Path ([IO.Path]::GetTempPath()) ("hook-cache-" + [guid]::NewGuid() + ".rs")
+                try {
+                    $script:InspectWorktree = $true
+                    $script:WorktreeTextCache[$temporaryRust] = "stale cache"
+                    [IO.File]::WriteAllText($temporaryRust, $script:CacheNewText)
+                    Assert (Test-FileDiffIsTestOnly -Path $temporaryRust) "worktree changelog classification must read current disk text"
+                    [IO.File]::WriteAllText($temporaryRust, $productionContent)
+                    Assert (-not (Test-FileDiffIsTestOnly -Path $temporaryRust)) "worktree edits after the first read must remain visible"
+                    Assert ($script:WorktreeTextCache[$temporaryRust] -ceq "stale cache") "blob sharing must not seed or reuse a worktree snapshot"
+                } finally { Remove-Item -LiteralPath $temporaryRust -Force }
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                Assert ($script:HeadTextCache.Count -eq 0 -and $script:IndexTextCache.Count -eq 0) "a new hook invocation must reset blob caches"
             "#,
         ])
         .current_dir(&root)
