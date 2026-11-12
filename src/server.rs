@@ -29,9 +29,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{
-    mpsc, watch, Mutex, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
-};
+use tokio::sync::{mpsc, watch, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::time::Duration;
 use uuid::Uuid;
 
@@ -905,9 +903,8 @@ pub struct EnhancedGameServer {
     pending_authority_releases: Arc<DashMap<RoomId, Arc<maintenance::PendingAuthorityRelease>>>,
     /// Failed creator baselines stay closed locally until room deletion succeeds.
     pending_creation_rollbacks: Arc<DashMap<RoomId, PlayerId>>,
-    /// Kick and ban can wait for a target lifecycle while holding the acting
-    /// authority lifecycle. Serialize them to prevent cycles across rooms.
-    moderation_lifecycle_gate: Mutex<()>,
+    /// Ordered player-pair exclusion prevents crossed eviction lifecycle cycles.
+    moderation_player_gates: RoutingGateRegistry,
     abandoned_room_workers: maintenance_workers::MaintenanceWorkers,
     abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers,
     durable_detach_workers: maintenance_workers::MaintenanceWorkers,
@@ -1441,7 +1438,7 @@ impl EnhancedGameServer {
             pending_durable_player_detaches: Arc::new(DashMap::new()),
             pending_authority_releases: Arc::new(DashMap::new()),
             pending_creation_rollbacks: Arc::clone(&spectator_service.pending_creation_rollbacks),
-            moderation_lifecycle_gate: Mutex::new(()),
+            moderation_player_gates: RoutingGateRegistry::default(),
             abandoned_room_workers: maintenance_workers::MaintenanceWorkers::default(),
             abandoned_room_deletion_workers: maintenance_workers::MaintenanceWorkers::default(),
             durable_detach_workers: maintenance_workers::MaintenanceWorkers::default(),

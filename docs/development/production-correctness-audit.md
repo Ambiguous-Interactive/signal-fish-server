@@ -16262,3 +16262,86 @@ queued unregister cannot win the first-close attribution. All 70 selected
 departure, retry, shutdown, and kick controls pass in
 `e3f0e7db-f3de-4dfd-bb54-83dca5bc71e3`. Independent review found no remaining blocker
 in these changes. The final hosted gate remains separate from this local proof.
+
+### F338–F340: complete room controls without blocking unrelated matches
+
+Baseline: `a50e5f64`. Related campaign: #826. New findings:
+
+- F338 ([#1598](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1598)):
+  canceling a kick after confirmed durable removal discarded terminal routing,
+  `PlayerLeft`, the correlated result, and the `4007 Kicked` close. The target
+  could remain assigned to a room whose durable roster no longer contained it.
+- F339 ([#1599](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1599)):
+  canceling room-code rotation during storage discarded the operation and
+  explicit join-lock releases. A control also pauses after a known code commit;
+  the old caller could lose the only result that reports the replacement code.
+- F340 ([#1600](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1600)):
+  one global eviction lock let a held target lifecycle block a removal in an
+  unrelated match. The control observes the first target's exact lock attempt
+  before starting the unrelated removal.
+
+The three initial regressions fail on unchanged baseline production source in
+Nextest `441ce695-0dff-4f81-a79c-dd149ee8e462`. The first fixture attempt reused
+player names in the isolation room and failed admission; that setup failure is
+not defect evidence. The corrected isolation control uses distinct names.
+The initial repair and the existing two-way and three-way crossed-seat controls
+pass in `1d1d1366-c42e-41f2-8980-ea80815010c9`.
+
+Kicks and code rotations now capture the physical source lifecycle before
+spawning an owned transaction. The owned task retains validation, storage,
+publication, close attribution, and result delivery when its observer disappears.
+The acting lifecycle remains held through the correlated kick result.
+Evictions take two player gates in UUID order before acquiring either physical
+lifecycle. Overlapping evictions stay serialized; disjoint pairs can proceed.
+The existing weak gate directory removes idle entries. No wire schema changes.
+
+Three additional server-component controls finalize real WebRTC mesh plans.
+They require continued generation-preserving signaling between kick survivors,
+late admission through the new room code with a shared fresh generation, and
+unrelated-room removal and signaling while another target remains held. The
+code-rotation control confirms durable registry ownership before canceling its
+observer. These controls pass in
+`49b010ff-0925-4e63-bee3-1faf724c3253`.
+The same three live controls fail with baseline operation bodies and locking in
+`0fe35da2-c893-4af3-b2eb-c6eb8feb11eb`. That red build retains only test support:
+the new post-commit storage pause and an unused empty gate directory for the
+cleanup assertion. It does not use the repaired operation bodies.
+The final kick control also sends three relay frames before removal and checks
+the exact nonzero terminal watermark in live delivery and replay, once each.
+The final all-feature focused run passes 48 controls in
+`8c56531e-556f-458d-b6cb-77991858bc5f`, including refusal paths, collisions,
+stale-socket dispatch, reconnect exclusion, and crossed-seat cycles. A deleted-room
+storage failure after observer cancellation still returns the correlated storage
+refusal and releases both code locks. All 29 source-policy checks pass in
+`77777880-e3b1-45ec-9e0f-ab4eded59f57`.
+
+These tests establish server ordering, routing, and plan behavior. They do not
+establish real-network WebRTC packet delivery, SDK runtime parity, process-loss
+recovery, or storage commits whose outcomes remain unknown. Unexpected panics
+inside these new owned operations are outside the cancellation histories.
+Independent review found no blocking correctness issue.
+
+External-client timing qualification remains open in
+[Rust #300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+[.NET #153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and [Godot #578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Rust's `src/client_core.rs` recognizes the existing kick and code-change results.
+Godot's `sf_events.gd` validates their payloads. The inspected .NET state machine
+handles room membership but does not prove support for these result envelopes.
+The tracking issues require canceled observers, exact departure and close events,
+code-result correlation, late admission, and continued P2P signaling. No required
+SDK migration is established; each SDK still needs runtime qualification.
+
+F338 review reproduced a delayed-refusal race on `d1f56eae`. The shared target
+resolver released its acting lifecycle when it returned a refusal. A complete
+unregister and token restore could then replace that player ID before the old
+failure resolved its recipient. The deterministic control pauses after refusal
+resolution, completes the real reconnect, and resumes the old reply. It fails in
+`9513ad18-b1e4-48f5-9a45-d6c67d4b6f6f`: the restored socket receives the old
+`OperationFailed` envelope.
+
+The owned kick now retains the captured lifecycle, reacquires it on refusal,
+and validates physical ownership before charging or delivering the reply. The
+control also submits a current request and requires its proper refusal, so silence
+cannot pass as a disabled reply path. Independent review found no blocker in this
+repair. The existing deadlock, cancellation, and mesh controls remain required.

@@ -3590,3 +3590,639 @@ async fn transfer_authority_preserves_non_authority_error_precedence() {
         assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
     }
 }
+
+/// A caller can disappear after storage removes the target but before routing changes.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_kick_finishes_committed_departure_and_close() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:49201".parse().unwrap()).await;
+    let (target, mut target_rx, close) =
+        register_client_with_close_listener(&server, "127.0.0.1:49202".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "KCANCL", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "KCANCL", "peer").await;
+    drain_receiver(&mut authority_rx);
+    let room_id = server.get_client_room(&authority).await.unwrap();
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_next_removed_player_for_test();
+    let operation_id = RoomOperationId::new_v4();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_kick_player_operation(&authority, operation_id, target)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_removed_player_for_test(),
+    )
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    database.release_removed_player_for_test();
+    let departed = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::PlayerLeft { .. })
+    })
+    .await;
+    assert!(
+        matches!(departed.as_ref(), ServerMessage::PlayerLeft { player_id, epoch: Some(_), final_seq: Some(_)} if *player_id == target)
+    );
+    let result = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(
+        matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id } if *player_id == target))
+    );
+    assert_eq!(server.get_client_room(&target).await, None);
+    assert!(!server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .players
+        .contains_key(&target));
+    assert_eq!(close.requested_reason(), Some(CloseReason::Kicked));
+}
+
+/// Canceling a storage-waiting rotation must still return the new join code and release both locks.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_room_code_rotation_finishes_and_releases_join_locks() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:49203".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "RCOLD1", "host").await;
+    drain_receiver(&mut authority_rx);
+    let room_id = server.get_client_room(&authority).await.unwrap();
+    server.script_room_codes_for_test(["RCNEW1"]);
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_next_update_room_code_for_test();
+    let operation_id = RoomOperationId::new_v4();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_regenerate_room_code_operation(&authority, operation_id)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_update_room_code_for_test(),
+    )
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    database.release_paused_update_room_code_for_test();
+    let result = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(
+        matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { room_code } if room_code == "RCNEW1"))
+    );
+    assert!(server
+        .database
+        .get_room("moderation-game", "RCOLD1")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        server
+            .database
+            .get_room("moderation-game", "RCNEW1")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        room_id
+    );
+    for code in ["RCOLD1", "RCNEW1"] {
+        assert!(!server
+            .distributed_lock
+            .is_locked(&format!("room_join:moderation-game:{code}"))
+            .await
+            .unwrap());
+    }
+}
+
+/// A busy target in one match must not block removal in another match.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn busy_kick_target_does_not_block_an_unrelated_room() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let mut members = Vec::new();
+    for (index, code) in ["ISOLA1", "ISOLA1", "ISOLA2", "ISOLA2"].iter().enumerate() {
+        let (player, mut receiver) = register_client(
+            &server,
+            format!("127.0.0.1:{}", 49210 + index).parse().unwrap(),
+        )
+        .await;
+        join_seated_player(
+            &server,
+            &player,
+            &mut receiver,
+            code,
+            &format!("peer-{index}"),
+        )
+        .await;
+        members.push((player, receiver));
+    }
+    let authority = members[0].0;
+    let target = members[1].0;
+    let other_authority = members[2].0;
+    let other_target = members[3].0;
+    let lifecycle = server.connection_manager.client_lifecycle(&target).unwrap();
+    let held = lifecycle.lock().await;
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    let blocked = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+    )
+    .await
+    .unwrap();
+    let other = timeout(
+        Duration::from_secs(1),
+        server.handle_kick_player_operation(
+            &other_authority,
+            RoomOperationId::new_v4(),
+            other_target,
+        ),
+    )
+    .await;
+    drop(held);
+    timeout(Duration::from_secs(1), blocked)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        other.is_ok(),
+        "another room must complete while the first target is busy"
+    );
+    assert_eq!(server.get_client_room(&other_target).await, None);
+}
+
+struct LiveModerationPeer {
+    id: PlayerId,
+    receiver: mpsc::Receiver<Arc<ServerMessage>>,
+    close: crate::coordination::ConnectionCloseListener,
+}
+
+/// Finalize a real server-side WebRTC mesh and retain each peer's opening generation.
+async fn live_moderation_room(
+    server: &Arc<EnhancedGameServer>,
+    code: &str,
+    count: usize,
+) -> (
+    RoomId,
+    Vec<LiveModerationPeer>,
+    crate::protocol::SessionGeneration,
+) {
+    let mut peers: Vec<LiveModerationPeer> = Vec::new();
+    for index in 0..count {
+        let (id, mut receiver, close) = register_client_with_close_listener(
+            server,
+            format!("127.0.0.1:{}", 49400 + index).parse().unwrap(),
+        )
+        .await;
+        server.set_client_protocol(
+            &id,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![
+                    crate::protocol::Transport::Relay,
+                    crate::protocol::Transport::WebRtc,
+                ],
+                topologies: vec![
+                    crate::protocol::Topology::Relay,
+                    crate::protocol::Topology::Mesh,
+                ],
+            },
+        );
+        join_seated_player(server, &id, &mut receiver, code, &format!("peer-{index}")).await;
+        peers.push(LiveModerationPeer {
+            id,
+            receiver,
+            close,
+        });
+        for peer in &mut peers {
+            drain_receiver(&mut peer.receiver);
+        }
+    }
+    for index in 0..peers.len() {
+        server.handle_player_ready(&peers[index].id).await;
+        for peer in &mut peers {
+            drain_receiver(&mut peer.receiver);
+        }
+    }
+    server.handle_start_game(&peers[0].id).await;
+    let room_id = server.get_client_room(&peers[0].id).await.unwrap();
+    let mut generation = None;
+    for peer in &mut peers {
+        let messages = drain_receiver(&mut peer.receiver);
+        let plan = messages
+            .iter()
+            .find_map(|message| match message.as_ref() {
+                ServerMessage::SessionPlan(plan) => Some(plan),
+                _ => None,
+            })
+            .expect("every finalized v3 peer receives its plan");
+        assert_eq!(plan.topology, crate::protocol::Topology::Mesh);
+        assert_eq!(plan.transport, crate::protocol::Transport::WebRtc);
+        assert_eq!(plan.peers.len(), count - 1);
+        if let Some(generation) = generation {
+            assert_eq!(plan.generation, generation);
+        }
+        generation = Some(plan.generation);
+    }
+    (room_id, peers, generation.unwrap())
+}
+
+async fn assert_live_moderation_signal(
+    server: &EnhancedGameServer,
+    sender: PlayerId,
+    recipient: &mut LiveModerationPeer,
+    generation: crate::protocol::SessionGeneration,
+) {
+    let signal = serde_json::json!({"candidate": "live-room-control"});
+    server
+        .handle_signal_in_generation(&sender, recipient.id, generation, signal.clone())
+        .await;
+    let received = recv_until(&mut recipient.receiver, |message| {
+        matches!(message, ServerMessage::Signal { .. })
+    })
+    .await;
+    assert!(
+        matches!(received.as_ref(), ServerMessage::Signal { from, generation: actual, signal: actual_signal } if *from == sender && *actual == generation && *actual_signal == signal)
+    );
+}
+
+fn assert_moderation_players_released(server: &EnhancedGameServer) {
+    assert!(server
+        .moderation_player_gates
+        .inner
+        .gates
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert!(server
+        .moderation_player_gates
+        .inner
+        .active
+        .lock()
+        .unwrap()
+        .is_empty());
+}
+
+/// Remaining mesh peers keep their plan and signaling after a canceled, committed kick.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_kick_preserves_live_mesh_survivors() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (room_id, mut peers, generation) = live_moderation_room(&server, "LIVEK1", 3).await;
+    let authority = peers[0].id;
+    let target = peers[1].id;
+    let replay = server.reconnection_manager.as_ref().unwrap();
+    replay
+        .register_disconnection(PlayerId::new_v4(), room_id, false, None, 0)
+        .await;
+    for sequence in 1..=3 {
+        server
+            .handle_game_data(
+                &target,
+                serde_json::json!({"sequence": sequence}),
+                None,
+                None,
+            )
+            .await;
+    }
+    for index in [0, 2] {
+        let frames = drain_receiver(&mut peers[index].receiver);
+        assert_eq!(frames.iter().filter(|message| matches!(message.as_ref(), ServerMessage::GameData { from_player, .. } if *from_player == target)).count(), 3);
+    }
+    let expected_tail = server
+        .connection_manager
+        .current_relay_stamp_in_room(&target, &room_id)
+        .unwrap();
+    assert_eq!(expected_tail.seq, 3);
+    let replay_before = replay.get_missed_events(&room_id, 0).await;
+    let operation_id = RoomOperationId::new_v4();
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_next_removed_player_for_test();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_kick_player_operation(&authority, operation_id, target)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_removed_player_for_test(),
+    )
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    database.release_removed_player_for_test();
+    let departed = recv_until(&mut peers[0].receiver, |message| {
+        matches!(message, ServerMessage::PlayerLeft { .. })
+    })
+    .await;
+    assert!(
+        matches!(departed.as_ref(), ServerMessage::PlayerLeft { player_id, epoch: Some(epoch), final_seq: Some(final_seq) } if *player_id == target && *epoch == expected_tail.epoch && *final_seq == expected_tail.seq)
+    );
+    let result = recv_until(&mut peers[0].receiver, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(
+        matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id } if *player_id == target))
+    );
+    let survivor_messages = drain_receiver(&mut peers[2].receiver);
+    assert_eq!(survivor_messages.iter().filter(|message| matches!(message.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == target)).count(), 1);
+    assert_eq!(peers[1].close.requested_reason(), Some(CloseReason::Kicked));
+    assert_eq!(peers[0].close.requested_reason(), None);
+    assert_eq!(peers[2].close.requested_reason(), None);
+    assert_eq!(
+        server.active_session_plan(&room_id).unwrap().transport,
+        crate::protocol::Transport::WebRtc
+    );
+    assert_live_moderation_signal(&server, authority, &mut peers[2], generation).await;
+    let replay_after = replay.get_missed_events(&room_id, 0).await;
+    assert_eq!(replay_after.events.len(), replay_before.events.len() + 1);
+    assert!(
+        matches!(replay_after.events.last(), Some(ServerMessage::PlayerLeft { player_id, epoch: Some(epoch), final_seq: Some(final_seq) }) if *player_id == target && *epoch == expected_tail.epoch && *final_seq == expected_tail.seq)
+    );
+    assert!(!drain_receiver(&mut peers[0].receiver).iter().any(|message| matches!(message.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == target)));
+    assert_moderation_players_released(&server);
+}
+
+/// A known committed code change remains observable and admits a fresh live mesh peer.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_committed_room_code_change_preserves_live_mesh_admission() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (room_id, mut peers, _) = live_moderation_room(&server, "LIVEC1", 2).await;
+    let authority = peers[0].id;
+    let operation_id = RoomOperationId::new_v4();
+    server.script_room_codes_for_test(["LIVEC2"]);
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_after_update_room_code_commit_for_test();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_regenerate_room_code_operation(&authority, operation_id)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_update_room_code_for_test(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server
+            .database
+            .get_room("moderation-game", "LIVEC2")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        room_id
+    );
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    database.release_paused_update_room_code_for_test();
+    let response = recv_until(&mut peers[0].receiver, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(
+        matches!(response.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { room_code } if room_code == "LIVEC2"))
+    );
+    for code in ["LIVEC1", "LIVEC2"] {
+        assert!(!server
+            .distributed_lock
+            .is_locked(&format!("room_join:moderation-game:{code}"))
+            .await
+            .unwrap());
+    }
+    let (joiner, mut receiver) = register_client(&server, "127.0.0.1:49403".parse().unwrap()).await;
+    server.set_client_protocol(
+        &joiner,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![
+                crate::protocol::Transport::Relay,
+                crate::protocol::Transport::WebRtc,
+            ],
+            topologies: vec![
+                crate::protocol::Topology::Relay,
+                crate::protocol::Topology::Mesh,
+            ],
+        },
+    );
+    join_seated_player(&server, &joiner, &mut receiver, "LIVEC2", "new-peer").await;
+    assert_eq!(server.get_client_room(&joiner).await, Some(room_id));
+    let mut generation = None;
+    for peer in &mut peers {
+        let message = recv_until(&mut peer.receiver, |message| {
+            matches!(message, ServerMessage::SessionPlan(_))
+        })
+        .await;
+        let ServerMessage::SessionPlan(plan) = message.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(plan.transport, crate::protocol::Transport::WebRtc);
+        assert_eq!(plan.peers.len(), 2);
+        if let Some(generation) = generation {
+            assert_eq!(plan.generation, generation);
+        }
+        generation = Some(plan.generation);
+    }
+    let message = recv_until(&mut receiver, |message| {
+        matches!(message, ServerMessage::SessionPlan(_))
+    })
+    .await;
+    assert!(
+        matches!(message.as_ref(), ServerMessage::SessionPlan(plan) if Some(plan.generation) == generation && plan.peers.len() == 2)
+    );
+    assert_live_moderation_signal(&server, joiner, &mut peers[1], generation.unwrap()).await;
+    assert!(server
+        .database
+        .get_room("moderation-game", "LIVEC1")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// One held lifecycle cannot stop an unrelated live mesh from removing a peer and signaling.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn busy_kick_keeps_an_unrelated_live_mesh_running() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (_, first, _) = live_moderation_room(&server, "LIVEI1", 2).await;
+    let (room_id, mut other, generation) = live_moderation_room(&server, "LIVEI2", 3).await;
+    let authority = first[0].id;
+    let target = first[1].id;
+    let lifecycle = server.connection_manager.client_lifecycle(&target).unwrap();
+    let held = lifecycle.lock().await;
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    let blocked = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+    )
+    .await
+    .unwrap();
+    let other_authority = other[0].id;
+    let other_target = other[1].id;
+    let result = timeout(
+        Duration::from_secs(1),
+        server.handle_kick_player_operation(
+            &other_authority,
+            RoomOperationId::new_v4(),
+            other_target,
+        ),
+    )
+    .await;
+    if result.is_ok() {
+        assert_eq!(server.get_client_room(&other_target).await, None);
+        assert_eq!(
+            server.get_client_room(&target).await,
+            server.get_client_room(&authority).await
+        );
+        assert_eq!(
+            server.active_session_plan(&room_id).unwrap().transport,
+            crate::protocol::Transport::WebRtc
+        );
+        assert_live_moderation_signal(&server, other_authority, &mut other[2], generation).await;
+        assert_eq!(other[1].close.requested_reason(), Some(CloseReason::Kicked));
+    }
+    drop(held);
+    timeout(Duration::from_secs(1), blocked)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "unrelated live mesh must finish its own kick"
+    );
+    assert_moderation_players_released(&server);
+}
+
+/// A canceled observer still receives the storage refusal and releases both code locks.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_room_code_change_reports_storage_failure_and_releases_locks() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut receiver) =
+        register_client(&server, "127.0.0.1:49501".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut receiver, "FAILC1", "host").await;
+    drain_receiver(&mut receiver);
+    let room_id = server.get_client_room(&authority).await.unwrap();
+    server.script_room_codes_for_test(["FAILC2"]);
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_next_update_room_code_for_test();
+    let operation_id = RoomOperationId::new_v4();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_regenerate_room_code_operation(&authority, operation_id)
+                .await
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_update_room_code_for_test(),
+    )
+    .await
+    .unwrap();
+    server.database.delete_room(&room_id).await.unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    database.release_paused_update_room_code_for_test();
+    let response = recv_until(&mut receiver, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(
+        matches!(response.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, .. } if *actual == operation_id)
+    );
+    assert_eq!(
+        operation_failed_code(response.as_ref()),
+        ErrorCode::StorageError
+    );
+    for code in ["FAILC1", "FAILC2"] {
+        assert!(!server
+            .distributed_lock
+            .is_locked(&format!("room_join:moderation-game:{code}"))
+            .await
+            .unwrap());
+        assert!(server
+            .database
+            .get_room("moderation-game", code)
+            .await
+            .unwrap()
+            .is_none());
+    }
+}

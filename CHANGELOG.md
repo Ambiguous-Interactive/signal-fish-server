@@ -66,6 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Complete admitted player kicks and room-code changes after caller cancellation, and keep kick replies on the original
+  connection (#1598, #1599).
+- Keep a busy player removal from delaying removals in unrelated matches (#1600).
 - Recover exact live P2P departures through cleanup failures and queued leaves, share repeated teardown, and prevent closing
   sockets from joining new rooms or removing restored peer routes (#1594, #1595, #1596).
 - Retry delayed authority notifications after maintenance publication fails (#1592).
