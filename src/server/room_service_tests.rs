@@ -18379,3 +18379,56 @@ async fn missing_room_locked_unregister_retains_an_interrupted_departure() {
     assert_eq!(server.metrics.active_connections.load(Ordering::Relaxed), 0);
     assert_eq!(close.requested_reason(), Some(CloseReason::RoomInactive));
 }
+
+/// A refusal from a departed socket must not charge or answer its restored identity.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn delayed_kick_refusal_cannot_reach_a_restored_authority() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let authority = fixture.leaver;
+    let operation_id = crate::protocol::RoomOperationId::new_v4();
+    let pause = super::moderation::arm_kick_refusal_pause(authority);
+    let caller = tokio::spawn({
+        let server = Arc::clone(&fixture.server);
+        async move {
+            server
+                .handle_kick_player_operation(&authority, operation_id, authority)
+                .await
+        }
+    });
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .unwrap();
+    let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+    drain_queued_messages(&mut replacement_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), caller)
+        .await
+        .unwrap()
+        .unwrap();
+    let replacement_messages = drain_queued_messages(&mut replacement_rx);
+    assert!(
+        replacement_messages.is_empty(),
+        "old refusal reached restored socket: {replacement_messages:?}"
+    );
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.authority_player, Some(authority));
+    assert!(room.players.contains_key(&fixture.survivor));
+    fixture
+        .server
+        .handle_kick_player_operation(&authority, operation_id, authority)
+        .await;
+    let response = timeout(Duration::from_secs(1), replacement_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(response.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), crate::protocol::RoomOperationResult::OperationFailed { error_code: Some(ErrorCode::InvalidInput), .. }))
+    );
+}

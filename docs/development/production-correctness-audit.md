@@ -16331,3 +16331,17 @@ handles room membership but does not prove support for these result envelopes.
 The tracking issues require canceled observers, exact departure and close events,
 code-result correlation, late admission, and continued P2P signaling. No required
 SDK migration is established; each SDK still needs runtime qualification.
+
+F338 review reproduced a delayed-refusal race on `d1f56eae`. The shared target
+resolver released its acting lifecycle when it returned a refusal. A complete
+unregister and token restore could then replace that player ID before the old
+failure resolved its recipient. The deterministic control pauses after refusal
+resolution, completes the real reconnect, and resumes the old reply. It fails in
+`9513ad18-b1e4-48f5-9a45-d6c67d4b6f6f`: the restored socket receives the old
+`OperationFailed` envelope.
+
+The owned kick now retains the captured lifecycle, reacquires it on refusal,
+and validates physical ownership before charging or delivering the reply. The
+control also submits a current request and requires its proper refusal, so silence
+cannot pass as a disabled reply path. Independent review found no blocker in this
+repair. The existing deadlock, cancellation, and mesh controls remain required.

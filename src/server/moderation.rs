@@ -15,6 +15,23 @@ use super::{ClientLifecycle, EnhancedGameServer};
 /// (`GENERATED_ROOM_CODE_MAX_ATTEMPTS`).
 const REGENERATED_ROOM_CODE_MAX_ATTEMPTS: u8 = 8;
 
+#[cfg(all(test, signal_fish_repository_tests))]
+static KICK_REFUSAL_PAUSES: std::sync::LazyLock<
+    dashmap::DashMap<PlayerId, Arc<super::message_router::SocketDispatchPause>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) fn arm_kick_refusal_pause(
+    player_id: PlayerId,
+) -> Arc<super::message_router::SocketDispatchPause> {
+    let pause = Arc::new(super::message_router::SocketDispatchPause {
+        reached: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    KICK_REFUSAL_PAUSES.insert(player_id, Arc::clone(&pause));
+    pause
+}
+
 /// Validated target context for a seat-targeting moderation operation
 /// (`KickPlayer`, `BanPlayer`).
 struct ModerationTarget {
@@ -97,7 +114,7 @@ impl EnhancedGameServer {
         let moderation_lifecycle_guard =
             self.lock_moderation_players(*authority_id, target_id).await;
         let resolved = self
-            .resolve_kick_style_target(authority_id, &target_id, Some(lifecycle))
+            .resolve_kick_style_target(authority_id, &target_id, Some(Arc::clone(&lifecycle)))
             .await;
         let Some(ModerationTarget {
             room_id,
@@ -109,6 +126,19 @@ impl EnhancedGameServer {
             Ok(target) => target,
             Err((message, code)) => {
                 drop(moderation_lifecycle_guard);
+                #[cfg(all(test, signal_fish_repository_tests))]
+                if let Some((_, pause)) = KICK_REFUSAL_PAUSES.remove(authority_id) {
+                    pause.reached.notify_one();
+                    pause.release.notified().await;
+                }
+                let _authority_lifecycle_guard = lifecycle.lock().await;
+                if lifecycle.player_id() != *authority_id
+                    || !self
+                        .connection_manager
+                        .lifecycle_matches(authority_id, &lifecycle)
+                {
+                    return;
+                }
                 self.fail_operation(authority_id, operation_id, message, code)
                     .await;
                 return;
