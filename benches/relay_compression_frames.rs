@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if argument == "--test" {
             validate_only = true;
         } else if argument == "--help" {
-            println!("Usage: relay_compression_frames <output-directory> | --test");
+            println!("Usage: relay_compression_frames [output-directory | --test]");
             return Ok(());
         } else if argument == "--list" {
             return Ok(());
@@ -32,9 +32,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("pass exactly one output directory".into());
             }
         }
-    }
-    if directory.is_none() && !validate_only {
-        return Err("pass an output directory after --, or pass --test".into());
     }
     if directory.is_some() && validate_only {
         return Err("choose an output directory or --test".into());

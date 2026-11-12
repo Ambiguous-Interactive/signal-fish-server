@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep healthy P2P signaling moving when a transport report arrives during a slow peer delivery (#826).
+- Keep healthy P2P signaling and transport reports moving during slow peer delivery (#826, #1619).
 - Keep offers between healthy P2P peers moving while another target waits for outbound capacity (#1617).
 - Keep healthy peers signaling while another peer waits for an authority refusal, signal refusal, or metadata error reply
   (#826, #1612, #1613).

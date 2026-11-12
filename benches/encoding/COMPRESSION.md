@@ -29,9 +29,10 @@ python3 scripts/measure-relay-compression.py --self-test
 python3 scripts/measure-relay-compression.py target/relay-compression-corpus --output target/relay-compression.json
 ```
 
-The exporter also accepts `--test` in place of the directory. It checks every
-captured production frame against the existing exact-byte ledger without
-writing a corpus. This is a benchmark tool, not a server configuration option.
+Without a directory, the exporter checks every captured production frame against
+the existing exact-byte ledger without writing a corpus. This includes Cargo's
+default `--bench` invocation and explicit `--test` runs. A directory enables
+export. This is a benchmark tool, not a server configuration option.
 
 ## Measurement contract
 
@@ -69,11 +70,11 @@ time per recipient frame in microseconds.
 
 | Lane | Saved without takeover | CPU | Saved with takeover | CPU |
 | --- | ---: | ---: | ---: | ---: |
-| V3 JSON text | 84.47% | 6.73 | 97.46% | 3.15 |
-| V3 MessagePack binary | 85.22% | 6.90 | 97.43% | 3.51 |
+| V3 JSON text | 84.47% | 6.10 | 97.46% | 2.77 |
+| V3 MessagePack binary | 85.22% | 6.02 | 97.43% | 2.84 |
 
-The same identity loop costs 0.10 microseconds per frame. Takeover decompression
-costs 1.10 microseconds for JSON and 1.33 for MessagePack.
+The same identity loop costs 0.08 microseconds per frame. Takeover decompression
+costs 0.96 microseconds for JSON and 0.94 for MessagePack.
 
 The production fixture repeats an 896-byte string and stable gameplay fields.
 Its high savings do not represent arbitrary game payloads. Separate deterministic
@@ -83,9 +84,9 @@ production-derived frames. They prevent a claim that every payload shrinks.
 
 | Distinct opaque bytes per frame | Size increase with takeover | CPU |
 | --- | ---: | ---: |
-| 6 | 27.88% | 2.30 |
-| 96 | 6.12% | 8.48 |
-| 1,024 | 0.58% | 44.96 |
+| 6 | 27.88% | 2.25 |
+| 96 | 6.12% | 7.24 |
+| 1,024 | 0.58% | 46.16 |
 
 ## Decision limits
 
