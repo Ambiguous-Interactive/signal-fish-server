@@ -375,6 +375,103 @@ mod handler_honesty {
         }
     }
 
+    /// docs/protocol.md:2206–2215 assigns order when the server allocates a stamp.
+    /// Overlapping unstamped handlers may enter in either order. Recipients must
+    /// receive their exact payloads in increasing allocated sequence order.
+    #[tokio::test(start_paused = true)]
+    async fn unstamped_concurrent_relays_linearize_when_their_stamps_are_allocated() {
+        for binary in [false, true] {
+            let RelayOrderFixture {
+                server,
+                source,
+                room,
+                mut target_receiver,
+                ..
+            } = relay_order_fixture().await;
+            tokio::task::yield_now().await;
+            let mut first =
+                Box::pin(server.handle_game_data(&source, serde_json::json!("A"), None, None));
+            assert!(futures_util::poll!(first.as_mut()).is_pending());
+            let mut second = Box::pin(async {
+                if binary {
+                    server
+                        .handle_game_data_binary(
+                            &source,
+                            GameDataEncoding::MessagePack,
+                            Bytes::from_static(b"B"),
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_game_data(&source, serde_json::json!("B"), None, None)
+                        .await;
+                }
+            });
+            assert!(futures_util::poll!(second.as_mut()).is_pending());
+            let mut third = Box::pin(async {
+                if binary {
+                    server
+                        .handle_game_data_binary(
+                            &source,
+                            GameDataEncoding::MessagePack,
+                            Bytes::from_static(b"C"),
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_game_data(&source, serde_json::json!("C"), None, None)
+                        .await;
+                }
+            });
+            assert!(futures_util::poll!(third.as_mut()).is_pending());
+            assert_eq!(server.metrics.game_data_messages.load(Ordering::Relaxed), 3);
+            let stamp = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!(
+                (stamp.epoch, stamp.seq),
+                (1, 1),
+                "B and C must remain unstamped while A owns the delivery tail"
+            );
+            assert_eq!(
+                server
+                    .metrics
+                    .websocket_backpressure_events
+                    .load(Ordering::Relaxed),
+                1
+            );
+            let prefill = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
+            let first_delivery = timeout(Duration::from_secs(1), target_receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            expect_ordered_payload(first_delivery.payload, source, 1, 1, "A");
+            timeout(Duration::from_secs(1), first).await.unwrap();
+            timeout(Duration::from_secs(1), third)
+                .await
+                .expect("C may allocate before overlapping unstamped B");
+            assert!(futures_util::poll!(second.as_mut()).is_pending());
+            let stamp = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!((stamp.epoch, stamp.seq), (1, 3));
+            let third_delivery = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(third_delivery.payload, source, 1, 2, "C");
+            timeout(Duration::from_secs(1), second).await.unwrap();
+            let second_delivery = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(second_delivery.payload, source, 1, 3, "B");
+            let remaining = target_receiver.try_recv();
+            assert!(matches!(
+                remaining,
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+            ));
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn relay_order_wait_releases_lifecycle_and_cannot_cross_a_same_room_rejoin() {
         use crate::coordination::outbound_queue::{OutboundPayload, TryReceiveError};

@@ -2882,6 +2882,12 @@ impl Drop for ParkedWaitAccounting<'_> {
     }
 }
 
+enum BorrowedBroadcastStart<'a> {
+    Complete,
+    Pending(Pin<Box<dyn Future<Output = ()> + Send + 'a>>),
+    Unavailable,
+}
+
 enum RoutedRelayStart {
     Started(StartedDeliveries, RoutingWriteGuard),
     NoMessage,
@@ -3366,18 +3372,18 @@ impl InMemoryMessageCoordinator {
         room_id: &RoomId,
         except_player: &PlayerId,
         build_message: &mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
-    ) -> ImmediateGameDataBroadcast<'a> {
+    ) -> BorrowedBroadcastStart<'a> {
         let Some(_routing) = self.room_routing_gates.try_read(*room_id) else {
-            return ImmediateGameDataBroadcast::Unavailable;
+            return BorrowedBroadcastStart::Unavailable;
         };
         let Ok(room_players) = self.room_players.try_read() else {
-            return ImmediateGameDataBroadcast::Unavailable;
+            return BorrowedBroadcastStart::Unavailable;
         };
         let Ok(clients) = self.local_clients.try_read() else {
-            return ImmediateGameDataBroadcast::Unavailable;
+            return BorrowedBroadcastStart::Unavailable;
         };
         let Some(message) = build_message() else {
-            return ImmediateGameDataBroadcast::Complete;
+            return BorrowedBroadcastStart::Complete;
         };
         let started = self.start_routed_deliveries(
             &room_players,
@@ -3390,9 +3396,9 @@ impl InMemoryMessageCoordinator {
         drop(room_players);
 
         if started.pending.is_empty() && started.slow_consumers.is_empty() {
-            ImmediateGameDataBroadcast::Complete
+            BorrowedBroadcastStart::Complete
         } else {
-            ImmediateGameDataBroadcast::Pending(Box::pin(self.finish_deliveries(started)))
+            BorrowedBroadcastStart::Pending(Box::pin(self.finish_deliveries(started)))
         }
     }
 
@@ -5656,18 +5662,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let mut build_message = Some(build_message);
         let mut build_once = || build_message.take().and_then(|build| build());
         match self.try_borrowed_room_broadcast(room_id, except_player, &mut build_once) {
-            ImmediateGameDataBroadcast::Complete => {}
-            ImmediateGameDataBroadcast::Pending(finish) => finish.await,
-            ImmediateGameDataBroadcast::OrderingBlocked(wait) => {
-                wait.await;
-                Box::pin(self.borrowed_room_broadcast_after_contention(
-                    room_id,
-                    except_player,
-                    &mut build_once,
-                ))
-                .await;
-            }
-            ImmediateGameDataBroadcast::Unavailable => {
+            BorrowedBroadcastStart::Complete => {}
+            BorrowedBroadcastStart::Pending(finish) => finish.await,
+            BorrowedBroadcastStart::Unavailable => {
                 Box::pin(self.borrowed_room_broadcast_after_contention(
                     room_id,
                     except_player,
@@ -5690,18 +5687,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // larger wait state is boxed only on actual contention, preserving the
         // checked-in allocation-byte ceiling in the healthy path.
         match self.try_borrowed_room_broadcast(room_id, except_player, build_message) {
-            ImmediateGameDataBroadcast::Complete => {}
-            ImmediateGameDataBroadcast::Pending(finish) => finish.await,
-            ImmediateGameDataBroadcast::OrderingBlocked(wait) => {
-                wait.await;
-                Box::pin(self.borrowed_room_broadcast_after_contention(
-                    room_id,
-                    except_player,
-                    build_message,
-                ))
-                .await;
-            }
-            ImmediateGameDataBroadcast::Unavailable => {
+            BorrowedBroadcastStart::Complete => {}
+            BorrowedBroadcastStart::Pending(finish) => finish.await,
+            BorrowedBroadcastStart::Unavailable => {
                 Box::pin(self.borrowed_room_broadcast_after_contention(
                     room_id,
                     except_player,

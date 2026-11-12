@@ -16442,3 +16442,30 @@ Final local qualification: all 69 selected all-feature controls pass in
 `7ac31d92-624d-4e4d-a9e8-7d1c61247b2d`. Formatting, Markdown, CI configuration,
 and documentation consistency checks pass. Hosted verification remains the
 publication and merge gate.
+
+The first hosted allocation gate failed on head `b0f0bd5a`: the mixed-rkyv
+two-player projection allocated 292,864 bytes over 1,024 relays against its
+284,672-byte ceiling. The generic compatibility helper could return only three
+states, but shared the expanded four-state public relay result. Its unreachable
+ordering-wait arm enlarged the boxed async future by eight bytes per relay.
+A private three-state result removes that unused state without changing the
+owned relay path. Matched release samples reproduce the failure and restore
+284,672 bytes. All 18 serialization cells pass their unchanged ceilings and exact
+wire digests. Compatibility and owned-delivery controls pass in
+`1cee728f-4970-4649-bf59-24a8b07ffd22`.
+
+Review also asked whether two concurrent, unstamped calls must retain invocation
+order. The protocol requires increasing delivered stamps. Overlapping unstamped
+library calls have no documented invocation-order guarantee; stamp allocation
+orders their delivery. The socket reader awaits each text or binary handler
+before reading its next frame. The new
+`unstamped_concurrent_relays_linearize_when_their_stamps_are_allocated` control
+holds accepted A while B and C wait unstamped, then drives C before B. Both JSON
+and binary histories require exact A(1), C(2), B(3) delivery with no extras.
+It passes in `e644486c-8af8-4404-b010-dfc6b388351f`. This pins accepted-message
+ordering and preserves the caller's existing responsibility to serialize
+overlapping library calls when invocation order matters.
+
+After the allocation repair, all 71 selected all-feature controls pass in
+`f54b629d-094d-4539-baec-00d23cac0f76`; all 47 source-policy controls pass in
+`ebbdc122-1aa9-4b02-b353-8dc3f11e93d4`. Strict full Clippy and formatting also pass.
