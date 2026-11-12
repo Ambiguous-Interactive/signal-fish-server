@@ -16345,3 +16345,127 @@ and validates physical ownership before charging or delivering the reply. The
 control also submits a current request and requires its proper refusal, so silence
 cannot pass as a disabled reply path. Independent review found no blocker in this
 repair. The existing deadlock, cancellation, and mesh controls remain required.
+
+### F341–F344: preserve gameplay roles and accepted relay tails
+
+Baseline: `ca154814`. Related campaign: #826. New findings:
+
+- F341 ([#1602](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1602)):
+  authority transfer accepted a target whose socket already had a close request.
+  Departure then cleared the granted role, leaving the former authority without
+  a usable successor. The room lane now rejects a closing transfer target.
+- F342 ([#1603](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1603)):
+  disconnect could save restoration metadata before an already admitted transfer
+  wrote its role. The disconnect snapshot now takes the same room mutation lane.
+  It releases that lane before departure reacquires it.
+- F343 ([#1604](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1604)):
+  canceling an admitted relay observer discarded full recipients' reliable tails
+  while their sockets remained open. The production relay handoff now starts an
+  owned completion before returning its observation future. That task retains
+  delivery deadlines and physical-queue-fenced slow-consumer cleanup.
+- F344 ([#1605](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1605)):
+  overlapping sends could enqueue sequence 2 before pending sequence 1 in a
+  classified recipient queue. A source-keyed ordering gate now spans admission
+  and owned completion, including a later physical socket with the same player ID.
+
+The initial role controls fail on baseline in
+`fd4d7e82-1951-4271-b474-d250a321cbbd`. The final live-mesh versions fail in
+`95e5f573-618e-48dd-ba82-59278df0dda7`. The postcommit F342 cell establishes
+publication order, not stale role metadata. Its stronger precommit history fails
+with only the snapshot guard removed in
+`b1eaf1b2-26f9-4879-ac2b-473809343b4c`: the saved `was_authority` is false after the
+admitted transfer and completed disconnect. The closing-target repair remains
+enabled in that negative control. Repaired controls complete a real token restore
+into a finalized three-player WebRTC mesh, check the restored role and plan, and
+require exact-generation signaling to an untouched survivor.
+
+The valid cancellation control fails with baseline relay bodies in
+`3fb34e13-441b-4886-9839-4901c3d9b073`. A healthy leg proves admission before its
+observer is dropped. The slow leg then misses the accepted tail. The valid
+ordering control fails in `829d4dc0-7c4f-47ad-aadc-a9c3d4e1086f` with payload
+`second`, sequence 2, epoch 1 before sequence 1. Initial duplicate-name fixtures,
+premature polls, and intermediate compile failures are excluded from defect proof.
+The JSON and binary repaired matrices pass in
+`c9a0694d-78eb-4f50-ac91-0fd1cfec9410`. The final JSON/binary ordering,
+cancellation, and leave/rejoin controls also pass in
+`efe01e4d-423c-41fd-8367-dd37368d1971`. Hosted checks are recorded separately.
+
+An ordering wait releases the source lifecycle before parking and reacquires the
+original lifecycle before retrying an uncalled builder. Each builder also retains
+its original membership epoch, so a same-socket leave and rejoin cannot stamp an
+old waiting payload into the new incarnation. Uncontended relay admission adds
+no task or per-message gate allocation. Compatibility control-message delivery
+retains its existing cancellation policy.
+
+The strengthened old-tail, stale-waiter, and fresh-epoch history exposed a
+candidate-only livelock in `2f56816f-a826-4dad-9ffb-21044a25ab8e`. Two fair-lock
+waiters acquired, released, and retried the same permit without admitting either
+frame. The spinning test was stopped explicitly after 25.337 seconds. This is
+development evidence, not another baseline defect. Readiness now arms a release
+notification before probing. Both an owned guard and a successful readiness probe
+unlock before notifying waiters. No waiter reserves a fair writer permit merely
+to discard it before admission.
+
+The final relay matrices pass in `08b8bf70-903e-4b63-8068-201061e87742`. The
+strengthened three-client history submits fresh epoch-2 gameplay while the old
+epoch-1 tail and a stale unstamped frame still wait. Fresh data stays unstamped
+until the old tail finishes. Only the fresh payload receives epoch 2, sequence 1.
+Independent final order controls pass in
+`59fd0446-5bb2-4d57-b368-a12a7346c4c4`. Readiness histories for release before first
+poll, two registered waiters, and one canceled waiter pass in
+`446e6d78-38d0-42be-bc54-250cef33c8dd`. Independent review found no remaining
+source blocker.
+
+Custom server integrations that exhaustively match the public, hidden
+`ImmediateGameDataBroadcast` or `RelayEnqueueOutcome` enums must handle the new
+`OrderingBlocked` variant. Release the source lifecycle, await its wait future,
+revalidate the original source and membership, then retry the uncalled builder.
+Default custom coordinator implementations need no new method. Wire schemas and
+SDK command formats do not change.
+
+These are server-component histories. They do not establish real-network WebRTC
+payload delivery, SDK runtime parity, process-loss recovery, or arbitrary custom
+storage behavior. The broader #826 audit remains open.
+
+External-client qualification remains open in
+[Rust #300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+[.NET #153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and [Godot #578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+The current Rust and Godot protocol sources recognize `AuthorityTransferred`.
+The .NET event mapper handles authority changes and reconnect baseline flags.
+Each tracking issue requires the role race, exact canceled relay tail,
+same-sender order, old-epoch terminal handling, and survivor signaling histories.
+No SDK migration is established; each runtime still needs qualification.
+
+Final local qualification: all 69 selected all-feature controls pass in
+`12ee9ee2-2013-4484-b1c5-ff435ac5d0c3`; all 47 source-policy controls pass in
+`7ac31d92-624d-4e4d-a9e8-7d1c61247b2d`. Formatting, Markdown, CI configuration,
+and documentation consistency checks pass. Hosted verification remains the
+publication and merge gate.
+
+The first hosted allocation gate failed on head `b0f0bd5a`: the mixed-rkyv
+two-player projection allocated 292,864 bytes over 1,024 relays against its
+284,672-byte ceiling. The generic compatibility helper could return only three
+states, but shared the expanded four-state public relay result. Its unreachable
+ordering-wait arm enlarged the boxed async future by eight bytes per relay.
+A private three-state result removes that unused state without changing the
+owned relay path. Matched release samples reproduce the failure and restore
+284,672 bytes. All 18 serialization cells pass their unchanged ceilings and exact
+wire digests. Compatibility and owned-delivery controls pass in
+`1cee728f-4970-4649-bf59-24a8b07ffd22`.
+
+Review also asked whether two concurrent, unstamped calls must retain invocation
+order. The protocol requires increasing delivered stamps. Overlapping unstamped
+library calls have no documented invocation-order guarantee; stamp allocation
+orders their delivery. The socket reader awaits each text or binary handler
+before reading its next frame. The new
+`unstamped_concurrent_relays_linearize_when_their_stamps_are_allocated` control
+holds accepted A while B and C wait unstamped, then drives C before B. Both JSON
+and binary histories require exact A(1), C(2), B(3) delivery with no extras.
+It passes in `e644486c-8af8-4404-b010-dfc6b388351f`. This pins accepted-message
+ordering and preserves the caller's existing responsibility to serialize
+overlapping library calls when invocation order matters.
+
+After the allocation repair, all 71 selected all-feature controls pass in
+`f54b629d-094d-4539-baec-00d23cac0f76`; all 47 source-policy controls pass in
+`ebbdc122-1aa9-4b02-b353-8dc3f11e93d4`. Strict full Clippy and formatting also pass.

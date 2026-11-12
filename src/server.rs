@@ -2065,6 +2065,10 @@ impl EnhancedGameServer {
         // field. A missing player/room or storage error must not degrade into a
         // pending record with `was_authority = false` and no player metadata.
         let reconnect_snapshot = if let Some(room_id) = room_id_opt {
+            let _room_guard = self
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await;
             match self
                 .database
                 .get_room_player_snapshot(&room_id, player_id)
@@ -2538,12 +2542,13 @@ pub struct InMemoryMessageCoordinator {
     local_clients: Arc<RwLock<HashMap<PlayerId, ClientDeliveryHandle>>>,
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
     // Each identity has one route. Read under its player gate; update with room_players.
-    player_rooms: StdMutex<HashMap<PlayerId, RoomId>>,
+    player_rooms: Arc<StdMutex<HashMap<PlayerId, RoomId>>>,
     // Broadcast recipients with no seated role. Access follows the routing
     // gate and room_players lock so publication and role are one transition.
     spectator_routes: Arc<StdMutex<HashSet<PlayerId>>>,
     room_routing_gates: RoutingGateRegistry,
     player_routing_gates: RoutingGateRegistry,
+    relay_order_gates: RoutingGateRegistry,
     metrics: Arc<crate::metrics::ServerMetrics>,
     slow_consumer_timeout: Duration,
     room_event_sequencer: Arc<RoomEventSequencer>,
@@ -2580,6 +2585,7 @@ struct RoutingGate {
     key: Uuid,
     owner: std::sync::Weak<RoutingGateRegistryInner>,
     lock: Arc<RwLock<()>>,
+    released: tokio::sync::Notify,
 }
 
 struct RoutingReadGuard {
@@ -2588,8 +2594,15 @@ struct RoutingReadGuard {
 }
 
 struct RoutingWriteGuard {
-    _guard: OwnedRwLockWriteGuard<()>,
+    guard: Option<OwnedRwLockWriteGuard<()>>,
     _gate: Arc<RoutingGate>,
+}
+
+impl Drop for RoutingWriteGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self._gate.released.notify_waiters();
+    }
 }
 
 struct PlayerRoutingWriteGuards {
@@ -2612,6 +2625,7 @@ impl RoutingGateRegistry {
             key,
             owner: Arc::downgrade(&self.inner),
             lock: Arc::new(RwLock::new(())),
+            released: tokio::sync::Notify::new(),
         });
         gates.insert(key, Arc::downgrade(&gate));
         gate
@@ -2635,11 +2649,20 @@ impl RoutingGateRegistry {
         })
     }
 
+    fn try_write(&self, key: Uuid) -> Option<RoutingWriteGuard> {
+        let gate = self.gate(key);
+        let guard = Arc::clone(&gate.lock).try_write_owned().ok()?;
+        Some(RoutingWriteGuard {
+            guard: Some(guard),
+            _gate: gate,
+        })
+    }
+
     async fn write(&self, key: Uuid) -> RoutingWriteGuard {
         let gate = self.gate(key);
         let guard = Arc::clone(&gate.lock).write_owned().await;
         RoutingWriteGuard {
-            _guard: guard,
+            guard: Some(guard),
             _gate: gate,
         }
     }
@@ -2859,6 +2882,18 @@ impl Drop for ParkedWaitAccounting<'_> {
     }
 }
 
+enum BorrowedBroadcastStart<'a> {
+    Complete,
+    Pending(Pin<Box<dyn Future<Output = ()> + Send + 'a>>),
+    Unavailable,
+}
+
+enum RoutedRelayStart {
+    Started(StartedDeliveries, RoutingWriteGuard),
+    NoMessage,
+    OrderingBlocked(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
+}
+
 #[derive(Default)]
 struct StartedDeliveries {
     // Healthy queues leave both vectors empty. Only exceptional outcomes own
@@ -2976,18 +3011,45 @@ impl InMemoryMessageCoordinator {
         room_id: &RoomId,
         except_player: &PlayerId,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
-    ) -> Option<StartedDeliveries> {
+    ) -> RoutedRelayStart {
+        let Some(relay_guard) = self.relay_order_gates.try_write(*except_player) else {
+            return RoutedRelayStart::OrderingBlocked(self.wait_for_relay_order(*except_player));
+        };
         let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-        build_message().map(|message| {
-            self.start_routed_owned_deliveries(
-                &room_players,
-                &clients,
-                room_id,
-                Some(except_player),
-                message,
-            )
+        match build_message() {
+            Some(message) => RoutedRelayStart::Started(
+                self.start_routed_owned_deliveries(
+                    &room_players,
+                    &clients,
+                    room_id,
+                    Some(except_player),
+                    message,
+                ),
+                relay_guard,
+            ),
+            None => RoutedRelayStart::NoMessage,
+        }
+    }
+
+    fn wait_for_relay_order(
+        &self,
+        player_id: PlayerId,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        let gate = self.relay_order_gates.gate(player_id);
+        Box::pin(async move {
+            loop {
+                let released = gate.released.notified();
+                tokio::pin!(released);
+                released.as_mut().enable();
+                if let Ok(guard) = Arc::clone(&gate.lock).try_write_owned() {
+                    drop(guard);
+                    gate.released.notify_waiters();
+                    return;
+                }
+                released.await;
+            }
         })
     }
 
@@ -3012,10 +3074,11 @@ impl InMemoryMessageCoordinator {
         Self {
             local_clients: Arc::new(RwLock::new(HashMap::new())),
             room_players: Arc::new(RwLock::new(HashMap::new())),
-            player_rooms: StdMutex::new(HashMap::new()),
+            player_rooms: Arc::new(StdMutex::new(HashMap::new())),
             spectator_routes: Arc::new(StdMutex::new(HashSet::new())),
             room_routing_gates: RoutingGateRegistry::default(),
             player_routing_gates: RoutingGateRegistry::default(),
+            relay_order_gates: RoutingGateRegistry::default(),
             metrics,
             slow_consumer_timeout,
             room_event_sequencer: Arc::new(RoomEventSequencer::default()),
@@ -3116,6 +3179,49 @@ impl InMemoryMessageCoordinator {
             }
         }
         started
+    }
+
+    /// Own admitted relay waits and cleanup before returning their observation future.
+    fn finish_owned_relay_deliveries(
+        &self,
+        mut started: StartedDeliveries,
+        relay_guard: RoutingWriteGuard,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        let metrics = Arc::clone(&self.metrics);
+        let clients = Arc::clone(&self.local_clients);
+        let player_rooms = Arc::clone(&self.player_rooms);
+        let player_gates = self.player_routing_gates.clone();
+        let room_gates = self.room_routing_gates.clone();
+        let completion = tokio::spawn(async move {
+            let _relay_guard = relay_guard;
+            let outcomes =
+                futures_util::future::join_all(started.pending.into_iter().map(|delivery| {
+                    crate::coordination::finish_backpressured_delivery_in_room(&metrics, delivery)
+                }))
+                .await;
+            started.slow_consumers.extend(
+                outcomes
+                    .into_iter()
+                    .filter(|(_, _, outcome)| *outcome == DeliveryOutcome::SlowConsumer)
+                    .map(|(player, sender, _)| (player, sender)),
+            );
+            for (player, sender) in started.slow_consumers {
+                Self::remove_owned_client_if_same_sender(
+                    &clients,
+                    &player_rooms,
+                    &player_gates,
+                    &room_gates,
+                    player,
+                    &sender,
+                )
+                .await;
+            }
+        });
+        Box::pin(async move {
+            if let Err(error) = completion.await {
+                tracing::error!(%error, "Owned relay delivery failed");
+            }
+        })
     }
 
     async fn finish_deliveries(&self, mut started: StartedDeliveries) {
@@ -3266,18 +3372,18 @@ impl InMemoryMessageCoordinator {
         room_id: &RoomId,
         except_player: &PlayerId,
         build_message: &mut (dyn FnMut() -> Option<Arc<ServerMessage>> + Send),
-    ) -> ImmediateGameDataBroadcast<'a> {
+    ) -> BorrowedBroadcastStart<'a> {
         let Some(_routing) = self.room_routing_gates.try_read(*room_id) else {
-            return ImmediateGameDataBroadcast::Unavailable;
+            return BorrowedBroadcastStart::Unavailable;
         };
         let Ok(room_players) = self.room_players.try_read() else {
-            return ImmediateGameDataBroadcast::Unavailable;
+            return BorrowedBroadcastStart::Unavailable;
         };
         let Ok(clients) = self.local_clients.try_read() else {
-            return ImmediateGameDataBroadcast::Unavailable;
+            return BorrowedBroadcastStart::Unavailable;
         };
         let Some(message) = build_message() else {
-            return ImmediateGameDataBroadcast::Complete;
+            return BorrowedBroadcastStart::Complete;
         };
         let started = self.start_routed_deliveries(
             &room_players,
@@ -3290,9 +3396,9 @@ impl InMemoryMessageCoordinator {
         drop(room_players);
 
         if started.pending.is_empty() && started.slow_consumers.is_empty() {
-            ImmediateGameDataBroadcast::Complete
+            BorrowedBroadcastStart::Complete
         } else {
-            ImmediateGameDataBroadcast::Pending(Box::pin(self.finish_deliveries(started)))
+            BorrowedBroadcastStart::Pending(Box::pin(self.finish_deliveries(started)))
         }
     }
 
@@ -3492,8 +3598,37 @@ impl InMemoryMessageCoordinator {
         player_id: PlayerId,
         attempted_sender: &DeliverySender,
     ) {
-        let _routing = self.lock_player_routing_write(player_id, None).await;
-        let mut clients = self.local_clients.write().await;
+        Self::remove_owned_client_if_same_sender(
+            &self.local_clients,
+            &self.player_rooms,
+            &self.player_routing_gates,
+            &self.room_routing_gates,
+            player_id,
+            attempted_sender,
+        )
+        .await;
+    }
+
+    /// Prune one failed physical queue while preserving replacement routes.
+    async fn remove_owned_client_if_same_sender(
+        local_clients: &RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
+        player_rooms: &StdMutex<HashMap<PlayerId, RoomId>>,
+        player_gates: &RoutingGateRegistry,
+        room_gates: &RoutingGateRegistry,
+        player_id: PlayerId,
+        attempted_sender: &DeliverySender,
+    ) {
+        let _player = player_gates.write(player_id).await;
+        let room = player_rooms
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&player_id)
+            .copied();
+        let _room = match room {
+            Some(room) => Some(room_gates.write(room).await),
+            None => None,
+        };
+        let mut clients = local_clients.write().await;
         if clients
             .get(&player_id)
             .is_some_and(|current| current.sender.same_channel(attempted_sender))
@@ -3530,6 +3665,12 @@ impl InMemoryMessageCoordinator {
         player_id: PlayerId,
         target_room: Option<RoomId>,
     ) {
+        if target_room.is_some() {
+            let gate = self.relay_order_gates.gate(player_id);
+            self.relay_order_gates.mark_active(&gate);
+        } else {
+            self.relay_order_gates.mark_inactive(player_id);
+        }
         let mut player_rooms = self
             .player_rooms
             .lock()
@@ -5521,9 +5662,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let mut build_message = Some(build_message);
         let mut build_once = || build_message.take().and_then(|build| build());
         match self.try_borrowed_room_broadcast(room_id, except_player, &mut build_once) {
-            ImmediateGameDataBroadcast::Complete => {}
-            ImmediateGameDataBroadcast::Pending(finish) => finish.await,
-            ImmediateGameDataBroadcast::Unavailable => {
+            BorrowedBroadcastStart::Complete => {}
+            BorrowedBroadcastStart::Pending(finish) => finish.await,
+            BorrowedBroadcastStart::Unavailable => {
                 Box::pin(self.borrowed_room_broadcast_after_contention(
                     room_id,
                     except_player,
@@ -5546,9 +5687,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // larger wait state is boxed only on actual contention, preserving the
         // checked-in allocation-byte ceiling in the healthy path.
         match self.try_borrowed_room_broadcast(room_id, except_player, build_message) {
-            ImmediateGameDataBroadcast::Complete => {}
-            ImmediateGameDataBroadcast::Pending(finish) => finish.await,
-            ImmediateGameDataBroadcast::Unavailable => {
+            BorrowedBroadcastStart::Complete => {}
+            BorrowedBroadcastStart::Pending(finish) => finish.await,
+            BorrowedBroadcastStart::Unavailable => {
                 Box::pin(self.borrowed_room_broadcast_after_contention(
                     room_id,
                     except_player,
@@ -5566,17 +5707,23 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> anyhow::Result<()> {
-        if let Some(started) = self
-            .enqueue_borrowed_owned_broadcast_after_contention(
-                room_id,
-                except_player,
-                build_message,
-            )
-            .await
-        {
-            self.finish_deliveries(started).await;
+        loop {
+            match self
+                .enqueue_borrowed_owned_broadcast_after_contention(
+                    room_id,
+                    except_player,
+                    build_message,
+                )
+                .await
+            {
+                RoutedRelayStart::Started(started, guard) => {
+                    self.finish_owned_relay_deliveries(started, guard).await;
+                    return Ok(());
+                }
+                RoutedRelayStart::NoMessage => return Ok(()),
+                RoutedRelayStart::OrderingBlocked(wait) => wait.await,
+            }
         }
-        Ok(())
     }
 
     /// Gated relay contention fallback
@@ -5601,11 +5748,17 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 )
                 .await
             {
-                Some(started) => RelayEnqueueOutcome::AwaitFinish(Box::pin(async move {
-                    self.finish_deliveries(started).await;
-                    Ok(())
-                })),
-                None => RelayEnqueueOutcome::Finished(Ok(())),
+                RoutedRelayStart::Started(started, relay_guard) => {
+                    let completion = self.finish_owned_relay_deliveries(started, relay_guard);
+                    RelayEnqueueOutcome::AwaitFinish(Box::pin(async move {
+                        completion.await;
+                        Ok(())
+                    }))
+                }
+                RoutedRelayStart::NoMessage => RelayEnqueueOutcome::Finished(Ok(())),
+                RoutedRelayStart::OrderingBlocked(wait) => {
+                    RelayEnqueueOutcome::OrderingBlocked(wait)
+                }
             }
         })
     }
@@ -5616,6 +5769,11 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> ImmediateGameDataBroadcast<'a> {
+        let Some(relay_guard) = self.relay_order_gates.try_write(*except_player) else {
+            return ImmediateGameDataBroadcast::OrderingBlocked(
+                self.wait_for_relay_order(*except_player),
+            );
+        };
         let Some(_routing) = self.room_routing_gates.try_read(*room_id) else {
             return ImmediateGameDataBroadcast::Unavailable;
         };
@@ -5641,7 +5799,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         if started.pending.is_empty() && started.slow_consumers.is_empty() {
             ImmediateGameDataBroadcast::Complete
         } else {
-            ImmediateGameDataBroadcast::Pending(Box::pin(self.finish_deliveries(started)))
+            ImmediateGameDataBroadcast::Pending(
+                self.finish_owned_relay_deliveries(started, relay_guard),
+            )
         }
     }
 

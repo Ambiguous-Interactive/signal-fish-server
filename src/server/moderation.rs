@@ -21,6 +21,23 @@ static KICK_REFUSAL_PAUSES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(all(test, signal_fish_repository_tests))]
+static TRANSFER_COMMIT_PAUSES: std::sync::LazyLock<
+    dashmap::DashMap<PlayerId, Arc<super::message_router::SocketDispatchPause>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) fn arm_transfer_commit_pause(
+    player_id: PlayerId,
+) -> Arc<super::message_router::SocketDispatchPause> {
+    let pause = Arc::new(super::message_router::SocketDispatchPause {
+        reached: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    TRANSFER_COMMIT_PAUSES.insert(player_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
 pub(super) fn arm_kick_refusal_pause(
     player_id: PlayerId,
 ) -> Arc<super::message_router::SocketDispatchPause> {
@@ -689,7 +706,12 @@ impl EnhancedGameServer {
         // authority operation behind `NotRoomAuthority`, and later clear the
         // role silently when the residue is repaired — a stale view no event
         // would ever correct.
-        if self.get_client_room(&target_id).await != Some(room_id) {
+        if self.get_client_room(&target_id).await != Some(room_id)
+            || self
+                .connection_manager
+                .close_signal_for(&target_id)
+                .is_none_or(|close| close.requested_reason().is_some())
+        {
             drop(routes);
             drop(transfer_event_guard);
             self.metrics.increment_authority_transfer_conflicts();
@@ -734,6 +756,11 @@ impl EnhancedGameServer {
         routes: crate::coordination::RoomRoutesLease,
     ) {
         let authority_id = &authority_id;
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if let Some((_, pause)) = TRANSFER_COMMIT_PAUSES.remove(&target_id) {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
         let result = self
             .database
             .update_room_authority(&room_id, Some(target_id))

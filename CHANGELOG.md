@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Add an `OrderingBlocked` outcome to the public relay handoff enums for custom server integrations (#1605).
 - **Breaking:** Require storage adapters to implement `lease_room_readiness` and return `bool` from `transition_room_to_lobby`.
 - **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority
   transfers; peer metadata writes also require `lease_room_member_route`.
@@ -66,6 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve accepted reliable relay frames and their sender order across canceled or overlapping sends, and avoid extra
+  heap use in compatibility relays (#1604, #1605).
+- Keep authority transfers and reconnect roles consistent when a peer disconnects (#1602, #1603).
 - Complete admitted player kicks and room-code changes after caller cancellation, and keep kick replies on the original
   connection (#1598, #1599).
 - Keep a busy player removal from delaying removals in unrelated matches (#1600).

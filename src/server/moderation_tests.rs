@@ -2923,6 +2923,277 @@ async fn transfer_authority_moves_the_role_and_notifies_members() {
     assert_eq!(room.authority_player, Some(authority));
 }
 
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+/// #1602: a departing peer cannot accept a new authority role.
+async fn transfer_authority_refuses_a_target_with_an_armed_disconnect() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (room_id, peers, _) = live_moderation_room(&server, "CLOSE1", 3).await;
+    let [authority_peer, target_peer, mut survivor]: [LiveModerationPeer; 3] =
+        peers.try_into().ok().unwrap();
+    let authority = authority_peer.id;
+    let target = target_peer.id;
+    let mut authority_rx = authority_peer.receiver;
+    let _target_rx = target_peer.receiver;
+    let manager = server.reconnection_manager().unwrap();
+    let token = manager.pre_issue_token(target, room_id).await;
+    let gate = server.install_reconnect_teardown_test_gate();
+    let disconnect = tokio::spawn({
+        let server = server.clone();
+        async move { server.unregister_client(&target).await }
+    });
+    timeout(Duration::from_secs(1), gate.wait_until_armed())
+        .await
+        .unwrap();
+    let operation_id = RoomOperationId::new_v4();
+    server
+        .handle_transfer_authority_operation(&authority, operation_id, target)
+        .await;
+    let messages = drain_receiver(&mut authority_rx);
+    gate.release();
+    timeout(Duration::from_secs(1), disconnect)
+        .await
+        .unwrap()
+        .unwrap();
+    let terminal = messages
+        .iter()
+        .find(|message| matches!(message.as_ref(), ServerMessage::RoomOperationResult { operation_id: id, .. } if *id == operation_id))
+        .expect("transfer must return one correlated result");
+    assert_eq!(
+        operation_failed_code(terminal),
+        ErrorCode::TransferTargetNotFound
+    );
+    assert!(!messages
+        .iter()
+        .any(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. })));
+    let claim = manager
+        .claim_reconnection(&PlayerId::new_v4(), &target, &room_id, &token)
+        .await
+        .unwrap();
+    assert!(!claim.disconnected.was_authority);
+    assert!(manager.release_reconnection_claim(&claim).await);
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        Some(authority)
+    );
+    let generation =
+        assert_transfer_target_reconnect(&server, target, room_id, &token, authority).await;
+    drain_receiver(&mut survivor.receiver);
+    assert_live_moderation_signal(&server, target, &mut survivor, generation).await;
+    assert_live_moderation_signal(&server, authority, &mut survivor, generation).await;
+    assert_eq!(survivor.close.requested_reason(), None);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+/// #1603: an admitted role change precedes the disconnect snapshot.
+async fn disconnect_snapshot_waits_for_an_admitted_authority_transfer() {
+    for before_commit in [true, false] {
+        assert_disconnect_snapshot_waits_for_transfer(before_commit).await;
+    }
+}
+
+async fn assert_disconnect_snapshot_waits_for_transfer(before_commit: bool) {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (room_id, peers, _) = live_moderation_room(&server, "CLOSE2", 3).await;
+    let [authority_peer, target_peer, mut survivor]: [LiveModerationPeer; 3] =
+        peers.try_into().ok().unwrap();
+    let authority = authority_peer.id;
+    let target = target_peer.id;
+    let mut authority_rx = authority_peer.receiver;
+    let _target_rx = target_peer.receiver;
+    let manager = server.reconnection_manager().unwrap();
+    let token = manager.pre_issue_token(target, room_id).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    let before_commit_pause =
+        before_commit.then(|| super::moderation::arm_transfer_commit_pause(target));
+    if !before_commit {
+        database.pause_authority_request_after_commit_for_test();
+    }
+    let transfer = tokio::spawn({
+        let server = server.clone();
+        async move {
+            server
+                .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), target)
+                .await
+        }
+    });
+    if let Some(pause) = &before_commit_pause {
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .unwrap();
+    } else {
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_authority_request_commit_for_test(),
+        )
+        .await
+        .unwrap();
+    }
+    let mut disconnect = Box::pin(server.unregister_client(&target));
+    assert!(futures_util::poll!(&mut disconnect).is_pending());
+    timeout(Duration::from_secs(1), async {
+        while server
+            .connection_manager
+            .close_signal_for(&target)
+            .unwrap()
+            .requested_reason()
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    if !before_commit {
+        assert!(
+            !manager.has_pending_reconnection(&target).await,
+            "a snapshot cannot overtake an admitted room mutation"
+        );
+    }
+    if let Some(pause) = before_commit_pause {
+        pause.release.notify_one();
+    } else {
+        database.release_authority_request_commit_for_test();
+    }
+    timeout(Duration::from_secs(1), transfer)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(1), &mut disconnect)
+        .await
+        .unwrap();
+    let claim = manager
+        .claim_reconnection(&PlayerId::new_v4(), &target, &room_id, &token)
+        .await
+        .unwrap();
+    assert!(claim.disconnected.was_authority);
+    assert!(manager.release_reconnection_claim(&claim).await);
+    drain_receiver(&mut authority_rx);
+    let generation =
+        assert_transfer_target_reconnect(&server, target, room_id, &token, target).await;
+    drain_receiver(&mut survivor.receiver);
+    assert_live_moderation_signal(&server, target, &mut survivor, generation).await;
+    assert_live_moderation_signal(&server, authority, &mut survivor, generation).await;
+    assert_eq!(survivor.close.requested_reason(), None);
+}
+
+async fn assert_transfer_target_reconnect(
+    server: &Arc<EnhancedGameServer>,
+    target: PlayerId,
+    room_id: RoomId,
+    token: &str,
+    expected_authority: PlayerId,
+) -> crate::protocol::SessionGeneration {
+    let (sender, mut receiver) = mpsc::channel(16);
+    let socket = server
+        .connection_manager
+        .register_client(
+            sender.clone(),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:48625".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .unwrap();
+    server
+        .message_coordinator
+        .register_local_client(
+            socket,
+            None,
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .unwrap();
+    server.set_client_protocol(
+        &socket,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![
+                crate::protocol::Transport::Relay,
+                crate::protocol::Transport::WebRtc,
+            ],
+            topologies: vec![
+                crate::protocol::Topology::Relay,
+                crate::protocol::Topology::Mesh,
+            ],
+        },
+    );
+    assert!(
+        server
+            .handle_reconnect_with_identity_operation(
+                &socket,
+                &target,
+                &room_id,
+                token,
+                Arc::new(tokio::sync::RwLock::new(socket)),
+                Some(RoomOperationId::new_v4())
+            )
+            .await
+    );
+    let messages = drain_receiver(&mut receiver);
+    let payload = messages
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::RoomOperationResult { result, .. } => match result.as_ref() {
+                RoomOperationResult::Reconnected(payload) => Some(payload),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("reconnect must return its authoritative baseline");
+    assert_eq!(payload.player_id, target);
+    assert_eq!(payload.is_authority, expected_authority == target);
+    assert_eq!(
+        payload
+            .current_players
+            .iter()
+            .find(|player| player.id == expected_authority)
+            .map(|player| player.is_authority),
+        Some(true)
+    );
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.authority_player, Some(expected_authority));
+    assert_eq!(
+        room.players.get(&target).unwrap().is_authority,
+        expected_authority == target
+    );
+    messages
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::SessionPlan(plan) => {
+                assert_eq!(plan.transport, crate::protocol::Transport::WebRtc);
+                assert_eq!(plan.topology, crate::protocol::Topology::Mesh);
+                Some(plan.generation)
+            }
+            _ => None,
+        })
+        .expect("restored peer must receive its live WebRTC plan")
+}
+
 /// Issue #396 sweep, same class as the kick path's rerouted-target handling:
 /// a durable row can outlive its membership as residue from a storage-failed
 /// detach while the player is routed elsewhere. Granting the role onto such a

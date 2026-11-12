@@ -429,8 +429,18 @@ impl EnhancedGameServer {
             }
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
+            let expected_epoch = connection_manager
+                .current_relay_stamp_in_room(player_id, &room_id)
+                .map(|stamp| stamp.epoch);
             let source_ref = &source_lifecycle;
             let mut build_message = one_shot_message_builder(move || {
+                if connection_manager
+                    .current_relay_stamp_in_room(player_id, &expected_room)
+                    .map(|stamp| stamp.epoch)
+                    != expected_epoch
+                {
+                    return None;
+                }
                 let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
                     player_id,
                     &expected_room,
@@ -445,8 +455,14 @@ impl EnhancedGameServer {
                     key,
                 })
             });
-            self.broadcast_game_data_with(player_id, &room_id, source_gate, &mut build_message)
-                .await;
+            self.broadcast_game_data_with(
+                player_id,
+                &room_id,
+                source_gate,
+                source_lifecycle.as_ref(),
+                &mut build_message,
+            )
+            .await;
         } else {
             // Refusal delivery acquires the same source gate.
             drop(source_gate);
@@ -596,8 +612,18 @@ impl EnhancedGameServer {
             self.maybe_update_last_seen(player_id).await;
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
+            let expected_epoch = connection_manager
+                .current_relay_stamp_in_room(player_id, &room_id)
+                .map(|stamp| stamp.epoch);
             let source_ref = &source_lifecycle;
             let mut build_message = one_shot_message_builder(move || {
+                if connection_manager
+                    .current_relay_stamp_in_room(player_id, &expected_room)
+                    .map(|stamp| stamp.epoch)
+                    != expected_epoch
+                {
+                    return None;
+                }
                 let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
                     player_id,
                     &expected_room,
@@ -611,8 +637,14 @@ impl EnhancedGameServer {
                     epoch: Some(stamp.epoch),
                 })
             });
-            self.broadcast_game_data_with(player_id, &room_id, source_gate, &mut build_message)
-                .await;
+            self.broadcast_game_data_with(
+                player_id,
+                &room_id,
+                source_gate,
+                source_lifecycle.as_ref(),
+                &mut build_message,
+            )
+            .await;
         } else {
             // Roomless frames keep their pre-existing liveness contract: the
             // frame was validly sized and is answered with NOT_IN_ROOM.
@@ -651,15 +683,22 @@ impl EnhancedGameServer {
     /// held across admission and stamp/enqueue and is released before any
     /// backpressured completion is awaited (issue #686). `None` keeps the
     /// legacy ungated shape for the no-lifecycle test entries.
-    async fn broadcast_game_data_with(
+    async fn broadcast_game_data_with<'a>(
         &self,
         player_id: &PlayerId,
         room_id: &RoomId,
-        source_gate: Option<tokio::sync::MutexGuard<'_, ()>>,
+        source_gate: Option<tokio::sync::MutexGuard<'a, ()>>,
+        source_lifecycle: Option<&'a Arc<ClientLifecycle>>,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) {
         if let Err(e) = self
-            .start_game_data_broadcast(player_id, room_id, build_message, source_gate)
+            .start_game_data_broadcast(
+                player_id,
+                room_id,
+                build_message,
+                source_gate,
+                source_lifecycle,
+            )
             .await
         {
             tracing::error!(
@@ -675,12 +714,13 @@ impl EnhancedGameServer {
     /// caller holds the source lifecycle gate across admission and
     /// stamp/enqueue; the gate is released before any backpressured
     /// completion is awaited (issue #686).
-    async fn start_game_data_broadcast(
+    async fn start_game_data_broadcast<'a>(
         &self,
         player_id: &PlayerId,
         room_id: &RoomId,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
-        source_gate: Option<tokio::sync::MutexGuard<'_, ()>>,
+        mut source_gate: Option<tokio::sync::MutexGuard<'a, ()>>,
+        source_lifecycle: Option<&'a Arc<ClientLifecycle>>,
     ) -> anyhow::Result<()> {
         // Acceptance-time semantics, deliberately counted BEFORE the
         // builder runs: the increment doubles as the synchronization marker
@@ -693,36 +733,42 @@ impl EnhancedGameServer {
         // two families are intentionally not interchangeable.
         self.metrics.increment_game_data_messages();
         let coordinator = self.message_coordinator.as_ref();
-        // Fast path: the synchronous admission never awaits, so the stamp and
-        // enqueue cannot race the gate.
-        match coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
-            room_id,
-            player_id,
-            build_message,
-        ) {
-            crate::coordination::ImmediateGameDataBroadcast::Complete => return Ok(()),
-            crate::coordination::ImmediateGameDataBroadcast::Pending(completion) => {
-                // The rekey may proceed while backpressured fan-out drains;
-                // every stamp and enqueue already completed under the gate.
-                drop(source_gate);
-                completion.await;
+        use crate::coordination::{ImmediateGameDataBroadcast, RelayEnqueueOutcome};
+        loop {
+            let wait = match coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+                room_id,
+                player_id,
+                build_message,
+            ) {
+                ImmediateGameDataBroadcast::Complete => return Ok(()),
+                ImmediateGameDataBroadcast::Pending(completion) => {
+                    drop(source_gate);
+                    completion.await;
+                    return Ok(());
+                }
+                ImmediateGameDataBroadcast::OrderingBlocked(wait) => wait,
+                ImmediateGameDataBroadcast::Unavailable => {
+                    match coordinator
+                        .enqueue_relay_broadcast_after_contention(room_id, player_id, build_message)
+                        .await
+                    {
+                        RelayEnqueueOutcome::Finished(result) => return result,
+                        RelayEnqueueOutcome::AwaitFinish(completion) => {
+                            drop(source_gate);
+                            return completion.await;
+                        }
+                        RelayEnqueueOutcome::OrderingBlocked(wait) => wait,
+                    }
+                }
+            };
+            drop(source_gate.take());
+            wait.await;
+            source_gate = match source_lifecycle {
+                Some(lifecycle) => Some(lifecycle.lock().await),
+                None => None,
+            };
+            if !self.relay_source_is_current(player_id, source_lifecycle) {
                 return Ok(());
-            }
-            crate::coordination::ImmediateGameDataBroadcast::Unavailable => {}
-        }
-        // Contended: run the fallback enqueue under the caller's gate, then
-        // release the gate before the backpressured completion.
-        match coordinator
-            .enqueue_relay_broadcast_after_contention(room_id, player_id, build_message)
-            .await
-        {
-            crate::coordination::RelayEnqueueOutcome::Finished(result) => {
-                drop(source_gate);
-                result
-            }
-            crate::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => {
-                drop(source_gate);
-                completion.await
             }
         }
     }
@@ -745,24 +791,31 @@ where
 {
     metrics.increment_game_data_messages();
     let mut build_message = one_shot_message_builder(build_message);
-    match message_coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
-        room_id,
-        player_id,
-        &mut build_message,
-    ) {
-        crate::coordination::ImmediateGameDataBroadcast::Complete => Ok(()),
-        crate::coordination::ImmediateGameDataBroadcast::Pending(completion) => {
-            completion.await;
-            Ok(())
-        }
-        crate::coordination::ImmediateGameDataBroadcast::Unavailable => {
-            match message_coordinator
-                .enqueue_relay_broadcast_after_contention(room_id, player_id, &mut build_message)
-                .await
-            {
-                crate::coordination::RelayEnqueueOutcome::Finished(result) => result,
-                crate::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => {
-                    completion.await
+    use crate::coordination::{ImmediateGameDataBroadcast, RelayEnqueueOutcome};
+    loop {
+        match message_coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+            room_id,
+            player_id,
+            &mut build_message,
+        ) {
+            ImmediateGameDataBroadcast::Complete => return Ok(()),
+            ImmediateGameDataBroadcast::Pending(completion) => {
+                completion.await;
+                return Ok(());
+            }
+            ImmediateGameDataBroadcast::OrderingBlocked(wait) => wait.await,
+            ImmediateGameDataBroadcast::Unavailable => {
+                match message_coordinator
+                    .enqueue_relay_broadcast_after_contention(
+                        room_id,
+                        player_id,
+                        &mut build_message,
+                    )
+                    .await
+                {
+                    RelayEnqueueOutcome::Finished(result) => return result,
+                    RelayEnqueueOutcome::AwaitFinish(completion) => return completion.await,
+                    RelayEnqueueOutcome::OrderingBlocked(wait) => wait.await,
                 }
             }
         }

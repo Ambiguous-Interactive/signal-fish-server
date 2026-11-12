@@ -64,12 +64,16 @@ pub type RoomEventCompletion = Pin<Box<dyn Future<Output = anyhow::Result<bool>>
 /// issue #686) across the enqueue call and releases them before awaiting an
 /// [`RelayEnqueueOutcome::AwaitFinish`] completion, so every implementation
 /// must finish its stamp-and-enqueue waits inside the enqueue call itself.
+/// An `OrderingBlocked` result allocates no stamp and leaves the builder intact.
+/// Release the lifecycle gate before that wait, then revalidate and retry.
 #[doc(hidden)]
 #[must_use = "await the AwaitFinish completion after releasing caller-held gates"]
 pub enum RelayEnqueueOutcome<'a> {
     /// The enqueue and its backpressured completion already finished inside
     /// the call (compatibility implementations), or nothing needed to start.
     Finished(anyhow::Result<()>),
+    /// No stamp was allocated. Release the lifecycle gate, wait, then retry.
+    OrderingBlocked(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
     /// Deliveries started; the completion finishes backpressured queue drains
     /// and slow-consumer cleanup. Await it only after releasing caller-held
     /// serialization gates.
@@ -84,11 +88,13 @@ pub enum RelayEnqueueOutcome<'a> {
 /// async trait path. Queue backpressure is exceptional and owns a boxed future
 /// only after the synchronous delivery attempt has already started.
 #[doc(hidden)]
-#[must_use = "await Pending completion or retry Unavailable through the async coordinator path"]
+#[must_use = "await Pending, retry Unavailable, or release lifecycle gates before OrderingBlocked"]
 pub enum ImmediateGameDataBroadcast<'a> {
     Complete,
     Pending(Pin<Box<dyn Future<Output = ()> + Send + 'a>>),
     Unavailable,
+    /// No builder was called. Release the lifecycle gate before waiting and retrying.
+    OrderingBlocked(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
 }
 
 /// Ordered control frames destined for one member of a room transaction.
@@ -2444,7 +2450,8 @@ pub trait MessageCoordinator: Send + Sync {
     /// future.
     ///
     /// Implementations must not invoke `build_message` when returning
-    /// [`ImmediateGameDataBroadcast::Unavailable`], because the caller will
+    /// [`ImmediateGameDataBroadcast::Unavailable`] or
+    /// [`ImmediateGameDataBroadcast::OrderingBlocked`], because the caller will
     /// retry through [`Self::broadcast_to_room_except_with_borrowed_owned_message`].
     /// The default preserves compatibility for coordinators without a
     /// synchronous routing snapshot.
