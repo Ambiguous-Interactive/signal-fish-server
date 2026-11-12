@@ -1105,7 +1105,10 @@ async fn healthy_contention_fallback_finishes_without_a_completion_task() {
                                     1,
                                 )
                                 .unwrap();
-                            receiver.try_recv().unwrap();
+                            let baseline = receiver.try_recv().unwrap();
+                            assert!(matches!(baseline.payload,
+                                crate::coordination::outbound_queue::OutboundPayload::Message(message)
+                                    if matches!(message.as_ref(), ServerMessage::SpectatorJoined(payload) if payload.room_id == room)));
                             let mut handle = ClientDeliveryHandle::classified(
                                 sender,
                                 ConnectionCloseSignal::detached(),
@@ -1177,8 +1180,9 @@ async fn healthy_contention_fallback_finishes_without_a_completion_task() {
                     crate::coordination::RelayEnqueueOutcome::Finished(Ok(()))
                 ));
                 assert!(coordinator.relay_order_gates.try_write(source).is_some());
+                let source_message = source_receiver.try_recv();
                 assert!(matches!(
-                    source_receiver.try_recv(),
+                    source_message,
                     Err(mpsc::error::TryRecvError::Empty)
                 ));
             }
