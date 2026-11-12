@@ -5945,66 +5945,71 @@ mod tests {
             }
         }
     }
-    /// Bound production deadline-scan work while preserving exact frame order and timestamps.
-    #[tokio::test(start_paused = true)]
-    async fn live_writer_deadline_lookups_do_linear_work_across_lossy_backlogs() {
-        const DEPTH: usize = 1_024;
-        for mode in [
-            "volatile",
-            "latest",
-            "reliable",
-            "lossy_prefix",
-            "alternating",
-        ] {
-            for batched in [false, true] {
-                let (tx, mut rx) = channel(DEPTH, 4);
-                tx.set_protocol_version(3);
-                let mut reliable_deadlines = std::collections::VecDeque::new();
-                for seq in 1..=u64::try_from(DEPTH).unwrap() {
-                    let class = match mode {
-                        "latest" => DeliveryClass::Latest,
-                        "reliable" => DeliveryClass::Reliable,
-                        "lossy_prefix" if seq == u64::try_from(DEPTH).unwrap() => {
-                            DeliveryClass::Reliable
+    mod deadline_scan_cost {
+        use super::*;
+
+        /// Bound production deadline-scan work while preserving exact frame order and timestamps.
+        #[tokio::test(start_paused = true)]
+        async fn live_writer_deadline_lookups_do_linear_work_across_lossy_backlogs() {
+            const DEPTH: usize = 1_024;
+            for mode in [
+                "volatile",
+                "latest",
+                "reliable",
+                "lossy_prefix",
+                "alternating",
+            ] {
+                for batched in [false, true] {
+                    let (tx, mut rx) = channel(DEPTH, 4);
+                    tx.set_protocol_version(3);
+                    let mut reliable_deadlines = std::collections::VecDeque::new();
+                    for seq in 1..=u64::try_from(DEPTH).unwrap() {
+                        let class = match mode {
+                            "latest" => DeliveryClass::Latest,
+                            "reliable" => DeliveryClass::Reliable,
+                            "lossy_prefix" if seq == u64::try_from(DEPTH).unwrap() => {
+                                DeliveryClass::Reliable
+                            }
+                            "alternating" if seq % 2 == 0 => DeliveryClass::Reliable,
+                            _ => DeliveryClass::Volatile,
+                        };
+                        let key =
+                            (class == DeliveryClass::Latest).then_some(u32::try_from(seq).unwrap());
+                        if class == DeliveryClass::Reliable {
+                            reliable_deadlines.push_back((seq, Instant::now()));
                         }
-                        "alternating" if seq % 2 == 0 => DeliveryClass::Reliable,
-                        _ => DeliveryClass::Volatile,
-                    };
-                    let key =
-                        (class == DeliveryClass::Latest).then_some(u32::try_from(seq).unwrap());
-                    if class == DeliveryClass::Reliable {
-                        reliable_deadlines.push_back((seq, Instant::now()));
+                        tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
+                        tokio::time::advance(Duration::from_micros(1)).await;
                     }
-                    tx.try_enqueue_data(data(seq, class, key, seq)).unwrap();
-                    tokio::time::advance(Duration::from_micros(1)).await;
-                }
-                for seq in 1..=u64::try_from(DEPTH).unwrap() {
-                    let expected = reliable_deadlines.front().map(|(_, deadline)| *deadline);
-                    assert_eq!(rx.oldest_reliable_enqueued_at(), expected);
-                    let item = if batched {
-                        rx.recv_batched(32, Duration::ZERO).await.unwrap().unwrap()
-                    } else {
-                        rx.try_recv().unwrap()
-                    };
-                    assert_eq!(message_id(&item), seq);
-                    if reliable_deadlines
-                        .front()
-                        .is_some_and(|(reliable_seq, _)| *reliable_seq == seq)
-                    {
-                        reliable_deadlines.pop_front();
+                    for seq in 1..=u64::try_from(DEPTH).unwrap() {
+                        let expected = reliable_deadlines.front().map(|(_, deadline)| *deadline);
+                        assert_eq!(rx.oldest_reliable_enqueued_at(), expected);
+                        let item = if batched {
+                            rx.recv_batched(32, Duration::ZERO).await.unwrap().unwrap()
+                        } else {
+                            rx.try_recv().unwrap()
+                        };
+                        assert_eq!(message_id(&item), seq);
+                        if reliable_deadlines
+                            .front()
+                            .is_some_and(|(reliable_seq, _)| *reliable_seq == seq)
+                        {
+                            reliable_deadlines.pop_front();
+                        }
                     }
+                    assert!(reliable_deadlines.is_empty());
+                    assert_eq!(rx.oldest_reliable_enqueued_at(), None);
+                    let visits = rx.shared.state().reliable_scan_visits.get();
+                    println!("RELIABLE_DEADLINE_SCAN mode={mode} batched={batched} depth={DEPTH} visits={visits}");
+                    assert!(
+                        visits <= 2 * DEPTH,
+                        "{mode} batched={batched}: deadline scans must be linear, got {visits}"
+                    );
                 }
-                assert!(reliable_deadlines.is_empty());
-                assert_eq!(rx.oldest_reliable_enqueued_at(), None);
-                let visits = rx.shared.state().reliable_scan_visits.get();
-                println!("RELIABLE_DEADLINE_SCAN mode={mode} batched={batched} depth={DEPTH} visits={visits}");
-                assert!(
-                    visits <= 2 * DEPTH,
-                    "{mode} batched={batched}: deadline scans must be linear, got {visits}"
-                );
             }
         }
     }
+
     /// Keep receiver EOF independent of metrics observation ownership.
     #[tokio::test]
     async fn queue_observers_do_not_keep_producers_open() {

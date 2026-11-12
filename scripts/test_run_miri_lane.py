@@ -77,6 +77,16 @@ class MiriLaneTests(unittest.TestCase):
         self.assertEqual(len(set(flattened)), len(names))
         self.assertEqual(partitions[0], names[3:])
 
+    def test_heavy_coordination_child_keeps_its_near_prefix_sibling(self):
+        child = "coordination::outbound_queue::tests::deadline_scan_cost"
+        names = [child + "::one", child + "_extra::two",
+                 "coordination::room_coordinator::tests::three"]
+        parent = LANE.select_tests(names, ["coordination"], [child])
+        dedicated = LANE.select_tests(names, [child])
+        self.assertEqual(dedicated, names[:1])
+        self.assertEqual(parent, names[1:])
+        self.assertEqual(sorted(parent + dedicated), sorted(names))
+
     def test_excluding_all_tests_fails_closed(self):
         with self.assertRaises(ValueError):
             LANE.select_tests(["server::tests::one"], ["server"], ["server::tests"])
