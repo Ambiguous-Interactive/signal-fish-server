@@ -17830,10 +17830,11 @@ async fn missing_unregister_preserves_a_connection_restored_while_old_work_waits
         Some(fixture.room_id)
     );
     server.handle_ping(&fixture.reconnect_player_id).await;
-    assert!(matches!(
-        fixture.receiver.try_recv().unwrap().as_ref(),
-        ServerMessage::Pong
-    ));
+    let response = fixture
+        .receiver
+        .try_recv()
+        .expect("restored route delivers Pong");
+    assert!(matches!(response.as_ref(), ServerMessage::Pong));
 }
 
 /// #1594: repeated observers share work and cannot lose completion notifications.

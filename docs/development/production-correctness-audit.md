@@ -16193,3 +16193,10 @@ disconnect ordering. Real WebSocket replay passes in
 `7aae0331-d21a-4e08-9a1d-4744fec029bb`. Strict full Clippy, formatting, Markdown,
 doc consistency, and CI configuration checks pass locally. Hosted checks and
 review remain the publication gate.
+
+The first hosted Nextest run passed the new runtime controls, then stopped on
+`async_timeout_policy_scan`: its assertion tracker did not recognize a chained
+receive on the fixture field. The test now binds the received message before
+asserting `Pong`. The local policy control passes in
+`1b13a342-5568-4d3b-8e98-eac3d5ae5343`; the assertion and runtime contract remain
+unchanged.
