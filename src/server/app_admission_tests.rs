@@ -706,7 +706,7 @@ async fn stalled_app_cap_count_read_keeps_its_lease_alive() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn unpublished_legacy_admission_rolls_back_ownership_claim() {
     let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
     let database = server
@@ -780,7 +780,7 @@ async fn unpublished_legacy_admission_rolls_back_ownership_claim() {
     assert!(!repaired_room.players.contains_key(&joiner));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn delayed_legacy_rollback_preserves_a_later_published_admission() {
     let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
     let database = server
@@ -840,7 +840,26 @@ async fn delayed_legacy_rollback_preserves_a_later_published_admission() {
         .expect("legacy room remains")
         .players
         .contains_key(&adopter));
+    database.pause_next_removed_player_for_test();
+    let observer = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.cleanup_pending_durable_player_detaches().await })
+    };
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_removed_player_for_test(),
+    )
+    .await
+    .expect("the cleanup worker reaches storage");
+    assert_eq!(observer.await.expect("the observer completes"), 0);
+    assert!(server
+        .pending_durable_player_detaches
+        .contains_key(&(legacy_room.id, failed_joiner)));
+    database.release_removed_player_for_test();
     assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    assert!(!server
+        .pending_durable_player_detaches
+        .contains_key(&(legacy_room.id, failed_joiner)));
     let repaired_room = server
         .database
         .get_room_by_id(&legacy_room.id)
@@ -852,7 +871,7 @@ async fn delayed_legacy_rollback_preserves_a_later_published_admission() {
     assert!(!repaired_room.players.contains_key(&failed_joiner));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn deleted_room_terminates_pending_ownership_rollback() {
     let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
     let database = server

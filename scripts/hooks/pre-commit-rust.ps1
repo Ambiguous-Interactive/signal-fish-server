@@ -925,11 +925,16 @@ function Get-HeadRustPanicMacroCandidates {
 function Get-HeadText {
     param([Parameter(Mandatory = $true)][string]$Path)
 
+    if ($script:HeadTextCache.ContainsKey($Path)) {
+        return $script:HeadTextCache[$Path]
+    }
+
     $result = Invoke-Native -FileName "git" -Arguments @("show", "HEAD:$Path")
     if ($result.ExitCode -ne 0) {
         return $null
     }
 
+    $script:HeadTextCache[$Path] = $result.Stdout
     $result.Stdout
 }
 
@@ -1175,10 +1180,44 @@ function Get-NewRustPanicMacroCandidates {
     return [object[]]$newCandidates.ToArray()
 }
 
+function Test-RustPanicSourcePrefixesUnchanged {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles)
+
+    # Broad names cover every candidate; later text cannot change an earlier candidate's context.
+    $options = [System.Text.RegularExpressions.RegexOptions]::RightToLeft -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+    foreach ($file in $CandidateFiles) {
+        $current = Get-PolicyText -Path $file
+        $head = Get-HeadText -Path $file
+        if ([string]::IsNullOrEmpty($current) -or [string]::IsNullOrEmpty($head)) { return $false }
+        $currentMatch = [regex]::Match($current, 'panic|todo|unimplemented|unreachable', $options)
+        $headMatch = [regex]::Match($head, 'panic|todo|unimplemented|unreachable', $options)
+        if (-not $currentMatch.Success -and -not $headMatch.Success) { continue }
+        if (-not $currentMatch.Success -or -not $headMatch.Success) { return $false }
+        $currentLength = $current.IndexOf("`n", $currentMatch.Index + $currentMatch.Length)
+        $headLength = $head.IndexOf("`n", $headMatch.Index + $headMatch.Length)
+        $currentLength = if ($currentLength -lt 0) { $current.Length } else { $currentLength + 1 }
+        $headLength = if ($headLength -lt 0) { $head.Length } else { $headLength + 1 }
+        if ($currentLength -ne $headLength -or [string]::CompareOrdinal($current, 0, $head, 0, $currentLength) -ne 0) {
+            return $false
+        }
+    }
+    $true
+}
+
 function Test-RustAddedPanicPatterns {
     $changedProductionRustFiles = [string[]]@($script:StagedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
     if ($changedProductionRustFiles.Count -eq 0) {
         Skip "Rust panic patterns" "no production Rust files staged"
+        return
+    }
+
+    try {
+        if (Test-RustPanicSourcePrefixesUnchanged -CandidateFiles $changedProductionRustFiles) {
+            Pass "Rust panic patterns"
+            return
+        }
+    } catch {
+        Fail "Rust panic patterns" $_.Exception.Message
         return
     }
 

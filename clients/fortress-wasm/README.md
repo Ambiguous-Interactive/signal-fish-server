@@ -10,8 +10,11 @@ current checkout. Chromium is the required pull-request gate. A weekly Firefox
 cell runs the same released-client and negative-control oracles to detect
 browser-specific drift without lengthening every pull request.
 
-The Rust `FortressWasmPeer::process` callback owns the full game/network loop.
-Each callback calls `SignalFishPollingClient::poll` exactly once, advances the
+The Rust `FortressWasmPeer::physics_process` callback owns the full game/network
+loop. The fixture sets `Engine.physics_ticks_per_second` to 60. The fixed
+physics clock drives gameplay. Godot can deliver catch-up physics callbacks
+in one browser turn. Report callback counts and intervals describe these real
+physics callbacks. Each calls `SignalFishPollingClient::poll` exactly once and advances the
 same deterministic workload and bounded relay adapter used by the native
 fixture, and records callback cadence plus cross-peer application sequence
 ledgers. GDScript only transfers injected configuration, creator room readiness,

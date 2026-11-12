@@ -27,7 +27,7 @@
 #   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
-#   - miri: Eight parallel lanes partition the compiled library test list.
+#   - miri: Ten parallel lanes partition the compiled library test list.
 #     Exact test paths prevent nested modules from duplicating expensive
 #     work in other lanes. Coordination, session policy, server, WebSocket,
 #     and the remaining modules have separate budgets.
@@ -134,9 +134,14 @@ jobs:
             modules: "protocol_core session_capability session_admission session_member"
           - name: coordination
             modules: "coordination"
+            exclude_modules: "coordination::outbound_queue::tests::deadline_scan_cost"
+          - name: deadline-scan
+            modules: "coordination::outbound_queue::tests::deadline_scan_cost"
           - name: server
             modules: "server"
-            exclude_modules: "server::session_policy_tests server::ready_state_tests"
+            exclude_modules: "server::session_policy_tests server::ready_state_tests server::room_service_tests"
+          - name: room-service
+            modules: "server::room_service_tests"
           - name: session-policy
             modules: "server::session_policy_tests"
           - name: ready-state

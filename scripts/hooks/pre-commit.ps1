@@ -13,6 +13,7 @@ $script:Passed = 0
 $script:Failed = 0
 $script:Skipped = 0
 $script:IndexTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+$script:HeadTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 # Keep hooks sub-second on normal local workloads and auto-report slowest checks if exceeded.
 $script:MaxBatchedBlobBytes = 2 * 1024 * 1024
@@ -1759,12 +1760,14 @@ function Test-FileDiffIsTestOnly {
         if ($newBlob.ExitCode -ne 0) {
             return $false
         }
+        $script:IndexTextCache[$Path] = $newBlob.Stdout
         $newLines = $newBlob.Stdout -split "`n"
     }
     $oldResult = Invoke-Native -FileName "git" -Arguments @("show", "HEAD:$Path")
     if ($null -eq $newLines -or $oldResult.ExitCode -ne 0) {
         return $false
     }
+    $script:HeadTextCache[$Path] = $oldResult.Stdout
     $oldLines = $oldResult.Stdout -split "`n"
 
     # File-final layout convention: the last top-level `#[cfg(test)]` marker

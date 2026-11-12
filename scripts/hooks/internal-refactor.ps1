@@ -134,7 +134,7 @@ function Get-InternalRefactorExemptions {
         $afterBlobs = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
         $presentPaths = [string[]]@($declaredPaths | Where-Object { Test-Path -LiteralPath $_ })
         foreach ($path in $presentPaths) {
-            $item = Get-Item -LiteralPath $path
+            $item = Get-Item -LiteralPath $path -Force
             if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
                 throw "Refactor current path is not a regular file"
             }

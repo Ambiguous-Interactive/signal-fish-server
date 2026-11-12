@@ -17866,15 +17866,8 @@ async fn repeated_unregister_observers_share_one_lifecycle_wait() {
             assert!(futures_util::poll!(&mut observer).is_pending());
             observers.push(observer);
         }
-        timeout(
-            Duration::from_secs(1),
-            lifecycle.wait_for_lock_attempt_after_for_test(before),
-        )
-        .await
-        .unwrap();
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
+        // This is a synchronization contract, independent of host or interpreter speed.
+        lifecycle.wait_for_lock_attempt_after_for_test(before).await;
         assert_eq!(
             lifecycle.lock_attempt_count_for_test() - before,
             1,
@@ -17882,25 +17875,18 @@ async fn repeated_unregister_observers_share_one_lifecycle_wait() {
         );
         if !cancel_observers {
             drop(held);
-            timeout(
-                Duration::from_secs(1),
-                futures_util::future::join_all(observers),
-            )
-            .await
-            .expect("all observers must learn that the shared teardown finished");
+            futures_util::future::join_all(observers).await;
         } else {
             drop(observers);
             drop(held);
         }
-        timeout(Duration::from_secs(1), async {
-            while server.connection_manager.has_client(&id)
-                || server.metrics.active_connections.load(Ordering::Relaxed) != 0
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        lifecycle.wait_for_unregister().await;
+        assert_eq!(
+            lifecycle.lock_attempt_count_for_test() - before,
+            1,
+            "observers must not admit additional teardown workers after the gate opens"
+        );
+        assert!(!server.connection_manager.has_client(&id));
         assert_eq!(server.metrics.active_connections.load(Ordering::Relaxed), 0);
     }
 }

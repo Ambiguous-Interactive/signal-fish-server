@@ -64,6 +64,29 @@ class MiriLaneTests(unittest.TestCase):
         self.assertEqual(partitions[0], names[2:])
         self.assertEqual(sorted(name for part in partitions for name in part), sorted(names))
 
+    def test_three_heavy_server_children_keep_every_path_once(self):
+        children = ["server::ready_state_tests", "server::session_policy_tests",
+                    "server::room_service_tests"]
+        names = [child + "::one" for child in children]
+        names.extend(child + "_extra::two" for child in children)
+        names.append("server::tests::three")
+        partitions = [LANE.select_tests(names, ["server"], children)]
+        partitions.extend(LANE.select_tests(names, [child]) for child in children)
+        flattened = [name for part in partitions for name in part]
+        self.assertEqual(sorted(flattened), sorted(names))
+        self.assertEqual(len(set(flattened)), len(names))
+        self.assertEqual(partitions[0], names[3:])
+
+    def test_heavy_coordination_child_keeps_its_near_prefix_sibling(self):
+        child = "coordination::outbound_queue::tests::deadline_scan_cost"
+        names = [child + "::one", child + "_extra::two",
+                 "coordination::room_coordinator::tests::three"]
+        parent = LANE.select_tests(names, ["coordination"], [child])
+        dedicated = LANE.select_tests(names, [child])
+        self.assertEqual(dedicated, names[:1])
+        self.assertEqual(parent, names[1:])
+        self.assertEqual(sorted(parent + dedicated), sorted(names))
+
     def test_excluding_all_tests_fails_closed(self):
         with self.assertRaises(ValueError):
             LANE.select_tests(["server::tests::one"], ["server"], ["server::tests"])

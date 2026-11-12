@@ -27,7 +27,7 @@ function Expect-Rejection {
 function Expect-Paths {
     param([string]$Mode, [string]$DiffBase = "")
     $paths = Get-InternalRefactorExemptions -Mode $Mode -DiffBase $DiffBase
-    if (($paths | Sort-Object) -join "," -cne "src/core.rs,src/deleted.rs,src/new.rs") {
+    if (($paths | Sort-Object) -join "," -cne "src/.hidden.rs,src/core.rs,src/deleted.rs,src/new.rs") {
         throw "Wrong exemption paths in $Mode"
     }
 }
@@ -50,12 +50,15 @@ try {
     Git config user.email "fixture@example.invalid" | Out-Null
     New-Item -ItemType Directory -Path src, .github | Out-Null
     [System.IO.File]::WriteAllText("src/core.rs", "old core`n")
+    [System.IO.File]::WriteAllText("src/.hidden.rs", "old hidden`n")
     [System.IO.File]::WriteAllText("src/deleted.rs", "deleted core`n")
     Git add . | Out-Null
     Git commit -qm seed | Out-Null
     $base = Git rev-parse HEAD
     $before = Git rev-parse HEAD:src/core.rs
     $deleted = Git rev-parse HEAD:src/deleted.rs
+    $hidden = Git rev-parse HEAD:src/.hidden.rs
+    [System.IO.File]::WriteAllText("src/.hidden.rs", "new hidden`n")
     [System.IO.File]::WriteAllText("src/core.rs", "new core`n")
     [System.IO.File]::WriteAllText("src/new.rs", "new file`n")
     Remove-Item src/deleted.rs
@@ -66,7 +69,8 @@ try {
         files = @(
             @{path = "src/core.rs"; before = $before; after = (Git hash-object src/core.rs)},
             @{path = "src/new.rs"; before = $null; after = (Git hash-object src/new.rs)},
-            @{path = "src/deleted.rs"; before = $deleted; after = $null}
+            @{path = "src/deleted.rs"; before = $deleted; after = $null},
+            @{path = "src/.hidden.rs"; before = $hidden; after = (Git hash-object src/.hidden.rs)}
         )
     }
     Save-Declaration $declaration
@@ -82,6 +86,26 @@ try {
     Expect-Paths Staged
     Expect-Rejection { Get-InternalRefactorExemptions -Mode Worktree } "unstaged source drift"
     [System.IO.File]::WriteAllText("src/core.rs", "new core`n")
+
+    Remove-Item -LiteralPath src/.hidden.rs -Force
+    foreach ($mode in @("Worktree", "Comparison")) {
+        Expect-Rejection { Get-InternalRefactorExemptions -Mode $mode -DiffBase $base } "missing hidden source in $mode" "after blob mismatch"
+    }
+    Expect-Paths Staged
+    if (-not $IsWindows) {
+        New-Item -ItemType SymbolicLink -Path src/.hidden.rs -Target core.rs | Out-Null
+        foreach ($mode in @("Worktree", "Comparison")) {
+            Expect-Rejection { Get-InternalRefactorExemptions -Mode $mode -DiffBase $base } "hidden source symlink in $mode" "not a regular file"
+        }
+        Remove-Item -LiteralPath src/.hidden.rs -Force
+    }
+    [System.IO.File]::WriteAllText("src/.hidden.rs", "wrong hidden`n")
+    foreach ($mode in @("Worktree", "Comparison")) {
+        Expect-Rejection { Get-InternalRefactorExemptions -Mode $mode -DiffBase $base } "hidden source drift in $mode" "after blob mismatch"
+    }
+    [System.IO.File]::WriteAllText("src/.hidden.rs", "new hidden`n")
+    Expect-Paths Worktree
+    Expect-Paths Comparison $base
 
     $originalJson = $declaration | ConvertTo-Json -Depth 5
     foreach ($mutation in @("before", "after", "reason", "traversal", "duplicate", "base", "extra")) {

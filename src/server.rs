@@ -2890,7 +2890,7 @@ enum BorrowedBroadcastStart<'a> {
 
 enum RoutedRelayStart {
     Started(StartedDeliveries, RoutingWriteGuard),
-    NoMessage,
+    Complete,
     OrderingBlocked(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
 }
 
@@ -3019,17 +3019,21 @@ impl InMemoryMessageCoordinator {
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         match build_message() {
-            Some(message) => RoutedRelayStart::Started(
-                self.start_routed_owned_deliveries(
+            Some(message) => {
+                let started = self.start_routed_owned_deliveries(
                     &room_players,
                     &clients,
                     room_id,
                     Some(except_player),
                     message,
-                ),
-                relay_guard,
-            ),
-            None => RoutedRelayStart::NoMessage,
+                );
+                if started.pending.is_empty() && started.slow_consumers.is_empty() {
+                    RoutedRelayStart::Complete
+                } else {
+                    RoutedRelayStart::Started(started, relay_guard)
+                }
+            }
+            None => RoutedRelayStart::Complete,
         }
     }
 
@@ -5720,7 +5724,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     self.finish_owned_relay_deliveries(started, guard).await;
                     return Ok(());
                 }
-                RoutedRelayStart::NoMessage => return Ok(()),
+                RoutedRelayStart::Complete => return Ok(()),
                 RoutedRelayStart::OrderingBlocked(wait) => wait.await,
             }
         }
@@ -5755,7 +5759,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         Ok(())
                     }))
                 }
-                RoutedRelayStart::NoMessage => RelayEnqueueOutcome::Finished(Ok(())),
+                RoutedRelayStart::Complete => RelayEnqueueOutcome::Finished(Ok(())),
                 RoutedRelayStart::OrderingBlocked(wait) => {
                     RelayEnqueueOutcome::OrderingBlocked(wait)
                 }
