@@ -17892,15 +17892,10 @@ async fn repeated_unregister_observers_share_one_lifecycle_wait() {
             drop(observers);
             drop(held);
         }
-        timeout(Duration::from_secs(1), async {
-            while server.connection_manager.has_client(&id)
-                || server.metrics.active_connections.load(Ordering::Relaxed) != 0
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        timeout(Duration::from_secs(1), lifecycle.wait_for_unregister())
+            .await
+            .expect("the owned teardown must finish after its lifecycle gate opens");
+        assert!(!server.connection_manager.has_client(&id));
         assert_eq!(server.metrics.active_connections.load(Ordering::Relaxed), 0);
     }
 }
