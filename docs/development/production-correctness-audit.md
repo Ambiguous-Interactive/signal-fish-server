@@ -16656,8 +16656,8 @@ non-owner release and storage-error denials. Each delivered denial retains its
 exact code and reason, and emits no replay event. The final control fails with
 the original coordinator in Nextest `5592461f-4766-4e63-8a11-9a567c8aa837`.
 
-A separate production-handler control joins three players, readies and starts
-a real Mesh/WebRTC session, and captures the shared SessionPlan generation.
+A separate production-handler control joins three players, marks them ready,
+and starts a real Mesh/WebRTC session, and captures the shared SessionPlan generation.
 It fills the first player's classified queue and requests unsupported authority.
 The other two players must exchange an exact-generation offer before the first
 player drains its denial. Original source fails that offer deadline in
@@ -16733,3 +16733,14 @@ requires both survivor queues to stay open and empty after the exact offer;
 it passes in `cfa35a5d-1c41-469c-87ce-94b179f786a7`. All 34 source-policy
 checks and strict full Clippy pass. Hosted current-head verification remains
 the delivery gate.
+
+Review found one preparation-cancellation control that still expected the old
+combined stage for a plain socket. It fails in
+`0a8867b9-2f90-4596-8954-2daa40bbb907` with actual `websocket_upgrade`.
+The corrected control waits until both withheld-upgrade sockets expose the
+first HTTP request byte before canceling. This proves both clients reached
+upgrade and excludes cancellation during TCP establishment. It preserves all
+planned-peer, cancellation, retained-refusal and artifact assertions. All three
+selected cancellation/deadline controls pass in
+`21401514-1c73-4280-b8b3-b0dd75ec47e3`. This is a diagnostic-test correction;
+server behavior and connection deadlines stay the same.

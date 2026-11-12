@@ -2914,7 +2914,7 @@ mod session_poll_tests {
     /// Issue #1355: cancellation retains identity and every planned initial peer.
     async fn preparation_cancellation_preserves_all_planned_peers() {
         for (encoding, upgrade, expected, refuse_first) in [
-            (Encoding::V2Json, false, "socket_connect_and_upgrade", false),
+            (Encoding::V2Json, false, "websocket_upgrade", false),
             (Encoding::V2Json, true, "join_snapshot", false),
             (Encoding::V3Json, true, "authentication_reply", false),
             (Encoding::V3Json, true, "authentication_reply", true),
@@ -2953,6 +2953,15 @@ mod session_poll_tests {
                         }
                         upgraded.push(websocket);
                     } else {
+                        let mut request = [0; 1];
+                        assert_eq!(
+                            tokio::time::timeout(Duration::from_secs(5), socket.peek(&mut request))
+                                .await
+                                .unwrap()
+                                .unwrap(),
+                            1
+                        );
+                        assert_eq!(request, [b'G']);
                         raw.push(socket);
                     }
                 }
