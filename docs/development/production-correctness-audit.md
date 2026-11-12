@@ -16135,3 +16135,130 @@ process. It does not establish visibility revocation on another node while a
 storage adapter refuses abandonment, or persistence across process loss. The
 shipped in-memory backend does not emit the injected failure. No wire message
 or SDK requirement changes beyond the linked F332–F334 assessment.
+
+### F335–F337: retain live peer teardown and preserve restored routing
+
+Baseline: `acaa1346`. Related campaign: #826. New findings:
+
+- F335 ([#1594](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1594)):
+  each unregister observer spawned another owned task for the same socket.
+  Repeated activity sweeps could retain more lifecycle waiters while the first
+  teardown remained blocked. A control holds one real socket lifecycle and
+  polls 16 observers. The baseline records 16 teardown lock attempts.
+- F336 ([#1595](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1595)):
+  an unregister task panic only produced a log. With activity expiry disabled,
+  normal maintenance never retried the physical disconnect. A finalized
+  WebRTC mesh control injects a room-existence panic after reconnect registration
+  and a member-removal panic before storage commit. The peer remains registered
+  after three maintenance periods on the baseline.
+- F337 ([#1596](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1596)):
+  missing-ID unregister admitted work without a socket lifecycle. The control
+  pauses its coordinator leg, completes a real token restore, then resumes old
+  work. The baseline removes the restored route. The connection manager retains
+  the room-bound socket, but Pong can no longer reach it.
+
+All three controls fail against unchanged baseline production source in Nextest
+`466ad9f8-5d09-48da-91fe-1025d2bc45fe`. The initial repair passes them in
+`5dba509a-2c57-4a07-8ee0-3f65a1de3125`.
+
+One lifecycle now admits one owned unregister attempt. Other observers wait for
+its completion. Canceling observers leaves that attempt alive. A guard releases
+interrupted attempts for a bounded maintenance queue to retry, independently of
+activity expiry and serial housekeeping. Retry candidates use the current socket
+lifecycle. A missing ID admits no work. No new per-connection heap allocation is
+required by this state.
+
+Controls retain the join-time reconnect credential, require one terminal
+`PlayerLeft`, restore the same player in the live room, and inspect its WebRTC
+plan and routed signaling. Reconnection-disabled cleanup and repeated failure
+histories also exercise maintenance recovery. This is server-component evidence;
+it does not establish a spontaneous panic in the shipped in-memory storage,
+real-network WebRTC delivery, or SDK runtime parity. Process loss still discards
+all in-memory state. Ambiguous storage commits remain outside these controls.
+
+External-client timing qualification remains open in
+[Rust #300](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/300),
+[.NET #153](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/153),
+and [Godot #578](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/578).
+Current source search finds the existing departure and reconnect event surfaces;
+that inspection does not prove the delayed runtime histories. The tracking issues
+now require delayed departure, original-token restore, the fresh P2P plan, and
+preserved routing after stale work resumes. Schemas and client commands stay the
+same. No client migration is established.
+
+Expanded validation passes all 16 selected all-feature lifecycle controls in
+`469b368e-992f-4346-9f7c-bc0bfbb3770e`, including shutdown attribution and queued
+disconnect ordering. Real WebSocket replay passes in
+`5eda8562-3925-45e6-b837-ec4f11dd3a76`; the idle-socket close control passes in
+`7aae0331-d21a-4e08-9a1d-4744fec029bb`. Strict full Clippy, formatting, Markdown,
+doc consistency, and CI configuration checks pass locally. Hosted checks and
+review remain the publication gate.
+
+The first hosted Nextest run passed the new runtime controls, then stopped on
+`async_timeout_policy_scan`: its assertion tracker did not recognize a chained
+receive on the fixture field. The test now binds the received message before
+asserting `Pong`. The local policy control passes in
+`1b13a342-5568-4d3b-8e98-eac3d5ae5343`; the assertion and runtime contract remain
+unchanged.
+
+F336 review reproduced two post-storage recovery gaps on `17d1160a`. A routing
+adapter panic before the assignment callback lost the confirmed authority release;
+a panic after the callback lost `PlayerLeft` and its terminal watermark. Both
+controls fail in `22a9a449-c6a4-4c7b-80fb-80379c17cbe5`. These are confirmed
+storage removals, not ambiguous commits.
+
+The unregistering lifecycle now retains its room, confirmed authority release,
+exact terminal tail, and publication flags. The callback retains and counts its
+tail before it can unwind. A retry reconciles the named route and resumes only
+missing publication stages. The socket remains registered until those stages
+resolve. A later authority grant supersedes the delayed clear. A reconnect
+registration from a prior attempt also remains visible to shutdown cleanup.
+
+The shutdown handoff control was red on the first journal candidate: a retry
+with no assignment did not discard its earlier reconnect record during drain.
+The repaired control and all 60 selected departure, disconnect, terminal-tail,
+shutdown, and host-failover controls pass locally. Both callback histories also
+require one exact terminal watermark, one applicable authority notice, host
+failover, and restoration with the original token. Six initial expanded controls
+pass in `27b758bd-0ac6-4458-b748-c1f6dd77e832`; strict full Clippy passes after the
+shutdown repair. These changes stay within F336 and the existing client timing
+assessment.
+
+Final local review validation: 60 all-feature controls pass in
+`6a46d67f-1d11-4fd8-9c85-f50e113f070a`; both assertion-policy scans pass in
+`697f73cc-1911-4211-adb3-deb51e784c83`. Real socket replay and idle closure pass in
+`4b091475-dc5e-4cb0-b321-1e009ca845ad` and
+`7ca75e3b-1ec7-4033-9855-8f09d01b86a9`. Formatting, strict full Clippy, Markdown,
+doc consistency, and the production panic-pattern scan pass.
+
+F336 independent review found a public-library reuse history after the callback
+panic. The socket remained open and could join a second room while the old
+departure journal waited. Unregister now pins the physical close after acquiring
+and validating its lifecycle, before durable work. The fixture admission now uses
+the same close-commit gate as the trait fallback. With only the new pin omitted,
+the conforming late-join control fails in
+`e64f069e-d288-4a48-8d7a-d192b195ed1e`.
+
+The corrected source passes all 61 selected controls in
+`ae137cd0-f711-4dfe-9ef2-33f122411b3b`. Each callback history checks the old tail count
+before and after retry; the late failed admission retains its separate existing
+rollback count. Both assertion-policy scans and strict full Clippy pass.
+Independent close/rekey controls pass in
+`aa9e09e5-aabb-4be2-ba3f-90e9c509ce1e`: the first close reason stays pinned,
+shutdown retains priority, and a transient closing socket cannot reassign.
+A reconnect that committed before unregister acquired the lifecycle gate still
+finishes before that physical socket is closed.
+
+F336 full review found two additional retained-entry gaps on `114d6911`.
+Missing-room cleanup entered the locked unregister method without marking retry
+state. A queued ordinary leave could also clear an assignment outside the cached
+journal. Both histories fail in
+`026e04ec-da0f-475b-a503-3d8c32e0a0ed`. The locked entry now retains retry state
+without reacquiring its gate. An ordinary leave adopts an existing departure
+journal; it does not create one or skip a kick merely waiting ahead of unregister.
+
+The captured kick close is pinned before releasing its lifecycle guards, so a
+queued unregister cannot win the first-close attribution. All 70 selected
+departure, retry, shutdown, and kick controls pass in
+`e3f0e7db-f3de-4dfd-bb54-83dca5bc71e3`. Independent review found no remaining blocker
+in these changes. The final hosted gate remains separate from this local proof.
