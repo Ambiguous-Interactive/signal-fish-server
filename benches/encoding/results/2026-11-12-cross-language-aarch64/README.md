@@ -30,6 +30,9 @@ median across all four fixtures and both seeds. Values below one mean a lower
 observed time in the second position. These are within-codec observations;
 they do not compare codec speeds or establish a causal cache or thermal effect.
 The [full cohort table](order-cohorts.csv) retains all 64 encode/decode comparisons.
+The [independent verifier](../../verify_order_cohorts.py) recomputes each median
+from raw JSON, checks the process streams, and rejects six changed or missing
+cohort controls. It prints the table ranges below; hosted CI runs it.
 
 | Language | Codec | Operation | Second / first median range |
 | --- | --- | --- | ---: |
