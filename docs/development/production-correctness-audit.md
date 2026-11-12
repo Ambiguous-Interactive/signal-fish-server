@@ -16744,3 +16744,18 @@ planned-peer, cancellation, retained-refusal and artifact assertions. All three
 selected cancellation/deadline controls pass in
 `21401514-1c73-4280-b8b3-b0dd75ec47e3`. This is a diagnostic-test correction;
 server behavior and connection deadlines stay the same.
+
+Hosted Linux runs then found a packaging error in the new denial matrix:
+its storage-failure hook was available only in repository tests, but the
+coordinator test file is included in the generated Cargo package. The exact
+package verifier reproduces the missing-method error in
+`08ae29e2-31e8-498e-a3a0-078387b16c1b`. The field, initialization, hook and
+method now use `cfg(test)` together. This retains the same twelve cases in
+repository and package tests. Production builds still omit the hook.
+The unchanged strict package verifier passes in
+`99b90b1e-f3e0-4225-a0c1-b66a654c7f16`; repository matrix/route controls and
+strict full Clippy also pass. Neither failed hosted Linux run is reported as
+passing. Fresh verification must use the corrected head.
+
+The denial matrix also passes when executed directly from the generated
+package with all features and strict warnings. No case is removed or ignored.

@@ -70,8 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep healthy P2P room operations moving while another peer waits for a refused authority request (#826).
-- Keep healthy peers signaling while another peer waits for a signal refusal or metadata error reply (#1612, #1613).
+- Keep healthy peers signaling while another peer waits for an authority refusal, signal refusal, or metadata error reply
+  (#826, #1612, #1613).
 - Preserve accepted reliable relay frames and their sender order across canceled or overlapping sends, and avoid extra
   heap use in compatibility relays (#1604, #1605).
 - Keep authority transfers and reconnect roles consistent when a peer disconnects (#1602, #1603).

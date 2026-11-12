@@ -1465,7 +1465,7 @@ pub struct InMemoryDatabase {
     /// reconnect authority grant fails after membership restored, so the
     /// attempt must complete degraded (live member, vacant role) with the
     /// next reconnect re-running the grant.
-    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg(test)]
     fail_request_room_authority_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     pause_publish_room_once: std::sync::atomic::AtomicBool,
@@ -1800,7 +1800,7 @@ impl InMemoryDatabase {
             fail_delete_room_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_add_player_to_room_once: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(all(test, signal_fish_repository_tests))]
+            #[cfg(test)]
             fail_request_room_authority_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             pause_publish_room_once: std::sync::atomic::AtomicBool::new(false),
@@ -2133,7 +2133,7 @@ impl InMemoryDatabase {
     /// Arms the one-shot storage-failure injection for the next
     /// `request_room_authority` call (see the `fail_request_room_authority_once`
     /// field doc).
-    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg(test)]
     pub(crate) fn fail_next_request_room_authority_for_test(&self) {
         self.fail_request_room_authority_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3090,7 +3090,7 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
-        #[cfg(all(test, signal_fish_repository_tests))]
+        #[cfg(test)]
         if self
             .fail_request_room_authority_once
             .swap(false, std::sync::atomic::Ordering::AcqRel)
