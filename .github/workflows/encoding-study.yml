@@ -121,6 +121,12 @@ jobs:
           python3 benches/encoding/cross_language.py --check
           --godot Godot_v4.7.2-stable_linux.x86_64
       - name: Reconcile recorded measurements and source manifest
+        run: |
+          for seed in 1524 1525; do
+            python3 benches/encoding/cross_language.py --verify-recorded \
+              "benches/encoding/results/2026-11-12-cross-language-aarch64/seed-$seed"
+          done
+      - name: Recompute order cohorts from raw samples
         run: >-
-          python3 benches/encoding/cross_language.py --verify-recorded
-          benches/encoding/results/2026-11-09-cross-language-aarch64
+          python3 benches/encoding/verify_order_cohorts.py
+          benches/encoding/results/2026-11-12-cross-language-aarch64 --self-test

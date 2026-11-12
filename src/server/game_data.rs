@@ -219,6 +219,7 @@ impl EnhancedGameServer {
             .update_player_connection_info(&room_id, player_id, connection_info)
             .await;
         drop(route);
+        drop(room_event_guard);
         match result {
             // Confirmed write: the caller asked for no receipt, so silence is
             // the success contract.

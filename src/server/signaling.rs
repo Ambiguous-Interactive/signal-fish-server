@@ -294,6 +294,7 @@ impl EnhancedGameServer {
         };
         let sender_is_routed = routed_pair.is_none_or(|[sender, _]| sender);
         if !sender_is_routed {
+            drop(signal_publication_guard);
             self.reject_signal(
                 from,
                 to,
@@ -317,6 +318,7 @@ impl EnhancedGameServer {
             .is_some_and(|stamp| stamp.epoch == target_epoch);
         if !target_is_routed || !target_incarnation_matches || !self.supports_webrtc_signaling(&to)
         {
+            drop(signal_publication_guard);
             self.reject_signal(
                 from,
                 to,
@@ -330,6 +332,7 @@ impl EnhancedGameServer {
 
         // 6. Per-connection valid signal rate limit.
         if let Err(err) = self.rate_limiter.check_signal(from).await {
+            drop(signal_publication_guard);
             self.send_signal_error(from, err.to_string(), ErrorCode::SignalRateLimited)
                 .await;
             return;

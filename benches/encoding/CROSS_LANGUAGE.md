@@ -13,7 +13,7 @@ toolchain. Restore the locked TypeScript graph once:
 ```bash
 npm ci --ignore-scripts --prefix benches/encoding/typescript
 python3 benches/encoding/cross_language.py --check
-python3 benches/encoding/cross_language.py --output /tmp/encoding-results
+python3 benches/encoding/cross_language.py --seed 1524 --output /tmp/encoding-results
 python3 benches/encoding/cross_language.py --verify-recorded /tmp/encoding-results
 ```
 
@@ -25,7 +25,14 @@ inside its decode measurement. TypeScript runs through `tsx` with Node.js V8.
 The hosted workflow runs the complete correctness controls. Timings are recorded
 observations, not thresholds. Each benchmark keeps its result observable with a
 checksum. It warms each operation for one second, calibrates a fixed iteration
-count for about 100 ms, then records ten samples at that count. Parsing source
+count for about 100 ms, then records ten samples at that count. TypeScript and
+GDScript alternate codec order for every sample. The uint32 seed (default 1524)
+and fixture index select the first order; each codec runs first five times and
+second five times. Each codec measures encode then decode within its turn.
+Warmup order, measured warmup duration and count, executed sample orders, and
+per-operation positions accompany every raw sample. C# has one protobuf codec,
+so it records a single-codec order with no seed; its encode and decode series
+remain separate. This baseline cannot establish a within-runtime codec ranking. Parsing source
 JSON, preparing the typed model, verifying results, and writing output happen
 outside timing. Encode allocates bytes. Decode allocates the codec's owned model.
 Protobuf-to-corpus projection happens outside timing. Garbage collection and
@@ -38,8 +45,12 @@ The runner checks source lengths and hashes against the corpus manifest. Each
 language checks logical values and coordinate/velocity float64 bits, including
 negative zero. The independent Python oracle checks all twenty cells and their
 samples. Recorded-source hashes and CSV summaries must agree with the raw
-samples. Its six negative controls reject changed values, negative-zero loss,
-missing cells, duplicate cells, changed boolean types, and changed protobuf bytes.
+samples. Its six value controls reject changed values, negative-zero loss, missing cells,
+duplicate cells, changed boolean types, and changed protobuf bytes. Nine order
+controls also reject missing order evidence, fixed order, wrong or inconsistent
+seeds, wrong warmup order, wrong positions, incomplete warmup counts or duration,
+and missing samples. The saved-record check enforces the requested seed and the
+same source hashes. Historical records keep their original format and sources.
 
 The checked-in protobuf schema matches Rust `prost` field tags, integer types,
 packed repeated doubles, and tile fields. C# and TypeScript protobuf output and
@@ -97,8 +108,10 @@ hashes beside the Rust baseline. Different runtime and model costs limit direct
 language comparisons. The Rust run uses Criterion's different sampling method.
 The [adoption decision](ADOPTION.md) applies the separate gate in #772.
 
-The [latest dependency refresh](results/2026-11-09-cross-language-aarch64/README.md)
-retains a new full sample set for the current locks and Godot 4.7.2. The earlier
+The [order controls](results/2026-11-12-cross-language-aarch64/README.md) retain
+fresh samples for both starting orders, with seeds 1524 and 1525. The
+[2026-11-09 dependency refresh](results/2026-11-09-cross-language-aarch64/README.md)
+retains its fixed-order observations for the same locks and Godot 4.7.2. The earlier
 [2026-11-05 refresh](results/2026-11-05-cross-language-aarch64/README.md),
 [2026-10-28 refresh](results/2026-10-28-cross-language-aarch64/README.md),
 [2026-10-21 refresh](results/2026-10-21-cross-language-aarch64/README.md),

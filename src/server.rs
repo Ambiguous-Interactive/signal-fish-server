@@ -2598,10 +2598,12 @@ struct RoutingWriteGuard {
     _gate: Arc<RoutingGate>,
 }
 
-impl Drop for RoutingWriteGuard {
+struct RelayOrderGuard(RoutingWriteGuard);
+
+impl Drop for RelayOrderGuard {
     fn drop(&mut self) {
-        drop(self.guard.take());
-        self._gate.released.notify_waiters();
+        drop(self.0.guard.take());
+        self.0._gate.released.notify_waiters();
     }
 }
 
@@ -2649,13 +2651,13 @@ impl RoutingGateRegistry {
         })
     }
 
-    fn try_write(&self, key: Uuid) -> Option<RoutingWriteGuard> {
+    fn try_write(&self, key: Uuid) -> Option<RelayOrderGuard> {
         let gate = self.gate(key);
         let guard = Arc::clone(&gate.lock).try_write_owned().ok()?;
-        Some(RoutingWriteGuard {
+        Some(RelayOrderGuard(RoutingWriteGuard {
             guard: Some(guard),
             _gate: gate,
-        })
+        }))
     }
 
     async fn write(&self, key: Uuid) -> RoutingWriteGuard {
@@ -2889,7 +2891,7 @@ enum BorrowedBroadcastStart<'a> {
 }
 
 enum RoutedRelayStart {
-    Started(StartedDeliveries, RoutingWriteGuard),
+    Started(StartedDeliveries, RelayOrderGuard),
     Complete,
     OrderingBlocked(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
 }
@@ -3189,7 +3191,7 @@ impl InMemoryMessageCoordinator {
     fn finish_owned_relay_deliveries(
         &self,
         mut started: StartedDeliveries,
-        relay_guard: RoutingWriteGuard,
+        relay_guard: RelayOrderGuard,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
         let metrics = Arc::clone(&self.metrics);
         let clients = Arc::clone(&self.local_clients);

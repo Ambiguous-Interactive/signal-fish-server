@@ -74,15 +74,19 @@ static class Study
         var warm = Stopwatch.StartNew();
         int iterations = 0;
         do { Consume(operation()); iterations++; } while (warm.Elapsed.TotalMilliseconds < 1000);
+        int warmupIterations = iterations;
+        double warmupNs = warm.Elapsed.TotalMilliseconds * 1e6;
         iterations = Math.Max(1, iterations / 10);
         var samples = new double[10];
+        var positions = new int[10];
         for (int sample = 0; sample < samples.Length; sample++)
         {
             long start = Stopwatch.GetTimestamp();
             for (int i = 0; i < iterations; i++) Consume(operation());
             samples[sample] = (Stopwatch.GetTimestamp() - start) * 1e9 / Stopwatch.Frequency / iterations;
         }
-        return new { iterations, samples_ns = samples, checksum };
+        return new { iterations, warmup_iterations = warmupIterations, warmup_ns = warmupNs,
+            samples_ns = samples, order_positions = positions, checksum };
     }
     public static void Main(string[] args)
     {
@@ -116,6 +120,11 @@ static class Study
                 wire_base64 = Convert.ToBase64String(wire),
                 logical,
                 float_bits = Bits(logical),
+                benchmark = check ? null : new {
+                    method = "single-codec", seed = (uint?)null, warmup_ms = 1000,
+                    warmup_order = new[] { "protobuf" },
+                    sample_orders = Enumerable.Range(0, 10).Select(_ => new[] { "protobuf" }).ToArray()
+                },
                 encode = check ? null : Samples(() => model.ToByteArray()),
                 decode = check ? null : Samples(() => decode(wire))
             }));
