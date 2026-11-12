@@ -16200,3 +16200,33 @@ receive on the fixture field. The test now binds the received message before
 asserting `Pong`. The local policy control passes in
 `1b13a342-5568-4d3b-8e98-eac3d5ae5343`; the assertion and runtime contract remain
 unchanged.
+
+F336 review reproduced two post-storage recovery gaps on `17d1160a`. A routing
+adapter panic before the assignment callback lost the confirmed authority release;
+a panic after the callback lost `PlayerLeft` and its terminal watermark. Both
+controls fail in `22a9a449-c6a4-4c7b-80fb-80379c17cbe5`. These are confirmed
+storage removals, not ambiguous commits.
+
+The unregistering lifecycle now retains its room, confirmed authority release,
+exact terminal tail, and publication flags. The callback retains and counts its
+tail before it can unwind. A retry reconciles the named route and resumes only
+missing publication stages. The socket remains registered until those stages
+resolve. A later authority grant supersedes the delayed clear. A reconnect
+registration from a prior attempt also remains visible to shutdown cleanup.
+
+The shutdown handoff control was red on the first journal candidate: a retry
+with no assignment did not discard its earlier reconnect record during drain.
+The repaired control and all 60 selected departure, disconnect, terminal-tail,
+shutdown, and host-failover controls pass locally. Both callback histories also
+require one exact terminal watermark, one applicable authority notice, host
+failover, and restoration with the original token. Six initial expanded controls
+pass in `27b758bd-0ac6-4458-b748-c1f6dd77e832`; strict full Clippy passes after the
+shutdown repair. These changes stay within F336 and the existing client timing
+assessment.
+
+Final local review validation: 60 all-feature controls pass in
+`6a46d67f-1d11-4fd8-9c85-f50e113f070a`; both assertion-policy scans pass in
+`697f73cc-1911-4211-adb3-deb51e784c83`. Real socket replay and idle closure pass in
+`4b091475-dc5e-4cb0-b321-1e009ca845ad` and
+`7ca75e3b-1ec7-4033-9855-8f09d01b86a9`. Formatting, strict full Clippy, Markdown,
+doc consistency, and the production panic-pattern scan pass.

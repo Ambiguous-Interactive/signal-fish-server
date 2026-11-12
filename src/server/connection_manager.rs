@@ -165,6 +165,7 @@ pub(crate) struct ClientLifecycle {
     unregister_running: std::sync::atomic::AtomicBool,
     unregister_pending: std::sync::atomic::AtomicBool,
     unregister_finished: tokio::sync::Notify,
+    unregister_departure: std::sync::Mutex<Option<Arc<super::room_service::UnregisterDeparture>>>,
     gate: Arc<tokio::sync::Mutex<()>>,
     player_id: std::sync::Mutex<PlayerId>,
     admission_pending: std::sync::atomic::AtomicBool,
@@ -205,6 +206,7 @@ impl ClientLifecycle {
             unregister_running: std::sync::atomic::AtomicBool::new(false),
             unregister_pending: std::sync::atomic::AtomicBool::new(false),
             unregister_finished: tokio::sync::Notify::new(),
+            unregister_departure: std::sync::Mutex::new(None),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             player_id: std::sync::Mutex::new(player_id),
             admission_pending: std::sync::atomic::AtomicBool::new(false),
@@ -213,6 +215,24 @@ impl ClientLifecycle {
             #[cfg(test)]
             lock_attempt_notify: tokio::sync::Notify::new(),
         }
+    }
+
+    pub(super) fn unregister_departure(
+        &self,
+        room_id: Option<RoomId>,
+    ) -> Option<Arc<super::room_service::UnregisterDeparture>> {
+        let mut departure = self
+            .unregister_departure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if departure.is_none() {
+            if let Some(room_id) = room_id {
+                *departure = Some(Arc::new(super::room_service::UnregisterDeparture::new(
+                    room_id,
+                )));
+            }
+        }
+        departure.clone()
     }
 
     /// Admit one owned transaction for this physical socket.

@@ -18,6 +18,53 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
+/// Committed departure evidence retained on the physical unregistering socket.
+#[derive(Debug)]
+pub(super) struct UnregisterDeparture {
+    pub(super) room_id: RoomId,
+    was_authority: AtomicBool,
+    terminal_tail: std::sync::Mutex<Option<(u32, u64)>>,
+    player_left_committed: Arc<AtomicBool>,
+    authority_committed: Arc<AtomicBool>,
+}
+
+impl UnregisterDeparture {
+    pub(super) fn new(room_id: RoomId) -> Self {
+        Self {
+            room_id,
+            was_authority: AtomicBool::new(false),
+            terminal_tail: std::sync::Mutex::new(None),
+            player_left_committed: Arc::new(AtomicBool::new(false)),
+            authority_committed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn terminal_tail(&self) -> Option<(u32, u64)> {
+        *self
+            .terminal_tail
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn retain_terminal_tail(&self, tail: (u32, u64)) -> bool {
+        let mut retained = self
+            .terminal_tail
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if retained.is_some() {
+            return false;
+        }
+        *retained = Some(tail);
+        true
+    }
+
+    pub(super) fn finished(&self) -> bool {
+        self.player_left_committed.load(Ordering::Acquire)
+            && (!self.was_authority.load(Ordering::Acquire)
+                || self.authority_committed.load(Ordering::Acquire))
+    }
+}
+
 pub(super) const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
 const APPLICATION_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
@@ -1459,6 +1506,7 @@ impl EnhancedGameServer {
             notify_player,
             operation_id,
             terminal_response_committed,
+            None,
         )
         .await;
     }
@@ -1474,6 +1522,23 @@ impl EnhancedGameServer {
             notify_player,
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .await;
+    }
+
+    /// Continue a retained departure while the caller holds the socket lifecycle gate.
+    pub(super) async fn leave_room_for_unregister(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        departure: Arc<UnregisterDeparture>,
+    ) {
+        self.leave_room_locked_operation(
+            player_id,
+            false,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Some(departure),
         )
         .await;
     }
@@ -1494,9 +1559,14 @@ impl EnhancedGameServer {
         notify_player: bool,
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
+        departure: Option<Arc<UnregisterDeparture>>,
     ) {
         let leave_span = tracing::Span::current();
-        let Some(room_id) = self.get_client_room(player_id).await else {
+        let Some(room_id) = departure
+            .as_ref()
+            .map(|progress| progress.room_id)
+            .or(self.get_client_room(player_id).await)
+        else {
             if let Some(operation_id) = operation_id {
                 let _ = self
                     .send_room_operation_failure_to_player(
@@ -1514,6 +1584,11 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
+
+        let retained_authority = departure.as_ref().is_some_and(|progress| {
+            progress.was_authority.load(Ordering::Acquire)
+                && !progress.authority_committed.load(Ordering::Acquire)
+        });
 
         // Whether this departure vacated the room's authority role. Storage
         // clears `authority_player` on removal without telling anyone, so the
@@ -1595,6 +1670,35 @@ impl EnhancedGameServer {
             }
         }
 
+        let was_authority = if let Some(progress) = &departure {
+            progress
+                .was_authority
+                .fetch_or(was_authority, Ordering::AcqRel);
+            progress.was_authority.load(Ordering::Acquire)
+        } else {
+            was_authority
+        };
+
+        if retained_authority {
+            match self
+                .database
+                .get_room_player_snapshot(&room_id, player_id)
+                .await
+            {
+                Ok(Some(snapshot)) if snapshot.authority_player.is_none() => {}
+                Ok(_) => {
+                    // A later grant supersedes this delayed clear under the room gate.
+                    if let Some(progress) = &departure {
+                        progress.authority_committed.store(true, Ordering::Release);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %room_id, %error, "Failed to revalidate retained authority departure");
+                    return;
+                }
+            }
+        }
+
         // The player is out of the room: its pre-issued reconnection token
         // must not stay claimable. On the DISCONNECT path this is a no-op
         // (register_disconnection_for_reconnect already consumed the entry
@@ -1608,21 +1712,43 @@ impl EnhancedGameServer {
         let connection_manager = Arc::clone(&self.connection_manager);
         let departed_player = *player_id;
         let leaving_room = room_id;
-        let terminal_tail = match self
-            .message_coordinator
-            .unroute_local_client_with_tail(
-                departed_player,
-                room_id,
-                Box::new(move || {
-                    connection_manager
-                        .clear_room_assignment_with_tail(&departed_player, &leaving_room)
-                        .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
-                }),
-            )
-            .await
-        {
-            Ok(Some(tail)) => tail,
-            Ok(None) => {
+        let previous_tail = departure
+            .as_ref()
+            .and_then(|progress| progress.terminal_tail());
+        let progress_for_unroute = departure.clone();
+        let metrics_for_unroute = Arc::clone(&self.metrics);
+        let unroute = self.message_coordinator.unroute_local_client_with_tail(
+            departed_player,
+            room_id,
+            Box::new(move || {
+                connection_manager
+                    .clear_room_assignment_with_tail(&departed_player, &leaving_room)
+                    .map(|(delivery, stamp)| {
+                        if let Some(progress) = &progress_for_unroute {
+                            if progress.retain_terminal_tail((stamp.epoch, stamp.seq)) {
+                                metrics_for_unroute.increment_players_left();
+                            }
+                        }
+                        (delivery, stamp.epoch, stamp.seq)
+                    })
+            }),
+        );
+        let unroute = if departure.is_some() {
+            AssertUnwindSafe(unroute)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Terminal unroute panicked")))
+        } else {
+            unroute.await
+        };
+        /*
+            A callback tail survives a coordinator panic. The retry reconciles
+            that room's route before reusing the captured watermark.
+        */
+        let terminal_tail = match (unroute, previous_tail) {
+            (Ok(Some(tail)), _) => tail,
+            (Ok(None), Some(tail)) => tail,
+            (Ok(None), None) => {
                 // Deliberate fail-closed answer to a guarded-semantics
                 // divergence (#469): no relay watermark was captured, and the
                 // honest alternatives are all worse. A watermark-less
@@ -1647,7 +1773,7 @@ impl EnhancedGameServer {
                 }
                 return;
             }
-            Err(error) => {
+            (Err(error), _) => {
                 tracing::error!(%player_id, %room_id, %error, "Failed to atomically unroute departing player");
                 if let Some(operation_id) = operation_id {
                     let _ = self
@@ -1666,7 +1792,9 @@ impl EnhancedGameServer {
         // by clients, not whether this invocation deleted a storage row. Count
         // exactly once at the successful terminal unroute; later durable
         // repair is storage bookkeeping only.
-        self.metrics.increment_players_left();
+        if departure.is_none() {
+            self.metrics.increment_players_left();
+        }
 
         if self.is_draining() {
             tracing::info!(
@@ -1724,11 +1852,17 @@ impl EnhancedGameServer {
         let authority_coordinator = Arc::clone(&self.message_coordinator);
         let reconnection_manager = self.reconnection_manager.clone();
         let authority_reconnection_manager = self.reconnection_manager.clone();
-        let committed = Arc::new(AtomicBool::new(false));
+        let committed = departure.as_ref().map_or_else(
+            || Arc::new(AtomicBool::new(false)),
+            |progress| Arc::clone(&progress.player_left_committed),
+        );
         let committed_in_hook = Arc::clone(&committed);
         let committed_for_authority = Arc::clone(&committed);
         let committed_for_job_recovery = Arc::clone(&committed);
-        let authority_committed = Arc::new(AtomicBool::new(false));
+        let authority_committed = departure.as_ref().map_or_else(
+            || Arc::new(AtomicBool::new(false)),
+            |progress| Arc::clone(&progress.authority_committed),
+        );
         let authority_committed_in_hook = Arc::clone(&authority_committed);
         let authority_committed_for_job_recovery = Arc::clone(&authority_committed);
         let authority_failed = Arc::new(AtomicBool::new(false));
@@ -1792,7 +1926,9 @@ impl EnhancedGameServer {
                     }
 
                     let should_broadcast = || !*broadcast_predicate_drain.borrow();
-                    let departure = coordinator
+                    let departure = if committed_for_authority.load(Ordering::Acquire) {
+                        Ok(false)
+                    } else { coordinator
                         .broadcast_to_room_except_if_with_hook(
                             &room_id_for_replay,
                             &departed_player,
@@ -1813,7 +1949,7 @@ impl EnhancedGameServer {
                                 })
                             }),
                         )
-                        .await;
+                        .await };
 
                     // Only announce a cleared role behind a `PlayerLeft` that
                     // committed: the event is defined as the explanation of that
@@ -1823,7 +1959,8 @@ impl EnhancedGameServer {
                     // means a live recipient was enqueued, which is false for a
                     // room whose remaining members are all awaiting reconnect,
                     // exactly when the replay record matters most.
-                    if was_authority && committed_for_authority.load(Ordering::Acquire) {
+                    if was_authority && committed_for_authority.load(Ordering::Acquire)
+                        && !authority_committed_for_job_recovery.load(Ordering::Acquire) {
                         // Storage already cleared `authority_player`; announce it
                         // inside this same FIFO job so it can never precede the
                         // `PlayerLeft` that explains it. `authority_player: None`

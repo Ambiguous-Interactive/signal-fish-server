@@ -2056,6 +2056,10 @@ impl EnhancedGameServer {
     /// Capture reconnect state and detach the client while its lifecycle is locked.
     async fn unregister_client_locked(self: &Arc<Self>, player_id: &PlayerId) {
         let room_id_opt = self.get_client_room(player_id).await;
+        let departure = self
+            .connection_manager
+            .client_lifecycle(player_id)
+            .and_then(|lifecycle| lifecycle.unregister_departure(room_id_opt));
         // One authoritative snapshot supplies every reconnect-restoration
         // field. A missing player/room or storage error must not degrade into a
         // pending record with `was_authority = false` and no player metadata.
@@ -2101,7 +2105,12 @@ impl EnhancedGameServer {
             )
             .await;
 
-        let mut registered_reconnect = false;
+        let mut registered_reconnect = match (&self.reconnection_manager, &departure) {
+            (Some(manager), Some(progress)) => {
+                manager.pending_reconnection_room(player_id).await == Some(progress.room_id)
+            }
+            _ => false,
+        };
 
         // Register disconnection for potential reconnection (before removing from room)
         if self.is_draining() {
@@ -2148,11 +2157,14 @@ impl EnhancedGameServer {
             }
         } else {
             // Remove from room if joined
-            if let Some(room_id) = room_id_opt {
+            if let Some(progress) = &departure {
+                let room_id = progress.room_id;
                 tracing::info!(%player_id, %room_id, draining = false, "Removing player from room during unregister");
-                self.leave_room_locked(player_id, false).await;
-                // Note: We previously had a sleep here, but it's been removed to eliminate sleeps from production code
-                // Tests should properly handle the asynchronous nature of message delivery
+                self.leave_room_for_unregister(player_id, Arc::clone(progress))
+                    .await;
+                if !self.is_draining() && !progress.finished() {
+                    return;
+                }
             }
 
             if self.is_draining() {

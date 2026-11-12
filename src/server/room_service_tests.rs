@@ -2047,6 +2047,7 @@ struct DrainTriggerCoordinator {
     fail_snapshot_after_next_join: AtomicBool,
     panic_alias_unregister: StdMutex<Option<(PlayerId, usize)>>,
     unregister_pause: StdMutex<Option<Arc<UnregisterPause>>>,
+    unroute_panic_once: std::sync::atomic::AtomicU8,
     panic_reconnect_opening_after_delivery: AtomicBool,
     panic_reconnect_exact_after_delivery: AtomicBool,
     panic_reconnect_authority_after_delivery: AtomicBool,
@@ -2080,6 +2081,7 @@ impl DrainTriggerCoordinator {
             fail_snapshot_after_next_join: AtomicBool::new(false),
             panic_alias_unregister: StdMutex::new(None),
             unregister_pause: StdMutex::new(None),
+            unroute_panic_once: std::sync::atomic::AtomicU8::new(0),
             panic_reconnect_opening_after_delivery: AtomicBool::new(false),
             panic_reconnect_exact_after_delivery: AtomicBool::new(false),
             panic_reconnect_authority_after_delivery: AtomicBool::new(false),
@@ -2686,9 +2688,15 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         _room_id: RoomId,
         clear_assignment: Box<dyn FnOnce() -> Option<(ClientDeliveryHandle, u32, u64)> + Send + 'a>,
     ) -> anyhow::Result<Option<(u32, u64)>> {
+        let fault = self.unroute_panic_once.swap(0, Ordering::AcqRel);
+        assert_ne!(
+            fault, 1,
+            "injected unroute panic before assignment callback"
+        );
         let Some((delivery, epoch, final_seq)) = clear_assignment() else {
             return Ok(None);
         };
+        assert_ne!(fault, 2, "injected unroute panic after assignment callback");
         self.register_local_client(player_id, None, delivery)
             .await?;
         if self.trigger == DrainTrigger::MissingTerminalTail {
@@ -18049,4 +18057,207 @@ async fn maintenance_recovers_panicked_unregister_without_activity_expiry() {
             matches!(signal.as_ref(), ServerMessage::Signal { from, generation: received, signal } if *from == peer && *received == generation && *signal == offer)
         );
     }
+}
+
+/// #1595 review: retain the confirmed authority removal before terminal unroute.
+#[tokio::test(start_paused = true)]
+async fn unregister_retry_retains_departure_before_unroute_callback() {
+    assert_unregister_unroute_panic_recovery(1, false).await;
+}
+
+/// #1595 review: retain the terminal tail after assignment clear has committed.
+#[tokio::test(start_paused = true)]
+async fn unregister_retry_retains_departure_after_unroute_callback() {
+    assert_unregister_unroute_panic_recovery(2, false).await;
+}
+
+/// A repaired departure must not clear an authority granted during the retry wait.
+#[tokio::test(start_paused = true)]
+async fn unregister_retry_preserves_a_new_authority_after_unroute_panic() {
+    for fault in [1, 2] {
+        assert_unregister_unroute_panic_recovery(fault, true).await;
+    }
+}
+
+async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool) {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let mut fixture = setup_joined_pair_with_reconnection_config_and_coordinator(
+        |config| {
+            config.ping_timeout = Duration::ZERO;
+            config.room_cleanup_interval = Duration::from_secs(1);
+        },
+        coordinator.clone(),
+    )
+    .await;
+    let protocol = NegotiatedProtocol {
+        version: 3,
+        transports: vec![
+            crate::protocol::Transport::Relay,
+            crate::protocol::Transport::WebRtc,
+        ],
+        topologies: vec![
+            crate::protocol::Topology::Relay,
+            crate::protocol::Topology::Host,
+        ],
+    };
+    for player in [fixture.leaver, fixture.survivor] {
+        fixture
+            .server
+            .set_client_protocol(&player, protocol.clone());
+        fixture.server.handle_player_ready(&player).await;
+    }
+    fixture.server.handle_start_game(&fixture.leaver).await;
+    assert_eq!(
+        fixture
+            .server
+            .active_session_plan(&fixture.room_id)
+            .unwrap()
+            .host,
+        Some(fixture.leaver)
+    );
+    let tail = fixture
+        .server
+        .connection_manager
+        .current_relay_stamp_in_room(&fixture.leaver, &fixture.room_id)
+        .unwrap();
+    let _initial = drain_queued_messages(&mut fixture.survivor_rx);
+    let left_before = fixture.server.metrics.players_left.load(Ordering::Relaxed);
+    coordinator
+        .unroute_panic_once
+        .store(fault, Ordering::Release);
+    fixture.server.unregister_client(&fixture.leaver).await;
+    assert_eq!(coordinator.unroute_panic_once.load(Ordering::Acquire), 0);
+    if superseded {
+        fixture
+            .server
+            .handle_authority_request(&fixture.survivor, true)
+            .await;
+    }
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let maintenance = tokio::spawn({
+        let server = fixture.server.clone();
+        async move {
+            server
+                .cleanup_task_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        }
+    });
+    let recovered = timeout(Duration::from_secs(3), async {
+        while fixture
+            .server
+            .connection_manager
+            .has_client(&fixture.leaver)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let _ = stop.send(());
+    maintenance.await.unwrap();
+    recovered.expect("retained departure must finish on maintenance");
+    let messages = drain_queued_messages(&mut fixture.survivor_rx);
+    let departures: Vec<_> = messages
+        .iter()
+        .filter_map(|message| match message.as_ref() {
+            ServerMessage::PlayerLeft {
+                player_id,
+                epoch,
+                final_seq,
+            } if *player_id == fixture.leaver => Some((*epoch, *final_seq)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        departures,
+        vec![(Some(tail.epoch), Some(tail.seq))],
+        "the original terminal watermark must be published exactly once"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(
+                message.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                }
+            ))
+            .count(),
+        usize::from(!superseded),
+        "the confirmed role removal must survive without clearing a later authority"
+    );
+    assert_eq!(
+        fixture
+            .server
+            .active_session_plan(&fixture.room_id)
+            .unwrap()
+            .host,
+        Some(fixture.survivor)
+    );
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + 1
+    );
+    let (new_id, mut receiver) =
+        register_client(&fixture.server, "127.0.0.1:48505".parse().unwrap()).await;
+    fixture.server.set_client_protocol(&new_id, protocol);
+    fixture
+        .server
+        .handle_reconnect(
+            &new_id,
+            &fixture.leaver,
+            &fixture.room_id,
+            &fixture.reconnect_token,
+        )
+        .await;
+    let messages = drain_queued_messages(&mut receiver);
+    assert!(messages
+        .iter()
+        .any(|message| matches!(message.as_ref(), ServerMessage::Reconnected(_))));
+    assert!(messages.iter().any(|message| matches!(message.as_ref(), ServerMessage::SessionPlan(plan) if plan.transport == crate::protocol::Transport::WebRtc)));
+}
+
+/// A later drain must discard the credential armed by an interrupted attempt.
+#[tokio::test(start_paused = true)]
+async fn unregister_retry_drain_discards_the_prior_reconnect_registration() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let mut fixture =
+        setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+            .await;
+    coordinator.unroute_panic_once.store(2, Ordering::Release);
+    fixture.server.unregister_client(&fixture.leaver).await;
+    assert!(
+        fixture
+            .server
+            .reconnection_manager()
+            .unwrap()
+            .has_pending_reconnection(&fixture.leaver)
+            .await
+    );
+    fixture.server.begin_shutdown_drain();
+    fixture.server.unregister_client(&fixture.leaver).await;
+    assert!(!fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.leaver));
+    assert!(
+        !fixture
+            .server
+            .reconnection_manager()
+            .unwrap()
+            .has_pending_reconnection(&fixture.leaver)
+            .await,
+        "drain must discard the credential retained by the earlier attempt"
+    );
+    let messages = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(!messages.iter().any(|message| matches!(
+        message.as_ref(),
+        ServerMessage::PlayerLeft { .. } | ServerMessage::AuthorityChanged { .. }
+    )));
 }
