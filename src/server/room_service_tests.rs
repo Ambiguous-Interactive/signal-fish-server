@@ -178,6 +178,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         expired_reconnect_workers: maintenance_workers::MaintenanceWorkers::default(),
         session_repair_workers: maintenance_workers::MaintenanceWorkers::default(),
         missing_room_workers: maintenance_workers::MaintenanceWorkers::default(),
+        unregister_workers: maintenance_workers::MaintenanceWorkers::default(),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
         reconnect_teardown_test_gate: StdMutex::new(None),
         missing_lifecycle_leave_test_gate: StdMutex::new(None),
@@ -2028,6 +2029,12 @@ enum DrainTrigger {
     PauseAuthorityTransferAnnouncement,
 }
 
+struct UnregisterPause {
+    player: PlayerId,
+    reached: Notify,
+    release: Notify,
+}
+
 struct DrainTriggerCoordinator {
     room_events: Arc<RoomEventSequencer>,
     trigger: DrainTrigger,
@@ -2039,6 +2046,7 @@ struct DrainTriggerCoordinator {
     fail_next_room_event_completion: AtomicBool,
     fail_snapshot_after_next_join: AtomicBool,
     panic_alias_unregister: StdMutex<Option<(PlayerId, usize)>>,
+    unregister_pause: StdMutex<Option<Arc<UnregisterPause>>>,
     panic_reconnect_opening_after_delivery: AtomicBool,
     panic_reconnect_exact_after_delivery: AtomicBool,
     panic_reconnect_authority_after_delivery: AtomicBool,
@@ -2071,6 +2079,7 @@ impl DrainTriggerCoordinator {
             fail_next_room_event_completion: AtomicBool::new(false),
             fail_snapshot_after_next_join: AtomicBool::new(false),
             panic_alias_unregister: StdMutex::new(None),
+            unregister_pause: StdMutex::new(None),
             panic_reconnect_opening_after_delivery: AtomicBool::new(false),
             panic_reconnect_exact_after_delivery: AtomicBool::new(false),
             panic_reconnect_authority_after_delivery: AtomicBool::new(false),
@@ -2689,6 +2698,22 @@ impl MessageCoordinator for DrainTriggerCoordinator {
     }
 
     async fn unregister_local_client(&self, player_id: &PlayerId) -> anyhow::Result<()> {
+        let pause = {
+            let mut pending = self.unregister_pause.lock().unwrap();
+            if pending
+                .as_ref()
+                .is_some_and(|pause| pause.player == *player_id)
+            {
+                pending.take()
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+
         if self.trigger == DrainTrigger::UnregisterLocal {
             self.begin_drain_once();
         }
@@ -17754,4 +17779,273 @@ async fn assert_failed_published_creation_repair(abandonment_fault: u8, detach_f
         2
     );
     server.pending_creation_rollbacks.remove(&replacement_id);
+}
+
+/// #1596: a stale missing-ID unregister cannot unroute a later token restore.
+#[tokio::test(start_paused = true)]
+async fn missing_unregister_preserves_a_connection_restored_while_old_work_waits() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), coordinator.clone())
+            .await;
+    let mut fixture = correlated_reconnect_panic_fixture_with_server(server.clone()).await;
+    let pause = Arc::new(UnregisterPause {
+        player: fixture.reconnect_player_id,
+        reached: Notify::new(),
+        release: Notify::new(),
+    });
+    *coordinator.unregister_pause.lock().unwrap() = Some(pause.clone());
+    let mut unregister = Box::pin(server.unregister_client(&fixture.reconnect_player_id));
+    let pending = futures_util::poll!(&mut unregister).is_pending();
+    if pending {
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .unwrap();
+    }
+    server
+        .handle_reconnect(
+            &fixture.current_player_id,
+            &fixture.reconnect_player_id,
+            &fixture.room_id,
+            &fixture.token,
+        )
+        .await;
+    assert!(drain_queued_messages(&mut fixture.receiver)
+        .iter()
+        .any(|m| matches!(m.as_ref(), ServerMessage::Reconnected(_))));
+    pause.release.notify_one();
+    if pending {
+        unregister.await;
+    }
+    assert!(
+        server
+            .connection_manager
+            .has_client(&fixture.reconnect_player_id),
+        "stale unregister must not remove the restored socket"
+    );
+    assert_eq!(
+        server.get_client_room(&fixture.reconnect_player_id).await,
+        Some(fixture.room_id)
+    );
+    server.handle_ping(&fixture.reconnect_player_id).await;
+    assert!(matches!(
+        fixture.receiver.try_recv().unwrap().as_ref(),
+        ServerMessage::Pong
+    ));
+}
+
+/// #1594: repeated observers share work and cannot lose completion notifications.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_unregister_observers_share_one_lifecycle_wait() {
+    for cancel_observers in [false, true] {
+        let server = create_test_server().await;
+        let (id, _receiver) = register_client(&server, "127.0.0.1:48501".parse().unwrap()).await;
+        let lifecycle = server.client_lifecycle(&id).unwrap();
+        let held = lifecycle.lock().await;
+        let before = lifecycle.lock_attempt_count_for_test();
+        let mut observers = Vec::new();
+        for _ in 0..16 {
+            let mut observer = Box::pin(server.unregister_client(&id));
+            assert!(futures_util::poll!(&mut observer).is_pending());
+            observers.push(observer);
+        }
+        timeout(
+            Duration::from_secs(1),
+            lifecycle.wait_for_lock_attempt_after_for_test(before),
+        )
+        .await
+        .unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            lifecycle.lock_attempt_count_for_test() - before,
+            1,
+            "a socket needs one retained teardown, even when many observers arrive"
+        );
+        if !cancel_observers {
+            drop(held);
+            timeout(
+                Duration::from_secs(1),
+                futures_util::future::join_all(observers),
+            )
+            .await
+            .expect("all observers must learn that the shared teardown finished");
+        } else {
+            drop(observers);
+            drop(held);
+        }
+        timeout(Duration::from_secs(1), async {
+            while server.connection_manager.has_client(&id)
+                || server.metrics.active_connections.load(Ordering::Relaxed) != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.metrics.active_connections.load(Ordering::Relaxed), 0);
+    }
+}
+
+/// #1595: maintenance must finish a physical disconnect after an adapter panics.
+#[tokio::test(start_paused = true)]
+async fn maintenance_recovers_panicked_unregister_without_activity_expiry() {
+    for (enable_reconnection, after_registration) in [(true, false), (true, true), (false, true)] {
+        let inner = create_test_database().await;
+        let mut wrapper = DrainAfterCreateDatabase::new(inner);
+        wrapper.trigger_drain_after_create = false;
+        let database = Arc::new(wrapper);
+        let server = create_test_server_with_message_coordinator_and_lock(
+            ServerConfig {
+                enable_reconnection,
+                ping_timeout: Duration::ZERO,
+                room_cleanup_interval: Duration::from_secs(1),
+                ..ServerConfig::default()
+            },
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        )
+        .await;
+        let (host, mut host_rx) =
+            register_client(&server, "127.0.0.1:48502".parse().unwrap()).await;
+        let (peer, mut peer_rx) =
+            register_client(&server, "127.0.0.1:48503".parse().unwrap()).await;
+        let protocol = NegotiatedProtocol {
+            version: 3,
+            transports: vec![
+                crate::protocol::Transport::Relay,
+                crate::protocol::Transport::WebRtc,
+            ],
+            topologies: vec![
+                crate::protocol::Topology::Relay,
+                crate::protocol::Topology::Mesh,
+            ],
+        };
+        for (id, name) in [(host, "host"), (peer, "peer")] {
+            server.set_client_protocol(&id, protocol.clone());
+            server
+                .handle_join_room(
+                    &id,
+                    "unregister-retry".into(),
+                    Some("UNREG1".into()),
+                    name.into(),
+                    Some(2),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            server.handle_player_ready(&id).await;
+        }
+        server.handle_start_game(&host).await;
+        let room = server.get_client_room(&host).await.unwrap();
+        let token = drain_queued_messages(&mut peer_rx)
+            .into_iter()
+            .find_map(|message| {
+                if let ServerMessage::RoomJoined(payload) = message.as_ref() {
+                    payload.reconnection_token.clone()
+                } else {
+                    None
+                }
+            });
+        let _setup = drain_queued_messages(&mut host_rx);
+        if after_registration {
+            database.panic_rollback_once.store(true, Ordering::Release);
+        } else {
+            database
+                .panic_room_exists_once
+                .store(true, Ordering::Release);
+        }
+        server.unregister_client(&peer).await;
+        assert!(server.connection_manager.has_client(&peer));
+        let lifecycle = server.client_lifecycle(&peer).unwrap();
+        if enable_reconnection && after_registration {
+            database
+                .panic_rollback_always
+                .store(true, Ordering::Release);
+        }
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let maintenance = tokio::spawn({
+            let server = server.clone();
+            async move {
+                server
+                    .cleanup_task_until(async {
+                        let _ = stopped.await;
+                    })
+                    .await;
+            }
+        });
+        if enable_reconnection && after_registration {
+            timeout(Duration::from_secs(3), async {
+                while lifecycle.lock_attempt_count_for_test() < 3 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("maintenance must retain another failed teardown");
+            assert!(server.connection_manager.has_client(&peer));
+            server.handle_ping(&host).await;
+            assert!(drain_queued_messages(&mut host_rx)
+                .iter()
+                .any(|m| matches!(m.as_ref(), ServerMessage::Pong)));
+            database
+                .panic_rollback_always
+                .store(false, Ordering::Release);
+        }
+        let recovered = timeout(Duration::from_secs(3), async {
+            while server.connection_manager.has_client(&peer) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let _ = stop.send(());
+        maintenance.await.unwrap();
+        recovered.expect(
+            "a physical disconnect must not depend on another socket event or activity timeout",
+        );
+        assert!(!server
+            .database
+            .get_room_players(&room)
+            .await
+            .unwrap()
+            .iter()
+            .any(|p| p.id == peer));
+        let messages = drain_queued_messages(&mut host_rx);
+        assert_eq!(messages.iter().filter(|m| matches!(m.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == peer)).count(), 1);
+        assert_eq!(server.metrics.active_connections.load(Ordering::Relaxed), 1);
+        if !enable_reconnection {
+            continue;
+        }
+        let token = token.expect("join advertises the retry credential");
+        let (new_id, mut new_rx) =
+            register_client(&server, "127.0.0.1:48504".parse().unwrap()).await;
+        server.set_client_protocol(&new_id, protocol);
+        server.handle_reconnect(&new_id, &peer, &room, &token).await;
+        let messages = drain_queued_messages(&mut new_rx);
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m.as_ref(), ServerMessage::Reconnected(_))));
+        assert!(messages.iter().any(|m| matches!(m.as_ref(), ServerMessage::SessionPlan(plan) if plan.transport == crate::protocol::Transport::WebRtc && plan.peers.iter().any(|p| p.player_id == host))));
+        let generation = messages
+            .iter()
+            .find_map(|message| match message.as_ref() {
+                ServerMessage::SessionPlan(plan) => Some(plan.generation),
+                _ => None,
+            })
+            .unwrap();
+        let _opening = drain_queued_messages(&mut host_rx);
+        let offer = serde_json::json!({"sdp": "recovered-offer"});
+        server
+            .handle_signal_in_generation(&peer, host, generation, offer.clone())
+            .await;
+        let signal = host_rx.try_recv().unwrap();
+        assert!(
+            matches!(signal.as_ref(), ServerMessage::Signal { from, generation: received, signal } if *from == peer && *received == generation && *signal == offer)
+        );
+    }
 }

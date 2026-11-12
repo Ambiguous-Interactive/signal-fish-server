@@ -162,6 +162,9 @@ impl Drop for HeartbeatUpdateReservation<'_> {
 #[derive(Debug)]
 pub(crate) struct ClientLifecycle {
     transport_reports: tokio::sync::Mutex<()>,
+    unregister_running: std::sync::atomic::AtomicBool,
+    unregister_pending: std::sync::atomic::AtomicBool,
+    unregister_finished: tokio::sync::Notify,
     gate: Arc<tokio::sync::Mutex<()>>,
     player_id: std::sync::Mutex<PlayerId>,
     admission_pending: std::sync::atomic::AtomicBool,
@@ -171,10 +174,37 @@ pub(crate) struct ClientLifecycle {
     lock_attempt_notify: tokio::sync::Notify,
 }
 
+/// Release an interrupted teardown for a later maintenance attempt.
+pub(super) struct UnregisterAttempt {
+    lifecycle: Arc<ClientLifecycle>,
+    complete: bool,
+}
+
+impl UnregisterAttempt {
+    pub(super) fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for UnregisterAttempt {
+    fn drop(&mut self) {
+        self.lifecycle
+            .unregister_pending
+            .store(!self.complete, Ordering::Release);
+        self.lifecycle
+            .unregister_running
+            .store(false, Ordering::Release);
+        self.lifecycle.unregister_finished.notify_waiters();
+    }
+}
+
 impl ClientLifecycle {
     fn new(player_id: PlayerId) -> Self {
         Self {
             transport_reports: tokio::sync::Mutex::new(()),
+            unregister_running: std::sync::atomic::AtomicBool::new(false),
+            unregister_pending: std::sync::atomic::AtomicBool::new(false),
+            unregister_finished: tokio::sync::Notify::new(),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             player_id: std::sync::Mutex::new(player_id),
             admission_pending: std::sync::atomic::AtomicBool::new(false),
@@ -182,6 +212,35 @@ impl ClientLifecycle {
             lock_attempts: AtomicUsize::new(0),
             #[cfg(test)]
             lock_attempt_notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Admit one owned transaction for this physical socket.
+    pub(super) fn start_unregister(self: &Arc<Self>) -> Option<UnregisterAttempt> {
+        if self.unregister_running.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        self.unregister_pending.store(true, Ordering::Release);
+        Some(UnregisterAttempt {
+            lifecycle: Arc::clone(self),
+            complete: false,
+        })
+    }
+
+    pub(super) fn unregister_needs_retry(&self) -> bool {
+        self.unregister_pending.load(Ordering::Acquire)
+            && !self.unregister_running.load(Ordering::Acquire)
+    }
+
+    pub(super) async fn wait_for_unregister(&self) {
+        loop {
+            let finished = self.unregister_finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if !self.unregister_running.load(Ordering::Acquire) {
+                return;
+            }
+            finished.await;
         }
     }
 

@@ -914,6 +914,7 @@ pub struct EnhancedGameServer {
     expired_reconnect_workers: maintenance_workers::MaintenanceWorkers,
     session_repair_workers: maintenance_workers::MaintenanceWorkers,
     missing_room_workers: maintenance_workers::MaintenanceWorkers,
+    unregister_workers: maintenance_workers::MaintenanceWorkers,
     #[cfg(test)]
     fail_retain_room_publication_snapshot: AtomicBool,
     #[cfg(test)]
@@ -1447,6 +1448,7 @@ impl EnhancedGameServer {
             expired_reconnect_workers: maintenance_workers::MaintenanceWorkers::default(),
             session_repair_workers: maintenance_workers::MaintenanceWorkers::default(),
             missing_room_workers: maintenance_workers::MaintenanceWorkers::default(),
+            unregister_workers: maintenance_workers::MaintenanceWorkers::default(),
             #[cfg(test)]
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
             #[cfg(test)]
@@ -1990,19 +1992,11 @@ impl EnhancedGameServer {
         self.unregister_client(player_id).await;
     }
 
-    /// Unregister a client connection
+    /// Unregister the current socket, sharing any teardown already in progress.
+    /// A missing socket is a no-op. Maintenance retries an interrupted attempt.
     pub async fn unregister_client(self: &Arc<Self>, player_id: &PlayerId) {
         if let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) {
             self.unregister_client_with_lifecycle(lifecycle).await;
-        } else {
-            let server = Arc::clone(self);
-            let player_id = *player_id;
-            let task = tokio::spawn(async move {
-                server.unregister_client_locked(&player_id).await;
-            });
-            if let Err(error) = task.await {
-                tracing::error!(%player_id, %error, "Owned client unregister transaction failed");
-            }
         }
     }
 
@@ -2031,6 +2025,10 @@ impl EnhancedGameServer {
         self: &Arc<Self>,
         lifecycle: Arc<ClientLifecycle>,
     ) {
+        let Some(mut attempt) = lifecycle.start_unregister() else {
+            lifecycle.wait_for_unregister().await;
+            return;
+        };
         let server = Arc::clone(self);
         let task = tokio::spawn(async move {
             let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
@@ -2039,9 +2037,16 @@ impl EnhancedGameServer {
                 .connection_manager
                 .lifecycle_matches(&player_id, &lifecycle)
             {
+                attempt.complete();
                 return;
             }
             server.unregister_client_locked(&player_id).await;
+            if !server
+                .connection_manager
+                .lifecycle_matches(&player_id, &lifecycle)
+            {
+                attempt.complete();
+            }
         });
         if let Err(error) = task.await {
             tracing::error!(%error, "Owned client unregister transaction failed");

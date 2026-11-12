@@ -808,6 +808,7 @@ impl EnhancedGameServer {
                 () = &mut housekeeping => return,
                 () = async {
                     tokio::join!(
+                        self.retry_pending_unregistrations(),
                         self.retry_pending_session_replans(),
                         self.cleanup_pending_durable_player_detaches(),
                         self.cleanup_expired_reconnections(),
@@ -818,6 +819,40 @@ impl EnhancedGameServer {
                 } => {}
             }
         }
+    }
+
+    /// Retry interrupted socket teardown without waiting for activity expiry.
+    async fn retry_pending_unregistrations(self: &Arc<Self>) {
+        let candidates = self
+            .connection_manager
+            .client_ids()
+            .into_iter()
+            .filter_map(|player| {
+                let lifecycle = self.connection_manager.client_lifecycle(&player)?;
+                lifecycle
+                    .unregister_needs_retry()
+                    .then_some((RoomId::nil(), player))
+            })
+            .collect();
+        self.unregister_workers
+            .run(
+                candidates,
+                MaintenanceWorkers::deadline(),
+                None,
+                |(_, player)| {
+                    let server = Arc::clone(self);
+                    async move {
+                        if let Some(lifecycle) = server.connection_manager.client_lifecycle(&player)
+                        {
+                            if lifecycle.unregister_needs_retry() {
+                                server.unregister_client_with_lifecycle(lifecycle).await;
+                            }
+                        }
+                        false
+                    }
+                },
+            )
+            .await;
     }
 
     /// Close inactive connections independently of room storage housekeeping.
