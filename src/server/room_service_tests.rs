@@ -2543,7 +2543,13 @@ impl MessageCoordinator for DrainTriggerCoordinator {
             if !should_commit() {
                 return Ok(DeliveryOutcome::Canceled);
             }
-            match delivery.sender.try_send(message, Some(room_id)) {
+            let Some(result) = delivery
+                .close
+                .commit_if_open(|| delivery.sender.try_send(message, Some(room_id)))
+            else {
+                return Ok(DeliveryOutcome::Canceled);
+            };
+            match result {
                 Ok(sent) if sent.enqueued => DeliveryOutcome::Delivered,
                 Ok(sent) if sent.losses > 0 => DeliveryOutcome::AccountedDrop,
                 Ok(_) => DeliveryOutcome::Canceled,
@@ -18062,24 +18068,30 @@ async fn maintenance_recovers_panicked_unregister_without_activity_expiry() {
 /// #1595 review: retain the confirmed authority removal before terminal unroute.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_retains_departure_before_unroute_callback() {
-    assert_unregister_unroute_panic_recovery(1, false).await;
+    assert_unregister_unroute_panic_recovery(1, false, false).await;
 }
 
 /// #1595 review: retain the terminal tail after assignment clear has committed.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_retains_departure_after_unroute_callback() {
-    assert_unregister_unroute_panic_recovery(2, false).await;
+    assert_unregister_unroute_panic_recovery(2, false, false).await;
 }
 
 /// A repaired departure must not clear an authority granted during the retry wait.
 #[tokio::test(start_paused = true)]
 async fn unregister_retry_preserves_a_new_authority_after_unroute_panic() {
     for fault in [1, 2] {
-        assert_unregister_unroute_panic_recovery(fault, true).await;
+        assert_unregister_unroute_panic_recovery(fault, true, false).await;
     }
 }
 
-async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool) {
+/// A physically departing source cannot admit a second room while retry is pending.
+#[tokio::test(start_paused = true)]
+async fn unregister_retry_cannot_reuse_the_socket_for_a_new_membership() {
+    assert_unregister_unroute_panic_recovery(2, false, true).await;
+}
+
+async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool, reuse_socket: bool) {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
         DrainTrigger::PauseAuthorityTransferAnnouncement,
     ));
@@ -18129,12 +18141,39 @@ async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool) {
         .store(fault, Ordering::Release);
     fixture.server.unregister_client(&fixture.leaver).await;
     assert_eq!(coordinator.unroute_panic_once.load(Ordering::Acquire), 0);
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        left_before + u64::from(fault == 2),
+        "only a captured tail counts before retry"
+    );
+    if reuse_socket {
+        fixture
+            .server
+            .handle_join_room(
+                &fixture.leaver,
+                "late-unregister-join".into(),
+                Some("LATE01".into()),
+                "late actor".into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(
+            fixture.server.get_client_room(&fixture.leaver).await,
+            None,
+            "a physically departing socket must not publish another membership"
+        );
+    }
     if superseded {
         fixture
             .server
             .handle_authority_request(&fixture.survivor, true)
             .await;
     }
+    let left_before_retry = fixture.server.metrics.players_left.load(Ordering::Relaxed);
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let maintenance = tokio::spawn({
         let server = fixture.server.clone();
@@ -18200,7 +18239,8 @@ async fn assert_unregister_unroute_panic_recovery(fault: u8, superseded: bool) {
     );
     assert_eq!(
         fixture.server.metrics.players_left.load(Ordering::Relaxed),
-        left_before + 1
+        left_before_retry + u64::from(fault == 1),
+        "retry counts the old departure only if its callback had not run"
     );
     let (new_id, mut receiver) =
         register_client(&fixture.server, "127.0.0.1:48505".parse().unwrap()).await;

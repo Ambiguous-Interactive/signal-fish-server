@@ -66,8 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Recover live P2P disconnect cleanup with exact departure events, share repeated teardown, and preserve restored peer routing
-  (#1594, #1595, #1596).
+- Recover exact live P2P departures after cleanup failures, share repeated teardown, and prevent closing sockets from joining
+  new rooms or removing restored peer routes (#1594, #1595, #1596).
 - Retry delayed authority notifications after maintenance publication fails (#1592).
 - Preserve P2P reconnect retries and authority updates, and complete pending room cleanup after recovery fails (#1590).
   Keep an existing reserved seat available when reconnection fails.

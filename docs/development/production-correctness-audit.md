@@ -16230,3 +16230,21 @@ Final local review validation: 60 all-feature controls pass in
 `4b091475-dc5e-4cb0-b321-1e009ca845ad` and
 `7ca75e3b-1ec7-4033-9855-8f09d01b86a9`. Formatting, strict full Clippy, Markdown,
 doc consistency, and the production panic-pattern scan pass.
+
+F336 independent review found a public-library reuse history after the callback
+panic. The socket remained open and could join a second room while the old
+departure journal waited. Unregister now pins the physical close after acquiring
+and validating its lifecycle, before durable work. The fixture admission now uses
+the same close-commit gate as the trait fallback. With only the new pin omitted,
+the conforming late-join control fails in
+`e64f069e-d288-4a48-8d7a-d192b195ed1e`.
+
+The corrected source passes all 61 selected controls in
+`ae137cd0-f711-4dfe-9ef2-33f122411b3b`. Each callback history checks the old tail count
+before and after retry; the late failed admission retains its separate existing
+rollback count. Both assertion-policy scans and strict full Clippy pass.
+Independent close/rekey controls pass in
+`aa9e09e5-aabb-4be2-ba3f-90e9c509ce1e`: the first close reason stays pinned,
+shutdown retains priority, and a transient closing socket cannot reassign.
+A reconnect that committed before unregister acquired the lifecycle gate still
+finishes before that physical socket is closed.

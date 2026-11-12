@@ -2040,6 +2040,9 @@ impl EnhancedGameServer {
                 attempt.complete();
                 return;
             }
+            server
+                .connection_manager
+                .request_close_for(&player_id, CloseReason::Unregistered);
             server.unregister_client_locked(&player_id).await;
             if !server
                 .connection_manager
