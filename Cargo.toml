@@ -319,6 +319,11 @@ name = "relay_serialization_runtime"
 harness = false
 required-features = ["allocation-tracking"]
 
+[[bench]]
+name = "relay_compression_frames"
+harness = false
+required-features = ["allocation-tracking"]
+
 [profile.dev]
 # Line tables instead of full debug info (issue #512, session 266): backtraces
 # keep file:line resolution, but emitting and linking debuginfo shrinks, which

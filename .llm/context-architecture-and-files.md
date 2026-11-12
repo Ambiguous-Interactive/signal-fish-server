@@ -164,7 +164,8 @@ close attribution, or the correlated result. Evictions acquire logical player ga
 in UUID order before either physical lifecycle; disjoint pairs remain independent.
 Keep the acting lifecycle through the correlated result and release idle player gates.
 
-Room signal admission shares a reader fence across independent source connections.
+Room signal admission and read-only transport-report snapshots share a reader fence
+across independent source connections. Reports release the fence before fan-out.
 Room mutations and SessionPlan publications retain the exclusive writer fence.
 Each admitted signal owns its source lifecycle and shared fence through delivery;
 queued writers block later readers. Source lifecycle serialization keeps that

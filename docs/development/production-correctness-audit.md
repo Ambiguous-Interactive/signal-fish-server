@@ -16859,3 +16859,44 @@ The wire schema, commands, target checks and per-source order stay unchanged.
 Signals from different source connections can now progress together, so
 runtime timing qualification remains required in Rust #300, .NET #153 and
 Godot #578. Server controls do not establish SDK runtime parity or a migration.
+
+### F349: keep read-only transport reports out of the room writer queue
+
+Session 688 starts at `bad46034`. The sweep found 45 existing open issues and
+no open PR. This repair advances existing #826 and #636. New #1619 names the
+specific stall and does not count as an existing issue.
+
+In a finalized three-player Mesh/WebRTC room, Charlie's offer waits on Alice's
+full classified queue while retaining shared signal admission. Alice's accepted
+transport report then requests exclusive room admission for its read-only
+recipient snapshot. That queued writer blocks Bob's offer to healthy Charlie.
+Original source fails the healthy offer's 10 ms virtual deadline in Nextest
+`4010fea4-4bbd-4d7e-815c-0900772587b4`.
+
+Reports now share snapshot admission with independent signals. Room changes
+remain exclusive. The source lifecycle and report-order guard remain; fan-out
+still releases the snapshot fence before delivery and revalidates membership
+and protocol support at queue commit. The exact healthy offer and both transport
+notifications arrive before Alice reads. Charlie's later candidate still waits
+behind his earlier offer. This history passes in `d870179a`.
+
+Independent review requested a preservation control for the snapshot fence.
+Holding the room writer stops report fan-out even after caller cancellation;
+release delivers the exact notification once. Removing the fence makes that
+control fail in `8f615772`; restored source passes. The 33-slow-recipient control
+also retains one five-second grace window across concurrent fan-out groups.
+
+Large reports now use nested groups of 16 concurrent sends above 30 recipients.
+Both levels await every send before reducing results; success cannot cancel an
+unfinished leg. The complete allocation fixture adds 31/32-member threshold
+cases and a configured 255-member case, retaining exact notifications, all
+recipients, changed/duplicate states, scheduler controls, and the prior small-room
+saving requirement. Old fan-out fails its new growth ceiling in `345ae901`;
+the repair passes. An earlier invalid-limit setup failure is retained separately
+and is not a source-fault proof. See the ARM capacity audit for measurements.
+
+Rust `client_core.rs` at blob `ef296f63`, .NET's state machine at revision
+`e467c871`, and Godot `sf_events.gd` at blob `5c4e66e6` were inspected. The wire
+schema and commands stay unchanged. Cross-source timing qualification remains
+open in Rust #300, .NET #153, and Godot #578. Server controls do not prove SDK
+runtime parity. The broader #826 and #636 campaigns remain open.

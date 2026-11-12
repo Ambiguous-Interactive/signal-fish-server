@@ -80,6 +80,7 @@ format. The corpus is synthetic. Host load can affect timing. Results do not
 establish server throughput, cross-language costs, or a new encoding adoption.
 The [client-language study](CROSS_LANGUAGE.md) supplies the #771 measurements.
 The [adoption decision](ADOPTION.md) applies the separate #772 gate.
+The [relay compression decision](COMPRESSION.md) covers the separate #773 study.
 
 ## Generated bindings
 
