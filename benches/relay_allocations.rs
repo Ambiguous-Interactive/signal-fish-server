@@ -948,8 +948,79 @@ fn assert_routed_rosters_reuse_storage() {
     }
 }
 
+/// Healthy fallback relays need only the trait future and message carrier.
+fn assert_healthy_relay_fallback_completion_cost() {
+    let runtime = Builder::new_current_thread().enable_time().build().unwrap();
+    runtime.block_on(async {
+        let mut bounded = true;
+        for recipients in [0, 1, 3] {
+            let coordinator = InMemoryMessageCoordinator::new();
+            let room = RoomId::new_v4();
+            let source = PlayerId::new_v4();
+            let (source_sender, mut source_receiver) = tokio::sync::mpsc::channel(1);
+            coordinator.register_local_client(source, Some(room), ClientDeliveryHandle::new(source_sender, ConnectionCloseSignal::detached())).await.unwrap();
+            let mut receivers = Vec::new();
+            for _ in 0..recipients {
+                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                coordinator.register_local_client(
+                    PlayerId::new_v4(), Some(room),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                ).await.unwrap();
+                receivers.push(receiver);
+            }
+            let expected = ServerMessage::GameDataBinary {
+                from_player: source,
+                encoding: GameDataEncoding::Json,
+                payload: Bytes::from_static(br#"{"exact":"fallback"}"#),
+                seq: Some(1),
+                epoch: Some(1),
+            };
+            let expected_wire = serde_json::to_value(&expected).unwrap();
+            let mut measured = None;
+            for warmup in [true, false] {
+                let region = Region::new(GLOBAL);
+                for _ in 0..128 {
+                    let mut message = Some(expected.clone());
+                    let mut build = || message.take();
+                    match coordinator.enqueue_relay_broadcast_after_contention(&room, &source, &mut build).await {
+                        signal_fish_server::coordination::RelayEnqueueOutcome::Finished(result) => result.unwrap(),
+                        signal_fish_server::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => completion.await.unwrap(),
+                        _ => panic!("a completed relay cannot be ordering-blocked"),
+                    }
+                    for receiver in &mut receivers {
+                        let received = receiver.try_recv().unwrap();
+                        assert!(matches!(received.as_ref(), ServerMessage::GameDataBinary { payload, seq: Some(1), epoch: Some(1), .. } if payload.as_ref() == br#"{"exact":"fallback"}"#));
+                    }
+                }
+                let stats = region.change();
+                if !warmup { measured = Some(stats); }
+            }
+            let stats = measured.unwrap();
+            eprintln!("healthy_relay_fallback recipients={recipients} relays=128 allocations={} bytes={}", stats.allocations, stats.bytes_allocated);
+            for receiver in &mut receivers {
+                assert!(receiver.try_recv().is_err());
+            }
+            let mut message = Some(expected);
+            let mut build = || message.take();
+            match coordinator.enqueue_relay_broadcast_after_contention(&room, &source, &mut build).await {
+                signal_fish_server::coordination::RelayEnqueueOutcome::Finished(result) => result.unwrap(),
+                signal_fish_server::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => completion.await.unwrap(),
+                _ => panic!("final relay cannot be ordering-blocked"),
+            }
+            for receiver in &mut receivers {
+                assert_eq!(serde_json::to_value(receiver.try_recv().unwrap().as_ref()).unwrap(), expected_wire);
+            }
+            bounded &= stats.allocations == 128 * 2;
+            assert!(source_receiver.try_recv().is_err());
+            assert_eq!(stats.reallocations, 0);
+        }
+        assert!(bounded, "healthy fallback must allocate no completion task");
+    });
+}
+
 /// Enforce component allocation ceilings and report repeated relay measurements.
 fn main() {
+    assert_healthy_relay_fallback_completion_cost();
     assert_routed_rosters_reuse_storage();
     assert_full_replay_rings_reuse_storage();
     assert_readiness_snapshots_reuse_their_id_storage();

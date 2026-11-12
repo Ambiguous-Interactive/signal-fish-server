@@ -16469,3 +16469,78 @@ overlapping library calls when invocation order matters.
 After the allocation repair, all 71 selected all-feature controls pass in
 `f54b629d-094d-4539-baec-00d23cac0f76`; all 47 source-policy controls pass in
 `ebbdc122-1aa9-4b02-b353-8dc3f11e93d4`. Strict full Clippy and formatting also pass.
+
+### Session 683: existing live P2P issue sweep
+
+Baseline: `3e7b16df`. The sweep inspected all 48 existing open issues and
+prioritized #1352, #826, and #636. It also reproduced the narrow tooling defect
+in #1477. No new server gameplay defect is established by the checks below.
+
+For #1352, matched plain and LLVM-instrumented controls retained two rooms with
+two players, 20 sends per second, 96-byte reliable JSON payloads, a 200 ms warmup,
+1,200 ms duration, 50% room replacement, the 400/200/500 ms churn schedule,
+500 ms lag bound, and two-second drain grace. Runs
+`c41ec683-0c13-477a-934f-cef206289014` and
+`69542175-6c76-48b7-a7e6-7e89a848f712` both sent all 112 messages with no
+outstanding obligations. Both replacement peers reached incarnation 3 and all
+peer tasks returned. Replay validation passed. Local artifacts and binary hashes
+are retained in `progress/session-683-replacement/`. The historical source drops
+both socket halves synchronously; it does not await a close handshake. These
+passes do not attribute the original timeout. Keep #1352 open for a recurrence
+with the current per-peer stage capture.
+
+The #826 source review inspected signal recipient incarnation checks, endpoint
+metadata and plan commit ordering, owned transport-status fanout, pending host
+repair revisions, and owned authority results. Four focused canceled-departure,
+current-generation repair, slow-repair, and authority publication controls pass
+in `9bbdf210-3006-4e6f-8996-83fbf6e062fb`. Peer and seat recovery already run
+independently of serial storage housekeeping. No new defect was confirmed in
+these seams. This evidence does not complete the broader audit.
+
+The #1477 fixture reproduces a missing-item exception for a present Unix hidden
+regular file. Item lookup now includes hidden entries before the existing
+regular-file and exact-blob checks. The fixture covers Staged, Worktree, and
+Comparison modes, plus missing files, content drift, and hidden symlink refusal.
+The focused Rust fixture passes in `c5a82295-bef8-4e3e-863f-60b630390014`.
+
+The main workflow sweep also found a current failed scheduled check relevant to
+issue #1474: Advanced Safety run `43139696641`, Miri server job `130923466332`, fails
+`delayed_legacy_rollback_preserves_a_later_published_admission`. Its cleanup
+observer returns zero completed jobs while the test expects one. A held-storage
+control reproduces that mismatch in
+`62f6f28b-fd0e-48cd-92e2-37b91428d3bc`. The repair checks the actual contract:
+the observer returns zero while storage is held, the pending obligation remains,
+and the released worker completes exactly once with the original adopted-room
+and membership assertions intact. Three in-memory controls use paused Tokio time.
+They pass normally in `4d2aa0e5-ea72-4128-8943-817287151357` and under pinned
+`nightly-2026-08-01` Miri without added ignores or longer production deadlines.
+This repairs a test assumption. It does not establish a server gameplay defect
+or explain the older cancellation history in #1474.
+
+For #636, the contended relay handoff started an owned completion task even when
+all recipient queues had already committed and no cleanup remained. The repair
+returns completion directly in that case. Pending delivery and slow-consumer
+cleanup retain their existing owned task and source ordering guard. The private
+result keeps the same three states; no public enum or wire format changes.
+The corrected classified/legacy, JSON/binary, zero/one/three-recipient matrix
+fails with only the shortcut disabled in
+`1d3bca9d-07aa-4901-b838-ef87034fe0d0`: exact queue delivery succeeds, but one
+unnecessary task remains. Seven final contention, cancellation, ordering, rejoin,
+and replacement controls pass in `db69bf3c-f2c3-41c9-b8dc-8f62c8f5c398`.
+The earlier invalid classified baseline fixture is excluded from defect evidence.
+
+The release allocation control uses a seated source, healthy compatibility
+queues, static binary bytes, a warmup, and 128 measured relays per cohort. At
+zero, one, and three recipients, each baseline uses 640 allocations and 161,792
+bytes; each repaired cohort uses 256 allocations and 71,680 bytes. This saves
+three allocations and 704 bytes per fallback relay. These are allocation costs
+for the compatibility-queue fallback seam, not end-to-end latency or server
+capacity results. The separate queue matrix proves task removal for classified
+queues. All existing component allocation ceilings pass unchanged.
+Independent source and regression reviews found no blocking issue.
+
+Rust, .NET, and Godot clients need no migration for this optimization. The server
+changes only its internal completion path after the same messages enter the same
+queues. Public outcomes, payloads, sequence stamps, recipient selection, and
+cancellation ownership remain unchanged. This does not qualify the outstanding
+SDK timing work from earlier sessions.

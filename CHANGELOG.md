@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server work for gameplay relays that finish after routing contention (#636).
 - **Breaking:** Add an `OrderingBlocked` outcome to the public relay handoff enums for custom server integrations (#1605).
 - **Breaking:** Require storage adapters to implement `lease_room_readiness` and return `bool` from `transition_room_to_lobby`.
 - **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority

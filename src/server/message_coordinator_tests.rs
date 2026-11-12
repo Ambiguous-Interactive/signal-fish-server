@@ -1055,6 +1055,138 @@ fn spawn_contended_game_data_broadcast(
 }
 
 #[tokio::test]
+async fn healthy_contention_fallback_finishes_without_a_completion_task() {
+    for kind in [ControlQueueKind::Classified, ControlQueueKind::Legacy] {
+        for binary in [false, true] {
+            for recipients in [3, 1, 0] {
+                let coordinator = InMemoryMessageCoordinator::new();
+                let room = RoomId::new_v4();
+                let source = PlayerId::new_v4();
+                let (source_sender, mut source_receiver) = mpsc::channel(2);
+                coordinator
+                    .register_local_client(
+                        source,
+                        Some(room),
+                        ClientDeliveryHandle::new(source_sender, ConnectionCloseSignal::detached()),
+                    )
+                    .await
+                    .unwrap();
+                let mut receivers = Vec::new();
+                for _ in 0..recipients {
+                    let (handle, receiver) = match kind {
+                        ControlQueueKind::Legacy => {
+                            let (sender, receiver) = mpsc::channel(2);
+                            (
+                                ClientDeliveryHandle::new(
+                                    sender,
+                                    ConnectionCloseSignal::detached(),
+                                ),
+                                ControlReceiver::Legacy(receiver),
+                            )
+                        }
+                        ControlQueueKind::Classified => {
+                            let (sender, mut receiver) =
+                                crate::coordination::outbound_queue::channel(2, 2);
+                            sender.set_protocol_version(3);
+                            sender
+                                .try_enqueue_transition(
+                                    Arc::new(ServerMessage::SpectatorJoined(Box::new(
+                                        SpectatorJoinedPayload {
+                                            room_id: room,
+                                            room_code: "FALL01".into(),
+                                            spectator_id: PlayerId::nil(),
+                                            game_name: "fallback-control".into(),
+                                            current_players: vec![],
+                                            current_spectators: vec![],
+                                            lobby_state: LobbyState::Lobby,
+                                            reason: None,
+                                        },
+                                    ))),
+                                    1,
+                                )
+                                .unwrap();
+                            receiver.try_recv().unwrap();
+                            let mut handle = ClientDeliveryHandle::classified(
+                                sender,
+                                ConnectionCloseSignal::detached(),
+                            );
+                            handle.sender = handle.sender.next_generation();
+                            (handle, ControlReceiver::Classified(receiver))
+                        }
+                    };
+                    coordinator
+                        .register_local_client(PlayerId::new_v4(), Some(room), handle)
+                        .await
+                        .unwrap();
+                    receivers.push(receiver);
+                }
+                let expected = if binary {
+                    ServerMessage::GameDataBinary {
+                        from_player: source,
+                        encoding: GameDataEncoding::Json,
+                        payload: bytes::Bytes::from_static(br#"{"exact":"fallback"}"#),
+                        seq: Some(1),
+                        epoch: Some(1),
+                    }
+                } else {
+                    contended_game_data(source)
+                };
+                let mut message = Some(expected.clone());
+                let calls = AtomicUsize::new(0);
+                let mut build = || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    message.take()
+                };
+                let routes = coordinator.room_players.write().await;
+                let mut fallback = coordinator
+                    .enqueue_relay_broadcast_after_contention(&room, &source, &mut build);
+                assert!(futures_util::poll!(&mut fallback).is_pending());
+                assert_eq!(calls.load(Ordering::Relaxed), 0);
+                drop(routes);
+                let tasks_before = tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks();
+                let result = fallback.await;
+                assert_eq!(calls.load(Ordering::Relaxed), 1);
+                for receiver in &mut receivers {
+                    let received = match receiver {
+                        ControlReceiver::Legacy(receiver) => {
+                            serde_json::to_value(receiver.try_recv().unwrap().as_ref()).unwrap()
+                        }
+                        ControlReceiver::Classified(receiver) => {
+                            let queued = receiver.try_recv().unwrap();
+                            assert_eq!(queued.class(), Some(DeliveryClass::Reliable));
+                            match queued.payload {
+                                crate::coordination::outbound_queue::OutboundPayload::Data(
+                                    delivery,
+                                ) => serde_json::to_value(delivery.message()).unwrap(),
+                                crate::coordination::outbound_queue::OutboundPayload::Message(
+                                    message,
+                                ) => serde_json::to_value(message.as_ref()).unwrap(),
+                                other => panic!("expected classified gameplay data, got {other:?}"),
+                            }
+                        }
+                    };
+                    assert_eq!(received, serde_json::to_value(&expected).unwrap());
+                    receiver.assert_empty("healthy fallback delivers exactly once");
+                }
+                assert_eq!(tokio::runtime::Handle::current().metrics().num_alive_tasks(), tasks_before,
+                    "completed queues must not create a completion task: recipients={recipients}, kind={kind:?}, binary={binary}");
+                assert!(matches!(
+                    result,
+                    crate::coordination::RelayEnqueueOutcome::Finished(Ok(()))
+                ));
+                assert!(coordinator.relay_order_gates.try_write(source).is_some());
+                assert!(matches!(
+                    source_receiver.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn immediate_owned_broadcast_preserves_builder_across_room_routing_contention() {
     let metrics = Arc::new(ServerMetrics::new());
     let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
