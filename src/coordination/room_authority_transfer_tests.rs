@@ -1,5 +1,194 @@
 use super::*;
 
+enum RefusalReceiver {
+    Legacy(mpsc::Receiver<Arc<ServerMessage>>),
+    Classified(crate::coordination::outbound_queue::OutboundReceiver),
+}
+
+impl RefusalReceiver {
+    async fn recv(&mut self) -> Arc<ServerMessage> {
+        let receive = async {
+            match self {
+                Self::Legacy(receiver) => receiver.recv().await.unwrap(),
+                Self::Classified(receiver) => {
+                    let message = receiver.recv().await.unwrap().unwrap();
+                    let crate::coordination::outbound_queue::OutboundPayload::Message(message) =
+                        message.payload
+                    else {
+                        panic!("expected a control message");
+                    };
+                    message
+                }
+            }
+        };
+        timeout(Duration::from_secs(1), receive)
+            .await
+            .expect("the refusal response must arrive after its queue drains")
+    }
+
+    fn assert_empty(&mut self) {
+        match self {
+            Self::Legacy(receiver) => {
+                let pending = receiver.try_recv();
+                assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+            }
+            Self::Classified(receiver) => {
+                let pending = receiver.try_recv();
+                assert!(matches!(
+                    pending,
+                    Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+                ));
+            }
+        }
+    }
+}
+
+/// #826: a refusal must not retain room publication while its recipient stops reading.
+#[tokio::test(start_paused = true)]
+async fn authority_denial_backpressure_releases_healthy_room_operations() {
+    for (classified, cancel_caller, denial) in [false, true].into_iter().flat_map(|classified| {
+        [false, true].into_iter().flat_map(move |cancel_caller| {
+            [
+                AuthorityDenial::AlreadyHeld,
+                AuthorityDenial::NotHeld,
+                AuthorityDenial::StorageError,
+            ]
+            .into_iter()
+            .map(move |denial| (classified, cancel_caller, denial))
+        })
+    }) {
+        let database = Arc::new(InMemoryDatabase::new());
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let messages = Arc::new(
+            crate::server::InMemoryMessageCoordinator::with_delivery_policy(
+                Duration::from_secs(30),
+                metrics.clone(),
+            ),
+        );
+        let authority = PlayerId::from_u128(1);
+        let requester = PlayerId::from_u128(2);
+        let room = database
+            .create_room(
+                "authority-refusal".into(),
+                None,
+                4,
+                true,
+                authority,
+                "relay".into(),
+                "test".into(),
+                None,
+            )
+            .await
+            .unwrap();
+        database
+            .add_player_to_room(
+                &room.id,
+                player_fixture(requester, "requester", false, None),
+            )
+            .await
+            .unwrap();
+        let (handle, mut receiver) = if classified {
+            let (sender, receiver) = crate::coordination::outbound_queue::channel(1, 1);
+            (
+                ClientDeliveryHandle::classified(sender, ConnectionCloseSignal::detached()),
+                RefusalReceiver::Classified(receiver),
+            )
+        } else {
+            let (sender, receiver) = mpsc::channel(1);
+            (
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                RefusalReceiver::Legacy(receiver),
+            )
+        };
+        messages
+            .register_local_client(requester, Some(room.id), handle)
+            .await
+            .unwrap();
+        messages
+            .send_to_player(&requester, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+        if denial == AuthorityDenial::StorageError {
+            database.fail_next_request_room_authority_for_test();
+        }
+        let replay = Arc::new(crate::reconnection::ReconnectionManager::new(
+            30,
+            16,
+            metrics.clone(),
+        ));
+        replay
+            .register_disconnection(PlayerId::from_u128(3), room.id, false, None, 0)
+            .await;
+        let coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+            messages.clone(),
+            database.clone(),
+            Some(replay.clone()),
+        ));
+        let task_coordinator = coordinator.clone();
+        let request = tokio::spawn(async move {
+            task_coordinator
+                .handle_authority_request(&room.id, &requester, denial != AuthorityDenial::NotHeld)
+                .await
+        });
+        timeout(Duration::from_secs(1), async {
+            while metrics
+                .websocket_backpressure_events
+                .load(Ordering::Acquire)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the authority refusal reaches backpressure");
+        assert!(
+            !request.is_finished(),
+            "the refusal must wait for the full recipient queue"
+        );
+        let gate = timeout(
+            Duration::from_millis(10),
+            messages.lock_room_event_mutation(&room.id),
+        )
+        .await
+        .expect("a backpressured authority refusal must release room publication");
+        assert_eq!(
+            database
+                .get_room_by_id(&room.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .authority_player,
+            Some(authority)
+        );
+        drop(gate);
+        if cancel_caller {
+            request.abort();
+        }
+        assert!(matches!(
+            receiver.recv().await.as_ref(),
+            ServerMessage::Pong
+        ));
+        if cancel_caller {
+            assert!(request.await.unwrap_err().is_cancelled());
+        } else {
+            assert_eq!(
+                request.await.unwrap().unwrap(),
+                AuthorityOutcome::Denied(denial)
+            );
+        }
+        let reply = receiver.recv().await;
+        assert!(
+            matches!(reply.as_ref(), ServerMessage::AuthorityResponse { granted: false, reason: Some(reason), error_code: Some(code) } if reason == denial.reason() && *code == denial.error_code())
+        );
+        receiver.assert_empty();
+        assert!(replay
+            .get_missed_events(&room.id, 0)
+            .await
+            .events
+            .is_empty());
+    }
+}
+
 /// Accepted transfers keep storage, recipient flags and replay in agreement.
 #[tokio::test]
 async fn authority_transfer_commits_storage_before_live_and_replay_events() {

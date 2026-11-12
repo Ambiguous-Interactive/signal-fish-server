@@ -1465,7 +1465,7 @@ pub struct InMemoryDatabase {
     /// reconnect authority grant fails after membership restored, so the
     /// attempt must complete degraded (live member, vacant role) with the
     /// next reconnect re-running the grant.
-    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg(test)]
     fail_request_room_authority_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     pause_publish_room_once: std::sync::atomic::AtomicBool,
@@ -1800,7 +1800,7 @@ impl InMemoryDatabase {
             fail_delete_room_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_add_player_to_room_once: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(all(test, signal_fish_repository_tests))]
+            #[cfg(test)]
             fail_request_room_authority_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             pause_publish_room_once: std::sync::atomic::AtomicBool::new(false),
@@ -2133,7 +2133,7 @@ impl InMemoryDatabase {
     /// Arms the one-shot storage-failure injection for the next
     /// `request_room_authority` call (see the `fail_request_room_authority_once`
     /// field doc).
-    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg(test)]
     pub(crate) fn fail_next_request_room_authority_for_test(&self) {
         self.fail_request_room_authority_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3090,7 +3090,7 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
-        #[cfg(all(test, signal_fish_repository_tests))]
+        #[cfg(test)]
         if self
             .fail_request_room_authority_once
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -3098,7 +3098,6 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::bail!("injected request_room_authority failure for test");
         }
         let mut rooms = self.rooms.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             // Check if room supports authority
             if !room.supports_authority {
@@ -3119,6 +3118,7 @@ impl GameDatabase for InMemoryDatabase {
                 }
 
                 // Grant authority to the requesting player
+                let mut liveness = self.room_liveness_monotonic.write().await;
                 room.set_authority(Some(*player_id));
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
@@ -3136,6 +3136,7 @@ impl GameDatabase for InMemoryDatabase {
                 }
 
                 // Release authority
+                let mut liveness = self.room_liveness_monotonic.write().await;
                 room.set_authority(None);
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
@@ -5920,6 +5921,112 @@ mod tests {
             );
             assert_eq!(after.game_finalized_at, before.game_finalized_at);
             assert!(matches!(liveness[&room.id], RoomLiveness::AgedFor(_)));
+        }
+    }
+
+    /// #826: refused authority requests do not need the room-liveness write lock.
+    #[tokio::test]
+    async fn refused_authority_requests_do_not_wait_for_room_liveness() {
+        for denial in [
+            AuthorityDenial::NotSupported,
+            AuthorityDenial::AlreadyHeld,
+            AuthorityDenial::NotAMember,
+            AuthorityDenial::NotHeld,
+            AuthorityDenial::RoomNotFound,
+        ] {
+            let db = InMemoryDatabase::new();
+            let member = Uuid::from_u128(1);
+            let room = db
+                .create_room(
+                    "refusal-lock".into(),
+                    None,
+                    4,
+                    denial != AuthorityDenial::NotSupported,
+                    member,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            if denial == AuthorityDenial::NotHeld {
+                db.request_room_authority(&room.id, &member, false)
+                    .await
+                    .unwrap();
+            }
+            let room_id = if denial == AuthorityDenial::RoomNotFound {
+                Uuid::nil()
+            } else {
+                room.id
+            };
+            let player = if denial == AuthorityDenial::NotAMember {
+                Uuid::nil()
+            } else {
+                member
+            };
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let liveness = db.room_liveness_monotonic.read().await;
+            let mut request = Box::pin(db.request_room_authority(
+                &room_id,
+                &player,
+                denial != AuthorityDenial::NotHeld,
+            ));
+            let result = futures_util::poll!(&mut request);
+            assert!(
+                matches!(result, std::task::Poll::Ready(Ok(AuthorityOutcome::Denied(actual))) if actual == denial),
+                "refusal {denial:?} waited for an unrelated liveness reader: {result:?}"
+            );
+            drop(request);
+            drop(liveness);
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.authority_player, before.authority_player);
+            assert_eq!(after.last_activity, before.last_activity);
+        }
+    }
+
+    /// #826: an accepted role change waits for both writes before mutating storage.
+    #[tokio::test]
+    async fn canceled_authority_changes_waiting_for_liveness_preserve_storage() {
+        for become_authority in [false, true] {
+            let db = InMemoryDatabase::new();
+            let member = Uuid::from_u128(1);
+            let room = db
+                .create_room(
+                    "authority-commit-lock".into(),
+                    None,
+                    4,
+                    true,
+                    member,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            if become_authority {
+                db.request_room_authority(&room.id, &member, false)
+                    .await
+                    .unwrap();
+            }
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let liveness = db.room_liveness_monotonic.read().await;
+            let mut request =
+                Box::pin(db.request_room_authority(&room.id, &member, become_authority));
+            assert!(futures_util::poll!(&mut request).is_pending());
+            drop(request);
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.authority_player, before.authority_player);
+            assert_eq!(after.last_activity, before.last_activity);
+            drop(liveness);
+            assert_eq!(
+                db.request_room_authority(&room.id, &member, become_authority)
+                    .await
+                    .unwrap(),
+                AuthorityOutcome::Granted
+            );
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.authority_player, become_authority.then_some(member));
+            assert_eq!(after.players[&member].is_authority, become_authority);
         }
     }
 

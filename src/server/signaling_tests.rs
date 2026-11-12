@@ -8015,6 +8015,139 @@ async fn recv_refusal_source(
     message
 }
 
+/// #826: a held authority refusal cannot stop offers in an already running WebRTC mesh.
+#[tokio::test(start_paused = true)]
+async fn authority_refusal_keeps_running_mesh_signaling_live() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (alice, mut alice_rx, room) = register_refusal_source(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let (charlie, mut charlie_rx) = register_client(&server).await;
+    for (player, name) in [(bob, "Bob"), (charlie, "Charlie")] {
+        server.set_client_protocol(&player, v3_webrtc());
+        server
+            .handle_join_room(
+                &player,
+                "refusal-room".into(),
+                Some("RPL685".into()),
+                name.into(),
+                Some(3),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+        loop {
+            match alice_rx.try_recv() {
+                Ok(queued) => assert!(
+                    matches!(queued.payload, crate::coordination::outbound_queue::OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::PlayerJoined { .. } | ServerMessage::LobbyStateChanged { .. }))
+                ),
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty) => break,
+                Err(error) => panic!("the joined source queue must stay open: {error:?}"),
+            }
+        }
+    }
+    for player in [alice, bob, charlie] {
+        server.handle_player_ready(&player).await;
+        assert!(matches!(
+            recv_refusal_source(&mut alice_rx).await.as_ref(),
+            ServerMessage::LobbyStateChanged { .. }
+        ));
+    }
+    server.handle_start_game(&bob).await;
+    assert!(matches!(
+        recv_refusal_source(&mut alice_rx).await.as_ref(),
+        ServerMessage::GameStarting { .. }
+    ));
+    let plan = recv_refusal_source(&mut alice_rx).await;
+    let ServerMessage::SessionPlan(plan) = plan.as_ref() else {
+        panic!("expected a real finalized plan: {plan:?}");
+    };
+    assert_eq!(plan.transport, Transport::WebRtc);
+    assert_eq!(plan.topology, Topology::Mesh);
+    let generation = plan.generation;
+    for receiver in [&mut bob_rx, &mut charlie_rx] {
+        let mut saw_plan = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    if let ServerMessage::SessionPlan(peer_plan) = message.as_ref() {
+                        assert_eq!(peer_plan.generation, generation);
+                        assert!(!saw_plan);
+                        saw_plan = true;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(error) => panic!("the healthy peer queue must stay open: {error:?}"),
+            }
+        }
+        assert!(saw_plan);
+    }
+    for _ in 0..4 {
+        server
+            .message_coordinator
+            .send_to_player(&alice, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let request_server = server.clone();
+    let request = tokio::spawn(async move {
+        request_server.handle_authority_request(&alice, true).await;
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!request.is_finished());
+    timeout(
+        Duration::from_millis(10),
+        server.handle_signal_in_generation(
+            &bob,
+            charlie,
+            generation,
+            json!({"Offer": "healthy mesh"}),
+        ),
+    )
+    .await
+    .expect("a held authority refusal cannot stop a healthy mesh offer");
+    assert!(
+        matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal } if *from == bob && *actual == generation && *signal == json!({"Offer": "healthy mesh"}))
+    );
+    for _ in 0..4 {
+        assert!(matches!(
+            recv_refusal_source(&mut alice_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    request.await.unwrap();
+    assert!(matches!(
+        recv_refusal_source(&mut alice_rx).await.as_ref(),
+        ServerMessage::AuthorityResponse {
+            granted: false,
+            error_code: Some(ErrorCode::AuthorityNotSupported),
+            ..
+        }
+    ));
+    let pending = alice_rx.try_recv();
+    assert!(matches!(
+        pending,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+    for receiver in [&mut bob_rx, &mut charlie_rx] {
+        let pending = receiver.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+    }
+    assert_eq!(server.get_client_room(&alice).await, Some(room));
+}
+
 async fn assert_signal_refusal_releases_room(refusal: &str) {
     let server = create_test_server_with_signals(1).await;
     let (alice, mut alice_rx, room) = register_refusal_source(&server).await;

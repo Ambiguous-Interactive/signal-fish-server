@@ -16633,3 +16633,139 @@ in `2314a76a-165f-4491-9af3-48344b72d2ea` and pass after repair in
 in `9abb75f5-ff5a-4535-841f-9b7630b5783b`. Strict full Clippy passes. Three
 production source-policy checks pass in `794fd092-654f-4902-b0ab-0d832797d64f`;
 queue reads use named results and require explicit open-empty states.
+
+### F347: keep authority refusals off live P2P room publication
+
+Session 686 starts from `b6ea71c1`. The sweep inspected all 44 existing open
+issues and found no open PR. This work advances existing #826, #636 and #1352.
+It does not establish three existing issue closures.
+
+F347: `handle_authority_request` enqueued every refusal as a room event. Its
+reply retained the room mutation guard while waiting for the requesting peer's
+output queue. No room state changed, but healthy peers could not acquire the
+same room gate to send offers. Refusals now release that guard and send from the
+existing owned request task. Accepted claims and releases retain the original
+response-before-AuthorityChanged publication, replay and cancellation behavior.
+A refusal describes the decision at request time; later room events need not
+wait for its recipient to read that answer.
+
+The coordinator regression fills the recipient queue, observes actual
+backpressure, and requires room admission before draining the queue. Its twelve
+cells cross legacy/classified queues, caller cancellation, and conflict,
+non-owner release and storage-error denials. Each delivered denial retains its
+exact code and reason, and emits no replay event. The final control fails with
+the original coordinator in Nextest `5592461f-4766-4e63-8a11-9a567c8aa837`.
+
+A separate production-handler control joins three players, marks them ready,
+and starts a real Mesh/WebRTC session, and captures the shared SessionPlan generation.
+It fills the first player's classified queue and requests unsupported authority.
+The other two players must exchange an exact-generation offer before the first
+player drains its denial. Original source fails that offer deadline in
+`115a3ac9-25b7-4eb1-9c5e-b41cf85a5da5`. The repair passes. This is server
+signaling evidence; it does not claim a browser or native media-channel pairing.
+
+Related #636 optimization: `InMemoryDatabase::request_room_authority` took the
+global liveness write lock before deciding even an unchanged refusal. The
+change acquires liveness only after a grant or release is validated, before
+changing any room state. This removes one unnecessary lock acquisition per
+refusal. The existing room-before-liveness lock order stays the same. A source
+review found that production liveness owners also hold the room lock. The
+synthetic held-reader control proves the unnecessary acquisition, not a
+separate reachable production stall. No such latency claim is established.
+The five-denial control polls requests while a liveness reader remains held.
+The original source returns Pending for the first denial in
+`917fcafd-a718-449c-ab79-50b9ee59cbb3`; repaired requests return their exact
+refusals immediately. Separate claim and release controls cancel at the
+liveness wait, require unchanged storage, then complete a fresh request.
+
+All twelve selected server controls pass with all features in
+`ec864a14-a994-4fff-b0bb-1242516ce2db`. They include the accepted publication,
+failed response, storage/route lease, cancellation, replay and expiry-clock
+controls. No wire field, error code, SDK command or public Rust type changes.
+
+For #636, the allocation fixture warms the current-thread runtime and eight
+requests, then measures 128 complete denials and checks each exact response.
+Both cohorts retain the liveness repair; only the coordinator publication path
+changes. The unsupported case falls from 2,049 allocations and 381,088 bytes to
+1,281 allocations and 215,200 bytes. The conflict case falls from 2,049
+allocations and 381,728 bytes to 1,281 allocations and 215,840 bytes. Each request
+saves six allocations and 1,296 allocated bytes on this ARM64 Linux host. The
+same repaired counts pass with all features. Restoring the original coordinator
+fails the new allocation ceiling. These are component costs, not server capacity
+or end-to-end latency results. Existing allocation ceilings remain unchanged.
+
+For #1352, the reconnect artifact previously combined TCP establishment and
+WebSocket upgrade into one stage. The ordinary plain-WebSocket path now records
+`socket_connect` and `websocket_upgrade` separately. DNS resolution belongs to
+the former. The clamped plain path records the same boundaries. The library
+`wss` path retains its original behavior and combined stage. A controlled pending
+socket and an already-connected socket with a withheld upgrade prove the two
+states. Delaying the socket for 29 seconds leaves only one second for upgrade;
+the original shared 30-second deadline is unchanged. Held real socket controls
+retain the pending stage after cancellation for both ordinary and clamped paths.
+The snapshot still retains one fixed-size row per peer.
+
+Five scoped runner controls pass in `574052f8-0699-4803-a61a-c1a509cb4afd`,
+including the unchanged room-replacement workload and its exact delivery/replay
+assertions. The original coverage timeout remains unattributed. This diagnostic
+repair does not establish a historical cause or justify closing #1352.
+
+The active Rust, .NET and Godot source assessments recognize authority answers
+separately from authoritative role events. Runtime ordering qualification remains
+in Rust #300, .NET #153 and Godot #578. Extend those existing assessments for a
+blocked denial while a healthy pair continues signaling. No migration is
+established. Server controls do not prove supported SDK runtime parity.
+
+The matched replacement runs are plain
+`79c1b9de-acee-4b48-98e5-c01c859ee10e` and LLVM-instrumented
+`1474404e-8c2e-4124-a067-b08c16d6be2f`. Both schedule and send 112 frames,
+record 109 receipts, and resolve every delivery obligation under the unchanged
+snapshot and replay rules. Both replaced peers reach incarnation 3; all four
+tasks return. Workload settings match except for the fresh room-code prefix
+and artifact directory. Retained local manifests, complete records, source
+hashes, generator/server hashes and peer rows live in `progress/session-686/`.
+These passes qualify the new diagnostic path; they do not explain the original
+instrumented failure.
+
+Final bounded-receive matrix passes in
+`1c65b0a3-0047-43d9-9999-6a3be17237f0`. The final healthy-mesh control also
+requires both survivor queues to stay open and empty after the exact offer;
+it passes in `cfa35a5d-1c41-469c-87ce-94b179f786a7`. All 34 source-policy
+checks and strict full Clippy pass. Hosted current-head verification remains
+the delivery gate.
+
+Review found one preparation-cancellation control that still expected the old
+combined stage for a plain socket. It fails in
+`0a8867b9-2f90-4596-8954-2daa40bbb907` with actual `websocket_upgrade`.
+The corrected control waits until both withheld-upgrade sockets expose the
+first HTTP request byte before canceling. This proves both clients reached
+upgrade and excludes cancellation during TCP establishment. It preserves all
+planned-peer, cancellation, retained-refusal and artifact assertions. All three
+selected cancellation/deadline controls pass in
+`21401514-1c73-4280-b8b3-b0dd75ec47e3`. This is a diagnostic-test correction;
+server behavior and connection deadlines stay the same.
+
+Hosted Linux runs then found a packaging error in the new denial matrix:
+its storage-failure hook was available only in repository tests, but the
+coordinator test file is included in the generated Cargo package. The exact
+package verifier reproduces the missing-method error in
+`08ae29e2-31e8-498e-a3a0-078387b16c1b`. The field, initialization, hook and
+method now use `cfg(test)` together. This retains the same twelve cases in
+repository and package tests. Production builds still omit the hook.
+The unchanged strict package verifier passes in
+`99b90b1e-f3e0-4225-a0c1-b66a654c7f16`; repository matrix/route controls and
+strict full Clippy also pass. Neither failed hosted Linux run is reported as
+passing. Fresh verification must use the corrected head.
+
+The denial matrix also passes when executed directly from the generated
+package with all features and strict warnings. No case is removed or ignored.
+
+The next Linux run passed the package verifier but rejected the deadline
+fixture's literal placeholder URI. Source-hygiene control
+`221923e4-7e22-49fe-baf4-23a04d71a928` reproduces that rejection. The fixture
+now binds one in-process listener on port zero and uses its address for both
+the injected pending socket and the later established-socket control. All
+thirteen unchanged source-hygiene checks pass in
+`9a61829a-d191-4afb-88b3-168b6588a109`; all three deadline/cancellation controls
+pass in `a46efc52-81b6-4a8a-825e-182590f4007b`. Scoped strict Clippy passes.
+The guard and original shared deadline remain unchanged.

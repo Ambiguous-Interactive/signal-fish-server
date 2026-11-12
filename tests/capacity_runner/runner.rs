@@ -1292,13 +1292,10 @@ async fn connect_and_join(
     String,
 > {
     let name = RunConfig::peer_name(plan.room, plan.player);
-    if let Some(progress) = progress {
-        progress.connection_stage("socket_connect_and_upgrade");
-    }
     let stream = if designated {
-        connect_clamped(ws_url, SLOW_READER_RECV_BUFFER_BYTES).await?
+        connect_clamped(ws_url, SLOW_READER_RECV_BUFFER_BYTES, progress).await?
     } else {
-        connect_plain(ws_url).await?
+        connect_plain(ws_url, progress).await?
     };
     let (mut sink, mut rx) = stream.split();
     if encoding == Encoding::V3Json {
@@ -1342,8 +1339,56 @@ fn paused_reader_name(config: &RunConfig) -> Option<String> {
 }
 
 /// Connect to `ws://{url}` with default buffers.
-async fn connect_plain(url: &str) -> Result<WsStream, String> {
-    let connect = tokio_tungstenite::connect_async(url);
+async fn connect_plain(url: &str, progress: Option<&PeerProgress>) -> Result<WsStream, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let request = url
+        .into_client_request()
+        .map_err(|error| format!("connect {url}: {error}"))?;
+    if request.uri().scheme_str() == Some("wss") {
+        if let Some(progress) = progress {
+            progress.connection_stage("socket_connect_and_upgrade");
+        }
+        return match tokio::time::timeout(STEP_TIMEOUT, tokio_tungstenite::connect_async(request))
+            .await
+        {
+            Ok(Ok((stream, _))) => Ok(stream),
+            Ok(Err(error)) => Err(format!("connect {url}: {error}")),
+            Err(_) => Err(format!("connect {url}: timed out after {STEP_TIMEOUT:?}")),
+        };
+    }
+    let host = request
+        .uri()
+        .host()
+        .ok_or_else(|| format!("connect {url}: missing host"))?
+        .trim_matches(['[', ']'])
+        .to_owned();
+    let port = match request.uri().scheme_str() {
+        Some("ws") => request.uri().port_u16().unwrap_or(80),
+        _ => return Err(format!("connect {url}: unsupported URL scheme")),
+    };
+    let socket = tokio::net::TcpStream::connect((host, port));
+    connect_plain_with_socket(url, request, socket, progress).await
+}
+
+async fn connect_plain_with_socket(
+    url: &str,
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    socket: impl std::future::Future<Output = std::io::Result<tokio::net::TcpStream>>,
+    progress: Option<&PeerProgress>,
+) -> Result<WsStream, String> {
+    let connect = async {
+        if let Some(progress) = progress {
+            progress.connection_stage("socket_connect");
+        }
+        let socket = socket
+            .await
+            .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+        if let Some(progress) = progress {
+            progress.connection_stage("websocket_upgrade");
+        }
+        tokio_tungstenite::client_async(request, tokio_tungstenite::MaybeTlsStream::Plain(socket))
+            .await
+    };
     match tokio::time::timeout(STEP_TIMEOUT, connect).await {
         Ok(Ok((stream, _response))) => Ok(stream),
         Ok(Err(error)) => Err(format!("connect {url}: {error}")),
@@ -1353,7 +1398,14 @@ async fn connect_plain(url: &str) -> Result<WsStream, String> {
 
 /// Connect with the kernel receive buffer clamped BEFORE the handshake (the
 /// slow-reader control's wedge must not depend on autotuned loopback sysctls).
-async fn connect_clamped(url: &str, recv_buffer_bytes: u32) -> Result<WsStream, String> {
+async fn connect_clamped(
+    url: &str,
+    recv_buffer_bytes: u32,
+    progress: Option<&PeerProgress>,
+) -> Result<WsStream, String> {
+    if let Some(progress) = progress {
+        progress.connection_stage("socket_connect");
+    }
     let addr = url
         .trim_start_matches("ws://")
         .trim_end_matches('/')
@@ -1376,6 +1428,9 @@ async fn connect_clamped(url: &str, recv_buffer_bytes: u32) -> Result<WsStream, 
     };
     let handshake =
         tokio_tungstenite::client_async(url, tokio_tungstenite::MaybeTlsStream::Plain(stream));
+    if let Some(progress) = progress {
+        progress.connection_stage("websocket_upgrade");
+    }
     match tokio::time::timeout(STEP_TIMEOUT, handshake).await {
         Ok(Ok((stream, _response))) => Ok(stream),
         Ok(Err(error)) => Err(format!("clamped handshake {url}: {error}")),
@@ -2859,7 +2914,7 @@ mod session_poll_tests {
     /// Issue #1355: cancellation retains identity and every planned initial peer.
     async fn preparation_cancellation_preserves_all_planned_peers() {
         for (encoding, upgrade, expected, refuse_first) in [
-            (Encoding::V2Json, false, "socket_connect_and_upgrade", false),
+            (Encoding::V2Json, false, "websocket_upgrade", false),
             (Encoding::V2Json, true, "join_snapshot", false),
             (Encoding::V3Json, true, "authentication_reply", false),
             (Encoding::V3Json, true, "authentication_reply", true),
@@ -2898,6 +2953,15 @@ mod session_poll_tests {
                         }
                         upgraded.push(websocket);
                     } else {
+                        let mut request = [0; 1];
+                        assert_eq!(
+                            tokio::time::timeout(Duration::from_secs(5), socket.peek(&mut request))
+                                .await
+                                .unwrap()
+                                .unwrap(),
+                            1
+                        );
+                        assert_eq!(request, [b'G']);
                         raw.push(socket);
                     }
                 }
@@ -3280,15 +3344,77 @@ mod session_poll_tests {
         assert_eq!(offline.last_completed_us, Some(1_000_000));
     }
 
+    /// #1352: distinguish a TCP wait from an upgrade wait within the original shared deadline.
+    #[tokio::test(start_paused = true)]
+    async fn connection_progress_separates_socket_and_upgrade_with_one_deadline() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let url = format!("ws://{address}");
+        let progress = PeerProgress::new();
+        progress.start(Instant::now());
+        progress.enter("reconnecting", 3);
+        let started = Instant::now();
+        let failure = connect_plain_with_socket(
+            &url,
+            url.as_str().into_client_request().unwrap(),
+            std::future::pending(),
+            Some(&progress),
+        )
+        .await
+        .unwrap_err();
+        assert!(failure.contains("timed out"));
+        assert_eq!(started.elapsed(), STEP_TIMEOUT);
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.stage, "socket_connect");
+        assert_eq!(snapshot.last_completed_stage, Some("reconnecting"));
+        assert_eq!(snapshot.incarnation, 3);
+
+        let (socket, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+        let socket = socket.unwrap();
+        let (_server_socket, _) = accepted.unwrap();
+        let progress = PeerProgress::new();
+        progress.start(Instant::now());
+        progress.enter("reconnecting", 4);
+        let started = Instant::now();
+        let delayed_socket = async {
+            tokio::time::sleep(STEP_TIMEOUT - Duration::from_secs(1)).await;
+            Ok(socket)
+        };
+        let failure = connect_plain_with_socket(
+            &url,
+            url.as_str().into_client_request().unwrap(),
+            delayed_socket,
+            Some(&progress),
+        )
+        .await
+        .unwrap_err();
+        assert!(failure.contains("timed out"));
+        assert_eq!(
+            started.elapsed(),
+            STEP_TIMEOUT,
+            "the upgrade must not receive a second timeout window"
+        );
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.stage, "websocket_upgrade");
+        assert_eq!(snapshot.last_completed_stage, Some("socket_connect"));
+        assert_eq!(snapshot.incarnation, 4);
+        assert_eq!(
+            snapshot.stage_started_us,
+            micros(STEP_TIMEOUT - Duration::from_secs(1))
+        );
+    }
+
     #[tokio::test]
     /// Hold each handshake boundary and preserve its pending stage after cancellation.
     async fn peer_lifecycle_retains_the_exact_pending_stage_after_cancellation() {
-        for (encoding, upgrade, expected, completed) in [
+        for (encoding, upgrade, expected, completed, designated) in [
             (
                 Encoding::V2Json,
                 false,
-                "socket_connect_and_upgrade",
-                "reconnecting",
+                "websocket_upgrade",
+                "socket_connect",
             ),
             (
                 Encoding::V3Json,
@@ -3297,7 +3423,12 @@ mod session_poll_tests {
                 "authentication_write",
             ),
             (Encoding::V2Json, true, "join_snapshot", "join_write"),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|(encoding, upgrade, expected, completed)| {
+            [false, true]
+                .map(move |designated| (encoding, upgrade, expected, completed, designated))
+        }) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("ws://{}", listener.local_addr().unwrap());
             let progress = PeerProgress::new();
@@ -3339,7 +3470,7 @@ mod session_poll_tests {
                     "STAGE1".into(),
                     4,
                     &plan,
-                    false,
+                    designated,
                     None,
                     Some(&task_progress),
                 )
@@ -3391,7 +3522,8 @@ mod session_poll_tests {
         for incarnation in 2..=10_000 {
             progress.enter("offline", incarnation - 1);
             progress.enter("reconnecting", incarnation);
-            progress.connection_stage("socket_connect_and_upgrade");
+            progress.connection_stage("socket_connect");
+            progress.connection_stage("websocket_upgrade");
             progress.connection_stage("join_write");
             progress.connection_stage("join_snapshot");
             progress.enter("active", incarnation);

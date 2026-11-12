@@ -3,6 +3,101 @@ use super::*;
 use signal_fish_server::coordination::{MessageCoordinator, RoomEventJob};
 use signal_fish_server::server::InMemoryMessageCoordinator;
 
+/// #636: measure complete authority refusals without room-publication work.
+pub(crate) fn authority_denial_avoids_room_publication() {
+    use signal_fish_server::coordination::{
+        ClientDeliveryHandle, ConnectionCloseSignal, InMemoryRoomOperationCoordinator,
+        RoomOperationCoordinatorTrait,
+    };
+    use signal_fish_server::database::{
+        AuthorityDenial, AuthorityOutcome, GameDatabase, InMemoryDatabase,
+    };
+    use std::sync::Arc;
+    for supported in [false, true] {
+        allocation_harness::block_on(async {
+            allocation_harness::warm_current_thread_runtime().await;
+            let actor = Uuid::from_u128(1);
+            let database = Arc::new(InMemoryDatabase::new());
+            let room = database
+                .create_room(
+                    "denial-cost".into(),
+                    None,
+                    2,
+                    supported,
+                    actor,
+                    "relay".into(),
+                    "test".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let messages = Arc::new(InMemoryMessageCoordinator::new());
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+            messages
+                .register_local_client(
+                    actor,
+                    Some(room.id),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+            let coordinator =
+                InMemoryRoomOperationCoordinator::new(messages, database.clone(), None);
+            let denial = if supported {
+                AuthorityDenial::AlreadyHeld
+            } else {
+                AuthorityDenial::NotSupported
+            };
+            for _ in 0..8 {
+                assert_eq!(
+                    coordinator
+                        .handle_authority_request(&room.id, &actor, true)
+                        .await
+                        .unwrap(),
+                    AuthorityOutcome::Denied(denial)
+                );
+                let message = receiver.try_recv().unwrap();
+                assert!(
+                    matches!(message.as_ref(), ServerMessage::AuthorityResponse { granted: false, error_code: Some(code), .. } if *code == denial.error_code())
+                );
+            }
+            let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            for _ in 0..128 {
+                assert_eq!(
+                    coordinator
+                        .handle_authority_request(&room.id, &actor, true)
+                        .await
+                        .unwrap(),
+                    AuthorityOutcome::Denied(denial)
+                );
+                let message = receiver.try_recv().unwrap();
+                assert!(
+                    matches!(message.as_ref(), ServerMessage::AuthorityResponse { granted: false, reason: Some(reason), error_code: Some(code) } if reason == denial.reason() && *code == denial.error_code())
+                );
+            }
+            let stats = region.change();
+            println!("AUTHORITY_DENIAL_COST supported={supported} requests=128 stats={stats:?}");
+            assert!(
+                stats.allocations <= 128 * 12 + 8,
+                "authority refusals allocated room-publication work: {stats:?}"
+            );
+            assert!(
+                stats.bytes_allocated <= 128 * 1900 + 1024,
+                "authority refusals retained room-publication work: {stats:?}"
+            );
+            let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.authority_player, before.authority_player);
+            assert_eq!(after.last_activity, before.last_activity);
+            let pending = receiver.try_recv();
+            assert!(matches!(
+                pending,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        });
+    }
+}
+
 pub(crate) fn room_event_admission_cost() {
     allocation_harness::block_on(async {
         allocation_harness::warm_current_thread_runtime().await;
