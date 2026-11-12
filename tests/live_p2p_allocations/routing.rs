@@ -142,8 +142,8 @@ pub(crate) fn signaling_cost_is_independent_of_room_size() {
     }
     for stats in &profiles {
         assert!(
-            stats.allocations <= 14,
-            "an idle active room rebuilt its Signal lane: {profiles:?}"
+            stats.allocations <= 8,
+            "a signal allocated exclusive room-publication work: {profiles:?}"
         );
         assert!(
             stats.bytes_allocated <= profiles[0].bytes_allocated + 256,

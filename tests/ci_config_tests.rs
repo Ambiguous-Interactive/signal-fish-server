@@ -110,6 +110,69 @@ fn encoding_workflow_skips_only_study_markdown() {
 }
 
 #[test]
+fn replacement_attempts_upload_after_failed_root_test_steps() {
+    let content = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid root workflow");
+    let jobs = documents[0].as_mapping_get("jobs").expect("root jobs");
+    for (job_name, test_step) in [
+        ("nextest", "Run nextest"),
+        ("msrv", "Verify build and tests with MSRV"),
+        ("coverage", "Generate coverage report"),
+    ] {
+        let steps = jobs
+            .as_mapping_get(job_name)
+            .and_then(|job| job.as_mapping_get("steps"))
+            .and_then(Yaml::as_sequence)
+            .expect("test job steps");
+        let find = |name: &str| {
+            steps
+                .iter()
+                .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+                .expect("required step")
+        };
+        let upload_index = find("Upload room replacement attempts");
+        assert!(
+            upload_index > find(test_step),
+            "{job_name}: capture after test completion"
+        );
+        let upload = &steps[upload_index];
+        assert_eq!(
+            upload.as_mapping_get("if").and_then(Yaml::as_str),
+            Some("always()"),
+            "{job_name}: failed tests must retain their attempts"
+        );
+        assert!(upload
+            .as_mapping_get("uses")
+            .and_then(Yaml::as_str)
+            .is_some_and(|uses| uses.starts_with("actions/upload-artifact@")));
+        let settings = upload.as_mapping_get("with").expect("upload settings");
+        assert_eq!(
+            settings.as_mapping_get("path").and_then(Yaml::as_str),
+            Some("target/capacity-attempts/${{ github.run_id }}/${{ github.run_attempt }}/"),
+            "{job_name}: exclude attempts restored from an older cache"
+        );
+        assert_eq!(
+            settings
+                .as_mapping_get("retention-days")
+                .and_then(Yaml::as_integer),
+            Some(14)
+        );
+        let name = settings
+            .as_mapping_get("name")
+            .and_then(Yaml::as_str)
+            .expect("artifact name");
+        assert!(
+            name.contains(if job_name == "nextest" {
+                "matrix.os"
+            } else {
+                job_name
+            }),
+            "{job_name}: parallel lanes must use distinct artifact names"
+        );
+    }
+}
+
+#[test]
 fn browser_interop_retains_failure_diagnostics() {
     let content = read_live_file(&repo_root().join(".github/workflows/browser-interop.yml"));
     let documents = Yaml::load_from_str(&content).expect("valid browser workflow");
@@ -35231,8 +35294,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     With 57 shards, ceil(567/57) * 29s remains 290s.
     568 (was 567): retained departure recovery adds one return-value site (#1586).
     With 57 shards, ceil(568/57) * 29s remains 290s.
+    570 (was 568): shared signal fence constructors add two return-value sites (#1617).
+    With 57 shards, ceil(570/57) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 568;
+const MUTATION_TOTAL_MUTANTS: u32 = 570;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

@@ -16769,3 +16769,93 @@ thirteen unchanged source-hygiene checks pass in
 `9a61829a-d191-4afb-88b3-168b6588a109`; all three deadline/cancellation controls
 pass in `a46efc52-81b6-4a8a-825e-182590f4007b`. Scoped strict Clippy passes.
 The guard and original shared deadline remain unchanged.
+
+### F348: let independent live P2P signals share room admission
+
+Session 687 starts from `dae5275d`. The sweep inspected all 45 existing open
+issues and found no open PR. This work advances existing #826, #636 and #1352.
+These campaigns remain open. New #1617 tracks the specific signaling defect;
+it does not count as an existing issue addressed by this session.
+
+On original main, an admitted `Signal` retains the exclusive room mutation
+lease through its owned FIFO delivery. If the target queue is full, an offer
+between two other healthy peers waits for that unrelated delivery. The new
+production-handler history creates three players, readies and finalizes their
+Mesh/WebRTC room, and records their shared plan generation. It fills Alice's
+classified queue, observes real backpressure on Charlie's offer to Alice, and
+requires Bob's offer to Charlie before Alice reads. Original source fails that
+healthy offer's 10 ms deadline in Nextest
+`aa7392ce-ce4c-466a-9b97-0abef2d4c72d`.
+
+The room lane now uses a reader/writer fence. Independent source connections
+share signal admission. Every room mutation still acquires exclusive admission,
+including membership and plan publications. A signal holds its source lifecycle
+and shared fence through an owned delivery task. The source lifecycle retains
+same-source ordering. A queued writer blocks later readers, so incoming signals
+cannot starve a pending room change. Custom message coordinators inherit the
+old exclusive fence through a default method; no existing implementation must
+add a method. The distinct signal guard cannot enqueue a mutation job.
+
+The healthy offer now arrives while Alice remains full. Draining Alice delivers
+Charlie's exact sender, generation and opaque offer once. Existing controls keep
+admitted signals alive after caller cancellation, require delivery before a
+normal target leave/rejoin, exclude replaced target incarnations and keep
+SessionPlan-before-Signal. All 112 scoped signal and room-event controls pass
+in `0b528031-41cc-4ac4-ab03-0f249007d013`. Three additional fence controls pass
+in `1862bcc8-1131-4d27-997f-4c95bc77f164`: shared admission with exclusive
+mutations, queued-writer fairness and canceled-admission lane cleanup. These
+are server handler and queue results, not a new browser media-channel pairing.
+
+The final cross-target control also holds Charlie's later candidate to healthy
+Bob behind Charlie's earlier offer to slow Alice. Removing the owned source
+lifecycle makes this source-order assertion fail in
+`1991bb4a-7576-46c8-b997-3fd23e94bdf1`. Restored source passes all six final
+all-feature mesh, cancellation and fence controls in
+`36f8a30f-2677-4947-af04-83c9adde1a41`. Strict full Clippy and all eleven
+source-policy controls pass. The original source also fails the tightened
+allocation ceiling; the restored all-feature fixture passes.
+
+For #636, the existing complete-signal fixture checks the exact ICE payload and
+recipient in finalized 2-, 16- and 64-player meshes. On this ARM64 Linux host,
+original source uses 14 allocations and 3,392 allocated bytes per signal at each
+size. The repair uses eight allocations and 2,840 bytes. It removes six
+allocations and 552 allocated bytes by avoiding the room mutation lease and
+FIFO job wrappers for signals. The fixture now rejects more than eight
+allocations. These matched samples use default features plus
+`allocation-tracking`. The all-feature repair control also passes at eight
+allocations and 2,912 bytes. These component costs do not establish server
+capacity or a network latency percentile. Room state changes still use the FIFO.
+
+For #1352, the historical replacement test used a temporary artifact directory.
+Its assertion unwind removed the manifest, complete ledger and captured peer
+stages. The runner already captured the interrupted lifecycle, but the failed
+test could delete that evidence before it was inspected. Each unchanged
+replacement workload now gets a distinct persistent directory under
+`target/capacity-attempts/`. It retains the original manifest, intervals,
+delivery records, peer progress, summary and replay inputs on success or
+failure. `attempt-identity.json` adds the test executable hash and size, Git
+revision, tracked-patch hash, instrumentation flags and hosted attempt identity;
+`source.patch` retains the tracked delta. The source patch does not include
+untracked files; local evidence must account for them separately. The
+unwind-control keeps two distinct peer snapshots without overwriting either.
+On assertion failure, bounded identity, progress and summary copies also enter
+the job log. Root Nextest, MSRV and coverage jobs upload the attempt directories
+even when their test step fails.
+
+Twenty ordinary original-source replacement iterations pass in
+`ac47f087-1d0f-4c3c-b306-26048aee3a74`. The new retained-attempt and unchanged
+replacement controls pass in `b4fd6eca-48d4-4f55-bef0-123f97d3ff08`. Ten
+all-feature LLVM-instrumented replacement iterations pass in
+`d6c826b5-1ed9-4636-a807-88c3238eb2a7`; all ten attempt directories survive.
+The original workload, 500 ms lag bound, two-second drain grace, exact receipt
+rules and replay checks remain. These passes qualify evidence retention and do
+not explain the original coverage deadline. Keep #1352 open for a matched
+recurrence and source attribution.
+
+External client assessment: Rust `src/client_core.rs` at blob `ef296f63`,
+.NET `SignalFishStateMachine.cs` at revision `e467c871` and Godot `sf_events.gd`
+at revision `58f880b1` expose generation-tagged signals.
+The wire schema, commands, target checks and per-source order stay unchanged.
+Signals from different source connections can now progress together, so
+runtime timing qualification remains required in Rust #300, .NET #153 and
+Godot #578. Server controls do not establish SDK runtime parity or a migration.

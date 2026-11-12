@@ -268,13 +268,10 @@ impl EnhancedGameServer {
         // SessionPlan publication is room-ordered, while socket writers run on
         // independent tasks. Without sharing this gate, a peer whose plan was
         // queued first could immediately offer to a later recipient and place
-        // `Signal` ahead of that recipient's plan. Holding the room mutation
-        // gate through dispatch makes plan-before-signal a server guarantee for
+        // `Signal` ahead of that recipient's plan. Holding the shared room
+        // fence through dispatch makes plan-before-signal a server guarantee for
         // finalize, re-plan, join, and reconnect publications alike.
-        let signal_publication_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&from_room)
-            .await;
+        let signal_publication_guard = self.message_coordinator.lock_room_signal(&from_room).await;
 
         // Either endpoint can be pruned as slow/closed while this signal waits
         // behind a room publication, before its connection assignment is
@@ -350,26 +347,22 @@ impl EnhancedGameServer {
         // (metrics + close), abandoning its queue only with the connection.
         let coordinator = Arc::clone(&self.message_coordinator);
         let from = *from;
-        let completion = self.message_coordinator.enqueue_room_event(
-            signal_publication_guard,
-            Box::new(move || {
-                Box::pin(async move {
-                    let _lifecycle_guard = lifecycle_guard;
-                    coordinator
-                        .send_to_player_in_room(
-                            &to,
-                            &from_room,
-                            Arc::new(ServerMessage::Signal {
-                                from,
-                                generation,
-                                signal,
-                            }),
-                        )
-                        .await
-                })
-            }),
-        );
-        if let Err(error) = completion.await {
+        let completion = tokio::spawn(async move {
+            let _signal_publication_guard = signal_publication_guard;
+            let _lifecycle_guard = lifecycle_guard;
+            coordinator
+                .send_to_player_in_room(
+                    &to,
+                    &from_room,
+                    Arc::new(ServerMessage::Signal {
+                        from,
+                        generation,
+                        signal,
+                    }),
+                )
+                .await
+        });
+        if let Err(error) = completion.await.unwrap_or_else(|error| Err(error.into())) {
             tracing::warn!(%from, %to, %error, "Signal delivery transaction failed");
         }
     }

@@ -396,6 +396,15 @@ jobs:
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: cargo nextest run --profile ci --locked --all-features --cargo-profile ci
 
+      - name: Upload room replacement attempts
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: room-replacement-${{ matrix.os }}-${{ github.run_attempt }}
+          path: target/capacity-attempts/${{ github.run_id }}/${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Record root CPU budget after tests
         if: ${{ always() && runner.os == 'Linux' }}
         shell: bash
@@ -958,6 +967,15 @@ jobs:
           cargo test --locked --all-features --no-fail-fast
           echo "✓ Build and tests successful with MSRV ${{ steps.msrv.outputs.msrv }}"
 
+      - name: Upload room replacement attempts
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: room-replacement-msrv-${{ github.run_attempt }}
+          path: target/capacity-attempts/${{ github.run_id }}/${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Drop trybuild artifacts before cache save
         # See the nextest job: prevents the trybuild/rust-cache `##[error]ENOENT` noise.
         if: always()
@@ -1182,6 +1200,15 @@ jobs:
         env:
           SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: "3"
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
+
+      - name: Upload room replacement attempts
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: room-replacement-coverage-${{ github.run_attempt }}
+          path: target/capacity-attempts/${{ github.run_id }}/${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Enforce coverage threshold
         run: cargo llvm-cov report --locked --fail-under-lines 70

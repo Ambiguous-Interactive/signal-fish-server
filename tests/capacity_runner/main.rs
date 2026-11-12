@@ -44,6 +44,7 @@
 mod websocket_test_helpers;
 
 mod artifacts;
+mod attempt_artifacts;
 mod config;
 mod diagnostics;
 mod oracle;
@@ -5562,7 +5563,7 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
 #[serial_test::serial]
 /// Require exact delivery, tracker continuity and replay through room replacement.
 async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
-    let output = tempfile::tempdir().expect("create output tempdir");
+    let output = attempt_artifacts::AttemptDirectory::replacement();
     let mut config = scenario_config(Encoding::V3Json);
     config.output_dir = output.path().to_path_buf();
     config.rooms = 2;

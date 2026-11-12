@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep offers between healthy P2P peers moving while another target waits for outbound capacity (#1617).
 - Keep healthy peers signaling while another peer waits for an authority refusal, signal refusal, or metadata error reply
   (#826, #1612, #1613).
 - Preserve accepted reliable relay frames and their sender order across canceled or overlapping sends, and avoid extra
