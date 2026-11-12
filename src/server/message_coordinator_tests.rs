@@ -145,6 +145,131 @@ fn full_control_queue(
     }
 }
 
+/// The already-admitted relay transaction owns its tail and physical-route cleanup.
+#[tokio::test(start_paused = true)]
+async fn unobserved_relay_completions_deliver_or_prune_only_the_original_queue() {
+    for immediate in [false, true] {
+        for outcome in ["drain", "timeout", "replacement"] {
+            let metrics = Arc::new(ServerMetrics::new());
+            let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+                Duration::from_secs(1),
+                Arc::clone(&metrics),
+            );
+            let room = RoomId::new_v4();
+            let source = PlayerId::new_v4();
+            let recipient = PlayerId::new_v4();
+            let (handle, close, mut receiver) = full_control_queue(ControlQueueKind::Legacy);
+            coordinator
+                .register_local_client(recipient, Some(room), handle)
+                .await
+                .unwrap();
+            let expected = ServerMessage::GameData {
+                from_player: source,
+                data: serde_json::json!({"tail": "exact"}),
+                seq: Some(1),
+                epoch: Some(1),
+                class: None,
+                key: None,
+            };
+            let expected_value = serde_json::to_value(&expected).unwrap();
+            let mut message = Some(expected);
+            let mut build = || message.take();
+            if immediate {
+                match coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+                    &room, &source, &mut build,
+                ) {
+                    ImmediateGameDataBroadcast::Pending(completion) => drop(completion),
+                    _ => panic!("a full recipient must return its owned pending observation"),
+                }
+            } else {
+                match coordinator
+                    .enqueue_relay_broadcast_after_contention(&room, &source, &mut build)
+                    .await
+                {
+                    crate::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => {
+                        drop(completion)
+                    }
+                    _ => panic!("a full recipient must return its owned contention observation"),
+                }
+            }
+            assert!(message.is_none());
+            assert_eq!(
+                metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                0
+            );
+            let replacement_receiver = if outcome == "replacement" {
+                let (sender, receiver) = mpsc::channel(2);
+                coordinator
+                    .register_local_client(
+                        recipient,
+                        Some(room),
+                        ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                    )
+                    .await
+                    .unwrap();
+                Some(receiver)
+            } else {
+                None
+            };
+            if outcome == "drain" {
+                assert!(matches!(
+                    receiver.pop_message("drain the full queue").as_ref(),
+                    ServerMessage::Pong
+                ));
+                let ControlReceiver::Legacy(receiver) = &mut receiver else {
+                    unreachable!()
+                };
+                let tail = tokio::time::timeout(Duration::from_millis(500), receiver.recv())
+                    .await
+                    .expect("unpolled observation must not cancel the admitted tail")
+                    .unwrap();
+                assert_eq!(serde_json::to_value(tail.as_ref()).unwrap(), expected_value);
+            } else {
+                tokio::time::advance(Duration::from_millis(1_001)).await;
+            }
+            let finished = tokio::time::timeout(
+                Duration::from_secs(1),
+                coordinator.relay_order_gates.write(source),
+            )
+            .await
+            .expect("owned cleanup must finish without its observer");
+            drop(finished);
+            let clients = coordinator.local_clients.read().await;
+            match outcome {
+                "drain" => {
+                    assert!(clients.contains_key(&recipient));
+                    assert_eq!(close.requested_reason(), None);
+                    assert_eq!(
+                        metrics
+                            .websocket_deliveries_enqueued
+                            .load(Ordering::Relaxed),
+                        1
+                    );
+                }
+                "timeout" => {
+                    assert!(!clients.contains_key(&recipient));
+                    assert_eq!(close.requested_reason(), Some(CloseReason::SlowConsumer));
+                    assert_eq!(
+                        metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                        1
+                    );
+                }
+                "replacement" => {
+                    assert!(clients.contains_key(&recipient));
+                    assert_eq!(close.requested_reason(), Some(CloseReason::SlowConsumer));
+                    assert_eq!(replacement_receiver.as_ref().unwrap().len(), 0);
+                    assert_eq!(clients[&recipient].close.requested_reason(), None);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
 // Regression #858: a reservation cannot hide known receiver loss at submission.
 #[tokio::test]
 async fn reserved_control_detects_receiver_loss_before_send() {
@@ -1167,7 +1292,8 @@ async fn builder_broadcast_backpressure_releases_routing_locks_and_keeps_snapsho
                                 Ok(())
                             }
                             ImmediateGameDataBroadcast::Complete => Ok(()),
-                            ImmediateGameDataBroadcast::Unavailable => {
+                            ImmediateGameDataBroadcast::Unavailable
+                            | ImmediateGameDataBroadcast::OrderingBlocked(_) => {
                                 panic!("uncontended immediate broadcast must acquire routing")
                             }
                         }
@@ -1729,6 +1855,7 @@ fn stale_routing_gate_cleanup_cannot_delete_a_replacement() {
         key,
         owner: Arc::downgrade(&registry.inner),
         lock: Arc::new(RwLock::new(())),
+        released: Notify::new(),
     });
     registry
         .inner
@@ -6400,4 +6527,44 @@ async fn room_roster_lease_keeps_exact_seated_routes_until_drop() {
             .player_ids,
         Some(vec![])
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn relay_order_readiness_survives_early_release_and_waiter_cancellation() {
+    for case in ["release before poll", "two waiters", "cancel one waiter"] {
+        let coordinator = InMemoryMessageCoordinator::new();
+        let source = PlayerId::new_v4();
+        let held = coordinator.relay_order_gates.try_write(source).unwrap();
+        let mut first = coordinator.wait_for_relay_order(source);
+        let mut second = coordinator.wait_for_relay_order(source);
+        if case == "release before poll" {
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("a release before the first poll must remain observable");
+            drop(second);
+        } else {
+            assert!(futures_util::poll!(first.as_mut()).is_pending(), "{case}");
+            assert!(futures_util::poll!(second.as_mut()).is_pending(), "{case}");
+            if case == "cancel one waiter" {
+                drop(first);
+                drop(held);
+                tokio::time::timeout(Duration::from_secs(1), second)
+                    .await
+                    .expect("canceling one waiter must not consume another waiter's wake");
+            } else {
+                drop(held);
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    tokio::join!(first, second);
+                })
+                .await
+                .expect("every registered waiter must observe the release");
+            }
+        }
+        let available = coordinator.relay_order_gates.try_write(source);
+        assert!(
+            available.is_some(),
+            "readiness must not retain the source gate: {case}"
+        );
+    }
 }

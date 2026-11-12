@@ -153,6 +153,582 @@ mod handler_honesty {
         }
     }
 
+    fn drain_setup_messages(
+        receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    ) -> Vec<Arc<ServerMessage>> {
+        let mut messages = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    assert!(
+                        matches!(
+                            message.as_ref(),
+                            ServerMessage::RoomJoined { .. }
+                                | ServerMessage::PlayerJoined { .. }
+                                | ServerMessage::LobbyStateChanged { .. }
+                        ),
+                        "unexpected setup result: {message:?}"
+                    );
+                    messages.push(message);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return messages,
+                Err(mpsc::error::TryRecvError::Disconnected) => panic!("setup connection closed"),
+            }
+        }
+    }
+
+    struct RelayOrderFixture {
+        server: Arc<EnhancedGameServer>,
+        source: PlayerId,
+        target: PlayerId,
+        room: crate::protocol::RoomId,
+        source_receiver: mpsc::Receiver<Arc<ServerMessage>>,
+        target_receiver: crate::coordination::outbound_queue::OutboundReceiver,
+    }
+
+    async fn relay_order_fixture() -> RelayOrderFixture {
+        use crate::coordination::outbound_queue;
+        use crate::coordination::{ClientDeliveryHandle, DeliverySender};
+        let server = create_test_server().await;
+        let (source, mut source_receiver) = register_client(&server).await;
+        let (target, mut target_receiver) = register_client(&server).await;
+        for (player, name) in [(source, "source"), (target, "target")] {
+            server
+                .handle_join_room(
+                    &player,
+                    "relay-order".into(),
+                    Some("ORDER1".into()),
+                    name.into(),
+                    Some(3),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        drain_setup_messages(&mut source_receiver);
+        let messages = drain_setup_messages(&mut target_receiver);
+        let baseline = messages
+            .into_iter()
+            .find(|message| matches!(message.as_ref(), ServerMessage::RoomJoined { .. }))
+            .unwrap();
+        let room = server.get_client_room(&source).await.unwrap();
+        assert_eq!(server.get_client_room(&target).await, Some(room));
+        let (target_sender, mut target_receiver) = outbound_queue::channel(1, 8);
+        target_sender.set_protocol_version(3);
+        let target_sender = DeliverySender::classified(target_sender).next_generation();
+        target_sender.try_send(baseline, Some(room)).unwrap();
+        let initial = target_receiver.try_recv().unwrap();
+        assert!(
+            matches!(initial.payload, crate::coordination::outbound_queue::OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::RoomJoined(payload) if payload.room_id == room))
+        );
+        target_sender
+            .try_send(
+                Arc::new(ServerMessage::GameData {
+                    from_player: source,
+                    data: serde_json::json!("prefill"),
+                    seq: Some(0),
+                    epoch: Some(0),
+                    class: None,
+                    key: None,
+                }),
+                Some(room),
+            )
+            .unwrap();
+        server
+            .message_coordinator
+            .register_local_client(
+                target,
+                Some(room),
+                ClientDeliveryHandle {
+                    sender: target_sender,
+                    close: ConnectionCloseSignal::detached(),
+                },
+            )
+            .await
+            .unwrap();
+        RelayOrderFixture {
+            server,
+            source,
+            target,
+            room,
+            source_receiver,
+            target_receiver,
+        }
+    }
+
+    fn expect_ordered_payload(
+        payload: crate::coordination::outbound_queue::OutboundPayload,
+        source: PlayerId,
+        epoch: u32,
+        seq: u64,
+        expected: &str,
+    ) {
+        use crate::coordination::outbound_queue::OutboundPayload;
+        let message = match payload {
+            OutboundPayload::Data(delivery) => delivery.message().clone(),
+            OutboundPayload::Message(message) => message.as_ref().clone(),
+            other => panic!("expected relay data, got {other:?}"),
+        };
+        match &message {
+            ServerMessage::GameData {
+                from_player,
+                data,
+                seq: Some(actual_seq),
+                epoch: Some(actual_epoch),
+                ..
+            } => {
+                assert_eq!(*from_player, source);
+                assert_eq!(*actual_epoch, epoch);
+                assert_eq!(
+                    *actual_seq, seq,
+                    "reliable relays must preserve stamp order: {message:?}"
+                );
+                assert_eq!(data, expected);
+            }
+            ServerMessage::GameDataBinary {
+                from_player,
+                payload,
+                seq: Some(actual_seq),
+                epoch: Some(actual_epoch),
+                ..
+            } => {
+                assert_eq!(*from_player, source);
+                assert_eq!(*actual_epoch, epoch);
+                assert_eq!(
+                    *actual_seq, seq,
+                    "binary reliable relays must preserve stamp order: {message:?}"
+                );
+                assert_eq!(payload.as_ref(), expected.as_bytes());
+            }
+            other => panic!("expected stamped relay data, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_reliable_relays_preserve_stamp_order_after_capacity_release() {
+        for binary in [false, true] {
+            let RelayOrderFixture {
+                server,
+                source,
+                mut target_receiver,
+                ..
+            } = relay_order_fixture().await;
+            tokio::task::yield_now().await;
+            let mut first = Box::pin(async {
+                if binary {
+                    server
+                        .handle_game_data_binary(
+                            &source,
+                            GameDataEncoding::MessagePack,
+                            bytes::Bytes::from_static(b"first"),
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_game_data(&source, serde_json::json!("first"), None, None)
+                        .await;
+                }
+            });
+            assert!(futures_util::poll!(first.as_mut()).is_pending());
+            assert_eq!(
+                server
+                    .metrics
+                    .websocket_backpressure_events
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            let prefill = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
+            let mut second = Box::pin(async {
+                if binary {
+                    server
+                        .handle_game_data_binary(
+                            &source,
+                            GameDataEncoding::MessagePack,
+                            bytes::Bytes::from_static(b"second"),
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_game_data(&source, serde_json::json!("second"), None, None)
+                        .await;
+                }
+            });
+            let second_done = futures_util::poll!(second.as_mut()).is_ready();
+            let first_done = futures_util::poll!(first.as_mut()).is_ready();
+            let observed = timeout(Duration::from_secs(1), target_receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            expect_ordered_payload(observed.payload, source, 1, 1, "first");
+            if !first_done {
+                first.await;
+            }
+            if !second_done {
+                second.await;
+            }
+            let observed = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(observed.payload, source, 1, 2, "second");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn relay_order_wait_releases_lifecycle_and_cannot_cross_a_same_room_rejoin() {
+        use crate::coordination::outbound_queue::{OutboundPayload, TryReceiveError};
+
+        for binary in [false, true] {
+            let RelayOrderFixture {
+                server,
+                source,
+                target,
+                room,
+                mut source_receiver,
+                mut target_receiver,
+            } = relay_order_fixture().await;
+            let (healthy, mut healthy_receiver) = register_client(&server).await;
+            server
+                .handle_join_room(
+                    &healthy,
+                    "relay-order".into(),
+                    Some("ORDER1".into()),
+                    "healthy".into(),
+                    Some(3),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            assert_eq!(server.get_client_room(&healthy).await, Some(room));
+            drain_setup_messages(&mut source_receiver);
+            drain_setup_messages(&mut healthy_receiver);
+            while let Some(control) = target_receiver.try_recv_control().unwrap() {
+                let OutboundPayload::Message(message) = control.payload else {
+                    panic!("expected healthy admission control");
+                };
+                assert!(
+                    matches!(message.as_ref(), ServerMessage::PlayerJoined { player } if player.id == healthy)
+                        || matches!(message.as_ref(), ServerMessage::LobbyStateChanged { .. })
+                );
+            }
+            tokio::task::yield_now().await;
+            let mut first =
+                Box::pin(server.handle_game_data(&source, serde_json::json!("first"), None, None));
+            assert!(futures_util::poll!(first.as_mut()).is_pending());
+            let admitted = healthy_receiver.try_recv().unwrap();
+            expect_ordered_payload(OutboundPayload::Message(admitted), source, 1, 1, "first");
+            assert_eq!(
+                server
+                    .metrics
+                    .websocket_backpressure_events
+                    .load(Ordering::Relaxed),
+                1
+            );
+            let mut second = Box::pin(async {
+                if binary {
+                    server
+                        .handle_game_data_binary(
+                            &source,
+                            GameDataEncoding::MessagePack,
+                            Bytes::from_static(b"stale"),
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_game_data(&source, serde_json::json!("stale"), None, None)
+                        .await;
+                }
+            });
+            assert!(futures_util::poll!(second.as_mut()).is_pending());
+            assert_eq!(server.metrics.game_data_messages.load(Ordering::Relaxed), 2);
+            assert_eq!(
+                server
+                    .connection_manager
+                    .current_relay_stamp_in_room(&source, &room)
+                    .unwrap()
+                    .seq,
+                1
+            );
+            let lifecycle = server.connection_manager.client_lifecycle(&source).unwrap();
+            let released = timeout(Duration::from_secs(1), lifecycle.lock())
+                .await
+                .expect("an ordering wait must release the lifecycle gate");
+            drop(released);
+            timeout(Duration::from_secs(1), server.leave_room(&source))
+                .await
+                .expect("leave must progress while the old reliable tail waits");
+            assert_eq!(server.get_client_room(&source).await, None);
+            server
+                .handle_join_room(
+                    &source,
+                    "relay-order".into(),
+                    Some("ORDER1".into()),
+                    "source".into(),
+                    Some(2),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            assert_eq!(server.get_client_room(&source).await, Some(room));
+            assert_eq!(server.get_client_room(&target).await, Some(room));
+            let stamp = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!((stamp.epoch, stamp.seq), (2, 0));
+            let mut saw_baseline = false;
+            loop {
+                match source_receiver.try_recv() {
+                    Ok(message) => match message.as_ref() {
+                        ServerMessage::RoomJoined(payload) => {
+                            assert_eq!(payload.room_id, room);
+                            saw_baseline = true;
+                        }
+                        ServerMessage::RoomLeft | ServerMessage::LobbyStateChanged { .. } => {}
+                        other => panic!("unexpected source lifecycle result: {other:?}"),
+                    },
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("source connection closed")
+                    }
+                }
+            }
+            assert!(saw_baseline);
+            let mut terminal = false;
+            let mut joined = false;
+            while let Some(control) = target_receiver.try_recv_control().unwrap() {
+                let OutboundPayload::Message(message) = control.payload else {
+                    panic!("expected lifecycle control");
+                };
+                match message.as_ref() {
+                    ServerMessage::PlayerLeft {
+                        player_id,
+                        epoch,
+                        final_seq,
+                    } => {
+                        assert_eq!((*player_id, *epoch, *final_seq), (source, Some(1), Some(1)));
+                        terminal = true;
+                    }
+                    ServerMessage::PlayerJoined { player } => {
+                        assert_eq!(player.id, source);
+                        assert_eq!(player.epoch, Some(2));
+                        joined = true;
+                    }
+                    ServerMessage::AuthorityChanged { .. }
+                    | ServerMessage::LobbyStateChanged { .. } => {}
+                    other => panic!("unexpected target lifecycle control: {other:?}"),
+                }
+            }
+            assert!(terminal && joined);
+            let mut healthy_terminal = false;
+            let mut healthy_joined = false;
+            loop {
+                match healthy_receiver.try_recv() {
+                    Ok(message) => match message.as_ref() {
+                        ServerMessage::PlayerLeft {
+                            player_id,
+                            epoch,
+                            final_seq,
+                        } => {
+                            assert_eq!(
+                                (*player_id, *epoch, *final_seq),
+                                (source, Some(1), Some(1))
+                            );
+                            healthy_terminal = true;
+                        }
+                        ServerMessage::PlayerJoined { player } => {
+                            assert_eq!(player.id, source);
+                            assert_eq!(player.epoch, Some(2));
+                            healthy_joined = true;
+                        }
+                        ServerMessage::AuthorityChanged { .. }
+                        | ServerMessage::LobbyStateChanged { .. } => {}
+                        other => panic!("unexpected healthy lifecycle result: {other:?}"),
+                    },
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("healthy recipient closed")
+                    }
+                }
+            }
+            assert!(healthy_terminal && healthy_joined);
+            let mut fresh =
+                Box::pin(server.handle_game_data(&source, serde_json::json!("fresh"), None, None));
+            assert!(futures_util::poll!(fresh.as_mut()).is_pending());
+            assert_eq!(server.metrics.game_data_messages.load(Ordering::Relaxed), 3);
+            let waiting_stamp = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!((waiting_stamp.epoch, waiting_stamp.seq), (2, 0));
+            assert_eq!(
+                target_receiver.len(),
+                1,
+                "only the old prefill remains resident"
+            );
+            let premature_fresh = healthy_receiver.try_recv();
+            assert!(matches!(
+                premature_fresh,
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            let prefill = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
+            let old_tail = timeout(Duration::from_secs(1), target_receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            expect_ordered_payload(old_tail.payload, source, 1, 1, "first");
+            timeout(Duration::from_secs(1), first).await.unwrap();
+            timeout(Duration::from_secs(1), async {
+                tokio::join!(second, fresh);
+            })
+            .await
+            .unwrap();
+            let stamp = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!(
+                (stamp.epoch, stamp.seq),
+                (2, 1),
+                "only the fresh payload may stamp the new membership"
+            );
+            let fresh = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(fresh.payload, source, 2, 1, "fresh");
+            let healthy_fresh = healthy_receiver.try_recv().unwrap();
+            expect_ordered_payload(
+                OutboundPayload::Message(healthy_fresh),
+                source,
+                2,
+                1,
+                "fresh",
+            );
+            let stale_delivery = target_receiver.try_recv();
+            assert!(matches!(stale_delivery, Err(TryReceiveError::Empty)));
+            let healthy_stale_delivery = healthy_receiver.try_recv();
+            assert!(matches!(
+                healthy_stale_delivery,
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    /// Accepted reliable fan-out survives cancellation of its sender's handler.
+    #[tokio::test(start_paused = true)]
+    async fn canceled_reliable_relay_completes_its_admitted_recipient_tail() {
+        use crate::coordination::ClientDeliveryHandle;
+
+        for binary in [false, true] {
+            let server = create_test_server().await;
+            let (sender, mut sender_rx) = register_client(&server).await;
+            let (healthy, mut healthy_rx) = register_client(&server).await;
+            let (slow, mut slow_setup_rx) = register_client(&server).await;
+            for (player, name) in [(sender, "sender"), (healthy, "healthy"), (slow, "slow")] {
+                server
+                    .handle_join_room(
+                        &player,
+                        "canceled-relay".into(),
+                        Some("CAN001".into()),
+                        name.into(),
+                        Some(4),
+                        Some(true),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+            }
+            for receiver in [&mut sender_rx, &mut healthy_rx, &mut slow_setup_rx] {
+                drain_setup_messages(receiver);
+            }
+            let room_id = server.get_client_room(&sender).await.unwrap();
+            let (slow_sender, mut slow_rx) = mpsc::channel(1);
+            slow_sender
+                .send(Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap();
+            let close = ConnectionCloseSignal::detached();
+            server
+                .message_coordinator
+                .register_local_client(
+                    slow,
+                    Some(room_id),
+                    ClientDeliveryHandle::new(slow_sender, close.clone()),
+                )
+                .await
+                .unwrap();
+            let accepted = {
+                let admission = async {
+                    if binary {
+                        server
+                            .handle_game_data_binary(
+                                &sender,
+                                GameDataEncoding::MessagePack,
+                                Bytes::from_static(b"accepted-tail"),
+                            )
+                            .await;
+                    } else {
+                        server
+                            .handle_game_data(
+                                &sender,
+                                serde_json::json!("accepted-tail"),
+                                None,
+                                None,
+                            )
+                            .await;
+                    }
+                };
+                tokio::pin!(admission);
+                timeout(Duration::from_secs(1), async {
+                    loop {
+                        assert!(futures_util::poll!(&mut admission).is_pending());
+                        let received = healthy_rx.try_recv();
+                        match received {
+                            Ok(message) => break message,
+                            Err(mpsc::error::TryRecvError::Empty) => {}
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                panic!("healthy recipient disconnected before relay admission");
+                            }
+                        }
+                        tokio::time::advance(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("healthy leg proves fan-out admission before caller cancellation")
+            };
+            assert!(matches!(
+                accepted.as_ref(),
+                ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+            ));
+            assert!(matches!(
+                slow_rx.recv().await.unwrap().as_ref(),
+                ServerMessage::Pong
+            ));
+            let tail = recv(&mut slow_rx).await;
+            assert_eq!(
+                serde_json::to_value(tail.as_ref()).unwrap(),
+                serde_json::to_value(accepted.as_ref()).unwrap()
+            );
+            assert_eq!(close.requested_reason(), None);
+            server
+                .handle_game_data(&sender, serde_json::json!("successor"), None, None)
+                .await;
+            let healthy_next = recv(&mut healthy_rx).await;
+            let slow_next = recv(&mut slow_rx).await;
+            assert_eq!(
+                serde_json::to_value(slow_next.as_ref()).unwrap(),
+                serde_json::to_value(healthy_next.as_ref()).unwrap()
+            );
+            assert_eq!(close.requested_reason(), None);
+        }
+    }
+
     /// #1555: delayed metadata cannot modify an unrouted reconnect seat.
     #[tokio::test]
     async fn peer_metadata_refuses_a_pruned_route_after_the_room_gate() {
