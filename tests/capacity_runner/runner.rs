@@ -3348,14 +3348,16 @@ mod session_poll_tests {
     #[tokio::test(start_paused = true)]
     async fn connection_progress_separates_socket_and_upgrade_with_one_deadline() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let url = format!("ws://{address}");
         let progress = PeerProgress::new();
         progress.start(Instant::now());
         progress.enter("reconnecting", 3);
-        let url = "ws://127.0.0.1:1";
         let started = Instant::now();
         let failure = connect_plain_with_socket(
-            url,
-            url.into_client_request().unwrap(),
+            &url,
+            url.as_str().into_client_request().unwrap(),
             std::future::pending(),
             Some(&progress),
         )
@@ -3368,13 +3370,10 @@ mod session_poll_tests {
         assert_eq!(snapshot.last_completed_stage, Some("reconnecting"));
         assert_eq!(snapshot.incarnation, 3);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
         let (socket, accepted) =
             tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
         let socket = socket.unwrap();
         let (_server_socket, _) = accepted.unwrap();
-        let url = format!("ws://{address}");
         let progress = PeerProgress::new();
         progress.start(Instant::now());
         progress.enter("reconnecting", 4);

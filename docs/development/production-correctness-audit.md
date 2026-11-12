@@ -16759,3 +16759,13 @@ passing. Fresh verification must use the corrected head.
 
 The denial matrix also passes when executed directly from the generated
 package with all features and strict warnings. No case is removed or ignored.
+
+The next Linux run passed the package verifier but rejected the deadline
+fixture's literal placeholder URI. Source-hygiene control
+`221923e4-7e22-49fe-baf4-23a04d71a928` reproduces that rejection. The fixture
+now binds one in-process listener on port zero and uses its address for both
+the injected pending socket and the later established-socket control. All
+thirteen unchanged source-hygiene checks pass in
+`9a61829a-d191-4afb-88b3-168b6588a109`; all three deadline/cancellation controls
+pass in `a46efc52-81b6-4a8a-825e-182590f4007b`. Scoped strict Clippy passes.
+The guard and original shared deadline remain unchanged.
