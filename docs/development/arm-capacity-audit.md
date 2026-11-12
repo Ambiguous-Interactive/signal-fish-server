@@ -852,7 +852,8 @@ Cannot Do" now lists `StartGame` explicitly.
   as phase one in one exact-membership transaction; finalized joins and
   reconnects queue the actor's plan ahead of incumbents' in two ordered
   phases (`actor_close_after_commit_does_not_suppress_incumbent_plan_phase`);
-  signal dispatch holds the room mutation gate so no `Signal` can overtake a
+  signal dispatch shares the room fence with independent signals and excludes
+  room mutations so no `Signal` can overtake a
   recipient's plan (`signal_dispatch_waits_for_room_plan_publication_gate`,
   `signal_waiting_on_plan_gate_cannot_cross_target_incarnations`).
 

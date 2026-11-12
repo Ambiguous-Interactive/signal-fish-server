@@ -4688,6 +4688,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         self.room_event_sequencer.lock(*room_id).await
     }
 
+    async fn lock_room_signal(&self, room_id: &RoomId) -> crate::coordination::RoomSignalGuard {
+        self.room_event_sequencer.lock_signal(*room_id).await
+    }
+
     fn enqueue_room_event(
         &self,
         mutation_guard: RoomEventMutationGuard,

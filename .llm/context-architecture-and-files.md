@@ -163,3 +163,9 @@ transaction. Caller cancellation must not interrupt admitted storage, publicatio
 close attribution, or the correlated result. Evictions acquire logical player gates
 in UUID order before either physical lifecycle; disjoint pairs remain independent.
 Keep the acting lifecycle through the correlated result and release idle player gates.
+
+Room signal admission shares a reader fence across independent source connections.
+Room mutations and SessionPlan publications retain the exclusive writer fence.
+Each admitted signal owns its source lifecycle and shared fence through delivery;
+queued writers block later readers. Source lifecycle serialization keeps that
+source's signal order. Room mutations still publish through the room FIFO.

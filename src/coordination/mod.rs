@@ -180,8 +180,24 @@ pub struct RoomEventMutationGuard {
 }
 
 struct RoomEventMutationLease {
-    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
     _lane: Arc<RoomEventLane>,
+}
+
+/// A signal may share a room fence with other signals, while room changes stay exclusive.
+/// Keep this guard until delivery finishes. It cannot enqueue a room mutation.
+pub struct RoomSignalGuard {
+    _lease: RoomSignalLease,
+}
+
+enum RoomSignalLease {
+    Exclusive {
+        _guard: RoomEventMutationGuard,
+    },
+    Shared {
+        _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+        _lane: Arc<RoomEventLane>,
+    },
 }
 
 struct QueuedRoomEvent {
@@ -216,7 +232,7 @@ impl RoomEventQueue {
 struct RoomEventLane {
     room_id: RoomId,
     owner: Weak<RoomEventSequencer>,
-    mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    mutation_gate: Arc<tokio::sync::RwLock<()>>,
     queue: Mutex<RoomEventQueue>,
     #[cfg(test)]
     post_job_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -367,7 +383,7 @@ impl RoomEventSequencer {
         Arc::new(RoomEventLane {
             room_id,
             owner: Arc::downgrade(self),
-            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
             queue: Mutex::new(RoomEventQueue::default()),
             #[cfg(test)]
             post_job_pause: Mutex::new(None),
@@ -387,12 +403,23 @@ impl RoomEventSequencer {
 
     pub(crate) async fn lock(self: &Arc<Self>, room_id: RoomId) -> RoomEventMutationGuard {
         let lane = self.lane(room_id);
-        let guard = Arc::clone(&lane.mutation_gate).lock_owned().await;
+        let guard = Arc::clone(&lane.mutation_gate).write_owned().await;
         RoomEventMutationGuard {
             lease: Arc::new(RoomEventMutationLease {
                 _guard: guard,
                 _lane: lane,
             }),
+        }
+    }
+
+    pub(crate) async fn lock_signal(self: &Arc<Self>, room_id: RoomId) -> RoomSignalGuard {
+        let lane = self.lane(room_id);
+        let guard = Arc::clone(&lane.mutation_gate).read_owned().await;
+        RoomSignalGuard {
+            _lease: RoomSignalLease::Shared {
+                _guard: guard,
+                _lane: lane,
+            },
         }
     }
 
@@ -2094,6 +2121,17 @@ pub trait MessageCoordinator: Send + Sync {
     /// [`Self::enqueue_room_event`].
     async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard;
 
+    /// Fence a signal against room mutations. Signals from independent sources may share
+    /// this fence; callers must serialize each source and retain the fence through delivery.
+    /// The default preserves exclusive ordering for existing coordinator implementations.
+    async fn lock_room_signal(&self, room_id: &RoomId) -> RoomSignalGuard {
+        RoomSignalGuard {
+            _lease: RoomSignalLease::Exclusive {
+                _guard: self.lock_room_event_mutation(room_id).await,
+            },
+        }
+    }
+
     /// Enqueue a committed room event into the shared per-room FIFO.
     ///
     /// Callers synchronously transfer the matching mutation guard with the
@@ -2649,6 +2687,9 @@ pub struct MembershipUpdate {
     #[allow(dead_code)]
     pub instance_id: String,
 }
+
+#[cfg(test)]
+mod room_signal_tests;
 
 #[cfg(test)]
 mod tests {

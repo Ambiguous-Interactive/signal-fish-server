@@ -2200,6 +2200,24 @@ async fn canceled_signal_caller_preserves_admitted_offer() {
     assert_eq!(server.metrics.signals_relayed.load(Ordering::Relaxed), 1);
     caller.abort();
     assert!(caller.await.unwrap_err().is_cancelled());
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    let next_server = server.clone();
+    let next = tokio::spawn(async move {
+        next_server
+            .handle_signal_in_generation(&alice, bob, generation, json!({"candidate": "next"}))
+            .await;
+    });
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("next signal reaches its source lifecycle");
+    assert!(
+        !next.is_finished(),
+        "a later source signal cannot overtake its held offer"
+    );
     assert!(matches!(
         recv(&mut bob_rx).await.as_ref(),
         ServerMessage::Pong
@@ -2207,13 +2225,11 @@ async fn canceled_signal_caller_preserves_admitted_offer() {
     assert!(matches!(recv(&mut bob_rx).await.as_ref(),
         ServerMessage::Signal { from, generation: actual_generation, signal }
         if *from == alice && *actual_generation == generation && *signal == expected));
-    let bob_rx_tail = bob_rx.try_recv();
-    assert!(matches!(bob_rx_tail, Err(mpsc::error::TryRecvError::Empty)));
-    server
-        .handle_signal_in_generation(&alice, bob, generation, json!({"candidate": "next"}))
-        .await;
+    next.await.unwrap();
     assert!(matches!(recv(&mut bob_rx).await.as_ref(),
         ServerMessage::Signal { signal, .. } if *signal == json!({"candidate": "next"})));
+    let bob_rx_tail = bob_rx.try_recv();
+    assert!(matches!(bob_rx_tail, Err(mpsc::error::TryRecvError::Empty)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -8015,9 +8031,7 @@ async fn recv_refusal_source(
     message
 }
 
-/// #826: a held authority refusal cannot stop offers in an already running WebRTC mesh.
-#[tokio::test(start_paused = true)]
-async fn authority_refusal_keeps_running_mesh_signaling_live() {
+async fn assert_running_mesh_signaling_live(blocked_signal: bool) {
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (alice, mut alice_rx, room) = register_refusal_source(&server).await;
     let (bob, mut bob_rx) = register_client(&server).await;
@@ -8092,7 +8106,18 @@ async fn authority_refusal_keeps_running_mesh_signaling_live() {
     }
     let request_server = server.clone();
     let request = tokio::spawn(async move {
-        request_server.handle_authority_request(&alice, true).await;
+        if blocked_signal {
+            request_server
+                .handle_signal_in_generation(
+                    &charlie,
+                    alice,
+                    generation,
+                    json!({"Offer": "held mesh"}),
+                )
+                .await;
+        } else {
+            request_server.handle_authority_request(&alice, true).await;
+        }
     });
     timeout(Duration::from_secs(1), async {
         while server
@@ -8107,6 +8132,37 @@ async fn authority_refusal_keeps_running_mesh_signaling_live() {
     .await
     .unwrap();
     assert!(!request.is_finished());
+    let mut successor = if blocked_signal {
+        let lifecycle = server
+            .connection_manager
+            .client_lifecycle(&charlie)
+            .unwrap();
+        let attempts = lifecycle.lock_attempt_count_for_test();
+        let successor_server = server.clone();
+        let successor = tokio::spawn(async move {
+            successor_server
+                .handle_signal_in_generation(
+                    &charlie,
+                    bob,
+                    generation,
+                    json!({"candidate": "later source signal"}),
+                )
+                .await;
+        });
+        timeout(
+            Duration::from_secs(1),
+            lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("the next source signal reaches its lifecycle");
+        assert!(
+            !successor.is_finished(),
+            "one source must retain order across different targets"
+        );
+        Some(successor)
+    } else {
+        None
+    };
     timeout(
         Duration::from_millis(10),
         server.handle_signal_in_generation(
@@ -8117,10 +8173,18 @@ async fn authority_refusal_keeps_running_mesh_signaling_live() {
         ),
     )
     .await
-    .expect("a held authority refusal cannot stop a healthy mesh offer");
+    .expect("a held control delivery cannot stop a healthy mesh offer");
     assert!(
         matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal } if *from == bob && *actual == generation && *signal == json!({"Offer": "healthy mesh"}))
     );
+    if let Some(successor) = successor.as_mut() {
+        assert!(
+            timeout(Duration::from_millis(10), successor).await.is_err(),
+            "a later signal from the held source cannot reach its healthy target first"
+        );
+        let pending = bob_rx.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+    }
     for _ in 0..4 {
         assert!(matches!(
             recv_refusal_source(&mut alice_rx).await.as_ref(),
@@ -8128,14 +8192,29 @@ async fn authority_refusal_keeps_running_mesh_signaling_live() {
         ));
     }
     request.await.unwrap();
-    assert!(matches!(
-        recv_refusal_source(&mut alice_rx).await.as_ref(),
-        ServerMessage::AuthorityResponse {
-            granted: false,
-            error_code: Some(ErrorCode::AuthorityNotSupported),
-            ..
-        }
-    ));
+    let response = recv_refusal_source(&mut alice_rx).await;
+    if blocked_signal {
+        assert!(
+            matches!(response.as_ref(), ServerMessage::Signal { from, generation: actual, signal }
+            if *from == charlie && *actual == generation && *signal == json!({"Offer": "held mesh"}))
+        );
+    } else {
+        assert!(matches!(
+            response.as_ref(),
+            ServerMessage::AuthorityResponse {
+                granted: false,
+                error_code: Some(ErrorCode::AuthorityNotSupported),
+                ..
+            }
+        ));
+    }
+    if let Some(successor) = successor {
+        successor.await.unwrap();
+        assert!(
+            matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal }
+            if *from == charlie && *actual == generation && *signal == json!({"candidate": "later source signal"}))
+        );
+    }
     let pending = alice_rx.try_recv();
     assert!(matches!(
         pending,
@@ -8146,6 +8225,18 @@ async fn authority_refusal_keeps_running_mesh_signaling_live() {
         assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
     }
     assert_eq!(server.get_client_room(&alice).await, Some(room));
+}
+
+/// #826: a held authority refusal cannot stop healthy mesh offers.
+#[tokio::test(start_paused = true)]
+async fn authority_refusal_keeps_running_mesh_signaling_live() {
+    assert_running_mesh_signaling_live(false).await;
+}
+
+/// #826: a slow signal target cannot stop offers between healthy peers.
+#[tokio::test(start_paused = true)]
+async fn backpressured_signal_keeps_running_mesh_signaling_live() {
+    assert_running_mesh_signaling_live(true).await;
 }
 
 async fn assert_signal_refusal_releases_room(refusal: &str) {

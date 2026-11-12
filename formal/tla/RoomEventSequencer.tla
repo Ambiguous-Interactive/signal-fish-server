@@ -16,7 +16,7 @@
 (* acquisition: stale cleanup must not remove the replacement lane.         *)
 (*                                                                         *)
 (* Mapping to src/coordination/mod.rs:                                      *)
-(*   AcquireGuard       RoomEventSequencer::lock / OwnedMutexGuard          *)
+(*   AcquireGuard       RoomEventSequencer::lock / OwnedRwLockWriteGuard    *)
 (*   Mutate             room-scoped state mutation under the guard          *)
 (*   Enqueue            synchronous guard transfer into RoomEventJob        *)
 (*   StartJob           RoomEventLane::drain pop + isolated tokio::spawn     *)

@@ -876,7 +876,7 @@ owned-job execution sequence.
 
 | Model action / predicate | Production correspondence |
 | ------------------------ | ------------------------- |
-| `AcquireGuard` / `Mutate` | `RoomEventSequencer::lock` and the room-scoped state mutation under its `OwnedMutexGuard` |
+| `AcquireGuard` / `Mutate` | `RoomEventSequencer::lock` and the room-scoped state mutation under its exclusive `OwnedRwLockWriteGuard` |
 | `Enqueue` | synchronous transfer of that guard into the `RoomEventJob`; no cancellation point exists between the modeled mutation and handoff |
 | `StartJob` / `StopIdleWorker` | the queue-mutex-protected `running` transition and `RoomEventLane::drain` loop |
 | `CompleteSuccess` / `CompleteError` / `CompletePanic` | owned child-task completion, including `JoinError` conversion and guard release |
@@ -890,7 +890,9 @@ work. `QueueAndActiveExact` and `WorkerStateSound` cover the drain handoff,
 while `RegistryProtectsActiveGuard` prevents stale lane cleanup from deleting a
 new guard's registry identity. The proof is process-local and assumes an active
 Tokio runtime; it makes no multi-node ordering claim and no liveness claim for
-a job whose own future blocks forever.
+a job whose own future blocks forever. Shared signal admission and reader/writer
+scheduling are outside this mutation-only model; dedicated Rust controls cover
+those boundaries.
 
 The healthy two-event/two-generation configuration exhausts 1,704 distinct
 states at graph depth 19. Four independent expected failures release the guard
