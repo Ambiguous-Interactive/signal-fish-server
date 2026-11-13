@@ -790,6 +790,8 @@ pub struct Engine {
     pub(crate) negotiation_hold: Option<NegotiationHold>,
     #[cfg(test)]
     send_buffer_limit: Option<usize>,
+    #[cfg(test)]
+    close_before_offer: bool,
     pending_negotiations: HashMap<PlayerId, PendingNegotiation>,
     negotiation_tx: mpsc::Sender<NegotiationReady>,
     negotiation_rx: mpsc::Receiver<NegotiationReady>,
@@ -825,6 +827,8 @@ impl Engine {
             negotiation_hold: None,
             #[cfg(test)]
             send_buffer_limit: None,
+            #[cfg(test)]
+            close_before_offer: false,
             pending_negotiations: HashMap::new(),
             negotiation_tx,
             negotiation_rx,
@@ -938,6 +942,7 @@ impl Engine {
         {
             worker.negotiation_hold = self.negotiation_hold.clone();
             worker.send_buffer_limit = self.send_buffer_limit;
+            worker.close_before_offer = self.close_before_offer;
         }
         let generation = if matches!(operation, Negotiation::Pair { .. }) {
             self.next_generation = self
@@ -1384,6 +1389,10 @@ impl Engine {
             }
 
             negotiation_checkpoint!(negotiation_hold, "offer");
+            #[cfg(test)]
+            if self.close_before_offer {
+                pc.close().await?;
+            }
             let offer = pc.create_offer(None).await.context("create offer")?;
             let sdp = offer.sdp.clone();
             negotiation_checkpoint!(negotiation_hold, "offer_local");
@@ -1394,10 +1403,17 @@ impl Engine {
             Ok(Some(sdp))
         }
         .await;
+        self.finish_pairing(peer, result).await
+    }
+
+    async fn finish_pairing(
+        &mut self,
+        peer: PlayerId,
+        result: Result<Option<String>>,
+    ) -> Result<Option<String>> {
         if result.is_err() {
-            if let Some(mut link) = self.peers.remove(&peer) {
-                link.stop_tasks();
-                let _ = link.pc.close().await;
+            if let Err(error) = self.remove_peer(peer).await {
+                tracing::warn!(%peer, %error, "Failed to close rejected peer connection");
             }
         }
         result

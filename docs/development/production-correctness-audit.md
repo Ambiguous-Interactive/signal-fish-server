@@ -16900,3 +16900,61 @@ Rust `client_core.rs` at blob `ef296f63`, .NET's state machine at revision
 schema and commands stay unchanged. Cross-source timing qualification remains
 open in Rust #300, .NET #153, and Godot #578. Server controls do not prove SDK
 runtime parity. The broader #826 and #636 campaigns remain open.
+
+### F350–F351: release failed leave replies and retain failed native setup closes
+
+Session 689 starts at `5e08e0a5`. The sweep found 44 existing open issues and
+no open PR. The session advances existing #826, #636 and #1240. New #1621
+and #1622 name the confirmed source defects; they do not count as existing issues.
+
+F350 (#1621): a finalized three-player Mesh/WebRTC room has a full leaver
+reply queue. Storage removal fails. The correlated refusal waits for capacity
+while holding exclusive room admission, blocking an offer between the healthy
+peers. Original source fails the room-fence assertion in Nextest `e6f28496`.
+The repair releases admission before refusal delivery on storage error, absent
+terminal watermark and unroute error. The source lifecycle still orders the
+response. Successful leave watermarks, room FIFO and publication stay unchanged.
+The storage failure uses the first-party in-memory fault seam; it is not an
+observed ordinary in-memory storage incident. All five focused leave controls
+pass in `8dde09fd`, including separate absent-tail and unroute-error outcomes.
+
+F351 (#1622): native `pair_with` directly awaits RTC close after setup fails.
+Normal teardown instead owns pending close with a 250 ms deadline. A real held
+RTC core leaves the original error-cleanup branch pending past 100 ms in
+Nextest `72a95ae6`. Failed pairing now uses the same owned teardown. It returns
+the original setup error while the Engine retains pending close.
+
+The native controls separate two histories. Closing RTC before `create_offer`
+produces its real typed `ErrConnectionClosed` through `pair_with`. A separate
+held-core history supplies an error to the shared production cleanup method.
+It does not establish that the real offer failed while that same core was held.
+Both Reference and Godot profiles cover owner retention and destruction,
+worker-to-parent close transfer, fresh generations and exact gameplay. Final
+three-control qualification passes in `aac0855f`. No vendor source changes.
+This does not identify the historical Godot failure or complete #1240's native,
+Web, service-session and remote-network qualification.
+
+The serialization change under #636 borrows fields for socket-bound
+`PlayerJoined` and `PlayerReconnected`. It preserves frozen v2 and current v3
+bytes, metadata omission, frame limits and the existing send/accounting path.
+The exact-wire control caught and rejected a missing envelope during iteration.
+See the ARM capacity audit for component allocation evidence and its limits.
+
+Final local all-feature leave and serialization qualification passes all six
+controls in `2ae6ab3c`. The root strict full Clippy gate and native strict
+all-target/all-feature Clippy pass. Both deterministic relay allocation benches
+pass. The 29 source-policy checks pass after assigning a checked timeout receive
+to a named local; the initial scanner rejected its nested assertion form.
+Independent reviewers requested separate terminal-refusal controls, which are
+included. Final adversarial reviews report no required changes.
+
+External client assessment: Rust `src/client_core.rs` at blob `ef296f63`
+normalizes correlated `OperationFailed` and recognizes generation-tagged signals.
+.NET `Core/SignalFishStateMachine.cs` at blob `98094169` exposes leave operations;
+this source check does not establish correlated refusal runtime parity. Godot
+`sf_events.gd` at blob `5c4e66e6` recognizes both envelope types. Frozen v2 and
+current v3 player-event bytes stay exact. Schema, command names and per-source
+order stay unchanged. Cross-source leave-refusal timing qualification remains
+open in Rust #300, .NET #153 and Godot #578. Native reference Engine changes do
+not modify these separate SDK implementations. Component controls do not prove
+SDK runtime compatibility or complete the wider #826/#636 campaigns.

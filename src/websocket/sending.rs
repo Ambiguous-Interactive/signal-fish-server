@@ -927,42 +927,12 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
-        // Broadcast room-snapshot frames carry a v3 incarnation `epoch` that
-        // must never reach a pre-v3 (v2) recipient (their bytes stay
-        // byte-identical to the frozen v2 wire). Only the rare snapshot
-        // broadcasts hit this; the common relay path above is untouched.
-        ServerMessage::PlayerJoined { player }
-            if (player.epoch.is_some() || player.seq.is_some()) && !recipient_supports_v3 =>
-        {
-            let mut player = player.clone();
-            player.epoch = None;
-            player.seq = None;
-            send_text_message(
+        ServerMessage::PlayerJoined { .. } | ServerMessage::PlayerReconnected { .. } => {
+            let projected = borrowed_player_event(message, recipient_supports_v3)
+                .ok_or(SendMessageError::Materialization)?;
+            send_serialized_text(
                 sender,
-                &ServerMessage::PlayerJoined { player },
-                player_id,
-                max_outbound_message_size,
-                &metrics,
-            )
-            .await?;
-        }
-        // Issues #529 and #539 (v3 snapshot metadata trim) — the mirror
-        // image of the v2 arms above. Protocol-v3 recipients get room
-        // snapshots WITHOUT the server-internal `connected_at` join
-        // timestamp and WITHOUT the legacy self-declared `connection_info`
-        // echo (its credential-looking `relay.token` and arbitrary `Custom`
-        // JSON must not be rebroadcast to every member). The legacy handoff
-        // surface is `GameStarting` (`PeerConnectionInfo`); v3 connectivity
-        // is negotiated via `SessionPlan`. Negotiated v2 recipients keep the
-        // frozen legacy wire shape, which includes both fields.
-        ServerMessage::PlayerJoined { player }
-            if recipient_supports_v3 && player_has_v2_only_snapshot_metadata(player) =>
-        {
-            let mut player = player.clone();
-            strip_player_v2_only_snapshot_metadata(&mut player);
-            send_text_message(
-                sender,
-                &ServerMessage::PlayerJoined { player },
+                &projected,
                 player_id,
                 max_outbound_message_size,
                 &metrics,
@@ -1047,43 +1017,6 @@ pub(super) async fn send_single_message_ref(
             send_text_message(
                 sender,
                 &ServerMessage::SpectatorJoined(Box::new(payload)),
-                player_id,
-                max_outbound_message_size,
-                &metrics,
-            )
-            .await?;
-        }
-        ServerMessage::PlayerReconnected {
-            player_id: reconnected,
-            epoch,
-            player,
-        } if (!recipient_supports_v3
-            && (epoch.is_some()
-                || player
-                    .as_ref()
-                    .is_some_and(|player| player.epoch.is_some() || player.seq.is_some())))
-            || (recipient_supports_v3
-                && player
-                    .as_ref()
-                    .is_some_and(|player| player_has_v2_only_snapshot_metadata(player))) =>
-        {
-            let mut player = player.clone();
-            if let Some(player) = &mut player {
-                if recipient_supports_v3 {
-                    strip_player_v2_only_snapshot_metadata(player);
-                } else {
-                    player.epoch = None;
-                    player.seq = None;
-                }
-            }
-            let stripped = ServerMessage::PlayerReconnected {
-                player_id: *reconnected,
-                epoch: recipient_supports_v3.then_some(*epoch).flatten(),
-                player,
-            };
-            send_text_message(
-                sender,
-                &stripped,
                 player_id,
                 max_outbound_message_size,
                 &metrics,
@@ -1371,6 +1304,107 @@ pub(super) async fn send_single_message_ref(
     }
 
     Ok(disposition)
+}
+
+#[derive(Serialize)]
+struct BorrowedPlayerSnapshot<'a> {
+    id: PlayerId,
+    name: &'a str,
+    is_authority: bool,
+    is_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_info: Option<&'a crate::protocol::ConnectionInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+}
+
+impl<'a> BorrowedPlayerSnapshot<'a> {
+    fn for_recipient(player: &'a PlayerInfo, supports_v3: bool) -> Self {
+        let PlayerInfo {
+            id,
+            name,
+            is_authority,
+            is_ready,
+            connected_at,
+            connection_info,
+            epoch,
+            seq,
+            region_id: _,
+        } = player;
+        Self {
+            id: *id,
+            name,
+            is_authority: *is_authority,
+            is_ready: *is_ready,
+            connected_at: (!supports_v3).then_some(*connected_at).flatten(),
+            connection_info: (!supports_v3).then_some(connection_info.as_ref()).flatten(),
+            epoch: supports_v3.then_some(*epoch).flatten(),
+            seq: supports_v3.then_some(*seq).flatten(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", content = "data")]
+enum BorrowedPlayerEvent<'a> {
+    PlayerJoined {
+        player: BorrowedPlayerSnapshot<'a>,
+    },
+    PlayerReconnected {
+        player_id: PlayerId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        epoch: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        player: Option<BorrowedPlayerSnapshot<'a>>,
+    },
+}
+
+fn borrowed_player_event(
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+) -> Option<BorrowedPlayerEvent<'_>> {
+    Some(match message {
+        ServerMessage::PlayerJoined { player } => BorrowedPlayerEvent::PlayerJoined {
+            player: BorrowedPlayerSnapshot::for_recipient(player, recipient_supports_v3),
+        },
+        ServerMessage::PlayerReconnected {
+            player_id,
+            epoch,
+            player,
+        } => BorrowedPlayerEvent::PlayerReconnected {
+            player_id: *player_id,
+            epoch: recipient_supports_v3.then_some(*epoch).flatten(),
+            player: player
+                .as_ref()
+                .map(|player| BorrowedPlayerSnapshot::for_recipient(player, recipient_supports_v3)),
+        },
+        _ => return None,
+    })
+}
+
+#[cfg(any(test, feature = "allocation-tracking"))]
+pub(super) fn materialize_player_event_frame(
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+    max_outbound_message_size: usize,
+) -> Result<Message, SendMessageError> {
+    let projected = borrowed_player_event(message, recipient_supports_v3)
+        .ok_or(SendMessageError::Materialization)?;
+    serialize_json_text_limited(&projected, max_outbound_message_size, 256, "JSON")
+        .map(|text| Message::Text(text.into()))
+        .map_err(|error| match error {
+            BoundedSerializationError::MessageTooLarge { size, max } => {
+                SendMessageError::MessageTooLarge { size, max }
+            }
+            BoundedSerializationError::Serialization(error) => {
+                tracing::error!(%error, "Failed to serialize player event");
+                SendMessageError::Materialization
+            }
+        })
 }
 
 /// The wire name of a server→client [`ServerMessage`] variant documented as
@@ -2679,6 +2713,93 @@ mod tests {
     use chrono::Utc;
     use serde::{Deserialize, Serializer};
     use uuid::Uuid;
+
+    #[test]
+    fn player_event_projection_preserves_exact_wire_and_optional_fields() {
+        for supports_v3 in [false, true] {
+            for info in [
+                None,
+                Some(ConnectionInfo::Direct {
+                    host: "192.0.2.1".into(),
+                    port: 7777,
+                }),
+                Some(ConnectionInfo::Custom {
+                    data: serde_json::json!({"null": null, "array": [1, true, "魚"]}),
+                }),
+            ] {
+                for (epoch, seq) in [
+                    (None, None),
+                    (Some(0), None),
+                    (None, Some(0)),
+                    (Some(7), Some(19)),
+                ] {
+                    let player = PlayerInfo {
+                        id: uuid::Uuid::from_u128(1),
+                        name: "Player 魚\n\"".into(),
+                        is_authority: true,
+                        is_ready: false,
+                        connected_at: info.as_ref().map(|_| chrono::DateTime::UNIX_EPOCH),
+                        connection_info: info.clone(),
+                        epoch,
+                        seq,
+                        region_id: "internal".into(),
+                    };
+                    let mut expected_player = player.clone();
+                    if supports_v3 {
+                        strip_player_v2_only_snapshot_metadata(&mut expected_player);
+                    } else {
+                        expected_player.epoch = None;
+                        expected_player.seq = None;
+                    }
+                    let mut cases = vec![(
+                        ServerMessage::PlayerJoined {
+                            player: player.clone(),
+                        },
+                        ServerMessage::PlayerJoined {
+                            player: expected_player.clone(),
+                        },
+                    )];
+                    for has_player in [false, true] {
+                        cases.push((
+                            ServerMessage::PlayerReconnected {
+                                player_id: player.id,
+                                epoch,
+                                player: has_player.then(|| Box::new(player.clone())),
+                            },
+                            ServerMessage::PlayerReconnected {
+                                player_id: player.id,
+                                epoch: supports_v3.then_some(epoch).flatten(),
+                                player: has_player.then(|| Box::new(expected_player.clone())),
+                            },
+                        ));
+                    }
+                    for (source, expected) in cases {
+                        let expected = serde_json::to_string(&expected).unwrap();
+                        let frame =
+                            materialize_player_event_frame(&source, supports_v3, expected.len())
+                                .unwrap();
+                        assert_eq!(
+                            frame.to_text().unwrap(),
+                            expected,
+                            "v3={supports_v3} source={source:?}"
+                        );
+                        assert!(matches!(
+                            materialize_player_event_frame(
+                                &source,
+                                supports_v3,
+                                expected.len() - 1
+                            ),
+                            Err(SendMessageError::MessageTooLarge { .. })
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(matches!(
+            materialize_player_event_frame(&ServerMessage::Pong, true, 1024),
+            Err(SendMessageError::Materialization)
+        ));
+    }
 
     /// One fixarray marker per byte is the densest legal nesting: a payload
     /// under the 64 KiB frame cap can request ~65k decoder recursion levels.

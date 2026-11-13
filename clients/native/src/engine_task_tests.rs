@@ -1286,3 +1286,198 @@ async fn pending_description_snapshot_retains_live_receive_refusal() {
         }
     }
 }
+
+/// Failed setup must retire its physical link without retaining the owner on a busy core.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_pair_cleanup_keeps_owner_available_and_releases_owned_close() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for drop_owner in [false, true] {
+            let (mut pair, clock) = super::snapshot_tests::unconnected_pair(profile);
+            pair.negotiate().await;
+            let peer = pair.sender_id;
+            let generation = pair.receiver.peers[&peer].generation;
+            let pc = Arc::downgrade(&pair.receiver.peers[&peer].pc);
+            let held = super::snapshot_tests::HeldCoreSend::start(
+                &clock,
+                pair.receiver.channel(peer, RELIABLE_LABEL).unwrap(),
+            )
+            .await;
+            let result = tokio::time::timeout(
+                Duration::from_millis(100),
+                pair.receiver
+                    .finish_pairing(peer, Err(anyhow!("pair setup failed"))),
+            )
+            .await;
+            if result.is_err() {
+                held.finish().await;
+                panic!("profile={profile:?}: failed setup cannot retain its owner behind a busy RTC core");
+            }
+            assert_eq!(
+                result.unwrap().unwrap_err().to_string(),
+                "pair setup failed"
+            );
+            assert!(!pair.receiver.is_current_generation(peer, generation));
+            assert!(!pair.receiver.retiring_peers.is_empty());
+            if drop_owner {
+                let (tx, events) = mpsc::unbounded_channel();
+                let replacement = Engine::new(
+                    EngineSettings {
+                        disable_mdns: true,
+                        channel_profile: profile,
+                        ..EngineSettings::default()
+                    },
+                    tx,
+                )
+                .unwrap();
+                drop(std::mem::replace(&mut pair.receiver, replacement));
+                pair.receiver_events = events;
+            }
+            held.finish().await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while pc.strong_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("owned cleanup releases its real RTC connection after the core resumes");
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.negotiate().await;
+            if !drop_owner {
+                assert_ne!(pair.receiver.peers[&peer].generation, generation);
+            }
+            let payload = format!("fresh setup after {profile:?} failure: 鱼");
+            pair.sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap()
+                .send_text(&payload)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if !pair.receiver.is_current_event(&event) {
+                        continue;
+                    }
+                    if let EngineEvent::ChannelMessage { text, .. } = event {
+                        assert_eq!(text, payload);
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("fresh physical channels carry exact gameplay");
+            pair.cleanup().await;
+        }
+    }
+}
+
+/// A real failed offer must preserve its setup error and allow a fresh pairing.
+#[tokio::test]
+async fn closed_transport_offer_error_retires_setup_and_allows_fresh_pairing() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        let (tx, _events) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(
+            EngineSettings {
+                crippled: true,
+                channel_profile: profile,
+                ..EngineSettings::default()
+            },
+            tx,
+        )
+        .unwrap();
+        let peer = PlayerId::from_u128(0x1240);
+        engine.close_before_offer = true;
+        let error = engine.pair_with(peer, true, &[]).await.unwrap_err();
+        assert_eq!(error.to_string(), "create offer");
+        assert!(matches!(
+            error.downcast_ref::<webrtc::error::Error>(),
+            Some(webrtc::error::Error::ErrConnectionClosed)
+        ));
+        assert!(!engine.is_paired(peer));
+        engine.close_before_offer = false;
+        assert!(engine.pair_with(peer, true, &[]).await.unwrap().is_some());
+        assert_eq!(engine.peers[&peer].channels.len(), profile.labels().len());
+        engine.remove_peer(peer).await.unwrap();
+    }
+}
+
+/// A failed setup worker must return its owned cleanup to the parent Engine.
+#[tokio::test]
+async fn failed_setup_worker_returns_its_close_owner_with_the_original_error() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for drop_owner in [false, true] {
+            let (tx, _events) = mpsc::unbounded_channel();
+            let mut engine = Engine::new(
+                EngineSettings {
+                    crippled: true,
+                    channel_profile: profile,
+                    ..EngineSettings::default()
+                },
+                tx,
+            )
+            .unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            engine.negotiation_hold = Some(NegotiationHold {
+                step: "close",
+                entered: entered.clone(),
+                release: release.clone(),
+            });
+            engine.close_before_offer = true;
+            let peer = PlayerId::from_u128(0x1240);
+            let result = engine
+                .start_negotiation(
+                    peer,
+                    Negotiation::Pair {
+                        initiate: true,
+                        ice_servers: vec![],
+                    },
+                    Deadline::after(tokio::time::Instant::now(), Duration::from_secs(5)),
+                )
+                .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(None) => tokio::time::timeout(Duration::from_secs(5), engine.next_negotiation())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .result
+                    .unwrap_err(),
+                Ok(Some(_)) => panic!("closed setup cannot publish an offer"),
+            };
+            assert!(matches!(
+                error.downcast_ref::<webrtc::error::Error>(),
+                Some(webrtc::error::Error::ErrConnectionClosed)
+            ));
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .unwrap();
+            assert!(!engine.is_paired(peer));
+            assert_eq!(engine.retiring_peers.len(), 1);
+            assert!(
+                Arc::strong_count(&release) > 2,
+                "the returned owner retains the waiting close"
+            );
+            if drop_owner {
+                drop(engine);
+            } else {
+                release.notify_one();
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while !engine.retiring_peers[0].task.is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the returned close owner finishes after release");
+                drop(engine);
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while Arc::strong_count(&release) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("Engine drop releases all waiting cleanup captures");
+        }
+    }
+}

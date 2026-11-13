@@ -46,6 +46,7 @@ P2P window and active run deadline. A zero P2P timeout reports fallback
 immediately but allows late negotiation until the run deadline.
 An expired operation retires its physical link before queued relay traffic and
 server replies resume. Cleanup waits at most 250 ms before stopping the driver.
+Failed pairing uses the same owned, bounded close, so setup errors do not delay fresh links.
 Logical exchange obligations remain due. A new plan or allowed retry can create
 a fresh link. The success-release harness keeps its existing run-window exemption.
 It closes other remote labels without retaining them or starting callbacks.
