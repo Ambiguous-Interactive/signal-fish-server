@@ -577,6 +577,10 @@ fn main() {
             control_costs::room_operation_refusal_skips_player_metadata,
         ),
         allocation_harness::trial(
+            "authority_release_skips_survivor_metadata",
+            live_p2p_allocations::authority_release_skips_survivor_metadata,
+        ),
+        allocation_harness::trial(
             "transport_report_delivery_cost",
             live_p2p_allocations::transport_report_delivery_cost,
         ),

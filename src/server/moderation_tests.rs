@@ -11,6 +11,132 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+/// #826: admitted roomless replies must survive canceled observers.
+#[tokio::test(start_paused = true)]
+async fn canceled_ping_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("ping").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_ready_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("ready").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_start_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("start").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_authority_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("authority").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_signal_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("signal").await;
+}
+
+async fn qualify_canceled_roomless_reply(command: &'static str) {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (actor, mut receiver) = register_client(&server, "127.0.0.1:49305".parse().unwrap()).await;
+    for _ in 0..8 {
+        server
+            .message_coordinator
+            .send_to_player(&actor, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            match command {
+                "ping" => server.handle_ping(&actor).await,
+                "ready" => server.handle_player_ready(&actor).await,
+                "start" => server.handle_start_game(&actor).await,
+                "authority" => server.handle_authority_request(&actor, true).await,
+                "signal" => {
+                    server
+                        .handle_signal(
+                            &actor,
+                            PlayerId::new_v4(),
+                            serde_json::json!({"candidate": "exact"}),
+                        )
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        }
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("roomless response reaches actual backpressure");
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+    let mut next = Box::pin(lifecycle.lock());
+    assert!(
+        futures_util::poll!(&mut next).is_pending(),
+        "{command}: cancellation released source order before the response"
+    );
+    drop(next);
+    let ping = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { server.handle_ping(&actor).await }
+    });
+    for _ in 0..8 {
+        assert!(matches!(
+            receiver.recv().await.unwrap().as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    let result = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match command {
+        "ping" => assert!(matches!(result.as_ref(), ServerMessage::Pong)),
+        "authority" => assert!(matches!(
+            result.as_ref(),
+            ServerMessage::AuthorityResponse {
+                granted: false,
+                error_code: Some(ErrorCode::NotInRoom),
+                ..
+            }
+        )),
+        _ => assert!(matches!(
+            result.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::NotInRoom),
+                ..
+            }
+        )),
+    }
+    timeout(Duration::from_secs(1), ping)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        receiver.recv().await.unwrap().as_ref(),
+        ServerMessage::Pong
+    ));
+    let pending = receiver.try_recv();
+    assert!(
+        matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+        "{command}: exactly one response per command"
+    );
+    let _guard = lifecycle.lock().await;
+}
+
 /// #826: a refused transfer retains its result after observer cancellation.
 #[tokio::test(start_paused = true)]
 async fn canceled_transfer_refusal_retains_result_and_source_order() {
@@ -195,6 +321,26 @@ async fn canceled_transfer_finishes_its_storage_decision() {
 /// #826: a canceled refusal must not hold healthy mesh signaling behind its reply.
 #[tokio::test(start_paused = true)]
 async fn canceled_transfer_refusal_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("transfer").await;
+}
+
+/// #1633: a retained Pong must leave healthy peers free to signal.
+#[tokio::test(start_paused = true)]
+async fn canceled_ping_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("ping").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_signal_refusal_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("signal-self").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_signal_limit_refusal_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("signal-rate").await;
+}
+
+async fn qualify_canceled_control_preserves_live_mesh(command: &'static str) {
     let server = create_test_server_with_session(SessionConfig {
         default_topology: crate::protocol::Topology::Mesh,
         ..SessionConfig::default()
@@ -210,13 +356,37 @@ async fn canceled_transfer_refusal_preserves_live_mesh_signaling() {
             .await
             .unwrap();
     }
+    if command == "signal-rate" {
+        for _ in 0..server.config.rate_limit_config.max_signals {
+            server.rate_limiter.check_signal(&actor).await.unwrap();
+        }
+    }
     let operation_id = RoomOperationId::new_v4();
     let caller = tokio::spawn({
         let server = Arc::clone(&server);
         async move {
-            server
-                .handle_transfer_authority_operation(&actor, operation_id, target)
-                .await
+            match command {
+                "ping" => server.handle_ping(&actor).await,
+                "signal-self" | "signal-rate" => {
+                    server
+                        .handle_signal_in_generation(
+                            &actor,
+                            if command == "signal-self" {
+                                actor
+                            } else {
+                                target
+                            },
+                            generation,
+                            serde_json::json!({"candidate": "exact"}),
+                        )
+                        .await
+                }
+                _ => {
+                    server
+                        .handle_transfer_authority_operation(&actor, operation_id, target)
+                        .await
+                }
+            }
         }
     });
     timeout(Duration::from_secs(1), async {
@@ -253,15 +423,29 @@ async fn canceled_transfer_refusal_preserves_live_mesh_signaling() {
             ServerMessage::Pong
         ));
     }
-    let response = recv_until(&mut peers[1].receiver, |message| {
-        matches!(message, ServerMessage::RoomOperationResult { .. })
-    })
-    .await;
-    assert!(
-        matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
-        if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {
-            error_code: Some(ErrorCode::NotRoomAuthority), ..}))
-    );
+    let response = timeout(Duration::from_secs(1), peers[1].receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    if command == "ping" {
+        assert!(matches!(response.as_ref(), ServerMessage::Pong));
+    } else if command.starts_with("signal") {
+        let expected = if command == "signal-self" {
+            ErrorCode::SignalTargetNotFound
+        } else {
+            ErrorCode::SignalRateLimited
+        };
+        assert!(
+            matches!(response.as_ref(), ServerMessage::Error { error_code: Some(actual), .. }
+            if *actual == expected)
+        );
+    } else {
+        assert!(
+            matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+            if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {
+                error_code: Some(ErrorCode::NotRoomAuthority), ..}))
+        );
+    }
     let _released = timeout(Duration::from_secs(1), lifecycle.lock())
         .await
         .unwrap();

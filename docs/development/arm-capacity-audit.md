@@ -7108,3 +7108,30 @@ when the observer is canceled (#1631). That task increases the fixed empty-input
 byte cost while removing metadata-dependent growth. These are warmed Linux ARM64
 debug observations. They do not establish release throughput, remote latency or
 node capacity. The wire contract and gameplay relay paths do not change.
+
+## Session 694 — delayed authority recovery skips survivor metadata
+
+Existing campaign: #636. Baseline:
+[51b54f31](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/51b54f3120da8d1214ec2edb8195be6cce99f559).
+A pending authority-clear publication copied the complete stored room merely
+to check whether a successor had taken authority. Its production check now
+uses the existing compact authority/member snapshot. Custom adapters retain
+their existing default projection and can override it for compact reads.
+
+The allocation control measures the complete production room-event enqueue,
+storage recheck and exact AuthorityChanged delivery. It varies 2/16/64 members
+and 0/1,024/65,536 bytes of nested legacy metadata per member. A restored
+complete-room read fails the metadata-independent cost requirement in Nextest
+`ea59f52c-dbcc-405a-9c8d-9d4bb4e29328`. In that control, the two-member case grows
+from 8,573 bytes to 139,645 bytes. The 64-member case adds 4 MiB for metadata.
+The fixed control passes in Nextest `534da8f6-4e59-4a96-9a6d-0a87f96e3dc4`.
+Across metadata sizes it uses 6,392 bytes for two members, 31,256 for 16 and
+122,680 for 64. It checks an actual finalized Mesh/WebRTC baseline before
+measurement, exact notice recipients and unchanged stored metadata afterward.
+Existing authority-recovery controls also retain failed-read retry, successor
+supersession, replay, publication-panic and shutdown behavior.
+
+These are warmed Linux ARM64 debug allocation observations. They do not prove
+release throughput, remote latency or node capacity. Ping's separate owned
+completion adds a fixed task allocation to preserve response ordering (#1633).
+The broader optimization campaign remains open.

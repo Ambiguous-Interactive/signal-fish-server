@@ -32,37 +32,7 @@ impl EnhancedGameServer {
 
         tracing::info!(%player_id, %become_authority, "Server handling authority request");
 
-        let Some(room_id) = self.get_client_room(player_id).await else {
-            tracing::warn!(%player_id, "Player not in room for authority request");
-            // The refusal is a polite per-frame reply: it charges the
-            // per-connection error-reply budget (issue #518), so a
-            // roomless RequestAuthority flood cannot buy unbounded denials.
-            if !self.connection_manager.charge_error_reply(player_id).await {
-                return;
-            }
-            if let Err(e) = self
-                .message_coordinator
-                .send_to_player(
-                    player_id,
-                    Arc::new(ServerMessage::AuthorityResponse {
-                        granted: false,
-                        reason: Some("Not in a room".to_string()),
-                        error_code: Some(ErrorCode::NotInRoom),
-                    }),
-                )
-                .await
-            {
-                tracing::error!(%player_id, "Failed to send via coordinator: {}", e);
-            }
-            return;
-        };
-
-        tracing::info!(
-            %player_id,
-            %room_id,
-            %become_authority,
-            "Processing authority request with coordinator"
-        );
+        let room_id = self.get_client_room(player_id).await;
 
         let room_coordinator = Arc::clone(&self.room_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
@@ -71,6 +41,29 @@ impl EnhancedGameServer {
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
             let player_id = &player_id;
+            let Some(room_id) = room_id else {
+                tracing::warn!(%player_id, "Player not in room for authority request");
+                // The refusal is a polite per-frame reply: it charges the
+                // per-connection error-reply budget (issue #518), so a
+                // roomless RequestAuthority flood cannot buy unbounded denials.
+                if !connection_manager.charge_error_reply(player_id).await {
+                    return;
+                }
+                if let Err(e) = message_coordinator
+                    .send_to_player(
+                        player_id,
+                        Arc::new(ServerMessage::AuthorityResponse {
+                            granted: false,
+                            reason: Some("Not in a room".to_string()),
+                            error_code: Some(ErrorCode::NotInRoom),
+                        }),
+                    )
+                    .await
+                {
+                    tracing::error!(%player_id, "Failed to send via coordinator: {}", e);
+                }
+                return;
+            };
             match room_coordinator
                 .handle_authority_request(&room_id, player_id, become_authority)
                 .await

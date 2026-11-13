@@ -149,6 +149,7 @@ impl EnhancedGameServer {
                 ),
                 ErrorCode::SignalTooLarge,
                 "payload_too_large",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -162,6 +163,7 @@ impl EnhancedGameServer {
                 "You are not in a room",
                 ErrorCode::NotInRoom,
                 "sender_not_in_room",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -176,6 +178,7 @@ impl EnhancedGameServer {
                 "Cannot signal yourself",
                 ErrorCode::SignalTargetNotFound,
                 "self_signal",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -189,6 +192,7 @@ impl EnhancedGameServer {
                 "Signal target is not in any room",
                 ErrorCode::SignalTargetNotFound,
                 "target_not_in_room",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -202,6 +206,7 @@ impl EnhancedGameServer {
                 "Cannot signal a peer in a different room",
                 ErrorCode::CrossRoomSignal,
                 "cross_room",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -216,6 +221,7 @@ impl EnhancedGameServer {
                 "WebRTC transport was not negotiated for this connection",
                 ErrorCode::UnsupportedTransport,
                 "sender_unsupported_transport",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -239,6 +245,7 @@ impl EnhancedGameServer {
                 "Signal target does not support WebRTC signaling",
                 ErrorCode::SignalTargetNotFound,
                 "target_unsupported_transport",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -260,6 +267,7 @@ impl EnhancedGameServer {
                 "Signal target is not currently routed in the room",
                 ErrorCode::SignalTargetNotFound,
                 "target_not_routed",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -298,6 +306,7 @@ impl EnhancedGameServer {
                 "Signal sender is no longer routed in the room",
                 ErrorCode::NotInRoom,
                 "sender_routing_changed",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -322,6 +331,7 @@ impl EnhancedGameServer {
                 "Signal target changed while session routing was being published",
                 ErrorCode::SignalTargetNotFound,
                 "target_routing_changed",
+                lifecycle_guard,
             )
             .await;
             return;
@@ -330,8 +340,13 @@ impl EnhancedGameServer {
         // 6. Per-connection valid signal rate limit.
         if let Err(err) = self.rate_limiter.check_signal(from).await {
             drop(signal_publication_guard);
-            self.send_signal_error(from, err.to_string(), ErrorCode::SignalRateLimited)
-                .await;
+            self.send_signal_error(
+                from,
+                err.to_string(),
+                ErrorCode::SignalRateLimited,
+                lifecycle_guard,
+            )
+            .await;
             return;
         }
 
@@ -850,6 +865,7 @@ impl EnhancedGameServer {
         message: impl Into<String>,
         error_code: ErrorCode,
         reason: &'static str,
+        lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
         tracing::debug!(
             %from,
@@ -860,24 +876,48 @@ impl EnhancedGameServer {
         );
 
         match self.rate_limiter.check_signal_error(from).await {
-            Ok(()) => self.send_signal_error(from, message, error_code).await,
+            Ok(()) => {
+                self.send_signal_error(from, message, error_code, lifecycle_guard)
+                    .await
+            }
             Err(err) => {
-                self.send_signal_error(from, err.to_string(), ErrorCode::SignalRateLimited)
-                    .await;
+                self.send_signal_error(
+                    from,
+                    err.to_string(),
+                    ErrorCode::SignalRateLimited,
+                    lifecycle_guard,
+                )
+                .await;
             }
         }
     }
 
-    /// Send a signaling error to a player (thin wrapper over the shared helper).
+    /// Retain a refused signal's reply and source order after observer cancellation.
     async fn send_signal_error(
         &self,
         player_id: &PlayerId,
         message: impl Into<String>,
         error_code: ErrorCode,
+        lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
-        let _ = self
-            .send_error_to_player(player_id, message.into(), Some(error_code))
-            .await;
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let message_coordinator = Arc::clone(&self.message_coordinator);
+        let player_id = *player_id;
+        let message = message.into();
+        let completion = tokio::spawn(async move {
+            let _lifecycle_guard = lifecycle_guard;
+            super::messaging::send_error_to_player(
+                connection_manager.as_ref(),
+                message_coordinator.as_ref(),
+                &player_id,
+                message,
+                Some(error_code),
+            )
+            .await
+        });
+        if let Err(error) = completion.await {
+            tracing::error!(%player_id, %error, "Signal refusal transaction failed");
+        }
     }
 }
 

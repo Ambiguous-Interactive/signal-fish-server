@@ -291,6 +291,23 @@ impl EnhancedGameServer {
         Some(obligation)
     }
 
+    #[cfg(feature = "allocation-tracking")]
+    pub(super) async fn publish_authority_release_for_measurement(
+        &self,
+        room_id: RoomId,
+        player_id: PlayerId,
+    ) -> anyhow::Result<bool> {
+        let obligation = Arc::new(PendingAuthorityRelease { player_id });
+        self.pending_authority_releases
+            .insert(room_id, Arc::clone(&obligation));
+        let guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        self.enqueue_pending_authority_release(room_id, obligation, guard)
+            .await
+    }
+
     /// Retain the obligation until its replay and live publication commit.
     fn enqueue_pending_authority_release(
         &self,
@@ -318,7 +335,7 @@ impl EnhancedGameServer {
                     // A new authority supersedes the delayed clear. The room
                     // gate keeps normal authority transitions behind this check.
                     let authority_is_vacant = database
-                        .get_room_by_id(&room_id)
+                        .get_room_member_snapshot(&room_id, &player_id)
                         .await?
                         .is_some_and(|room| room.authority_player.is_none());
                     if !authority_is_vacant || *predicate_drain.borrow() {

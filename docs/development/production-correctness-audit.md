@@ -17241,3 +17241,79 @@ Nextest `401b92ed-36d3-447c-b9af-f94338ae1536` passes this new history and the
 separate original Reference-profile control. This uses native Engines with
 Godot's negotiated channel profile. Actual Godot multiplayer framing, remote
 networks and historical #1244/#1264 attribution remain open.
+
+### F358: canceled control handlers lost their replies
+
+Session 694 starts at
+[51b54f31](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/51b54f3120da8d1214ec2edb8195be6cce99f559).
+Existing campaign: #826. Finding: [#1633](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1633).
+Ping and the roomless PlayerReady, StartGame and RequestAuthority refusals
+still ran on the observing task. After reply accounting, cancellation during
+queue backpressure discarded the response and released source ordering early.
+Four independent controls fail on the original handlers in Nextest
+`aaf1f8bf-145b-4b49-8b81-84aace6c18c7`. Each fills the real eight-slot reply queue,
+observes measured backpressure and cancels the observer before draining it.
+
+The handlers now move their acquired source guard into owned reply completion.
+Ready, start and authority reuse their existing completion tasks. Ping adds one
+owned task. The exact Pong, NotInRoom Error and AuthorityResponse forms and
+reply accounting remain unchanged. The cancellation controls require the
+retained response before a later same-player Ping. The first expanded cohort
+passes all 26 heartbeat, cancellation, authority and recovery controls in
+Nextest `f063c868-117a-47ed-89b5-807e07502547`. A separate finalized three-player
+Mesh/WebRTC control retains the canceled Ping's source guard while healthy
+peers exchange exact current-generation signals in both directions. It passes
+in Nextest `5a099291-5102-4bbe-bb3f-50c2cffa8293`.
+The final source cohort passes all 41 controls in Nextest
+`31508796-3f25-4676-8944-3f77a793f6d7`, including stale-source rejection and
+in-room cancellation. These are embedded server histories, not attribution
+of a historical network incident. The wider #826 audit remains open.
+
+The adjacent sweep also reproduces Signal refusal loss in Nextest
+`cf36cd82-720e-46ed-87db-0f2bad5b1663`. Two independent finalized Mesh/WebRTC
+controls fail on the original refusal path in
+`10e4756f-2467-442b-ab30-acadb793106d`: self-signal refusal and valid-signal-budget
+refusal both release source order early. Refused Signal delivery now retains
+its source guard in owned completion too. The room publication fence still
+releases before an error reply waits. Healthy peers must exchange exact
+current-generation signals in both directions before the blocked reply drains.
+The roomless refusal also precedes a later same-player Pong. Successful Signal
+admission and its existing owned delivery task stay unchanged.
+The expanded signaling cohort passes all 117 controls in Nextest
+`f95e255f-579f-4655-8936-57ad5346dcf4`. Its first run also
+rejected two older fixtures that treated one observer poll as worker admission.
+They now await measured reply backpressure, retaining the exact room-release,
+refusal-code and healthy-offer assertions. All 29 source-policy checks pass.
+The targeted allocation control still measures eight allocations and 2,840 bytes
+for successful Signal delivery at 2, 16 and 64 members in Nextest
+`0702f9d5-32cc-4d26-9e20-29081789a39d`.
+
+SDK inspection: Rust `client_core.rs` blob `ef296f63` accepts Pong and Error
+without room membership and AuthorityResponse while authenticated. Godot
+`sf_events.gd` blob `5c4e66e6` decodes all three existing response forms.
+.NET state-machine blob `98094169` alone does not establish delayed-reply parity.
+Timing qualification remains in Rust #300, .NET #153 and Godot #578, with
+backlinks to #1633. No wire migration or SDK runtime parity is claimed.
+
+### A11/A20: negotiated-profile partial ICE failure
+
+Existing issue: #1240. The new real-service control runs three native CLI
+processes with Godot's negotiated channel profile. One endpoint registers no
+usable ICE candidates and drops candidate signals in both directions. The
+server still publishes normal finalized Mesh/WebRTC plans. The two healthy
+peers open reliable, ordered and unreliable channels, then exchange exact
+reliable and unreliable payloads both ways. The failed endpoint opens no
+channels, reports WebRTC false exactly once and engages relay fallback.
+Every seat receives the exact asymmetric peer-status matrix and the other
+two seats' distinct WebSocket relay payloads. Timeout diagnostics identify
+only the incomplete pairs and retain channel/transport progress fields.
+
+The new control and the original Reference-profile control both pass in
+Nextest `50f4022b-d7ab-4991-bc8b-31e9dcb4842f`. The final serial run,
+`633f33d0-0d3d-425b-b777-aa898ea47562`, also requires one shared plan generation
+and exact deterministic offer roles for every pair. A first compile rejected the
+fixture's static-only argument storage; the fixture now borrows arguments
+for its actual lifetime. No production client behavior changed. These are
+native negotiated-profile service histories, not Godot runtime or multiplayer
+framing qualification. Remote networks and the historical #1244/#1264 causes
+remain unproven. Keep the broader #1240 issue open.
