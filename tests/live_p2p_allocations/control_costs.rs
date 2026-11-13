@@ -468,10 +468,11 @@ pub(crate) fn room_setting_refusal_skips_player_metadata() {
                             matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
                             if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {error_code: Some(ErrorCode::NotRoomAuthority), ..}))
                         );
-                        assert!(matches!(
-                            receiver.try_recv(),
-                            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-                        ));
+                        let pending = receiver.try_recv();
+                        assert!(
+                            matches!(pending, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+                            "unexpected room-setting message: {pending:?}"
+                        );
                         if measured {
                             println!("ROOM_SETTING_REFUSAL unban={unban} members={count} bytes={bytes} stats={stats:?}");
                             profiles.push(stats);
