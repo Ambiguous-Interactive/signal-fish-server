@@ -37,6 +37,26 @@ async fn canceled_roomless_signal_retains_response_and_source_order() {
     qualify_canceled_roomless_reply("signal").await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_relay_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("relay").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_invalid_relay_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("relay-invalid").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_binary_relay_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("relay-binary").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_invalid_binary_relay_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("relay-invalid-binary").await;
+}
+
 async fn qualify_canceled_roomless_reply(command: &'static str) {
     let server = create_test_server_with(ServerConfig::default()).await;
     let (actor, mut receiver) = register_client(&server, "127.0.0.1:49305".parse().unwrap()).await;
@@ -51,6 +71,20 @@ async fn qualify_canceled_roomless_reply(command: &'static str) {
         let server = Arc::clone(&server);
         async move {
             match command {
+                "relay-binary" => {
+                    server
+                        .handle_game_data_binary(
+                            &actor,
+                            crate::protocol::GameDataEncoding::MessagePack,
+                            bytes::Bytes::from_static(b"exact-binary-refusal"),
+                        )
+                        .await;
+                }
+                "relay" => {
+                    server
+                        .handle_game_data(&actor, serde_json::json!({"tick": 1}), None, None)
+                        .await;
+                }
                 "ping" => server.handle_ping(&actor).await,
                 "ready" => server.handle_player_ready(&actor).await,
                 "start" => server.handle_start_game(&actor).await,
@@ -366,6 +400,27 @@ async fn qualify_canceled_control_preserves_live_mesh(command: &'static str) {
         let server = Arc::clone(&server);
         async move {
             match command {
+                "relay-invalid-binary" => {
+                    let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+                    server
+                        .handle_game_data_binary_from_lifecycle(
+                            &actor,
+                            crate::protocol::GameDataEncoding::MessagePack,
+                            bytes::Bytes::from(vec![0; server.config.max_message_size + 1]),
+                            lifecycle,
+                        )
+                        .await;
+                }
+                "relay-invalid" => {
+                    server
+                        .handle_game_data(
+                            &actor,
+                            serde_json::json!({"tick": 1}),
+                            Some(crate::protocol::DeliveryClass::Latest),
+                            None,
+                        )
+                        .await;
+                }
                 "ping" => server.handle_ping(&actor).await,
                 "signal-self" | "signal-rate" => {
                     server
@@ -429,6 +484,15 @@ async fn qualify_canceled_control_preserves_live_mesh(command: &'static str) {
         .unwrap();
     if command == "ping" {
         assert!(matches!(response.as_ref(), ServerMessage::Pong));
+    } else if command.starts_with("relay-invalid") {
+        let expected = if command == "relay-invalid-binary" {
+            ErrorCode::MessageTooLarge
+        } else {
+            ErrorCode::InvalidDeliveryClass
+        };
+        assert!(
+            matches!(response.as_ref(), ServerMessage::Error {error_code: Some(actual), ..} if *actual == expected)
+        );
     } else if command.starts_with("signal") {
         let expected = if command == "signal-self" {
             ErrorCode::SignalTargetNotFound

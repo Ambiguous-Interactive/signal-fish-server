@@ -5657,6 +5657,15 @@ async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
         assert_eq!(row["incarnation"], incarnation);
         assert_eq!(row["clock"], "workload");
         assert_eq!(row["task_returned"], true);
+        let polls = &row["polls"];
+        let started = polls["started"].as_u64().expect("observed peer polls");
+        assert!(started > 0, "{name}: workload must be observed");
+        assert_eq!(polls["completed"], started);
+        assert_eq!(polls["pending_returns"], started - 1);
+        assert!(
+            polls["last_finished_preparation_us"].as_u64().unwrap()
+                >= polls["last_started_preparation_us"].as_u64().unwrap()
+        );
         let last_send = records
             .sent
             .iter()

@@ -7135,3 +7135,50 @@ These are warmed Linux ARM64 debug allocation observations. They do not prove
 release throughput, remote latency or node capacity. Ping's separate owned
 completion adds a fixed task allocation to preserve response ordering (#1633).
 The broader optimization campaign remains open.
+
+## Session 695 — join baseline ownership and bounded peer poll evidence
+
+Existing issues: #775, #636 and #1352. Baseline: main `832e7108`.
+The live runner built a tree of copied member names and formatted player IDs
+for every initial join. These initial tails were discarded before traffic.
+Rejoins converted that tree into the existing compact snapshot representation.
+The runner now skips initial tail collection and consumes decoded names
+directly into compact rejoin snapshots. Sorting, final duplicate-member values,
+missing-sequence zero defaults and exact serialized rejoin baselines remain
+unchanged. A red-first ownership control rejects the copied-name helper.
+
+An isolated allocation probe compiles the current helper and snapshot source
+with the existing ReceiptName representation. It compares the historical tree
+projection against the new projection, excluding decoding, input construction,
+name pooling and artifact output. For 1,035-byte member names at 2/16/64/255
+members, historical projection allocates 11/69/265/1,048 blocks and
+3,158/22,200/85,352/352,433 bytes. Initial projection now allocates zero blocks.
+Retained rejoin projection allocates 6/48/192/765 blocks and
+232/1,856/7,424/29,580 bytes. Reallocation counts remain separate in the retained
+profile. Rejoin JSON values match exactly. These are helper-level Linux ARM64
+debug observations, not full-run RSS, release throughput or a completed C3
+memory qualification. #775 and the broader #636 campaign remain open.
+
+Peer progress now retains poll-start and poll-completion counts, Pending-return
+counts, the last poll's start and finish times, and its longest observed poll.
+All times use the existing preparation origin, including workload and drain.
+The bounded row adds no per-send or per-poll history. Started greater than
+completed identifies a poll with no observed return at capture; it does not
+distinguish active execution, preemption or a panic. A Pending return with no
+later poll does not prove a lost wake or scheduler starvation. No wake requests
+are counted. Snapshot capture can itself wait for its existing progress mutex.
+
+A paused-clock control observes active polling from inside the child future,
+then a Pending return and a later Ready return. The unchanged two-room,
+two-wave replacement workload retains every send, exact receipt, incarnation
+and replay check. Its final artifact must contain observed poll counters for
+all four peers. The historical coverage failure has no matched recurrence in
+this session; #1352 stays open. Workload, deadlines, lag bound and drain grace
+are unchanged.
+
+The unchanged replacement workload passes the ordinary focused cohort in
+Nextest `7a586113-1e1d-4be1-a644-633308bb8450` and the all-feature LLVM coverage
+control in `5bceb9f0-f520-4c5a-a852-87d46422a62c`. Each attempt retains source and
+binary hashes, the manifest, peer poll rows, exact deliveries and replay. These
+passes qualify the new evidence and snapshot path; they do not repair or
+explain the historical coverage timeout.

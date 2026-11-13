@@ -17317,3 +17317,30 @@ for its actual lifetime. No production client behavior changed. These are
 native negotiated-profile service histories, not Godot runtime or multiplayer
 framing qualification. Remote networks and the historical #1244/#1264 causes
 remain unproven. Keep the broader #1240 issue open.
+
+### F359: canceled relay refusals lost their replies
+
+Session 695 starts at main `832e7108`. Existing campaign: #826.
+Finding: [#1635](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1635).
+The shared source-refusal helper charged a reply and waited on the caller's
+future. Canceling that caller during real queue backpressure discarded the
+Error and released source ordering before delivery. The roomless JSON and
+finalized Mesh/WebRTC invalid-class controls both fail on the original helper
+in Nextest `45a49503-787c-4192-8e30-3379a656eb5b`.
+
+The helper now moves its acquired source guard into owned completion.
+The original error code, reason, reply accounting and stale-source check stay
+unchanged. Roomless JSON and binary controls require the retained refusal
+before a later same-source Pong. Live three-player mesh controls retain an
+invalid-class or oversized-binary refusal while healthy peers exchange exact
+current-generation signals in both directions. The existing restored-socket
+control rejects an old lifecycle and accepts the current one. The nine focused
+controls pass in Nextest `538f1a9a-74e7-4445-930a-29e992b7d340`.
+
+This proves an embedded server cancellation repair. It does not identify a
+historical network timeout cause. SDK inspection confirms Rust accepts the
+existing Error outside room membership and Godot decodes its existing fields.
+The .NET state-machine inspection alone does not prove delayed-reply parity.
+Separate timing qualification stays in Rust #300, .NET #153 and Godot #578.
+No wire migration or SDK runtime parity is claimed. The wider #826 audit stays
+open.

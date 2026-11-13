@@ -97,8 +97,19 @@ struct PeerStageProgress {
     last_completed_us: Option<u64>,
     incarnation: u32,
     task_returned: bool,
+    polls: PeerPollProgress,
     send: Option<PeerSendProgress>,
     last_completed_send: Option<CompletedSendProgress>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct PeerPollProgress {
+    started: u64,
+    completed: u64,
+    pending_returns: u64,
+    last_started_preparation_us: Option<u64>,
+    last_finished_preparation_us: Option<u64>,
+    longest_poll_us: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -136,6 +147,7 @@ impl PeerProgress {
                 last_completed_us: None,
                 incarnation: 1,
                 task_returned: false,
+                polls: PeerPollProgress::default(),
                 send: None,
                 last_completed_send: None,
             })),
@@ -192,6 +204,35 @@ impl PeerProgress {
             at_us,
         });
         state.send = None;
+    }
+
+    /// Observe task polls on the preparation clock, including the workload and drain.
+    async fn observe<F: std::future::Future>(&self, future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|context| {
+            let started = Instant::now();
+            {
+                let mut state = self.state.lock().expect("peer progress");
+                state.polls.started = state.polls.started.saturating_add(1);
+                state.polls.last_started_preparation_us =
+                    Some(micros(self.preparation_started.elapsed()));
+            }
+            let result = future.as_mut().poll(context);
+            {
+                let mut state = self.state.lock().expect("peer progress");
+                state.polls.completed = state.polls.completed.saturating_add(1);
+                state.polls.pending_returns = state
+                    .polls
+                    .pending_returns
+                    .saturating_add(u64::from(result.is_pending()));
+                state.polls.last_finished_preparation_us =
+                    Some(micros(self.preparation_started.elapsed()));
+                state.polls.longest_poll_us =
+                    state.polls.longest_poll_us.max(micros(started.elapsed()));
+            }
+            result
+        })
+        .await
     }
 
     fn returned(&self) {
@@ -637,7 +678,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         sink: WsSink,
         rx: WsReceiver,
         player_id: PlayerId,
-        tails: BTreeMap<String, (String, u64)>,
+        tails: crate::snapshot_tails::SnapshotTails,
     }
     let mut peers: Vec<JoinedPeer> = Vec::new();
     for room in 0..config.rooms {
@@ -670,6 +711,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                         designated,
                         game_data_format,
                         Some(progress),
+                        false,
                     ),
                 )
                 .await
@@ -888,7 +930,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             is_slow_reader,
         );
         handles.push(tokio::spawn(async move {
-            task.await;
+            completion.observe(task).await;
             completion.returned();
         }));
     }
@@ -1282,12 +1324,13 @@ async fn connect_and_join(
     designated: bool,
     game_data_format: Option<GameDataEncoding>,
     progress: Option<&PeerProgress>,
+    retain_tails: bool,
 ) -> Result<
     (
         WsSink,
         WsReceiver,
         signal_fish_server::protocol::PlayerId,
-        BTreeMap<String, (String, u64)>,
+        crate::snapshot_tails::SnapshotTails,
     ),
     String,
 > {
@@ -1313,17 +1356,26 @@ async fn connect_and_join(
     // Snapshot tails: per member, the id whose registry entry names its
     // incarnation, and the seq tail its stream already reached ("a
     // recipient owes no GameData at or below this sequence").
-    let tails = joined
-        .current_players
-        .iter()
+    let tails = collect_join_tails(joined.current_players, retain_tails);
+    Ok((sink, rx, joined.player_id, tails))
+}
+
+fn collect_join_tails(
+    players: Vec<signal_fish_server::protocol::PlayerInfo>,
+    retain: bool,
+) -> crate::snapshot_tails::SnapshotTails {
+    if !retain {
+        return Default::default();
+    }
+    players
+        .into_iter()
         .map(|player| {
             (
-                player.name.clone(),
+                player.name,
                 (player.id.to_string(), player.seq.unwrap_or(0)),
             )
         })
-        .collect();
-    Ok((sink, rx, joined.player_id, tails))
+        .collect()
 }
 
 fn slow_reader_name(config: &RunConfig) -> Option<String> {
@@ -1830,7 +1882,7 @@ async fn peer_task(
         WsSink,
         WsReceiver,
         PlayerId,
-        BTreeMap<String, (String, u64)>,
+        crate::snapshot_tails::SnapshotTails,
     ),
     log: Arc<EventLog>,
     quiescence_us: u64,
@@ -1894,6 +1946,7 @@ async fn peer_task(
                     false,
                     facts.game_data_format,
                     facts.progress.as_ref(),
+                    true,
                 )
                 .await
                 {
@@ -1916,7 +1969,7 @@ async fn peer_task(
                             phase: ChurnPhase::Rejoined,
                             at_us: micros(epoch.elapsed()),
                             epoch: Some(incarnation),
-                            tails: tails.into(),
+                            tails,
                         });
                         (next_sink, next_rx)
                     }
@@ -2157,7 +2210,7 @@ async fn peer_task(
                         phase: ChurnPhase::Disconnect,
                         at_us: micros(epoch.elapsed()),
                         epoch: None,
-                        tails: BTreeMap::new().into(),
+                        tails: Default::default(),
                     });
                     churn_cursor += 1;
                     // The pending writer has dropped before either socket half
@@ -3327,6 +3380,80 @@ mod session_poll_tests {
         );
     }
 
+    #[test]
+    fn join_tails_move_names_and_keep_exact_sorted_baselines() {
+        let players: Vec<_> = ["z-未知", "a", "z-未知"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| signal_fish_server::protocol::PlayerInfo {
+                id: PlayerId::from_u128(index as u128 + 1),
+                name: name.to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: None,
+                connection_info: None,
+                epoch: Some(1),
+                seq: (index != 1).then_some(u64::MAX - index as u64),
+                region_id: String::new(),
+            })
+            .collect();
+        let expected: BTreeMap<_, _> = players
+            .iter()
+            .map(|player| {
+                (
+                    player.name.clone(),
+                    (player.id.to_string(), player.seq.unwrap_or(0)),
+                )
+            })
+            .collect();
+        assert!(collect_join_tails(players.clone(), false).is_empty());
+        let first_name = players[0].name.as_ptr();
+        let tails = collect_join_tails(players, true);
+        assert_eq!(
+            serde_json::to_value(&tails).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(
+            (&tails).into_iter().next_back().unwrap().0.as_ptr(),
+            first_name,
+            "rejoin baselines must move the decoded member name without copying it"
+        );
+        assert!(collect_join_tails(Vec::new(), false).is_empty());
+    }
+
+    /// #1352: record active polls and pending returns without extending peer deadlines.
+    #[tokio::test(start_paused = true)]
+    async fn peer_poll_evidence_distinguishes_active_pending_and_returned() {
+        let progress = PeerProgress::new();
+        let mut calls = 0;
+        let future = std::future::poll_fn(|_| {
+            calls += 1;
+            let snapshot = serde_json::to_value(progress.snapshot()).unwrap();
+            assert_eq!(snapshot["polls"]["started"], calls);
+            assert_eq!(snapshot["polls"]["completed"], calls - 1);
+            if calls == 1 {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(7)
+            }
+        });
+        let mut observed = Box::pin(progress.observe(future));
+        assert!(futures_util::poll!(&mut observed).is_pending());
+        tokio::time::advance(Duration::from_millis(125)).await;
+        let waiting = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(waiting["polls"]["started"], 1);
+        assert_eq!(waiting["polls"]["completed"], 1);
+        assert_eq!(waiting["polls"]["pending_returns"], 1);
+        assert_eq!(waiting["polls"]["last_finished_preparation_us"], 0);
+        assert_eq!(observed.await, 7);
+        let finished = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(finished["polls"]["started"], 2);
+        assert_eq!(finished["polls"]["completed"], 2);
+        assert_eq!(finished["polls"]["pending_returns"], 1);
+        assert_eq!(finished["polls"]["last_started_preparation_us"], 125_000);
+        assert_eq!(finished["polls"]["last_finished_preparation_us"], 125_000);
+    }
+
     /// #1352/#636: each dial path must disable Nagle on the actual gameplay socket.
     #[tokio::test]
     async fn runner_sockets_disable_nagle_before_gameplay() {
@@ -3509,6 +3636,7 @@ mod session_poll_tests {
                     designated,
                     None,
                     Some(&task_progress),
+                    true,
                 )
                 .await
                 .expect("the held handshake must not finish");
@@ -3990,7 +4118,7 @@ mod session_poll_tests {
             receiver,
             ready,
             Arc::clone(&registry),
-            (sink, reader, PlayerId::nil(), BTreeMap::new()),
+            (sink, reader, PlayerId::nil(), Default::default()),
             Arc::clone(&log),
             1_000_000,
             None,
@@ -4983,7 +5111,7 @@ mod session_poll_tests {
                 receiver,
                 ready,
                 Arc::clone(&registry),
-                (sink, reader, PlayerId::new_v4(), BTreeMap::new()),
+                (sink, reader, PlayerId::new_v4(), Default::default()),
                 Arc::clone(&log),
                 4_000_000,
                 Some(Duration::from_secs(2)),
