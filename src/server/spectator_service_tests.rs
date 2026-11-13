@@ -2209,69 +2209,59 @@ async fn ghost_notify_retry_survives_a_later_rollback_for_the_same_identity() {
     );
 }
 
-#[derive(Default)]
-struct RoomGateWake(AtomicBool);
-
-impl futures_util::task::ArcWake for RoomGateWake {
-    fn wake_by_ref(wake: &Arc<Self>) {
-        wake.0.store(true, Ordering::SeqCst);
-    }
-}
-
 struct RoomGateWaiters {
-    first: Arc<RoomGateWake>,
-    second: Arc<RoomGateWake>,
+    attempts: usize,
 }
 
 impl RoomGateWaiters {
-    /// Poll both operations without cooperative yields and retain their distinct wakes.
-    fn poll<First: std::future::Future, Second: std::future::Future>(
+    /// Observe each operation's actual writer-lock poll before admitting its successor.
+    async fn poll<First: std::future::Future, Second: std::future::Future>(
         first: std::pin::Pin<&mut First>,
         second: std::pin::Pin<&mut Second>,
+        gate: &RoomEventMutationGuard,
     ) -> Self {
-        let first_wake = Arc::new(RoomGateWake::default());
-        let second_wake = Arc::new(RoomGateWake::default());
-        let poll = |future: std::pin::Pin<&mut dyn std::future::Future<Output = ()>>,
-                    wake: &Arc<RoomGateWake>| {
-            let waker = futures_util::task::waker(Arc::clone(wake));
-            let mut context = std::task::Context::from_waker(&waker);
-            let future = tokio::task::unconstrained(future);
-            tokio::pin!(future);
-            assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
-        };
-        let first = async {
-            let _result = first.await;
-        };
-        let second = async {
-            let _result = second.await;
-        };
-        tokio::pin!(first, second);
-        poll(first.as_mut(), &first_wake);
-        poll(second.as_mut(), &second_wake);
+        async fn admit<F: std::future::Future>(
+            operation: std::pin::Pin<&mut F>,
+            gate: &RoomEventMutationGuard,
+            context: &str,
+        ) {
+            let attempts = gate.mutation_attempt_count_for_test();
+            let operation = tokio::task::unconstrained(operation);
+            tokio::pin!(operation);
+            assert!(futures_util::poll!(operation.as_mut()).is_pending());
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                gate.wait_for_mutation_attempt_after_for_test(attempts),
+            )
+            .await
+            .expect(context);
+            assert_eq!(gate.mutation_attempt_count_for_test(), attempts + 1);
+        }
+        admit(
+            first,
+            gate,
+            "first operation was not waiting on the held room gate",
+        )
+        .await;
+        admit(
+            second,
+            gate,
+            "second operation was not waiting on the held room gate",
+        )
+        .await;
         Self {
-            first: first_wake,
-            second: second_wake,
+            attempts: gate.mutation_attempt_count_for_test(),
         }
     }
 
-    /// Prove releasing this gate assigns its first permit to the expected operation.
     fn release(self, gate: RoomEventMutationGuard) {
-        assert!(!self.first.0.load(Ordering::SeqCst));
-        assert!(!self.second.0.load(Ordering::SeqCst));
+        assert_eq!(gate.mutation_attempt_count_for_test(), self.attempts);
         drop(gate);
-        assert!(
-            self.first.0.load(Ordering::SeqCst),
-            "first operation was not waiting on the held room gate"
-        );
-        assert!(
-            !self.second.0.load(Ordering::SeqCst),
-            "the second operation overtook the first gate waiter"
-        );
     }
 }
 
 /// Reject generic pending work that has not reached the intended room gate.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[should_panic(expected = "first operation was not waiting on the held room gate")]
 async fn room_gate_waiter_probe_rejects_an_unrelated_pending_operation() {
     let sequencer = Arc::new(RoomEventSequencer::default());
@@ -2283,7 +2273,7 @@ async fn room_gate_waiter_probe_rejects_an_unrelated_pending_operation() {
     };
     let waiting = sequencer.lock(room_id);
     tokio::pin!(stalled, waiting);
-    let waiters = RoomGateWaiters::poll(stalled.as_mut(), waiting.as_mut());
+    let waiters = RoomGateWaiters::poll(stalled.as_mut(), waiting.as_mut(), &gate).await;
     waiters.release(gate);
 }
 
@@ -2420,8 +2410,8 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 .message_coordinator
                 .lock_room_event_mutation(&room_id)
                 .await;
-            /* Poll the owned admission body directly so both futures queue on
-            the room gate in a known order, with no spawned-wrapper race. */
+            /* Observe actual room-queue admission for both direct bodies and
+            owned lobby workers before starting the next operation. */
             let join = server.spectator_service.clone().join_owned(
                 observer,
                 None,
@@ -2440,9 +2430,9 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
             };
             tokio::pin!(join, change);
             let waiters = if spectator_first {
-                RoomGateWaiters::poll(join.as_mut(), change.as_mut())
+                RoomGateWaiters::poll(join.as_mut(), change.as_mut(), &gate).await
             } else {
-                RoomGateWaiters::poll(change.as_mut(), join.as_mut())
+                RoomGateWaiters::poll(change.as_mut(), join.as_mut(), &gate).await
             };
             assert!(server
                 .database
@@ -2623,9 +2613,9 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
             };
             tokio::pin!(departure, change);
             let waiters = if departure_first {
-                RoomGateWaiters::poll(departure.as_mut(), change.as_mut())
+                RoomGateWaiters::poll(departure.as_mut(), change.as_mut(), &gate).await
             } else {
-                RoomGateWaiters::poll(change.as_mut(), departure.as_mut())
+                RoomGateWaiters::poll(change.as_mut(), departure.as_mut(), &gate).await
             };
             assert_eq!(
                 server

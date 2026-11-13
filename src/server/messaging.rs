@@ -2,6 +2,27 @@ use super::{ClientLifecycle, EnhancedGameServer};
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
+pub(super) async fn send_error_to_player(
+    connection_manager: &super::connection_manager::ConnectionManager,
+    message_coordinator: &dyn crate::coordination::MessageCoordinator,
+    player_id: &PlayerId,
+    message: String,
+    error_code: Option<ErrorCode>,
+) -> anyhow::Result<()> {
+    if !connection_manager.charge_error_reply(player_id).await {
+        return Ok(());
+    }
+    message_coordinator
+        .send_to_player(
+            player_id,
+            Arc::new(ServerMessage::Error {
+                message,
+                error_code,
+            }),
+        )
+        .await
+}
+
 impl EnhancedGameServer {
     pub(super) async fn send_error_to_player_for_source(
         &self,
@@ -69,18 +90,14 @@ impl EnhancedGameServer {
         message: String,
         error_code: Option<ErrorCode>,
     ) -> anyhow::Result<()> {
-        if !self.connection_manager.charge_error_reply(player_id).await {
-            return Ok(());
-        }
-        self.message_coordinator
-            .send_to_player(
-                player_id,
-                Arc::new(ServerMessage::Error {
-                    message,
-                    error_code,
-                }),
-            )
-            .await
+        send_error_to_player(
+            self.connection_manager.as_ref(),
+            self.message_coordinator.as_ref(),
+            player_id,
+            message,
+            error_code,
+        )
+        .await
     }
 
     /// Send the `RoomJoinFailed` refusal for one join frame.
