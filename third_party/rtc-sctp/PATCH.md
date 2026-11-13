@@ -577,6 +577,15 @@ Replacement qualification must retain `drain_readiness` controls for admitted
 DATA, final reads/stops, abrupt closure and packet handoff. The public WebRTC
 wrapper uses abort and does not consume this association predicate.
 
+The endpoint's `Drained` event uses the same readiness predicate. A peer can
+retry SHUTDOWN ACK after the first SHUTDOWN COMPLETE was lost while accepted
+gameplay remains unread. The final application read or stop must not retire
+the endpoint before the queued COMPLETE replay reaches `poll_transmit`.
+Issue [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145)
+retains the paired `drain_event_waits_for_shutdown_complete_replay_after_final_read`
+control for both application dispositions, exact tail bytes, final replay,
+terminal timers and one retirement event per endpoint.
+
 ## Retransmission receive credit
 
 Issue [#1536](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1536)

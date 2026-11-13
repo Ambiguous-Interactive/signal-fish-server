@@ -333,15 +333,18 @@ impl EnhancedGameServer {
                     player = %player_id,
                     "Reconnect reached the message router; reconnection is dispatched only by the connection task"
                 );
-                let _ = self
-                    .send_error_to_player(
-                        player_id,
-                        "Reconnection is dispatched by the connection that owns the \
-                         reconnection identity"
+                self.send_router_refusal(
+                    player_id,
+                    ServerMessage::Error {
+                        message: "Reconnection is dispatched by the connection that owns the \
+                                      reconnection identity"
                             .to_string(),
-                        Some(crate::protocol::ErrorCode::ReconnectionFailed),
-                    )
-                    .await;
+                        error_code: Some(crate::protocol::ErrorCode::ReconnectionFailed),
+                    },
+                    source_lifecycle,
+                    None,
+                )
+                .await;
             }
             ClientMessage::JoinAsSpectator {
                 game_name,
@@ -373,7 +376,7 @@ impl EnhancedGameServer {
                 operation,
             } => {
                 let _guard = if let Some(lifecycle) = &source_lifecycle {
-                    let guard = lifecycle.lock().await;
+                    let guard = Arc::clone(lifecycle).lock_owned().await;
                     if lifecycle.player_id() != *player_id
                         || !self
                             .connection_manager
@@ -396,17 +399,19 @@ impl EnhancedGameServer {
                     } else {
                         crate::protocol::ErrorCode::UnsupportedProtocolVersion
                     };
-                    let _ = self
-                        .send_error_to_player(
+                    self
+                        .send_router_refusal(
                             player_id,
-                            "RoomOperation requires the negotiated room_operation_ids capability"
-                                .to_string(),
-                            Some(error_code),
+                            ServerMessage::Error {
+                                message: "RoomOperation requires the negotiated room_operation_ids capability".to_string(),
+                                error_code: Some(error_code),
+                            },
+                            source_lifecycle,
+                            _guard,
                         )
                         .await;
                     return;
                 }
-                drop(_guard);
                 match *operation {
                     RoomOperationRequest::JoinRoom {
                         game_name,
@@ -418,6 +423,7 @@ impl EnhancedGameServer {
                         password,
                         join_only,
                     } => {
+                        drop(_guard);
                         self.handle_join_room_operation_from_lifecycle(
                             player_id,
                             Some(operation_id),
@@ -434,6 +440,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::LeaveRoom => {
+                        drop(_guard);
                         self.leave_room_operation_from_lifecycle(
                             player_id,
                             Some(operation_id),
@@ -449,15 +456,18 @@ impl EnhancedGameServer {
                             player = %player_id,
                             "Reconnect operation reached the message router; reconnection is dispatched only by the connection task"
                         );
-                        let _ = self
-                            .send_room_operation_failure_to_player(
-                                player_id,
+                        self.send_router_refusal(
+                            player_id,
+                            ServerMessage::room_operation_failed(
                                 operation_id,
                                 "Reconnection is dispatched by the connection that owns \
-                                 the reconnection identity",
+                                     the reconnection identity",
                                 Some(crate::protocol::ErrorCode::ReconnectionFailed),
-                            )
-                            .await;
+                            ),
+                            source_lifecycle,
+                            _guard,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::JoinAsSpectator {
                         game_name,
@@ -465,6 +475,7 @@ impl EnhancedGameServer {
                         spectator_name,
                         password,
                     } => {
+                        drop(_guard);
                         self.handle_join_as_spectator_operation_from_lifecycle(
                             player_id,
                             Some(operation_id),
@@ -477,6 +488,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::LeaveSpectator => {
+                        drop(_guard);
                         self.handle_leave_spectator_operation_from_lifecycle(
                             player_id,
                             Some(operation_id),
@@ -485,6 +497,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::KickPlayer { player_id: target } => {
+                        drop(_guard);
                         self.handle_kick_player_from_lifecycle(
                             player_id,
                             operation_id,
@@ -494,6 +507,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::RegenerateRoomCode => {
+                        drop(_guard);
                         self.handle_regenerate_room_code_from_lifecycle(
                             player_id,
                             operation_id,
@@ -502,6 +516,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::SetRoomAccess { password } => {
+                        drop(_guard);
                         self.handle_set_room_access_from_lifecycle(
                             player_id,
                             operation_id,
@@ -511,6 +526,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::BanPlayer { player_id: target } => {
+                        drop(_guard);
                         self.handle_ban_player_from_lifecycle(
                             player_id,
                             operation_id,
@@ -520,6 +536,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::UnbanPlayer { player_id: target } => {
+                        drop(_guard);
                         self.handle_unban_player_from_lifecycle(
                             player_id,
                             operation_id,
@@ -529,6 +546,7 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::TransferAuthority { player_id: target } => {
+                        drop(_guard);
                         self.handle_transfer_authority_from_lifecycle(
                             player_id,
                             operation_id,
@@ -546,6 +564,48 @@ impl EnhancedGameServer {
                 self.handle_transport_status(player_id, transport, connected, source_lifecycle)
                     .await;
             }
+        }
+    }
+
+    async fn send_router_refusal(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        message: ServerMessage,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+        source_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
+            return;
+        };
+        let guard = match source_guard {
+            Some(guard) => guard,
+            None => Arc::clone(&lifecycle).lock_owned().await,
+        };
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+        let server = Arc::clone(self);
+        let player_id = *player_id;
+        let completion = tokio::spawn(async move {
+            let _guard = guard;
+            if !server.charge_error_reply(&player_id).await {
+                return Ok(());
+            }
+            server
+                .message_coordinator
+                .send_to_player(&player_id, Arc::new(message))
+                .await
+        });
+        match completion.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%player_id, %error, "Router refusal delivery failed"),
+            Err(error) => tracing::error!(%player_id, %error, "Router refusal transaction failed"),
         }
     }
 

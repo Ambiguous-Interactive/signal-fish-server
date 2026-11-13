@@ -1918,3 +1918,298 @@ async fn transport_status_unknown_routing_preserves_filtered_delivery_and_errors
         assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
     }
 }
+
+/// #1637/#826: routed refusals retain the source command order after observer cancellation.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn canceled_router_refusals_finish_before_later_source_commands() {
+    use crate::protocol::ErrorCode;
+    for case in 0..4 {
+        let server = create_test_server().await;
+        let (player, mut receiver) = register_router_test_client(&server).await;
+        if case > 0 {
+            server.set_client_protocol(
+                &player,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::WebRtc],
+                    topologies: vec![Topology::Relay, Topology::Mesh],
+                },
+            );
+        }
+        server.set_client_room_operation_ids(&player, case == 3);
+        let mut healthy_peers = Vec::new();
+        let mut generation = None;
+        if case > 0 {
+            let mut room_code = None;
+            for index in 0..3 {
+                let (member, mut member_receiver) = if index == 0 {
+                    (player, None)
+                } else {
+                    let (member, receiver) = register_router_test_client(&server).await;
+                    server.set_client_protocol(&member, server.client_protocol(&player));
+                    (member, Some(receiver))
+                };
+                server
+                    .handle_join_room(
+                        &member,
+                        "retained-router-refusal".into(),
+                        room_code.clone(),
+                        format!("peer-{index}"),
+                        Some(3),
+                        Some(false),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                let joined = next_routed_test_message(
+                    member_receiver.as_mut().unwrap_or(&mut receiver),
+                    "room admission",
+                )
+                .await;
+                let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+                    panic!("{joined:?}");
+                };
+                room_code = Some(payload.room_code.clone());
+                if let Some(receiver) = member_receiver {
+                    healthy_peers.push((member, receiver));
+                }
+            }
+            for member in [player, healthy_peers[0].0, healthy_peers[1].0] {
+                server.handle_player_ready(&member).await;
+            }
+            server.handle_start_game(&player).await;
+            for messages in std::iter::once(&mut receiver)
+                .chain(healthy_peers.iter_mut().map(|(_, messages)| messages))
+            {
+                let mut plan = None;
+                loop {
+                    let queued = messages.try_recv();
+                    match queued {
+                        Ok(message) => match message.as_ref() {
+                            ServerMessage::SessionPlan(value) => {
+                                assert_eq!(value.topology, Topology::Mesh);
+                                assert_eq!(value.transport, Transport::WebRtc);
+                                plan = Some(value.generation);
+                            }
+                            ServerMessage::PlayerJoined { .. }
+                            | ServerMessage::LobbyStateChanged { .. }
+                            | ServerMessage::GameStarting { .. }
+                            | ServerMessage::NewPeer { .. } => {}
+                            other => panic!("unexpected mesh setup message: {other:?}"),
+                        },
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(error) => panic!("mesh setup connection closed: {error}"),
+                    }
+                }
+                assert!(plan.is_some(), "finalized mesh plan must be delivered");
+                if let Some(generation) = generation {
+                    assert_eq!(plan, Some(generation));
+                }
+                generation = plan;
+            }
+        }
+        let operation_id = uuid::Uuid::from_u128(123);
+        let reconnect = || RoomOperationRequest::Reconnect {
+            player_id: PlayerId::new_v4(),
+            room_id: RoomId::new_v4(),
+            auth_token: "unused".into(),
+        };
+        let message = match case {
+            0 | 1 => ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::LeaveRoom),
+            },
+            2 => ClientMessage::Reconnect {
+                player_id: PlayerId::new_v4(),
+                room_id: RoomId::new_v4(),
+                auth_token: "unused".into(),
+            },
+            _ => ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(reconnect()),
+            },
+        };
+        for _ in 0..receiver.max_capacity() {
+            server
+                .message_coordinator
+                .send_to_player(&player, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap();
+        }
+        let caller_server = Arc::clone(&server);
+        let caller = tokio::spawn(async move {
+            caller_server.handle_client_message(&player, message).await;
+        });
+        timeout(Duration::from_secs(1), async {
+            while server
+                .metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("refusal reaches the full source queue");
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        assert!(
+            timeout(Duration::from_millis(20), lifecycle.lock())
+                .await
+                .is_err(),
+            "case {case}: retained refusal must pin source order"
+        );
+        let ping_server = Arc::clone(&server);
+        let ping = tokio::spawn(async move {
+            ping_server
+                .handle_client_message(&player, ClientMessage::Ping)
+                .await;
+        });
+        if case > 0 {
+            let generation = generation.expect("healthy peers have a current mesh plan");
+            for direction in 0..2 {
+                let source = healthy_peers[direction].0;
+                let target = healthy_peers[1 - direction].0;
+                let signal = serde_json::json!({"candidate": format!("exact-{case}-{direction}")});
+                server
+                    .handle_signal_in_generation(&source, target, generation, signal.clone())
+                    .await;
+                let received = next_routed_test_message(
+                    &mut healthy_peers[1 - direction].1,
+                    "healthy mesh signaling",
+                )
+                .await;
+                assert!(
+                    matches!(received.as_ref(), ServerMessage::Signal { from, generation: observed, signal: payload } if *from == source && *observed == generation && *payload == signal),
+                    "{received:?}"
+                );
+            }
+        }
+        for _ in 0..receiver.max_capacity() {
+            assert!(matches!(
+                next_routed_test_message(&mut receiver, "filler")
+                    .await
+                    .as_ref(),
+                ServerMessage::Pong
+            ));
+        }
+        let response = next_routed_test_message(&mut receiver, "retained refusal").await;
+        let expected_code = match case {
+            0 => ErrorCode::UnsupportedProtocolVersion,
+            1 => ErrorCode::InvalidInput,
+            _ => ErrorCode::ReconnectionFailed,
+        };
+        if case == 3 {
+            assert!(
+                matches!(response.as_ref(), ServerMessage::RoomOperationResult { operation_id: echoed, result } if *echoed == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed { error_code: Some(code), .. } if *code == expected_code)),
+                "{response:?}"
+            );
+        } else {
+            assert!(
+                matches!(response.as_ref(), ServerMessage::Error { error_code: Some(code), .. } if *code == expected_code),
+                "{response:?}"
+            );
+        }
+        assert!(matches!(
+            next_routed_test_message(&mut receiver, "later ping")
+                .await
+                .as_ref(),
+            ServerMessage::Pong
+        ));
+        timeout(Duration::from_secs(1), ping)
+            .await
+            .unwrap()
+            .unwrap();
+        let trailing = receiver.try_recv();
+        assert!(
+            matches!(trailing, Err(mpsc::error::TryRecvError::Empty)),
+            "unexpected trailing message: {trailing:?}"
+        );
+    }
+}
+
+/// #1637/#826: an old physical socket cannot send a router refusal to its replacement.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn stale_socket_router_refusals_do_not_reach_replacement_connections() {
+    for case in 0..4 {
+        let server = create_test_server().await;
+        let (player, _old_receiver) = register_router_test_client(&server).await;
+        if case > 0 {
+            server.set_client_protocol(
+                &player,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::WebRtc],
+                    topologies: vec![Topology::Relay, Topology::Mesh],
+                },
+            );
+        }
+        server.set_client_room_operation_ids(&player, case == 3);
+        let operation_id = uuid::Uuid::from_u128(123);
+        let message = match case {
+            0 | 1 => ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::LeaveRoom),
+            },
+            2 => ClientMessage::Reconnect {
+                player_id: PlayerId::new_v4(),
+                room_id: RoomId::new_v4(),
+                auth_token: "unused".into(),
+            },
+            _ => ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::Reconnect {
+                    player_id: PlayerId::new_v4(),
+                    room_id: RoomId::new_v4(),
+                    auth_token: "unused".into(),
+                }),
+            },
+        };
+        let source = server.client_lifecycle(&player).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(player);
+        let caller_server = Arc::clone(&server);
+        let caller = tokio::spawn(async move {
+            caller_server
+                .handle_client_message_from_lifecycle(&player, message, source)
+                .await;
+        });
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(4);
+        server
+            .connection_manager
+            .connect_test_client(player, sender, "127.0.0.1:50100".parse().unwrap())
+            .await;
+        server.set_client_room_operation_ids(&player, true);
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), caller)
+            .await
+            .unwrap()
+            .unwrap();
+        let stale = receiver.try_recv();
+        assert!(
+            matches!(stale, Err(mpsc::error::TryRecvError::Empty)),
+            "case {case}: replacement must receive no stale refusal: {stale:?}"
+        );
+        server
+            .handle_client_message(&player, ClientMessage::Ping)
+            .await;
+        assert!(matches!(
+            next_routed_test_message(&mut receiver, "replacement ping")
+                .await
+                .as_ref(),
+            ServerMessage::Pong
+        ));
+        let trailing = receiver.try_recv();
+        assert!(
+            matches!(trailing, Err(mpsc::error::TryRecvError::Empty)),
+            "unexpected trailing message: {trailing:?}"
+        );
+    }
+}

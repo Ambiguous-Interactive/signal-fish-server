@@ -1076,6 +1076,9 @@ fn graceful_shutdown_reset_preserves_forwarded_future_sequence_without_data() ->
             reader.read_sctp()?.unwrap().to_payload(100)?.freeze(),
             Bytes::from_static(b"admitted future tail")
         );
+        let queued_final_controls = !b.control_queue.is_empty();
+        assert_eq!(b.poll_transmit(now).is_some(), queued_final_controls);
+        assert!(b.control_queue.is_empty());
         assert!(b.poll_endpoint_event().is_some());
         assert!(b.poll_endpoint_event().is_none());
         assert!(b.streams.is_empty());
@@ -2870,6 +2873,9 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
             assert!(b.deferred_reset_reassembly.is_empty());
             assert!(b.deferred_reset_data.is_empty());
             assert_eq!(b.deferred_reset_bytes, 0);
+            let queued_final_controls = !b.control_queue.is_empty();
+            assert_eq!(b.poll_transmit(now).is_some(), queued_final_controls);
+            assert!(b.control_queue.is_empty());
             assert!(b.poll_endpoint_event().is_some());
             assert!(b.poll_endpoint_event().is_none());
             assert!(b.poll_timeout().is_none());
@@ -2907,6 +2913,9 @@ fn graceful_shutdown_preserves_accepted_reset_generation_tail() -> Result<()> {
             Bytes::from_static(b"saved next generation")
         );
         assert!(next.read_sctp()?.is_none());
+        let queued_final_controls = !b.control_queue.is_empty();
+        assert_eq!(b.poll_transmit(now).is_some(), queued_final_controls);
+        assert!(b.control_queue.is_empty());
         assert!(b.poll_endpoint_event().is_some());
         assert!(b.poll_endpoint_event().is_none());
         assert!(b.streams.is_empty());

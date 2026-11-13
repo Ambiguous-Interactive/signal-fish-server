@@ -537,9 +537,9 @@ impl Association {
     pub fn poll_endpoint_event(&mut self) -> Option<EndpointEvent> {
         /*
          * Endpoint drivers remove their owned association on Drained. A
-         * graceful close must leave accepted messages available to readers.
+         * graceful close retains unread messages and queued final packets.
          */
-        if self.retired && self.has_readable_data() {
+        if self.retired && !self.is_drained() {
             return None;
         }
         self.endpoint_events.pop_front().map(EndpointEvent)

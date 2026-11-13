@@ -1528,6 +1528,20 @@ fn recipient_latency_statistics<T: Counter>(
     latency.stats()
 }
 
+/// Count each advisory once and retain only names present in the run roster.
+fn unsupported_notice_counts<'a>(
+    notices: impl IntoIterator<Item = &'a crate::records::UnsupportedNoticeEvent>,
+    roster: &BTreeMap<&str, u32>,
+) -> BTreeMap<&'a str, u64> {
+    let mut counts = BTreeMap::<&str, u64>::new();
+    for notice in notices {
+        if roster.contains_key(notice.recipient.as_str()) {
+            *counts.entry(notice.recipient.as_str()).or_default() += 1;
+        }
+    }
+    counts
+}
+
 /// The shared histogram for summary percentiles and the artifact. Grow the
 /// range as observations arrive so long stalls remain visible.
 pub fn latency_histogram(samples: impl IntoIterator<Item = u64>) -> Histogram<u64> {
@@ -2717,14 +2731,9 @@ pub fn summarize(
                 *opaque_per_room.entry(plan.room).or_default() += 1;
             }
         }
+        let notice_counts = unsupported_notice_counts(&records.unsupported_notices, room_of);
         for (recipient, room) in roster {
-            let count = count_u64(
-                records
-                    .unsupported_notices
-                    .iter()
-                    .filter(|notice| notice.recipient == *recipient)
-                    .count(),
-            );
+            let count = notice_counts.get(recipient.as_str()).copied().unwrap_or(0);
             let bound = opaque_per_room.get(room).copied().unwrap_or(0) * bound_per_opaque;
             if count > bound {
                 reasons.push(InvalidReason::UnsupportedNoticeFlood {
@@ -8415,5 +8424,172 @@ mod coverage_tests {
             })
         );
         std::hint::black_box(records);
+    }
+    /// #636/#775: count exact names in one pass without retaining unplanned identities.
+    #[test]
+    fn indexed_advisories_match_scans_with_bounded_roster_state() {
+        let roster = BTreeMap::from([("", 0), ("peer", 0), ("未知\"\\\n", 1)]);
+        for names in [
+            vec![],
+            vec!["peer"],
+            vec!["outside", "peer", "", "未知\"\\\n", "peer", "outside", ""],
+        ] {
+            for reverse in [false, true] {
+                let mut notices: Vec<_> = names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| crate::records::UnsupportedNoticeEvent {
+                        recipient: (*name).into(),
+                        at_us: count_u64(index),
+                    })
+                    .collect();
+                if reverse {
+                    notices.reverse();
+                }
+                let visited = std::cell::Cell::new(0);
+                let counts = unsupported_notice_counts(
+                    notices.iter().inspect(|_| {
+                        visited.set(visited.get() + 1);
+                    }),
+                    &roster,
+                );
+                assert_eq!(visited.get(), notices.len());
+                assert!(counts.len() <= roster.len());
+                assert!(!counts.contains_key("outside"));
+                for name in roster.keys() {
+                    assert_eq!(
+                        counts.get(name).copied().unwrap_or(0),
+                        count_u64(
+                            notices
+                                .iter()
+                                .filter(|notice| notice.recipient == *name)
+                                .count()
+                        )
+                    );
+                }
+            }
+        }
+    }
+
+    /// Roster ordering and duplicate rows remain authoritative for the emitted reasons.
+    #[test]
+    fn indexed_advisories_preserve_exact_flood_reason_order_and_replay() {
+        let context = crate::unit_context_with_experiment();
+        let mut records = crate::experiment_complete_records(&context.plans);
+        let bound = crate::notice_bound(&records);
+        records.unsupported_notices.clear();
+        for (recipient, count) in [("r0p1", bound + 1), ("r0p0", bound + 2), ("unknown", 30)] {
+            records.unsupported_notices.extend((0..count).map(|at_us| {
+                crate::records::UnsupportedNoticeEvent {
+                    recipient: recipient.into(),
+                    at_us,
+                }
+            }));
+        }
+        let mut roster = context.roster.clone();
+        roster.reverse();
+        roster.push(("r0p1".into(), 0));
+        let summarize = |records: &RunRecords| {
+            super::summarize(
+                &context.plans,
+                &roster,
+                records,
+                1000,
+                96,
+                context.delivery_class,
+                &ChurnPlan::default(),
+                context.experiment,
+            )
+        };
+        for reverse in [false, true] {
+            if reverse {
+                records.unsupported_notices.reverse();
+            }
+            let summary = summarize(&records);
+            let actual: Vec<_> = summary
+                .reasons
+                .iter()
+                .filter_map(|reason| {
+                    if let InvalidReason::UnsupportedNoticeFlood {
+                        recipient,
+                        count,
+                        bound,
+                    } = reason
+                    {
+                        Some((recipient.as_str(), *count, *bound))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let expected: Vec<_> = roster
+                .iter()
+                .filter_map(|(recipient, _)| match recipient.as_str() {
+                    "r0p0" => Some((recipient.as_str(), bound + 2, bound)),
+                    "r0p1" => Some((recipient.as_str(), bound + 1, bound)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                summary.unsupported_notices,
+                count_u64(records.unsupported_notices.len())
+            );
+            let output = tempfile::tempdir().expect("notice artifacts");
+            crate::artifacts::write_deliveries(output.path(), &records).expect("write notices");
+            let replayed = crate::artifacts::read_records(output.path()).expect("read notices");
+            assert_eq!(
+                serde_json::to_value(summarize(&replayed)).unwrap(),
+                serde_json::to_value(summary).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated advisory-count scaling profile; run in a fresh process"]
+    fn generator_advisory_count_scaling_profile() {
+        let notices = 65_536;
+        for peers in [256, 1024, 4096] {
+            let names: Vec<_> = (0..peers).map(|peer| format!("peer-{peer:05}")).collect();
+            let roster: BTreeMap<_, _> = names.iter().map(|name| (name.as_str(), 0)).collect();
+            let rows: Vec<_> = (0..notices)
+                .map(|index| crate::records::UnsupportedNoticeEvent {
+                    recipient: if index % 4 == 0 {
+                        "outside".into()
+                    } else {
+                        names[index % peers].clone()
+                    },
+                    at_us: count_u64(index),
+                })
+                .collect();
+            let started = std::time::Instant::now();
+            let reference: Vec<_> = names
+                .iter()
+                .map(|name| {
+                    count_u64(
+                        rows.iter()
+                            .filter(|notice| notice.recipient == *name)
+                            .count(),
+                    )
+                })
+                .collect();
+            let scan_elapsed_us = started.elapsed().as_micros();
+            let started = std::time::Instant::now();
+            let indexed = unsupported_notice_counts(std::hint::black_box(&rows), &roster);
+            let actual: Vec<_> = names
+                .iter()
+                .map(|name| indexed.get(name.as_str()).copied().unwrap_or(0))
+                .collect();
+            let indexed_elapsed_us = started.elapsed().as_micros();
+            assert_eq!(actual, reference);
+            println!(
+                "ADVISORY_COUNT_PROFILE {}",
+                serde_json::json!({
+                    "peers": peers, "notices": notices, "scan_elapsed_us": scan_elapsed_us,
+                    "indexed_elapsed_us": indexed_elapsed_us, "retained_index_rows": indexed.len(),
+                    "scan_row_visits": peers * notices, "indexed_row_visits": notices,
+                })
+            );
+        }
     }
 }
