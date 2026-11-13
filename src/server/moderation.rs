@@ -1009,7 +1009,7 @@ impl EnhancedGameServer {
             .await;
             return;
         };
-        let room = match self.database.get_room_by_id(&room_id).await {
+        let room = match self.database.get_room_code_snapshot(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 self.fail_operation(
@@ -1123,7 +1123,10 @@ impl EnhancedGameServer {
                 .message_coordinator
                 .lock_room_event_mutation(&room_id)
                 .await;
-            let result = self.database.update_room_code(&room_id, candidate).await;
+            let result = self
+                .database
+                .update_room_code_snapshot(&room_id, candidate)
+                .await;
             drop(room_event_guard);
             match result {
                 Ok(room) => {

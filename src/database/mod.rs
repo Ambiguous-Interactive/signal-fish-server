@@ -142,6 +142,17 @@ pub struct RoomMetricsSnapshot {
     pub game_percentiles: HashMap<String, HashMap<String, f64>>,
 }
 
+/// Room identity and authority read together for room-code changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomCodeSnapshot {
+    /// Game identity used by the room-code registry.
+    pub game_name: String,
+    /// Current room code from the same storage read or write.
+    pub code: String,
+    /// Authority identity stored alongside the room code.
+    pub authority_player: Option<PlayerId>,
+}
+
 /// One room member and the authority identity from the same storage snapshot.
 #[derive(Debug, Clone)]
 pub struct RoomPlayerSnapshot {
@@ -574,6 +585,22 @@ pub trait GameDatabase: Send + Sync {
         )))
     }
 
+    /// Replace a room code atomically and return only its identity and authority.
+    /// The write and error contract match [`Self::update_room_code`].
+    async fn update_room_code_snapshot(
+        &self,
+        room_id: &RoomId,
+        new_code: String,
+    ) -> std::result::Result<RoomCodeSnapshot, UpdateRoomCodeError> {
+        self.update_room_code(room_id, new_code)
+            .await
+            .map(|room| RoomCodeSnapshot {
+                game_name: room.game_name,
+                code: room.code,
+                authority_player: room.authority_player,
+            })
+    }
+
     /// Apply a room's spectator capacity (creation-time default,
     /// issue #525).
     ///
@@ -637,6 +664,19 @@ pub trait GameDatabase: Send + Sync {
     /// Pending rooms and storage errors match [`Self::get_room_by_id`].
     async fn get_room_code(&self, room_id: &RoomId) -> Result<Option<String>> {
         Ok(self.get_room_by_id(room_id).await?.map(|room| room.code))
+    }
+
+    /// Read room-code identity and authority without member metadata.
+    /// Pending visibility and storage errors match [`Self::get_room_by_id`].
+    async fn get_room_code_snapshot(&self, room_id: &RoomId) -> Result<Option<RoomCodeSnapshot>> {
+        Ok(self
+            .get_room_by_id(room_id)
+            .await?
+            .map(|room| RoomCodeSnapshot {
+                game_name: room.game_name,
+                code: room.code,
+                authority_player: room.authority_player,
+            }))
     }
 
     /// Read game-start policy fields from one room snapshot.
@@ -2316,6 +2356,85 @@ fn room_idle_for(
 }
 
 impl InMemoryDatabase {
+    async fn update_room_code_projected<T: Send>(
+        &self,
+        room_id: &RoomId,
+        new_code: String,
+        project: impl FnOnce(&Room) -> T + Send,
+    ) -> std::result::Result<T, UpdateRoomCodeError> {
+        #[cfg(test)]
+        if self
+            .pause_update_room_code
+            .compare_exchange(
+                1,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.update_room_code_reached.notify_one();
+            self.release_update_room_code.notified().await;
+        }
+        // Lock order matches `create_room`: rooms first, then room_codes,
+        // then liveness. All writes commit under one set of guards so the
+        // code registry can never disagree with the stored room about which
+        // code owns this id, and the rotation's activity stamps are atomic
+        // with the code swap.
+        let mut rooms = self.rooms.write().await;
+        let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
+
+        let room = rooms.get_mut(room_id).ok_or_else(|| {
+            UpdateRoomCodeError::Storage(anyhow::anyhow!(
+                "Room {room_id} not found during code rotation"
+            ))
+        })?;
+
+        if room_codes
+            .get(&room.game_name, &new_code)
+            .is_some_and(|owner| owner != room_id)
+        {
+            return Err(UpdateRoomCodeError::RoomCodeCollision {
+                game_name: room.game_name.clone(),
+                room_code: new_code,
+            });
+        }
+
+        // A rotation is room activity on BOTH clocks: `last_activity` is the
+        // durable wall-clock record, and the monotonic liveness stamp is what
+        // the in-process GC decides idle time from when one exists —
+        // refreshing only the wall clock would leave the reaper working from
+        // a stale instant (BUG-1 clock pairing).
+        room_codes.remove(&room.game_name, &room.code);
+        room.code = new_code;
+        room.last_activity = chrono::Utc::now();
+        room_codes.insert(room.game_name.clone(), room.code.clone(), *room_id);
+        liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        self.session_records
+            .record_room_code_changed(room_id, &room.code);
+
+        let updated_room = project(room);
+        #[cfg(test)]
+        if self
+            .pause_update_room_code
+            .compare_exchange(
+                2,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            drop(liveness);
+            drop(room_codes);
+            drop(rooms);
+            self.update_room_code_reached.notify_one();
+            self.release_update_room_code.notified().await;
+        }
+        Ok(updated_room)
+    }
+
     async fn create_room_with_state(
         &self,
         game_name: String,
@@ -2585,77 +2704,21 @@ impl GameDatabase for InMemoryDatabase {
         .await
     }
     async fn update_room_code(&self, room_id: &RoomId, new_code: String) -> UpdateRoomCodeResult {
-        #[cfg(test)]
-        if self
-            .pause_update_room_code
-            .compare_exchange(
-                1,
-                0,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            self.update_room_code_reached.notify_one();
-            self.release_update_room_code.notified().await;
-        }
-        // Lock order matches `create_room`: rooms first, then room_codes,
-        // then liveness. All writes commit under one set of guards so the
-        // code registry can never disagree with the stored room about which
-        // code owns this id, and the rotation's activity stamps are atomic
-        // with the code swap.
-        let mut rooms = self.rooms.write().await;
-        let mut room_codes = self.room_codes.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
+        self.update_room_code_projected(room_id, new_code, Room::clone)
+            .await
+    }
 
-        let room = rooms.get_mut(room_id).ok_or_else(|| {
-            UpdateRoomCodeError::Storage(anyhow::anyhow!(
-                "Room {room_id} not found during code rotation"
-            ))
-        })?;
-
-        if room_codes
-            .get(&room.game_name, &new_code)
-            .is_some_and(|owner| owner != room_id)
-        {
-            return Err(UpdateRoomCodeError::RoomCodeCollision {
-                game_name: room.game_name.clone(),
-                room_code: new_code,
-            });
-        }
-
-        // A rotation is room activity on BOTH clocks: `last_activity` is the
-        // durable wall-clock record, and the monotonic liveness stamp is what
-        // the in-process GC decides idle time from when one exists —
-        // refreshing only the wall clock would leave the reaper working from
-        // a stale instant (BUG-1 clock pairing).
-        room_codes.remove(&room.game_name, &room.code);
-        room.code = new_code;
-        room.last_activity = chrono::Utc::now();
-        room_codes.insert(room.game_name.clone(), room.code.clone(), *room_id);
-        liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
-        self.session_records
-            .record_room_code_changed(room_id, &room.code);
-
-        let updated_room = room.clone();
-        #[cfg(test)]
-        if self
-            .pause_update_room_code
-            .compare_exchange(
-                2,
-                0,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            drop(liveness);
-            drop(room_codes);
-            drop(rooms);
-            self.update_room_code_reached.notify_one();
-            self.release_update_room_code.notified().await;
-        }
-        Ok(updated_room)
+    async fn update_room_code_snapshot(
+        &self,
+        room_id: &RoomId,
+        new_code: String,
+    ) -> std::result::Result<RoomCodeSnapshot, UpdateRoomCodeError> {
+        self.update_room_code_projected(room_id, new_code, |room| RoomCodeSnapshot {
+            game_name: room.game_name.clone(),
+            code: room.code.clone(),
+            authority_player: room.authority_player,
+        })
+        .await
     }
 
     async fn set_room_max_spectators(
@@ -2762,6 +2825,21 @@ impl GameDatabase for InMemoryDatabase {
             .await
             .get(room_id)
             .map(|room| room.code.clone()))
+    }
+
+    async fn get_room_code_snapshot(&self, room_id: &RoomId) -> Result<Option<RoomCodeSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomCodeSnapshot {
+                game_name: room.game_name.clone(),
+                code: room.code.clone(),
+                authority_player: room.authority_player,
+            }))
     }
 
     /// Copy game-start policy fields without member or spectator metadata.
@@ -4028,6 +4106,115 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    /// #636: compact writes retain the full rotation's registry and failure semantics.
+    #[tokio::test(start_paused = true)]
+    async fn compact_room_code_rotation_preserves_registry_and_clocks() {
+        let database = InMemoryDatabase::new();
+        let actor = PlayerId::from_u128(1);
+        let mut rooms = Vec::new();
+        for code in ["ORIGIN", "TAKEN1"] {
+            rooms.push(
+                database
+                    .create_room(
+                        "compact-rotation".into(),
+                        Some(code.into()),
+                        4,
+                        true,
+                        actor,
+                        "relay".into(),
+                        "test".into(),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let room = &rooms[0];
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let rotated = database
+            .update_room_code_snapshot(&room.id, "FRESH1".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            rotated,
+            RoomCodeSnapshot {
+                game_name: room.game_name.clone(),
+                code: "FRESH1".into(),
+                authority_player: Some(actor),
+            }
+        );
+        assert!(database
+            .get_room(&room.game_name, "ORIGIN")
+            .await
+            .unwrap()
+            .is_none());
+        let stored = database
+            .get_room(&room.game_name, "FRESH1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.id, room.id);
+        assert_eq!(
+            serde_json::to_value(&stored.players).unwrap(),
+            serde_json::to_value(&room.players).unwrap()
+        );
+        assert_eq!(stored.authority_player, room.authority_player);
+        assert!(stored.last_activity >= room.last_activity);
+        assert_eq!(
+            database
+                .room_liveness_monotonic
+                .read()
+                .await
+                .get(&room.id)
+                .unwrap()
+                .idle_for(),
+            chrono::Duration::zero()
+        );
+        let collision = database
+            .update_room_code_snapshot(&room.id, "TAKEN1".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(collision, UpdateRoomCodeError::RoomCodeCollision { game_name, room_code } if game_name == room.game_name && room_code == "TAKEN1")
+        );
+        let unchanged = database.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.code, stored.code);
+        assert_eq!(unchanged.last_activity, stored.last_activity);
+        assert_eq!(
+            database
+                .get_room(&room.game_name, "TAKEN1")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            rooms[1].id
+        );
+        assert!(matches!(
+            database
+                .update_room_code_snapshot(&RoomId::nil(), "ABSENT".into())
+                .await,
+            Err(UpdateRoomCodeError::Storage(_))
+        ));
+        database
+            .update_room_code(&room.id, "LEGACY".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            database
+                .get_room_code_snapshot(&room.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .code,
+            "LEGACY"
+        );
+        assert!(database
+            .get_room(&room.game_name, "FRESH1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     /// Code-only reads preserve pending visibility, rotation, deletion and storage errors.
     #[tokio::test]
     async fn room_code_projection_matches_full_room_lifecycle() {
@@ -4316,6 +4503,14 @@ mod tests {
                 Some(state.clone())
             );
             assert_eq!(
+                database.get_room_code_snapshot(&room.id).await.unwrap(),
+                Some(RoomCodeSnapshot {
+                    game_name: room.game_name.clone(),
+                    code: room.code.clone(),
+                    authority_player: room.authority_player,
+                })
+            );
+            assert_eq!(
                 database.get_room_start_snapshot(&room.id).await.unwrap(),
                 Some(RoomStartSnapshot {
                     game_name: room.game_name.clone(),
@@ -4337,12 +4532,20 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(database.get_room_lobby_state(&room.id).await.is_err());
         assert!(database.get_room_start_snapshot(&room.id).await.is_err());
+        assert!(database.get_room_code_snapshot(&room.id).await.is_err());
         database
             .fail_get_room_by_id
             .store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
             database
                 .get_room_lobby_state(&PlayerId::from_u128(2))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .get_room_code_snapshot(&PlayerId::from_u128(2))
                 .await
                 .unwrap(),
             None

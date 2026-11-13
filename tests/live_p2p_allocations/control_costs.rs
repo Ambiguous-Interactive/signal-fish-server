@@ -376,7 +376,7 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
     });
 }
 
-/// Refused room operations do not copy stored peer connection metadata.
+/// Room-code rotations and refused room operations do not copy peer connection metadata.
 pub(crate) fn room_operation_refusal_skips_player_metadata() {
     use signal_fish_server::protocol::{
         ClientMessage, ErrorCode, PlayerInfo, RoomOperationId, RoomOperationRequest,
@@ -384,6 +384,8 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
     };
     use signal_fish_server::server::allocation_benchmark::enable_room_operations_for_measurement;
     for operation_name in [
+        "rotate-success",
+        "rotate",
         "access",
         "unban",
         "kick",
@@ -450,8 +452,13 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                             .unwrap());
                     }
                     let missing_target = operation_name.ends_with("-missing");
-                    let expected_authority = if missing_target { requester } else { authority };
-                    if missing_target {
+                    let expected_authority = if missing_target || operation_name == "rotate-success"
+                    {
+                        requester
+                    } else {
+                        authority
+                    };
+                    if missing_target || operation_name == "rotate-success" {
                         assert!(server
                             .database()
                             .update_room_authority(&room.id, Some(requester))
@@ -476,6 +483,7 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                     for measured in [false, true] {
                         let operation_id = RoomOperationId::from_u128(999);
                         let operation = match operation_name {
+                            "rotate" | "rotate-success" => RoomOperationRequest::RegenerateRoomCode,
                             "unban" => RoomOperationRequest::UnbanPlayer {
                                 player_id: authority,
                             },
@@ -495,17 +503,52 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                         server.handle_client_message(&requester, message).await;
                         let stats = region.change();
                         let response = receiver.try_recv().unwrap();
-                        assert!(
-                            matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+                        if operation_name == "rotate-success" {
+                            let ServerMessage::RoomOperationResult {
+                                operation_id: actual,
+                                result,
+                            } = response.as_ref()
+                            else {
+                                panic!("expected code-rotation result: {response:?}");
+                            };
+                            assert_eq!(*actual, operation_id);
+                            let RoomOperationResult::RoomCodeRegenerated { room_code } =
+                                result.as_ref()
+                            else {
+                                panic!("expected successful rotation: {result:?}");
+                            };
+                            assert_eq!(
+                                server
+                                    .database()
+                                    .get_room_code(&room.id)
+                                    .await
+                                    .unwrap()
+                                    .as_ref(),
+                                Some(room_code)
+                            );
+                            assert_eq!(
+                                server
+                                    .database()
+                                    .get_room("setting-cost", room_code)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .id,
+                                room.id
+                            );
+                        } else {
+                            assert!(
+                                matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
                             if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {error_code: Some(code), ..} if *code == expected_code))
-                        );
+                            );
+                        }
                         let pending = receiver.try_recv();
                         assert!(
                             matches!(pending, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
                             "unexpected room-operation message: {pending:?}"
                         );
                         if measured {
-                            println!("ROOM_OPERATION_REFUSAL operation={operation_name} members={count} bytes={bytes} stats={stats:?}");
+                            println!("ROOM_OPERATION_COST operation={operation_name} members={count} bytes={bytes} stats={stats:?}");
                             profiles.push(stats);
                         }
                     }
@@ -530,7 +573,7 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
             }
             for profile in &profiles {
                 assert!(profile.bytes_allocated <= profiles[0].bytes_allocated + 256,
-                    "room-operation refusal copied peer metadata: operation={operation_name} count={count} profiles={profiles:?}");
+                    "room operation copied peer metadata: operation={operation_name} count={count} profiles={profiles:?}");
             }
         }
     }
