@@ -6957,3 +6957,30 @@ release throughput, network latency, or arbitrary-load CPU bounds. Small grouped
 joins can repoll more pending futures than the old per-node scheduler. The
 33-slow-recipient control checks concurrent grace deadlines across groups;
 it does not measure production CPU under slow-peer load.
+
+### Borrowed live player event serialization (#636, session 689)
+
+The production socket path cloned `PlayerInfo` before removing fields omitted
+from a recipient's protocol version. A v3 event could copy a large legacy
+`Custom` value that never appeared in its output. The new projection borrows
+visible fields and serializes through the same bounded JSON writer. Exhaustive
+`PlayerInfo` destructuring requires review if the source type gains a field.
+
+The fixture measures one event's prewrite materialization on ARM64 Linux with
+`allocation-tracking`. It checks exact v2/v3 bytes for joined and reconnected
+events with 0, 1,024 and 65,536 bytes of nested metadata. The source message and
+expected bytes are prepared outside the measured region.
+
+| v3 event, 65,536-byte metadata | Old allocations | Borrowed allocations | Old allocated bytes | Borrowed allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| PlayerJoined | 8 | 2 | 66,505 | 280 |
+| PlayerReconnected | 9 | 2 | 66,689 | 280 |
+
+All three metadata sizes use two allocations and 280 bytes after repair. The
+original projection fails the fixed two-allocation/512-byte bounds in
+`a557c044`; the repair passes in `355b9ee8`. Output-required v2 metadata stays
+serialized and is not subject to the hidden-metadata bound. The unit matrix
+checks 72 exact field/envelope and frame-limit cases, including absent reconnect
+snapshots. Live socket snapshot and reconnect controls pass in `cf9a2a68`.
+These are component costs, not complete join cost, release throughput or server
+capacity. Protocol control events remain JSON text for both gameplay encodings.

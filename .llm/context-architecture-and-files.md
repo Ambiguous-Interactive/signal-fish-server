@@ -170,3 +170,7 @@ Room mutations and SessionPlan publications retain the exclusive writer fence.
 Each admitted signal owns its source lifecycle and shared fence through delivery;
 queued writers block later readers. Source lifecycle serialization keeps that
 source's signal order. Room mutations still publish through the room FIFO.
+
+Failed departures release the room mutation fence before sending a correlated
+refusal. The source lifecycle still orders its response. Successful departures
+retain the normal terminal watermark, room FIFO and publication rules.

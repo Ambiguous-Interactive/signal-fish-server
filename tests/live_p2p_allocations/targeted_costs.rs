@@ -171,3 +171,80 @@ pub(crate) fn targeted_room_delivery_borrows_healthy_sender() {
             .unwrap());
     });
 }
+
+/// #636: membership events serialize only the recipient's visible player fields.
+pub(crate) fn player_events_do_not_copy_hidden_metadata() {
+    use signal_fish_server::protocol::PlayerInfo;
+    use signal_fish_server::websocket::allocation_benchmark::materialize_player_event;
+    let mut profiles = Vec::new();
+    for bytes in [0, 1024, 64 * 1024] {
+        let player = PlayerInfo {
+            id: Uuid::from_u128(1),
+            name: "Player 🐟\n\"".into(),
+            is_authority: true,
+            is_ready: false,
+            connected_at: Some(chrono::DateTime::UNIX_EPOCH),
+            connection_info: Some(ConnectionInfo::Custom {
+                data: serde_json::json!({"nested": ["x".repeat(bytes)]}),
+            }),
+            epoch: Some(7),
+            seq: Some(19),
+            region_id: "region".into(),
+        };
+        for reconnected in [false, true] {
+            let message = if reconnected {
+                ServerMessage::PlayerReconnected {
+                    player_id: player.id,
+                    epoch: Some(7),
+                    player: Some(Box::new(player.clone())),
+                }
+            } else {
+                ServerMessage::PlayerJoined {
+                    player: player.clone(),
+                }
+            };
+            for v3 in [false, true] {
+                let mut projected_player = player.clone();
+                if v3 {
+                    projected_player.connected_at = None;
+                    projected_player.connection_info = None;
+                } else {
+                    projected_player.epoch = None;
+                    projected_player.seq = None;
+                }
+                let expected = if reconnected {
+                    ServerMessage::PlayerReconnected {
+                        player_id: player.id,
+                        epoch: v3.then_some(7),
+                        player: Some(Box::new(projected_player)),
+                    }
+                } else {
+                    ServerMessage::PlayerJoined {
+                        player: projected_player,
+                    }
+                };
+                let expected = serde_json::to_string(&expected).unwrap();
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                let frame = materialize_player_event(&message, v3, 1024 * 1024).unwrap();
+                let stats = region.change();
+                println!("PLAYER_EVENT_COST bytes={bytes} reconnect={reconnected} v3={v3} stats={stats:?}");
+                assert_eq!(frame.to_text().unwrap(), expected);
+                if v3 {
+                    profiles.push((bytes, reconnected, stats));
+                }
+                assert!(materialize_player_event(&message, v3, expected.len()).is_ok());
+                assert!(materialize_player_event(&message, v3, expected.len() - 1).is_err());
+            }
+        }
+    }
+    for (bytes, reconnected, stats) in &profiles {
+        assert!(
+            stats.allocations <= 2,
+            "player event copied hidden fields: bytes={bytes} reconnect={reconnected}: {stats:?}"
+        );
+        assert!(
+            stats.bytes_allocated <= 512,
+            "player event copied hidden metadata: bytes={bytes} reconnect={reconnected}: {stats:?}"
+        );
+    }
+}

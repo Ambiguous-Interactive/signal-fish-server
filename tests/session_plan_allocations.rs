@@ -483,6 +483,10 @@ fn main() {
             reconnect_costs::reconnect_baseline_reuses_player_roster,
         ),
         allocation_harness::trial(
+            "player_events_do_not_copy_hidden_metadata",
+            targeted_costs::player_events_do_not_copy_hidden_metadata,
+        ),
+        allocation_harness::trial(
             "targeted_reply_avoids_recipient_storage",
             targeted_costs::targeted_reply_avoids_recipient_storage,
         ),

@@ -95,6 +95,19 @@ pub mod allocation_benchmark {
         pub message_pack_decodes: u64,
     }
 
+    pub fn materialize_player_event(
+        message: &crate::protocol::ServerMessage,
+        recipient_supports_v3: bool,
+        max_outbound_message_size: usize,
+    ) -> Result<Message, String> {
+        super::sending::materialize_player_event_frame(
+            message,
+            recipient_supports_v3,
+            max_outbound_message_size,
+        )
+        .map_err(|error| format!("{error:?}"))
+    }
+
     pub fn materialize_game_data(
         delivery: &DeliveryMessage,
         recipient_supports_v3: bool,

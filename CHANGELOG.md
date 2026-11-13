@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server memory used to send live P2P join and reconnect events (#636).
 - Reduce server memory use for refused authority requests (#636).
 - Avoid unused routing wakeups during live room changes (#636).
 - Reduce server work for gameplay relays that finish after routing contention (#636).
@@ -70,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep healthy P2P signaling moving while a failed leave waits for its error reply (#1621).
+- Keep native P2P setup responsive while failed peer connections close (#1622).
 - Keep healthy P2P signaling and transport reports moving during slow peer delivery (#826, #1619).
 - Keep offers between healthy P2P peers moving while another target waits for outbound capacity (#1617).
 - Keep healthy peers signaling while another peer waits for an authority refusal, signal refusal, or metadata error reply

@@ -1634,6 +1634,7 @@ impl EnhancedGameServer {
                     // A live caller can retry safely, so preserve its complete
                     // role when the durable outcome is unknown.
                     tracing::error!(%player_id, %room_id, error = %e, "Failed to remove player from room");
+                    drop(room_event_guard);
                     if let Some(operation_id) = operation_id {
                         let _ = self
                             .send_room_operation_failure_to_player(
@@ -1766,6 +1767,7 @@ impl EnhancedGameServer {
                 // state. Peers reconcile the ghosted membership from their
                 // next baseline.
                 tracing::error!(%player_id, %room_id, "Terminal unroute found no relay watermark; suppressing incomplete PlayerLeft");
+                drop(room_event_guard);
                 if let Some(operation_id) = operation_id {
                     let _ = self
                         .send_room_operation_failure_to_player(
@@ -1780,6 +1782,7 @@ impl EnhancedGameServer {
             }
             (Err(error), _) => {
                 tracing::error!(%player_id, %room_id, %error, "Failed to atomically unroute departing player");
+                drop(room_event_guard);
                 if let Some(operation_id) = operation_id {
                     let _ = self
                         .send_room_operation_failure_to_player(

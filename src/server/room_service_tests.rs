@@ -2020,6 +2020,7 @@ enum DrainTrigger {
     PlayerLeftBroadcast,
     FirstFarewellTrySend,
     MissingTerminalTail,
+    UnrouteFailure,
     SpectatorRoutingLookupFailure,
     AuthorityBroadcastFailure,
     // Marker only: the transfer-announcement pause arms through the
@@ -2047,6 +2048,7 @@ struct DrainTriggerCoordinator {
     fail_snapshot_after_next_join: AtomicBool,
     panic_alias_unregister: StdMutex<Option<(PlayerId, usize)>>,
     unregister_pause: StdMutex<Option<Arc<UnregisterPause>>>,
+    operation_failure_pause: StdMutex<Option<Arc<UnregisterPause>>>,
     unroute_panic_once: std::sync::atomic::AtomicU8,
     panic_reconnect_opening_after_delivery: AtomicBool,
     panic_reconnect_exact_after_delivery: AtomicBool,
@@ -2081,6 +2083,7 @@ impl DrainTriggerCoordinator {
             fail_snapshot_after_next_join: AtomicBool::new(false),
             panic_alias_unregister: StdMutex::new(None),
             unregister_pause: StdMutex::new(None),
+            operation_failure_pause: StdMutex::new(None),
             unroute_panic_once: std::sync::atomic::AtomicU8::new(0),
             panic_reconnect_opening_after_delivery: AtomicBool::new(false),
             panic_reconnect_exact_after_delivery: AtomicBool::new(false),
@@ -2183,6 +2186,16 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         player_id: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
+        if matches!(message.as_ref(), ServerMessage::RoomOperationResult { result, .. }
+            if matches!(result.as_ref(), crate::protocol::RoomOperationResult::OperationFailed { .. }))
+        {
+            let pause = self.operation_failure_pause.lock().unwrap().take();
+            if let Some(pause) = pause {
+                assert_eq!(pause.player, *player_id);
+                pause.reached.notify_one();
+                pause.release.notified().await;
+            }
+        }
         if self.trigger == DrainTrigger::SpectatorLeftSend
             && matches!(message.as_ref(), ServerMessage::SpectatorLeft { .. })
         {
@@ -2707,6 +2720,9 @@ impl MessageCoordinator for DrainTriggerCoordinator {
             .await?;
         if self.trigger == DrainTrigger::MissingTerminalTail {
             return Ok(None);
+        }
+        if self.trigger == DrainTrigger::UnrouteFailure {
+            anyhow::bail!("injected terminal unroute failure");
         }
         Ok(Some((epoch, final_seq)))
     }
@@ -8648,6 +8664,236 @@ async fn leave_room_sends_confirmation_and_clears_membership() {
         !room_after.players.contains_key(&player_id),
         "player should be removed from room state"
     );
+}
+
+/// #826: a failed leave reply cannot hold healthy peers behind the room fence.
+#[tokio::test(start_paused = true)]
+async fn failed_leave_releases_room_before_reply_backpressure() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let mut fixture =
+        setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+            .await;
+    Arc::get_mut(&mut fixture.server).unwrap().session_config = Arc::new(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        enable_webrtc: true,
+        ..SessionConfig::default()
+    });
+    let server = &fixture.server;
+    let (third, mut third_rx) = register_client(server, "127.0.0.1:48408".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &third,
+            "leave-convergence".into(),
+            Some("LVC001".into()),
+            "third".into(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(server.get_client_room(&third).await, Some(fixture.room_id));
+    for receiver in [
+        &mut fixture.leaver_rx,
+        &mut fixture.survivor_rx,
+        &mut third_rx,
+    ] {
+        let _ = drain_queued_messages(receiver);
+    }
+    for player in [fixture.leaver, fixture.survivor, third] {
+        server.set_client_protocol(
+            &player,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![crate::protocol::Transport::WebRtc],
+                topologies: vec![crate::protocol::Topology::Mesh],
+            },
+        );
+    }
+    for player in [fixture.leaver, fixture.survivor, third] {
+        server.handle_player_ready(&player).await;
+    }
+    server.handle_start_game(&fixture.leaver).await;
+    let mut generation = None;
+    for receiver in [
+        &mut fixture.leaver_rx,
+        &mut fixture.survivor_rx,
+        &mut third_rx,
+    ] {
+        let messages = drain_queued_messages(receiver);
+        let plan = messages
+            .iter()
+            .find_map(|message| match message.as_ref() {
+                ServerMessage::SessionPlan(plan) => Some(plan),
+                _ => None,
+            })
+            .expect("each live peer receives its finalized session plan");
+        assert_eq!(plan.topology, crate::protocol::Topology::Mesh);
+        assert_eq!(plan.transport, crate::protocol::Transport::WebRtc);
+        assert_eq!(plan.peers.len(), 2);
+        if let Some(expected) = generation {
+            assert_eq!(plan.generation, expected);
+        }
+        generation = Some(plan.generation);
+    }
+    let generation = generation.unwrap();
+    for _ in 0..8 {
+        server
+            .message_coordinator
+            .send_to_player(&fixture.leaver, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    fixture.database.fail_remove_player_from_room_for_test(true);
+    let operation_id = uuid::Uuid::new_v4();
+    let request = {
+        let server = Arc::clone(server);
+        let leaver = fixture.leaver;
+        tokio::spawn(async move {
+            server
+                .leave_room_operation(&leaver, Some(operation_id))
+                .await
+        })
+    };
+    timeout(Duration::from_secs(1), async {
+        while coordinator
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("failed leave must reach the full reply queue");
+    let mut available = Box::pin(
+        server
+            .message_coordinator
+            .lock_room_event_mutation(&fixture.room_id),
+    );
+    let released = futures_util::poll!(&mut available);
+    assert!(
+        released.is_ready(),
+        "a failed leave must release its room fence before replying"
+    );
+    drop(released);
+    drop(available);
+    timeout(
+        Duration::from_millis(10),
+        server.handle_signal_in_generation(
+            &fixture.survivor,
+            third,
+            generation,
+            serde_json::json!({"Offer": "healthy-after-failed-leave"}),
+        ),
+    )
+    .await
+    .expect("healthy P2P signaling must continue while the leave reply waits");
+    let signal = timeout(Duration::from_secs(1), third_rx.recv())
+        .await
+        .expect("healthy offer arrives")
+        .unwrap();
+    assert!(
+        matches!(signal.as_ref(), ServerMessage::Signal { from, generation: actual, signal }
+        if *from == fixture.survivor && *actual == generation
+            && *signal == serde_json::json!({"Offer": "healthy-after-failed-leave"}))
+    );
+    assert_eq!(
+        server.get_client_room(&fixture.leaver).await,
+        Some(fixture.room_id)
+    );
+    assert!(!request.is_finished());
+    for _ in 0..8 {
+        let queued = timeout(Duration::from_secs(1), fixture.leaver_rx.recv())
+            .await
+            .expect("queued Pong arrives")
+            .unwrap();
+        assert!(matches!(queued.as_ref(), ServerMessage::Pong));
+    }
+    request.await.unwrap();
+    let failure = timeout(Duration::from_secs(1), fixture.leaver_rx.recv())
+        .await
+        .expect("correlated leave failure arrives")
+        .unwrap();
+    assert!(
+        matches!(failure.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result }
+        if *actual == operation_id && matches!(result.as_ref(), crate::protocol::RoomOperationResult::OperationFailed {
+            error_code: Some(ErrorCode::StorageError), ..
+        }))
+    );
+    assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+    assert!(drain_queued_messages(&mut third_rx).is_empty());
+}
+
+/// An incomplete terminal unroute must release its room before its correlated refusal.
+#[tokio::test(start_paused = true)]
+async fn failed_leave_unroute_results_release_room_before_reply() {
+    for trigger in [
+        DrainTrigger::MissingTerminalTail,
+        DrainTrigger::UnrouteFailure,
+    ] {
+        let coordinator = Arc::new(DrainTriggerCoordinator::new(trigger));
+        let mut fixture =
+            setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+                .await;
+        let pause = Arc::new(UnregisterPause {
+            player: fixture.leaver,
+            reached: Notify::new(),
+            release: Notify::new(),
+        });
+        *coordinator.operation_failure_pause.lock().unwrap() = Some(Arc::clone(&pause));
+        let operation_id = uuid::Uuid::new_v4();
+        let request = {
+            let server = Arc::clone(&fixture.server);
+            let leaver = fixture.leaver;
+            tokio::spawn(async move {
+                server
+                    .leave_room_operation(&leaver, Some(operation_id))
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("terminal unroute refusal reaches its held response");
+        assert!(!request.is_finished());
+        let mut available = Box::pin(coordinator.lock_room_event_mutation(&fixture.room_id));
+        let released = futures_util::poll!(&mut available);
+        assert!(
+            released.is_ready(),
+            "terminal unroute refusal cannot retain the room fence"
+        );
+        drop(released);
+        drop(available);
+        assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+        assert!(fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|player| player.id != fixture.leaver));
+        assert!(drain_queued_messages(&mut fixture.leaver_rx).is_empty());
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), request)
+            .await
+            .expect("released refusal completes")
+            .unwrap();
+        let failure = timeout(Duration::from_secs(1), fixture.leaver_rx.recv())
+            .await
+            .expect("terminal refusal arrives")
+            .unwrap();
+        assert!(
+            matches!(failure.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result }
+            if *actual == operation_id && matches!(result.as_ref(), crate::protocol::RoomOperationResult::OperationFailed {
+                error_code: Some(ErrorCode::StorageError), ..
+            }))
+        );
+        assert!(drain_queued_messages(&mut fixture.leaver_rx).is_empty());
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+    }
 }
 
 #[tokio::test(start_paused = true)]
