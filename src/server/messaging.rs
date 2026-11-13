@@ -49,7 +49,7 @@ impl EnhancedGameServer {
     }
 
     /// Send a socket-originated refusal only while that socket owns the ID.
-    /// The guard covers the budget charge and the queued reply.
+    /// The owned completion retains source order through the queued reply.
     pub(crate) async fn send_error_to_player_from_lifecycle(
         &self,
         player_id: &PlayerId,
@@ -57,7 +57,7 @@ impl EnhancedGameServer {
         error_code: Option<ErrorCode>,
         source_lifecycle: Arc<ClientLifecycle>,
     ) -> anyhow::Result<()> {
-        let _guard = source_lifecycle.lock().await;
+        let guard = Arc::clone(&source_lifecycle).lock_owned().await;
         if source_lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -65,8 +65,22 @@ impl EnhancedGameServer {
         {
             return Ok(());
         }
-        self.send_error_to_player(player_id, message, error_code)
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let message_coordinator = Arc::clone(&self.message_coordinator);
+        let player_id = *player_id;
+        tokio::spawn(async move {
+            let _guard = guard;
+            send_error_to_player(
+                connection_manager.as_ref(),
+                message_coordinator.as_ref(),
+                &player_id,
+                message,
+                error_code,
+            )
             .await
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Source refusal transaction failed: {error}"))?
     }
 
     /// Charge one polite per-frame reply against the player's per-connection

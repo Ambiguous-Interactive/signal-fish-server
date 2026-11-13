@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve relay refusal replies and command order when an embedding caller is canceled (#1635).
 - Preserve Ping replies and control refusals, and keep authority replies, ready changes, and game-start plans in source
   order after a server caller cancels its wait (#1628, #1630, #1633).
 - Preserve room-setting results and source order after a server library caller cancels its wait (#1626).
