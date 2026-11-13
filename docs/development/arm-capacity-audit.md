@@ -7006,3 +7006,39 @@ Both scheduler warm-up cohorts agree. Green control: Nextest
 This does not attribute the historical macOS allocation in #1436. That
 investigation stays open. The original two-allocation single-recipient
 requirement is preserved through the generic linear projection.
+
+## Session 691 — room-operation refusal snapshots
+
+Existing campaign: #636. Kick and ban validation cloned all stored players
+before its first role decision and again after waiting for the target lifecycle.
+It now reads compact policy first and a selected-member snapshot second.
+These are the existing storage APIs; their adapter defaults preserve behavior.
+The in-memory implementation avoids unrelated roster metadata copies.
+
+The complete-handler control measures access, unban, kick and ban role refusals,
+plus kick/ban absent-target refusals. It checks exact operation ID and error
+code, one reply, unchanged room policy and unchanged peer metadata outside the
+measured region. Each case runs at 2, 16 and 64 members with 0, 1,024 and 65,536
+bytes of nested legacy metadata per stored non-host member.
+
+The original kick role refusal grows from 23 allocations / 4,987 bytes to
+24 / 70,523 at two members as metadata grows from empty to 65,536 bytes.
+It fails the metadata-independent bound in Nextest
+`abd27686-9446-4f16-a4a1-8ec89dda8c9b`. The final expanded control passes in
+Nextest `ed63e95a-58f0-4ff1-9057-945aba6675b4`. At every room/metadata size:
+
+| Complete refusal | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| SetRoomAccess: role | 10 | 1,816 |
+| UnbanPlayer: role | 10 | 1,688 |
+| KickPlayer: role | 13 | 3,472 |
+| BanPlayer: role | 11 | 1,256 |
+| KickPlayer: absent target | 14 | 3,591 |
+| BanPlayer: absent target | 12 | 1,375 |
+
+Access and unban each add one owned task allocation compared with their previous
+9-allocation path. That cost preserves their stored decision, source order and
+correlated result after observer cancellation (#1626). The kick/ban profiles
+remain independent of unrelated room metadata. These are warmed Linux ARM64
+debug allocation observations, not release throughput, network latency or a
+node-capacity guarantee. No relay hot path changes.

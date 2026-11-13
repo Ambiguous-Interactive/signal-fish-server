@@ -1348,8 +1348,11 @@ async fn connect_plain(url: &str, progress: Option<&PeerProgress>) -> Result<WsS
         if let Some(progress) = progress {
             progress.connection_stage("socket_connect_and_upgrade");
         }
-        return match tokio::time::timeout(STEP_TIMEOUT, tokio_tungstenite::connect_async(request))
-            .await
+        return match tokio::time::timeout(
+            STEP_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(request, None, true),
+        )
+        .await
         {
             Ok(Ok((stream, _))) => Ok(stream),
             Ok(Err(error)) => Err(format!("connect {url}: {error}")),
@@ -1383,6 +1386,7 @@ async fn connect_plain_with_socket(
         let socket = socket
             .await
             .map_err(tokio_tungstenite::tungstenite::Error::Io)?;
+        socket.set_nodelay(true)?;
         if let Some(progress) = progress {
             progress.connection_stage("websocket_upgrade");
         }
@@ -1426,6 +1430,9 @@ async fn connect_clamped(
         Ok(Err(error)) => return Err(format!("clamped connect {addr}: {error}")),
         Err(_) => return Err(format!("clamped connect {addr}: timed out")),
     };
+    stream
+        .set_nodelay(true)
+        .map_err(|error| format!("set TCP_NODELAY: {error}"))?;
     let handshake =
         tokio_tungstenite::client_async(url, tokio_tungstenite::MaybeTlsStream::Plain(stream));
     if let Some(progress) = progress {
@@ -3318,6 +3325,35 @@ mod session_poll_tests {
             completed["last_completed_send"],
             json!({"seq": 16, "incarnation": 4, "at_us": 20_010_000})
         );
+    }
+
+    /// #1352/#636: each dial path must disable Nagle on the actual gameplay socket.
+    #[tokio::test]
+    async fn runner_sockets_disable_nagle_before_gameplay() {
+        for clamped in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/", listener.local_addr().unwrap());
+            let accepting = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio_tungstenite::accept_async(stream).await.unwrap()
+            });
+            let stream = if clamped {
+                connect_clamped(&url, SLOW_READER_RECV_BUFFER_BYTES, None)
+                    .await
+                    .unwrap()
+            } else {
+                connect_plain(&url, None).await.unwrap()
+            };
+            let peer = accepting.await.unwrap();
+            let tokio_tungstenite::MaybeTlsStream::Plain(socket) = stream.get_ref() else {
+                panic!("the local fixture uses plain TCP");
+            };
+            assert!(
+                socket.nodelay().unwrap(),
+                "clamped={clamped}: the runner must not add Nagle delays"
+            );
+            drop(peer);
+        }
     }
 
     #[tokio::test(start_paused = true)]
