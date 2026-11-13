@@ -109,17 +109,32 @@ impl TransportStatusFanOut {
     }
 
     async fn deliver_group(&self, server: &EnhancedGameServer, recipients: &[PlayerId]) -> bool {
-        if let [recipient] = recipients {
-            self.deliver_to(server, recipient).await
-        } else {
-            futures_util::future::join_all(
+        match recipients {
+            [] => false,
+            [recipient] => self.deliver_to(server, recipient).await,
+            [first, second] => {
+                let (first, second) = tokio::join!(
+                    self.deliver_to(server, first),
+                    self.deliver_to(server, second),
+                );
+                first || second
+            }
+            [first, second, third] => {
+                let (first, second, third) = tokio::join!(
+                    self.deliver_to(server, first),
+                    self.deliver_to(server, second),
+                    self.deliver_to(server, third),
+                );
+                first || second || third
+            }
+            _ => futures_util::future::join_all(
                 recipients
                     .iter()
                     .map(|recipient| self.deliver_to(server, recipient)),
             )
             .await
             .into_iter()
-            .any(std::convert::identity)
+            .any(std::convert::identity),
         }
     }
 

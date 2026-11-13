@@ -100,6 +100,22 @@ baseline. It maps audit ownership; it does not certify these operations.
 
 ## Bounded histories without a confirmed defect
 
+### A11/A20 — Session 690 active consumer on one worker
+
+Existing issues: #1264 and #1240. A new current-thread Engine control uses the
+Godot negotiated-channel profile, both receiver offer roles, and two fresh
+physical generations. Each cell stops callback polling, offers 2,048 distinct
+4 KiB reliable packets, and requires actual SCTP receive-credit refusal before
+resuming the production callback loop and an active application consumer.
+It checks the complete ordered payload, sender debt, all receipt counters,
+receive-budget release, and absence of a terminal receive verdict.
+
+The initial control passes without a runtime repair in Nextest
+`1946f937-f400-459b-a460-86a1c0f2f496` (22.411 seconds). This adds a one-worker
+history to the existing multi-worker controls. It does not reproduce or explain
+the historical terminal event in #1264, establish Godot runtime compatibility, or
+close either investigation. No receive budget or timeout changes.
+
 ### A11 — Session 502 signal admission and target departure
 
 At the [base commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/ba65aa23087e3be0a9b4d6f60d14363a31b1bb63),

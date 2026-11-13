@@ -7019,7 +7019,9 @@ async fn assert_transport_status_slow_peers_share_one_timeout_window(slow_peer_c
 
 #[tokio::test(start_paused = true)]
 async fn transport_status_slow_peers_share_one_timeout_window() {
-    assert_transport_status_slow_peers_share_one_timeout_window(2).await;
+    for recipients in 1..=3 {
+        assert_transport_status_slow_peers_share_one_timeout_window(recipients).await;
+    }
 }
 
 #[tokio::test(start_paused = true)]

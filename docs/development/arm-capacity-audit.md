@@ -6984,3 +6984,24 @@ checks 72 exact field/envelope and frame-limit cases, including absent reconnect
 snapshots. Live socket snapshot and reconnect controls pass in `cf9a2a68`.
 These are component costs, not complete join cost, release throughput or server
 capacity. Protocol control events remain JSON text for both gameplay encodings.
+
+## Session 690 — small live transport-report fan-out
+
+Existing campaign: #636. At base `26ba1382`, three- and four-member rooms
+allocate two temporary fan-out collections per changed transport report.
+The exact-delivery allocation control now derives generic per-recipient cost
+from five- and six-member rooms and requires the same two-allocation saving
+for each one-, two-, and three-recipient path. Larger-room projections and
+all exact message assertions remain in place.
+
+The expanded control fails on the base implementation in Nextest
+`85b7f42b-86af-4c25-aa3b-86e9ded51d33`. Fixed-size concurrent joins remove those collections.
+On Linux ARM, three-member reports change from 11 allocations / 5,690 bytes
+to 9 / 5,528; four-member reports change from 13 / 7,923 to 11 / 7,680.
+Two-member and generic five- and six-member costs stay unchanged.
+Both scheduler warm-up cohorts agree. Green control: Nextest
+`2216f6a9-7b03-4c8b-a9a2-692478392538`.
+
+This does not attribute the historical macOS allocation in #1436. That
+investigation stays open. The original two-allocation single-recipient
+requirement is preserved through the generic linear projection.

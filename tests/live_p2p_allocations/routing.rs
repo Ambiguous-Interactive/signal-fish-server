@@ -247,7 +247,7 @@ pub(crate) fn game_start_shares_configuration() {
 /// Compare complete steady-state delivery after exercising both report states.
 /// Retain first-use profiles: macOS can add one retained allocation on first use.
 pub(crate) fn transport_report_delivery_cost() {
-    let counts = [2_u128, 3, 4, 16, 31, 32, 64, 255];
+    let counts = [2_u128, 3, 4, 5, 6, 16, 31, 32, 64, 255];
     let mut profiles = Vec::new();
     for warm_owned_scheduler in [false, true] {
         for count in counts {
@@ -354,9 +354,9 @@ pub(crate) fn transport_report_delivery_cost() {
         }
     }
     for profiles in profiles.chunks_exact(counts.len()) {
-        let per_recipient = profiles[2]
+        let per_recipient = profiles[4]
             .allocations
-            .checked_sub(profiles[1].allocations)
+            .checked_sub(profiles[3].allocations)
             .expect("the generic delivery cost grows with recipients");
         for (count, profile) in counts
             .into_iter()
@@ -365,19 +365,18 @@ pub(crate) fn transport_report_delivery_cost() {
         {
             let count = usize::try_from(count).unwrap();
             let groups = (count - 1).div_ceil(16);
-            let projection = profiles[2].allocations + (count - 4) * per_recipient;
+            let projection = profiles[3].allocations + (count - 5) * per_recipient;
             assert!(profile.allocations <= projection + 2 * groups + 4,
                 "large report fan-out allocates one scheduling node per recipient: count={count} projection={projection} profiles={profiles:?}");
         }
-        let generic_single_recipient = profiles[1]
-            .allocations
-            .checked_mul(2)
-            .and_then(|twice| twice.checked_sub(profiles[2].allocations))
-            .expect("full-delivery cohorts have a common fixed cost");
-        assert!(
-            profiles[0].allocations + 2 <= generic_single_recipient,
-            "single-recipient delivery builds fan-out collections: {profiles:?}"
-        );
+        for (index, count) in counts[..3].iter().enumerate() {
+            let generic = profiles[3]
+                .allocations
+                .checked_sub(usize::try_from(5 - count).unwrap() * per_recipient)
+                .expect("full-delivery cohorts have a common fixed cost");
+            assert!(profiles[index].allocations + 2 <= generic,
+                "small live mesh reports build fan-out collections: count={count} generic={generic} profiles={profiles:?}");
+        }
     }
 }
 
