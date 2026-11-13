@@ -32,6 +32,7 @@ impl EnhancedGameServer {
 
     /// Handle ping with coordination.
     ///
+    /// An admitted reply retains source ordering if its caller is canceled.
     /// Records the in-memory ping timestamp (always) for disconnect detection and
     /// replies `Pong`. The throttled `last_seen` + room-activity refresh is done
     /// once per inbound message by the router (`handle_client_message` →
@@ -57,7 +58,7 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let _lifecycle_guard = lifecycle.lock().await;
+        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -66,17 +67,22 @@ impl EnhancedGameServer {
             return;
         }
 
-        // Always record the ping in memory for disconnect detection
-        self.connection_manager.record_ping(player_id);
-
-        if !self.connection_manager.charge_error_reply(player_id).await {
-            return;
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let message_coordinator = Arc::clone(&self.message_coordinator);
+        let player_id = *player_id;
+        let completion = tokio::spawn(async move {
+            let _lifecycle_guard = lifecycle_guard;
+            connection_manager.record_ping(&player_id);
+            if !connection_manager.charge_error_reply(&player_id).await {
+                return;
+            }
+            let _ = message_coordinator
+                .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+                .await;
+        });
+        if let Err(error) = completion.await {
+            tracing::error!(%player_id, %error, "Ping response transaction failed");
         }
-
-        let _ = self
-            .message_coordinator
-            .send_to_player(player_id, Arc::new(ServerMessage::Pong))
-            .await;
     }
 
     /// Conditionally updates `last_seen` if the throttle threshold has elapsed.

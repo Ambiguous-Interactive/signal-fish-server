@@ -77,16 +77,7 @@ impl EnhancedGameServer {
             return;
         }
 
-        let Some(room_id) = self.get_client_room(player_id).await else {
-            let _ = self
-                .send_error_to_player(
-                    player_id,
-                    "Not in a room".to_string(),
-                    Some(ErrorCode::NotInRoom),
-                )
-                .await;
-            return;
-        };
+        let room_id = self.get_client_room(player_id).await;
 
         let room_coordinator = Arc::clone(&self.room_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
@@ -96,6 +87,17 @@ impl EnhancedGameServer {
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
             let player_id = &player_id;
+            let Some(room_id) = room_id else {
+                let _ = super::messaging::send_error_to_player(
+                    connection_manager.as_ref(),
+                    message_coordinator.as_ref(),
+                    player_id,
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
+                )
+                .await;
+                return;
+            };
             if let Err(error) = room_coordinator
                 .handle_player_ready(&room_id, player_id, app_id)
                 .await
@@ -167,18 +169,10 @@ impl EnhancedGameServer {
             return;
         }
 
-        let Some(room_id) = self.get_client_room(player_id).await else {
-            let _ = self
-                .send_error_to_player(
-                    player_id,
-                    "Not in a room".to_string(),
-                    Some(ErrorCode::NotInRoom),
-                )
-                .await;
-            return;
-        };
-
-        let publication = self.start_game_publication_builder(room_id);
+        let publication = self
+            .get_client_room(player_id)
+            .await
+            .map(|room| (room, self.start_game_publication_builder(room)));
         let room_coordinator = Arc::clone(&self.room_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
         let message_coordinator = Arc::clone(&self.message_coordinator);
@@ -186,6 +180,17 @@ impl EnhancedGameServer {
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
             let player_id = &player_id;
+            let Some((room_id, publication)) = publication else {
+                let _ = super::messaging::send_error_to_player(
+                    connection_manager.as_ref(),
+                    message_coordinator.as_ref(),
+                    player_id,
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
+                )
+                .await;
+                return;
+            };
             match room_coordinator
                 .handle_start_game_with_publication(&room_id, player_id, publication)
                 .await

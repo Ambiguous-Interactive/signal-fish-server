@@ -497,6 +497,17 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    /// Measure the complete pending authority notice with its production storage check.
+    pub async fn publish_authority_release_for_measurement(
+        server: &super::EnhancedGameServer,
+        room_id: crate::protocol::RoomId,
+        player_id: crate::protocol::PlayerId,
+    ) -> anyhow::Result<bool> {
+        server
+            .publish_authority_release_for_measurement(room_id, player_id)
+            .await
+    }
+
     /// Measure the production readiness projection without socket tasks.
     pub fn apply_snapshot_readiness(
         players: &mut [crate::protocol::PlayerInfo],

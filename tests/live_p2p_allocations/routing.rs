@@ -445,3 +445,145 @@ pub(crate) fn bus_exclusions_do_not_grow_recipient_storage() {
         }
     });
 }
+
+/// #636: a delayed authority clear must not copy surviving player metadata.
+pub(crate) fn authority_release_skips_survivor_metadata() {
+    let mut profiles = Vec::new();
+    for count in [2_u128, 16, 64] {
+        for bytes in [0, 1024, 64 * 1024] {
+            allocation_harness::block_on(async {
+                allocation_harness::warm_current_thread_runtime().await;
+                let server = EnhancedGameServer::new(
+                    ServerConfig::default(),
+                    ProtocolConfig::default(),
+                    RelayTypeConfig::default(),
+                    SessionConfig {
+                        default_topology: Topology::Mesh,
+                        enable_webrtc: true,
+                        ..SessionConfig::default()
+                    },
+                    TurnConfig::default(),
+                    DatabaseConfig::InMemory,
+                    MetricsConfig::default(),
+                    CoordinationConfig::default(),
+                    TransportSecurityConfig::default(),
+                    vec![],
+                )
+                .await
+                .unwrap();
+                let mut receivers = Vec::new();
+                for index in 0..count {
+                    let player = Uuid::from_u128(index + 1);
+                    let (sender, receiver) = tokio::sync::mpsc::channel(256);
+                    receivers.push(receiver);
+                    server.connect_client(player, sender).await;
+                    negotiate_webrtc_for_measurement(&server, &player);
+                    server
+                        .handle_join_room(
+                            &player,
+                            "authority-retry-cost".into(),
+                            Some("AUTHRC".into()),
+                            format!("Player{index}"),
+                            Some(64),
+                            Some(true),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    server.handle_player_ready(&player).await;
+                }
+                let actor = Uuid::from_u128(1);
+                let room = server.get_client_room(&actor).await.unwrap();
+                for receiver in &mut receivers {
+                    drain_membership_setup(receiver, false);
+                }
+                server.handle_start_game(&actor).await;
+                for receiver in &mut receivers {
+                    let starting = receiver.try_recv().unwrap();
+                    assert!(matches!(
+                        starting.as_ref(),
+                        ServerMessage::GameStarting { .. }
+                    ));
+                    let plan = take_plan(receiver);
+                    assert_eq!(plan.topology, Topology::Mesh);
+                    assert_eq!(plan.transport, Transport::WebRtc);
+                    assert_eq!(plan.peers.len(), usize::try_from(count - 1).unwrap());
+                    assert_membership_queue_empty(receiver);
+                }
+                let departed = Uuid::from_u128(999);
+                assert!(server
+                    .database()
+                    .update_room_authority(&room, None)
+                    .await
+                    .unwrap());
+                let metadata = serde_json::json!({"unused": "x".repeat(bytes)});
+                for index in 0..count {
+                    assert!(server
+                        .database()
+                        .update_player_connection_info(
+                            &room,
+                            &Uuid::from_u128(index + 1),
+                            ConnectionInfo::Custom {
+                                data: metadata.clone()
+                            }
+                        )
+                        .await
+                        .unwrap());
+                }
+                for receiver in &mut receivers {
+                    assert_membership_queue_empty(receiver);
+                }
+                for measured in [false, true] {
+                    let region = stats_alloc::Region::new(ALLOCATOR);
+                    assert!(signal_fish_server::server::allocation_benchmark::
+                        publish_authority_release_for_measurement(&server, room, departed)
+                        .await.unwrap());
+                    let stats = region.change();
+                    if measured {
+                        println!(
+                            "AUTHORITY_RELEASE_COST members={count} bytes={bytes} stats={stats:?}"
+                        );
+                        profiles.push((count, bytes, stats));
+                    }
+                    for receiver in &mut receivers {
+                        let message = receiver.try_recv().unwrap();
+                        assert!(matches!(
+                            message.as_ref(),
+                            ServerMessage::AuthorityChanged {
+                                authority_player: None,
+                                you_are_authority: false,
+                            }
+                        ));
+                        assert_membership_queue_empty(receiver);
+                    }
+                }
+                let stored = server
+                    .database()
+                    .get_room_by_id(&room)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(stored.authority_player.is_none());
+                assert_eq!(stored.players.len(), usize::try_from(count).unwrap());
+                for player in stored.players.values() {
+                    assert!(matches!(&player.connection_info,
+                        Some(ConnectionInfo::Custom { data }) if *data == metadata));
+                }
+            });
+        }
+    }
+    for (count, bytes, stats) in &profiles {
+        let base = profiles
+            .iter()
+            .find(|(members, size, _)| members == count && *size == 0)
+            .unwrap()
+            .2;
+        assert!(stats.bytes_allocated <= base.bytes_allocated + 256,
+            "authority retry copied metadata: members={count} bytes={bytes} stats={stats:?} base={base:?}");
+        assert!(
+            stats.allocations <= base.allocations + 1,
+            "authority retry copied metadata collections: {profiles:?}"
+        );
+    }
+}

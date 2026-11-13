@@ -242,17 +242,17 @@ fn relay_payload_for(name: &str) -> String {
 
 /// Per-client knobs for [`run_three_clients`]; everything else (names, the
 /// creator/joiner split, run windows) follows the fixed 3-client pattern.
-struct ClientConfig {
+struct ClientConfig<'a> {
     exchange: bool,
     /// Send (and expect) the `relay-from-<name>` relay-floor payload.
     relay: bool,
-    extra_args: &'static [&'static str],
+    extra_args: &'a [&'a str],
     /// Connect to `/v2/ws` instead of `/v3/ws` (for pure-v2 members: a
     /// faithful v2 client would not know the v3 endpoint exists).
     v2_endpoint: bool,
 }
 
-impl ClientConfig {
+impl ClientConfig<'_> {
     /// The scenario-1/2 default: full exchange + relay probe on `/v3/ws`.
     const fn full() -> Self {
         Self {
@@ -302,7 +302,7 @@ async fn await_event_count(
 async fn run_three_clients(
     default_topology: &str,
     game_name: &str,
-    configs: &[ClientConfig; 3],
+    configs: &[ClientConfig<'_>; 3],
 ) -> ScenarioRun {
     let server = spawn_server(default_topology).await;
     // Holds the clients' captured stderr logs for failure diagnostics.
@@ -1016,6 +1016,17 @@ async fn host_star_n3_webrtc() {
 #[tokio::test(flavor = "multi_thread")]
 async fn mesh_n3_partial_ice_cripple_relay_fallback() {
     let _serial = acquire_serial().await;
+    qualify_partial_ice_fallback("reference").await;
+}
+
+/// #1240: negotiated channels keep the healthy mesh edge live during ICE failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn godot_profile_partial_ice_failure_preserves_gameplay_and_relay() {
+    let _serial = acquire_serial().await;
+    qualify_partial_ice_fallback("godot").await;
+}
+
+async fn qualify_partial_ice_fallback(profile: &str) {
     // All members run a SHORT P2P window: the crippled pairs can never
     // connect (the crippled endpoint registers no local candidate and applies
     // no remote candidate), so every member
@@ -1023,13 +1034,22 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
     // one connected pair (>= 1 rule => true), the crippled member with zero
     // (=> false + fallback). 6 s comfortably covers the healthy pair's
     // loopback establishment.
-    const HEALTHY_ARGS: &[&str] = &["--p2p-timeout-secs", "6", "--p2p-retry-count", "0"];
-    const CRIPPLED_ARGS: &[&str] = &[
+    let healthy_args = [
+        "--p2p-timeout-secs",
+        "6",
+        "--p2p-retry-count",
+        "0",
+        "--channel-profile",
+        profile,
+    ];
+    let crippled_args = [
         "--p2p-timeout-secs",
         "6",
         "--p2p-retry-count",
         "0",
         "--cripple-ice",
+        "--channel-profile",
+        profile,
     ];
     let run = run_three_clients(
         "mesh",
@@ -1038,13 +1058,13 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
             ClientConfig {
                 exchange: true,
                 relay: true,
-                extra_args: HEALTHY_ARGS,
+                extra_args: &healthy_args,
                 v2_endpoint: false,
             },
             ClientConfig {
                 exchange: true,
                 relay: true,
-                extra_args: HEALTHY_ARGS,
+                extra_args: &healthy_args,
                 v2_endpoint: false,
             },
             // The crippled member registers no usable local candidates and
@@ -1053,7 +1073,7 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
             ClientConfig {
                 exchange: false,
                 relay: true,
-                extra_args: CRIPPLED_ARGS,
+                extra_args: &crippled_args,
                 v2_endpoint: false,
             },
         ],
@@ -1064,8 +1084,23 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
     // Finalization is unaffected by runtime ICE health: every member
     // advertises mesh+webrtc, so all three plans are normal mesh plans
     // listing the other two members.
+    let mut generation = None;
     for (index, who) in CLIENT_NAMES.iter().enumerate() {
         let plan = session_plan(run.window(index), who, "mesh", 2);
+        if let Some(expected) = generation {
+            assert_eq!(plan["generation"], expected);
+        }
+        generation = Some(plan["generation"].clone());
+        assert!(plan["host"].is_null());
+        let expected_pairs: BTreeSet<_> = run
+            .other_ids(index)
+            .iter()
+            .map(|peer| ((*peer).to_string(), run.ids[index].as_str() < *peer))
+            .collect();
+        assert_eq!(
+            plan_peers(plan, who).into_iter().collect::<BTreeSet<_>>(),
+            expected_pairs
+        );
         let peer_ids: BTreeSet<String> = plan_peers(plan, who)
             .into_iter()
             .map(|(id, _initiate)| id)
@@ -1085,6 +1120,24 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
         let who = CLIENT_NAMES[index];
         let other_only: BTreeSet<&str> = BTreeSet::from([run.ids[other].as_str()]);
         assert_pair_connected_exactly(run.window(index), who, &other_only);
+        let labels: &[&str] = if profile == "godot" {
+            &["reliable", "ordered", "unreliable"]
+        } else {
+            &["reliable", "unreliable"]
+        };
+        let opened = events_named(run.window(index), "channel_open");
+        let expected_opened: BTreeSet<_> = labels
+            .iter()
+            .map(|label| (run.ids[other].as_str(), *label))
+            .collect();
+        assert_eq!(opened.len(), labels.len());
+        assert_eq!(
+            opened
+                .iter()
+                .map(|event| (str_field(event, "peer"), str_field(event, "label")))
+                .collect::<BTreeSet<_>>(),
+            expected_opened
+        );
         assert_exchange_received_from(&run.logs[index], who, &other_only);
         assert_exchange_sent_to(&run.logs[index], who, &other_only);
         // >= 1 pair connected at the deadline => overall webrtc status true.

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server memory used to retry delayed authority changes (#636).
 - Reduce server memory used for small-room P2P transport reports, room-code changes, and refused room operations (#636).
 - Reduce server memory used to send live P2P join and reconnect events (#636).
 - Reduce server memory use for refused authority requests (#636).
@@ -72,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep authority replies, ready changes, and game-start plans in source order after a server caller cancels its wait
-  (#1628, #1630).
+- Preserve Ping replies, roomless refusals, authority replies, ready changes, and game-start plans after a server
+  caller cancels its wait (#1628, #1630, #1633).
 - Preserve room-setting results and source order after a server library caller cancels its wait (#1626).
 - Keep live P2P signaling moving while refused room-setting replies wait on a slow requester (#1625).
 - Keep healthy P2P signaling moving while a failed leave waits for its error reply (#1621).
