@@ -573,6 +573,10 @@ fn main() {
             control_costs::direct_repeat_cost_does_not_copy_other_members,
         ),
         allocation_harness::trial(
+            "room_setting_refusal_skips_player_metadata",
+            control_costs::room_setting_refusal_skips_player_metadata,
+        ),
+        allocation_harness::trial(
             "transport_report_delivery_cost",
             live_p2p_allocations::transport_report_delivery_cost,
         ),

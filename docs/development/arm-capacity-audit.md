@@ -6987,7 +6987,8 @@ capacity. Protocol control events remain JSON text for both gameplay encodings.
 
 ## Session 690 — small live transport-report fan-out
 
-Existing campaign: #636. At base `26ba1382`, three- and four-member rooms
+Existing campaign: #636. At the [session baseline](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/26ba13822dd7af6d407a6699c0a9b5aad1d8cb8c),
+three- and four-member rooms
 allocate two temporary fan-out collections per changed transport report.
 The exact-delivery allocation control now derives generic per-recipient cost
 from five- and six-member rooms and requires the same two-allocation saving

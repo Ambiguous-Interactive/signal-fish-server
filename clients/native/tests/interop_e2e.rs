@@ -2491,6 +2491,33 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
     }
 }
 
+/// Qualify server-brokered sessions for the negotiated Godot channel profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn godot_profile_completes_server_brokered_peer_exchange() {
+    let _serial = acquire_serial().await;
+    let run = run_two_peer_mesh("interop-godot-profile", &["--channel-profile", "godot"]).await;
+    for (index, who) in TWO_CLIENT_NAMES.iter().enumerate() {
+        let peer_id = run.ids[1 - index].as_str();
+        let peers = BTreeSet::from([peer_id]);
+        let window = run.window(index);
+        session_plan(window, who, "mesh", 1);
+        assert_pair_connected_exactly(window, who, &peers);
+        let labels: BTreeSet<_> = window
+            .iter()
+            .filter(|event| event["event"] == "channel_open" && event["peer"] == peer_id)
+            .map(|event| str_field(event, "label"))
+            .collect();
+        assert_eq!(
+            labels,
+            BTreeSet::from(["reliable", "ordered", "unreliable"]),
+            "{who}: every negotiated channel must be open"
+        );
+        assert_exchange_sent_to(&run.logs[index], who, &peers);
+        assert_exchange_received_from(&run.logs[index], who, &peers);
+        assert_transport_status_true(&run.logs[index], who);
+    }
+}
+
 // Regression #889: retain connected channel observations when only exchange debt expires.
 #[tokio::test(flavor = "multi_thread")]
 async fn connected_peer_exchange_cutoff_keeps_live_channel_snapshot() {

@@ -8597,3 +8597,164 @@ async fn failed_peer_metadata_releases_the_room_before_reply_backpressure() {
         Err(mpsc::error::TryRecvError::Empty)
     ));
 }
+
+/// A refused room setting must release live signaling before its reply can wait.
+#[tokio::test(start_paused = true)]
+async fn room_setting_refusals_release_the_room_before_reply_backpressure() {
+    for unban in [false, true] {
+        let server = create_test_server_with_session(mesh_session_config()).await;
+        let (alice, mut alice_rx, room) = register_refusal_source(&server).await;
+        let (bob, mut bob_rx) = register_client(&server).await;
+        let (charlie, mut charlie_rx) = register_client(&server).await;
+        for (player, name) in [(bob, "Bob"), (charlie, "Charlie")] {
+            server.set_client_protocol(&player, v3_webrtc());
+            server
+                .handle_join_room(
+                    &player,
+                    "refusal-room".into(),
+                    Some("RPL685".into()),
+                    name.into(),
+                    Some(3),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            loop {
+                match alice_rx.try_recv() {
+                    Ok(queued) => assert!(
+                        matches!(queued.payload, crate::coordination::outbound_queue::OutboundPayload::Message(message) if matches!(message.as_ref(), ServerMessage::PlayerJoined { .. } | ServerMessage::LobbyStateChanged { .. }))
+                    ),
+                    Err(crate::coordination::outbound_queue::TryReceiveError::Empty) => break,
+                    Err(error) => panic!("the joined source queue must stay open: {error:?}"),
+                }
+            }
+        }
+        for player in [alice, bob, charlie] {
+            server.handle_player_ready(&player).await;
+            assert!(matches!(
+                recv_refusal_source(&mut alice_rx).await.as_ref(),
+                ServerMessage::LobbyStateChanged { .. }
+            ));
+        }
+        server.handle_start_game(&bob).await;
+        assert!(matches!(
+            recv_refusal_source(&mut alice_rx).await.as_ref(),
+            ServerMessage::GameStarting { .. }
+        ));
+        let plan = recv_refusal_source(&mut alice_rx).await;
+        let ServerMessage::SessionPlan(plan) = plan.as_ref() else {
+            panic!("expected a real finalized plan: {plan:?}");
+        };
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.topology, Topology::Mesh);
+        let generation = plan.generation;
+        for receiver in [&mut bob_rx, &mut charlie_rx] {
+            let mut saw_plan = false;
+            loop {
+                match receiver.try_recv() {
+                    Ok(message) => {
+                        if let ServerMessage::SessionPlan(peer_plan) = message.as_ref() {
+                            assert_eq!(peer_plan.generation, generation);
+                            assert!(!saw_plan);
+                            saw_plan = true;
+                        }
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(error) => panic!("the healthy peer queue must stay open: {error:?}"),
+                }
+            }
+            assert!(saw_plan);
+        }
+        for _ in 0..4 {
+            server
+                .message_coordinator
+                .send_to_player(&alice, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap();
+        }
+        let operation_id = crate::protocol::RoomOperationId::new_v4();
+        let caller = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                if unban {
+                    server
+                        .handle_unban_player_operation(&alice, operation_id, bob)
+                        .await;
+                } else {
+                    server
+                        .handle_set_room_access_operation(&alice, operation_id, None)
+                        .await;
+                }
+            })
+        };
+        timeout(Duration::from_secs(1), async {
+            while server
+                .metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("refused room setting reaches its full reply queue");
+        let mut available = Box::pin(server.message_coordinator.lock_room_event_mutation(&room));
+        let released = futures_util::poll!(&mut available);
+        assert!(
+            released.is_ready(),
+            "refused room setting must release the room gate before replying"
+        );
+        drop(released);
+        drop(available);
+        server
+            .handle_signal_in_generation(
+                &bob,
+                charlie,
+                generation,
+                json!({"Offer": "after-room-setting-refusal"}),
+            )
+            .await;
+        assert!(
+            matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal {from, generation: actual, signal}
+        if *from == bob && *actual == generation && *signal == json!({"Offer": "after-room-setting-refusal"}))
+        );
+        for _ in 0..4 {
+            assert!(matches!(
+                recv_refusal_source(&mut alice_rx).await.as_ref(),
+                ServerMessage::Pong
+            ));
+        }
+        caller.await.unwrap();
+        let response = recv_refusal_source(&mut alice_rx).await;
+        let ServerMessage::RoomOperationResult {
+            operation_id: actual,
+            result,
+        } = response.as_ref()
+        else {
+            panic!("expected the correlated room-setting refusal: {response:?}");
+        };
+        assert_eq!(*actual, operation_id);
+        assert!(matches!(
+            result.as_ref(),
+            crate::protocol::RoomOperationResult::OperationFailed {
+                error_code: Some(ErrorCode::NotRoomAuthority),
+                ..
+            }
+        ));
+        let alice_tail = alice_rx.try_recv();
+        assert!(matches!(
+            alice_tail,
+            Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+        ));
+        let bob_tail = bob_rx.try_recv();
+        assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+        let charlie_tail = charlie_rx.try_recv();
+        assert!(matches!(
+            charlie_tail,
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}

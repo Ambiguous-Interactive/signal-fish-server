@@ -522,6 +522,14 @@ pub mod allocation_benchmark {
         }
     }
 
+    /// Enable correlated room requests in embedded allocation fixtures.
+    pub fn enable_room_operations_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+    ) {
+        server.set_client_room_operation_ids(player_id, true);
+    }
+
     /// Select WebRTC capabilities for embedded allocation fixtures without socket tasks.
     pub fn negotiate_webrtc_for_measurement(
         server: &super::EnhancedGameServer,
