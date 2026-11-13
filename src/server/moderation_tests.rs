@@ -32,6 +32,11 @@ async fn canceled_roomless_authority_retains_response_and_source_order() {
     qualify_canceled_roomless_reply("authority").await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn canceled_roomless_signal_retains_response_and_source_order() {
+    qualify_canceled_roomless_reply("signal").await;
+}
+
 async fn qualify_canceled_roomless_reply(command: &'static str) {
     let server = create_test_server_with(ServerConfig::default()).await;
     let (actor, mut receiver) = register_client(&server, "127.0.0.1:49305".parse().unwrap()).await;
@@ -50,6 +55,15 @@ async fn qualify_canceled_roomless_reply(command: &'static str) {
                 "ready" => server.handle_player_ready(&actor).await,
                 "start" => server.handle_start_game(&actor).await,
                 "authority" => server.handle_authority_request(&actor, true).await,
+                "signal" => {
+                    server
+                        .handle_signal(
+                            &actor,
+                            PlayerId::new_v4(),
+                            serde_json::json!({"candidate": "exact"}),
+                        )
+                        .await
+                }
                 _ => unreachable!(),
             }
         }
@@ -307,16 +321,26 @@ async fn canceled_transfer_finishes_its_storage_decision() {
 /// #826: a canceled refusal must not hold healthy mesh signaling behind its reply.
 #[tokio::test(start_paused = true)]
 async fn canceled_transfer_refusal_preserves_live_mesh_signaling() {
-    qualify_canceled_control_preserves_live_mesh(false).await;
+    qualify_canceled_control_preserves_live_mesh("transfer").await;
 }
 
 /// #1633: a retained Pong must leave healthy peers free to signal.
 #[tokio::test(start_paused = true)]
 async fn canceled_ping_preserves_live_mesh_signaling() {
-    qualify_canceled_control_preserves_live_mesh(true).await;
+    qualify_canceled_control_preserves_live_mesh("ping").await;
 }
 
-async fn qualify_canceled_control_preserves_live_mesh(ping: bool) {
+#[tokio::test(start_paused = true)]
+async fn canceled_signal_refusal_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("signal-self").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_signal_limit_refusal_preserves_live_mesh_signaling() {
+    qualify_canceled_control_preserves_live_mesh("signal-rate").await;
+}
+
+async fn qualify_canceled_control_preserves_live_mesh(command: &'static str) {
     let server = create_test_server_with_session(SessionConfig {
         default_topology: crate::protocol::Topology::Mesh,
         ..SessionConfig::default()
@@ -332,16 +356,36 @@ async fn qualify_canceled_control_preserves_live_mesh(ping: bool) {
             .await
             .unwrap();
     }
+    if command == "signal-rate" {
+        for _ in 0..server.config.rate_limit_config.max_signals {
+            server.rate_limiter.check_signal(&actor).await.unwrap();
+        }
+    }
     let operation_id = RoomOperationId::new_v4();
     let caller = tokio::spawn({
         let server = Arc::clone(&server);
         async move {
-            if ping {
-                server.handle_ping(&actor).await;
-            } else {
-                server
-                    .handle_transfer_authority_operation(&actor, operation_id, target)
-                    .await;
+            match command {
+                "ping" => server.handle_ping(&actor).await,
+                "signal-self" | "signal-rate" => {
+                    server
+                        .handle_signal_in_generation(
+                            &actor,
+                            if command == "signal-self" {
+                                actor
+                            } else {
+                                target
+                            },
+                            generation,
+                            serde_json::json!({"candidate": "exact"}),
+                        )
+                        .await
+                }
+                _ => {
+                    server
+                        .handle_transfer_authority_operation(&actor, operation_id, target)
+                        .await
+                }
             }
         }
     });
@@ -383,8 +427,18 @@ async fn qualify_canceled_control_preserves_live_mesh(ping: bool) {
         .await
         .unwrap()
         .unwrap();
-    if ping {
+    if command == "ping" {
         assert!(matches!(response.as_ref(), ServerMessage::Pong));
+    } else if command.starts_with("signal") {
+        let expected = if command == "signal-self" {
+            ErrorCode::SignalTargetNotFound
+        } else {
+            ErrorCode::SignalRateLimited
+        };
+        assert!(
+            matches!(response.as_ref(), ServerMessage::Error { error_code: Some(actual), .. }
+            if *actual == expected)
+        );
     } else {
         assert!(
             matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}

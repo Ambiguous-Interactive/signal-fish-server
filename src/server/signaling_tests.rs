@@ -8423,6 +8423,18 @@ async fn assert_signal_refusal_releases_room(refusal: &str) {
     }
     drop(guard);
     assert!(futures_util::poll!(&mut rejected).is_pending());
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("refusal worker reaches actual reply backpressure");
     assert_eq!(
         server
             .metrics

@@ -17242,7 +17242,7 @@ separate original Reference-profile control. This uses native Engines with
 Godot's negotiated channel profile. Actual Godot multiplayer framing, remote
 networks and historical #1244/#1264 attribution remain open.
 
-### F358: canceled Ping and roomless controls lost their replies
+### F358: canceled control handlers lost their replies
 
 Session 694 starts at
 [51b54f31](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/51b54f3120da8d1214ec2edb8195be6cce99f559).
@@ -17268,6 +17268,25 @@ The final source cohort passes all 41 controls in Nextest
 `31508796-3f25-4676-8944-3f77a793f6d7`, including stale-source rejection and
 in-room cancellation. These are embedded server histories, not attribution
 of a historical network incident. The wider #826 audit remains open.
+
+The adjacent sweep also reproduces Signal refusal loss in Nextest
+`cf36cd82-720e-46ed-87db-0f2bad5b1663`. Two independent finalized Mesh/WebRTC
+controls fail on the original refusal path in
+`10e4756f-2467-442b-ab30-acadb793106d`: self-signal refusal and valid-signal-budget
+refusal both release source order early. Refused Signal delivery now retains
+its source guard in owned completion too. The room publication fence still
+releases before an error reply waits. Healthy peers must exchange exact
+current-generation signals in both directions before the blocked reply drains.
+The roomless refusal also precedes a later same-player Pong. Successful Signal
+admission and its existing owned delivery task stay unchanged.
+The expanded signaling cohort passes all 117 controls in Nextest
+`f95e255f-579f-4655-8936-57ad5346dcf4`. Its first run also
+rejected two older fixtures that treated one observer poll as worker admission.
+They now await measured reply backpressure, retaining the exact room-release,
+refusal-code and healthy-offer assertions. All 29 source-policy checks pass.
+The targeted allocation control still measures eight allocations and 2,840 bytes
+for successful Signal delivery at 2, 16 and 64 members in Nextest
+`0702f9d5-32cc-4d26-9e20-29081789a39d`.
 
 SDK inspection: Rust `client_core.rs` blob `ef296f63` accepts Pong and Error
 without room membership and AuthorityResponse while authenticated. Godot
