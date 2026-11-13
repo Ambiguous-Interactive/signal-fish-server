@@ -4845,6 +4845,131 @@ mod tests {
     }
 
     #[test]
+    fn graceful_shutdown_replay_flushes_after_final_parked_read() {
+        let mut pair = establish();
+        let now = Instant::now();
+        let ch = pair.client_ch;
+        let expected = Bytes::from_static(b"parked gameplay survives the final packet replay");
+        pair.server_conn
+            .open_stream(0, PayloadProtocolIdentifier::Binary)
+            .unwrap()
+            .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)
+            .unwrap();
+        let mut ctx = client_ctx(now, pair.client_ep, ch, pair.client_conn);
+        {
+            let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
+            for raw in drain_transmits(&mut pair.server_conn, now) {
+                handler.handle_read(raw_read(now, raw)).unwrap();
+            }
+            while let Some(message) = handler.poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    let (_, DatagramEvent::AssociationEvent(event)) = pair
+                        .server_ep
+                        .handle(now, client_addr(), None, raw.freeze())
+                        .unwrap()
+                    else {
+                        panic!("data acknowledgment belongs to peer")
+                    };
+                    pair.server_conn.handle_event(event);
+                }
+            }
+            assert!(!handler.ctx.flush_dirty);
+            assert!(!handler.ctx.pending_readable.is_empty());
+            handler
+                .ctx
+                .sctp_transport
+                .sctp_associations
+                .get_mut(&ch)
+                .unwrap()
+                .shutdown()
+                .unwrap();
+            handler.ctx.flush_dirty = true;
+            while let Some(message) = handler.poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    let (_, DatagramEvent::AssociationEvent(event)) = pair
+                        .server_ep
+                        .handle(now, client_addr(), None, raw.freeze())
+                        .unwrap()
+                    else {
+                        panic!("shutdown belongs to peer")
+                    };
+                    pair.server_conn.handle_event(event);
+                }
+            }
+            for raw in drain_transmits(&mut pair.server_conn, now) {
+                handler.handle_read(raw_read(now, raw)).unwrap();
+            }
+            let complete = handler.poll_write().expect("first COMPLETE is dropped");
+            let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = complete.message else {
+                panic!("COMPLETE must be raw")
+            };
+            assert_eq!(raw[12], CT_SHUTDOWN_COMPLETE);
+            assert!(handler.poll_write().is_none());
+            assert!(!handler.ctx.flush_dirty);
+            assert!(handler.ctx.sctp_transport.sctp_associations[&ch].is_closed());
+        }
+        let retry_at = pair
+            .server_conn
+            .poll_timeout()
+            .expect("lost COMPLETE retry");
+        pair.server_conn.handle_timeout(retry_at);
+        let acks = drain_transmits(&mut pair.server_conn, retry_at);
+        assert_eq!(acks.len(), 1);
+        {
+            let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
+            handler
+                .handle_read(raw_read(retry_at, acks[0].clone()))
+                .unwrap();
+            assert!(handler.ctx.flush_dirty, "ACK retry arms the replay flush");
+        }
+        let mut handler = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT - 1);
+        let mut received = Vec::new();
+        while let Some(message) = handler.poll_read() {
+            if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(data)) = message.message {
+                received.push(data.payload.freeze());
+            }
+        }
+        assert_eq!(received, vec![expected]);
+        assert!(
+            handler.ctx.flush_dirty,
+            "final parked read retains flush readiness"
+        );
+        assert!(
+            handler
+                .ctx
+                .sctp_transport
+                .sctp_associations
+                .contains_key(&ch)
+        );
+        let reply = handler
+            .poll_write()
+            .expect("queued COMPLETE replay handoff");
+        let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = reply.message else {
+            panic!("replay must be raw")
+        };
+        assert_eq!(raw[12], CT_SHUTDOWN_COMPLETE);
+        assert_eq!(
+            raw[13] & 1,
+            0,
+            "retained association replies with its own tag"
+        );
+        let (_, DatagramEvent::AssociationEvent(event)) = pair
+            .server_ep
+            .handle(retry_at, client_addr(), None, raw.freeze())
+            .unwrap()
+        else {
+            panic!("COMPLETE replay belongs to peer")
+        };
+        pair.server_conn.handle_event(event);
+        assert!(pair.server_conn.is_closed());
+        assert!(pair.server_conn.poll_timeout().is_none());
+        assert!(handler.ctx.sctp_transport.sctp_associations.is_empty());
+        assert!(handler.ctx.association_transport.is_empty());
+        assert!(handler.ctx.pending_readable.is_empty());
+        assert!(handler.poll_write().is_none());
+    }
+
+    #[test]
     fn sctp_received_payload_reuses_single_packet_storage_after_retirement() {
         for size in [64, 1200, 5000] {
             let now = Instant::now();

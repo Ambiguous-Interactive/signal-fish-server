@@ -17344,3 +17344,94 @@ The .NET state-machine inspection alone does not prove delayed-reply parity.
 Separate timing qualification stays in Rust #300, .NET #153 and Godot #578.
 No wire migration or SDK runtime parity is claimed. The wider #826 audit stays
 open.
+
+### F360: canceled router refusals lost their replies
+
+Session 696 starts at main `dcbdf817`. Existing campaign: #826.
+Finding: [#1637](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1637).
+The router sent unnegotiated RoomOperation refusals and plain/correlated
+Reconnect fallbacks on the calling future. Cancellation during source queue
+backpressure lost the admitted Error or correlated OperationFailed and released
+source command order. The red-first table fails on original main in Nextest
+`bdc3362a` when the source lifecycle becomes available after cancellation.
+
+The router now transfers the acquired source guard into owned completion.
+It keeps the current reply code, text, operation ID and budget. A stale physical
+source is refused before delivery. Adversarial review found and removed an
+intermediate guard release/reacquire window and a delegated-handler deadlock.
+The four refusal cases require the retained result before a later Pong, and
+four replaced-source cases require silence at the new socket. Finalized
+three-player Mesh/WebRTC cases keep the source queue full while the two healthy
+peers exchange exact current-generation signals in both directions.
+
+This is an embedded server cancellation repair. Socket-owned reconnect dispatch
+still owns physical identity swaps. Rust source inspection accepts generic Error
+outside room membership; .NET keeps ServerError informational; Godot decodes the
+existing Error and OperationFailed payloads. Delayed-reply runtime qualification
+remains in Rust #300, .NET #153 and Godot #578. No SDK runtime parity or wire
+migration is claimed. The wider #826 campaign stays open.
+
+### F361: endpoint retirement preceded a final shutdown replay
+
+Existing issue: [#1145](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1145).
+A retired native SCTP association can keep accepted gameplay unread after
+handing off a SHUTDOWN COMPLETE that the network then loses. The peer's real
+T2 retry queues another COMPLETE. After the final application read or stop,
+`poll_endpoint_event` previously emitted Drained while that replay still waited
+for `poll_transmit`. An event-first driver could retire routing before handing
+off its last control packet. The public drain predicate already refused this
+state. Nextest `9fed4cd1-33a2-474d-80e7-80a0741fa018` fails at this event fence
+on the original source.
+
+The event now uses the same drain predicate. The new paired control retains
+exact accepted bytes and checks both final read and stop, actual lost COMPLETE,
+peer ACK retry, replay handoff, both terminal states, stopped timers and one
+Drained event per endpoint. The 125 focused shutdown/drain/reset controls pass.
+The RTC bounded-application-read graceful-tail integration passes in Nextest
+`7405c6c2-17e6-4949-9a80-325680da8967`.
+
+The #1145 acceptance audit also checks pending and in-flight DATA, partial ACK,
+small and zero receive windows, retransmission, fragmentation, simultaneous
+shutdown, no-DATA closure and real endpoint registration. Final hosted native
+qualification remains required before closing it. The patch belongs only to
+the private reference-client transport graph; the signaling server and external
+SDKs do not depend on this copy. The public wrapper uses abort. This does not
+explain historical #1120 or prove #1184's independent-peer reachability, and
+replacement-release qualification remains in #912.
+
+Review also requested driver-level flush evidence. The RTC
+`graceful_shutdown_replay_flushes_after_final_parked_read` control parks exact
+gameplay, loses COMPLETE, ingests the peer's real ACK retry and performs the
+final application read before polling output. It requires replay handoff and
+retirement without another input. All three focused RTC graceful-close controls
+pass in Nextest `437bd79b-11a9-499c-9d2b-f85a6dd7ce60`. Packet input and resumed
+reads arm the existing flush; that flush collects retirement after transmits,
+and the wrapper repeats its write pass after read progress. No driver defect
+or production repair is claimed from this integration qualification.
+
+### A20/A22 — Session 696 pre-join unreliable receipt investigation
+
+New follow-up: [#1639](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1639),
+related to existing #1240 and #826. Native interop job `132206185062` on
+PR #1638 head `f13d76a5` fails before the late joiner exists. Its actual checkout
+is merge `7b67e3bb8d444511838c2099aef0667dfc8ba5ea`. After seat-holder departure,
+inc0's new incumbent link opens all three Godot-profile channels, exchanges
+reliable data and reports WebRTC connected. Its second receipt, on the
+unreliable channel, is missing at the unchanged pre-join deadline. The profile's
+one-millisecond packet lifetime permits local expiry, but the retained evidence
+does not establish that cause or a transport defect.
+
+The sequential fixture discarded the other incumbent's unread output after
+inc0 failed. Both original observation sequences now run concurrently; a failed
+endpoint cannot cancel the other's diagnostic collection. The fixture still
+requires both results and reports both diagnostics on failure. Exact receipt
+counts, events, channel lifetime and deadlines remain unchanged. A focused
+negative control checks either endpoint failing while the other completes.
+This repairs evidence retention; it does not identify the historical loss.
+
+The complete failed job log is retained. The run has no artifacts. One narrow
+unchanged local workload passes in Nextest `cbab8402`, with source and binary
+identities retained. Reference-profile and Godot-profile final controls also
+pass after the diagnostic repair. These are qualification histories, not proof
+that the original incident is repaired. Keep #1639 open. Do not count this
+session-created follow-up as a pre-existing issue addressed or closed.

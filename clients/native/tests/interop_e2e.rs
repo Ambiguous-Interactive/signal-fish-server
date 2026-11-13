@@ -1251,6 +1251,68 @@ async fn godot_profile_late_join_rebuilds_live_three_player_mesh() {
     qualify_late_join_authoritative_replan("godot", &["reliable", "ordered", "unreliable"]).await;
 }
 
+async fn await_incumbent_pre_join(incumbent: &mut ClientProcess) {
+    for event_name in [
+        "p2p_pair_connected",
+        "player_left",
+        "transport_status_sent",
+        "peer_transport_status",
+        "game_data_received",
+    ] {
+        incumbent
+            .await_event_or_recorded(event_name, EVENT_TIMEOUT)
+            .await;
+    }
+    for name in ["channel_message", "channel_message_sent"] {
+        await_event_count(incumbent, name, 2, EVENT_TIMEOUT).await;
+    }
+}
+
+async fn await_both_incumbent_observations(
+    first: impl std::future::Future<Output = ()>,
+    second: impl std::future::Future<Output = ()>,
+) -> [bool; 2] {
+    use futures_util::FutureExt;
+    let (first, second) = tokio::join!(
+        std::panic::AssertUnwindSafe(first).catch_unwind(),
+        std::panic::AssertUnwindSafe(second).catch_unwind(),
+    );
+    [first.is_ok(), second.is_ok()]
+}
+
+/// #1639: retain the opposite endpoint after either pre-join observation fails.
+#[tokio::test]
+async fn incumbent_observation_failure_retains_both_endpoint_results() {
+    for failed in [0, 1] {
+        let first_completed = std::cell::Cell::new(false);
+        let second_completed = std::cell::Cell::new(false);
+        let result = await_both_incumbent_observations(
+            async {
+                if failed == 0 {
+                    panic!("first endpoint has missing unreliable receipt");
+                }
+                tokio::task::yield_now().await;
+                first_completed.set(true);
+            },
+            async {
+                if failed == 1 {
+                    panic!("second endpoint has missing unreliable receipt");
+                }
+                tokio::task::yield_now().await;
+                second_completed.set(true);
+            },
+        )
+        .await;
+        assert_eq!(result, [failed != 0, failed != 1]);
+        assert_eq!(first_completed.get(), failed != 0);
+        assert_eq!(second_completed.get(), failed != 1);
+    }
+    assert_eq!(
+        await_both_incumbent_observations(async {}, async {}).await,
+        [true, true]
+    );
+}
+
 async fn qualify_late_join_authoritative_replan(profile: &str, labels: &[&str]) {
     let server = spawn_server("mesh").await;
     let server_url = server.v3_ws_url();
@@ -1368,22 +1430,17 @@ async fn qualify_late_join_authoritative_replan(profile: &str, labels: &[&str]) 
     //  - `game_data_received`: likewise, the server processed the OTHER
     //    incumbent's relay payload (the only possible pre-join sender) and
     //    fanned it out, so the joiner can never receive incumbent GameData.
-    for incumbent in [&mut inc0, &mut inc1] {
-        for event_name in [
-            "p2p_pair_connected",
-            "player_left",
-            "transport_status_sent",
-            "peer_transport_status",
-            "game_data_received",
-        ] {
-            incumbent
-                .await_event_or_recorded(event_name, EVENT_TIMEOUT)
-                .await;
-        }
-        for name in ["channel_message", "channel_message_sent"] {
-            await_event_count(incumbent, name, 2, EVENT_TIMEOUT).await;
-        }
-    }
+    let readiness = await_both_incumbent_observations(
+        await_incumbent_pre_join(&mut inc0),
+        await_incumbent_pre_join(&mut inc1),
+    )
+    .await;
+    assert!(
+        readiness.iter().all(|ready| *ready),
+        "pre-join incumbent gates failed ({readiness:?}); inc0: {}; inc1: {}",
+        inc0.diagnostics(),
+        inc1.diagnostics(),
+    );
     let pre_join_status_counts = [
         events_named(&inc0.events, "transport_status_sent").len(),
         events_named(&inc1.events, "transport_status_sent").len(),

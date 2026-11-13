@@ -7182,3 +7182,30 @@ control in `5bceb9f0-f520-4c5a-a852-87d46422a62c`. Each attempt retains source a
 binary hashes, the manifest, peer poll rows, exact deliveries and replay. These
 passes qualify the new evidence and snapshot path; they do not repair or
 explain the historical coverage timeout.
+
+## Session 696 — advisory validation visits each raw row once
+
+Existing campaigns: #636 and #775. Baseline: main `dcbdf817`.
+The unsupported-format oracle counted advisories by scanning every raw notice
+for each roster row. It now counts them once in a borrowed-name index and
+looks up each roster recipient. The index retains at most one row per known
+roster identity. Unknown notice names add no index rows. Raw notices, total
+counts, duplicate roster rows, reason order and artifact replay stay exact.
+Empty, Unicode, escaped, repeated and unknown names have scan-reference controls.
+
+A paired helper profile compares the former scan with the indexed count on
+65,536 raw notices, including 16,384 notices outside the roster. Three fresh
+processes use the same unoptimized Linux ARM64 binary. Median elapsed times:
+
+| Roster peers | Former scan (us) | Indexed count (us) | Retained index rows |
+| --- | --- | --- | --- |
+| 256 | 211,859 | 35,678 | 192 |
+| 1,024 | 844,695 | 44,348 | 768 |
+| 4,096 | 3,407,386 | 53,978 | 3,072 |
+
+The former scan visits 16,777,216/67,108,864/268,435,456 rows. The new count
+visits 65,536 rows in each profile and uses tree lookups for exact identities.
+This measures oracle CPU work, not server throughput or full-run RSS. The
+new index adds roster-bounded scratch; configured raw-event byte admission
+continues to exclude validation indexes. No memory ceiling or ten-minute C3
+qualification follows from these timings. Both campaigns remain open.

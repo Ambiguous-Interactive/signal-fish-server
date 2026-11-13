@@ -180,3 +180,86 @@ fn drain_readiness_does_not_retire_fresh_or_live_associations() {
         );
     }
 }
+
+#[test]
+fn drain_event_waits_for_shutdown_complete_replay_after_final_read() -> Result<()> {
+    for stop in [false, true] {
+        let (mut local, mut remote) = established_pair();
+        local.peer_verification_tag = remote.my_verification_tag;
+        remote.peer_verification_tag = local.my_verification_tag;
+        let now = Instant::now();
+        let expected = Bytes::from_static(b"accepted tail retained through lost final packet");
+        remote
+            .stream(1)?
+            .write_sctp(now, &expected, PayloadProtocolIdentifier::Binary)?;
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        local.shutdown()?;
+        for raw in local.gather_outbound(now).0 {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        for raw in remote.gather_outbound(now).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+        }
+        let lost_complete = local.gather_outbound(now).0;
+        assert_eq!(lost_complete.len(), 1);
+        assert!(
+            Packet::unmarshal(&lost_complete[0])?.chunks[0]
+                .as_any()
+                .is::<ChunkShutdownComplete>()
+        );
+        assert_eq!(local.state(), AssociationState::Closed);
+        assert_eq!(remote.state(), AssociationState::ShutdownAckSent);
+        assert!(local.poll_endpoint_event().is_none());
+        let retry_at = remote
+            .poll_timeout()
+            .expect("lost COMPLETE requires recovery");
+        remote.handle_timeout(retry_at);
+        for raw in remote.gather_outbound(retry_at).0 {
+            local.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+        }
+        assert_eq!(
+            local.control_queue.len(),
+            1,
+            "retry queues the final COMPLETE replay"
+        );
+        if stop {
+            local.stream(1)?.stop(retry_at)?;
+        } else {
+            assert_eq!(
+                local
+                    .stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .into_payload(1024)?
+                    .freeze(),
+                expected
+            );
+        }
+        assert!(!local.is_drained());
+        assert!(
+            local.poll_endpoint_event().is_none(),
+            "stop={stop}: queued COMPLETE still owns endpoint routing"
+        );
+        let transmit = local.poll_transmit(retry_at).expect("final replay handoff");
+        let Payload::RawEncode(packets) = transmit.message else {
+            panic!("encoded SCTP replay");
+        };
+        assert_eq!(packets.len(), 1);
+        for raw in packets {
+            remote.handle_inbound(Packet::unmarshal(&raw)?, retry_at)?;
+        }
+        for association in [&mut local, &mut remote] {
+            assert_eq!(association.state(), AssociationState::Closed);
+            assert!(association.is_drained());
+            assert!(association.poll_timeout().is_none());
+            assert!(association.poll_endpoint_event().unwrap().is_drained());
+            assert!(association.poll_endpoint_event().is_none());
+        }
+    }
+    Ok(())
+}
