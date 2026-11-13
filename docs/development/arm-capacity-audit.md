@@ -6912,3 +6912,48 @@ the final completion identity against its exact event ledger and preserves repla
 The original coverage workload, drain margin, lag limit and delivery assertions
 stay unchanged. A passing control does not establish the historical cause of
 issue #1352, which remains open.
+
+### Concurrent transport-report fan-out (#636, session 688)
+
+The complete production-handler fixture preserves exact payloads, recipients,
+changed and duplicate reports, and the two scheduler-warming controls. It adds
+31/32-member switch boundaries and a configured 255-member room. The default
+room limit remains 100. The old large fan-out fails the new relative growth
+ceiling; small-room savings remain independently required.
+
+Shared snapshot admission saves one allocation and 48 bytes per changed report
+on this ARM64 Linux host. Grouping large fan-outs removes additional per-recipient
+combinator nodes. Both levels await all sends concurrently.
+
+| Members | Old allocations | Grouped allocations | Old allocated bytes | Grouped allocated bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 32 | 103 | 74 | 73,440 | 71,009 |
+| 64 | 199 | 142 | 147,456 | 142,739 |
+| 255 | 772 | 548 | 589,248 | 570,886 |
+
+These paired rows retain shared snapshot admission on both sides. Grouped
+reports have zero reallocations; old rows have four, six, and ten.
+
+A separate debug qualification alternates 128 reports in each unchanged room
+and scheduler cohort, verifying every receipt. A temporary timing observer adds
+no production code. Three direct executable runs retain process user/system CPU
+via `resource.getrusage(RUSAGE_CHILDREN)`. Ungrouped CPU seconds are
+2.299/0.226, 2.344/0.215, and 2.744/0.273; grouped samples are 1.941/0.197,
+1.907/0.172, and 1.929/0.202. These totals include setup, checks, and logging.
+The warmed per-report wall medians across 372 post-warm samples are
+483.15→367.30 µs at 32 members, 902.00→725.75 µs at 64, and
+4,440.40→3,104.35 µs at 255. Both sources use the same fixture instrumentation;
+only the grouping threshold changes. The ungrouped runs intentionally fail the
+new allocation assertion after completing all exact receipt checks.
+
+Retained binary SHA-256 values are ungrouped
+`81ad92cee9b4e0a2881a0f39c0404bacec7f8aa89cb381110e2142b3226e16ac`
+and grouped
+`9bfb9656fb6e4bc1257dbe05c2539c393cab3d97e94790ef8cf5c91272a8ee3f`. The timing observer changes the fixture to
+128 alternating reports, records each handler's `Instant` interval, and keeps
+only its final allocation profile. Final checked-in source restores four reports
+and contains no timing observer. These local debug samples do not establish
+release throughput, network latency, or arbitrary-load CPU bounds. Small grouped
+joins can repoll more pending futures than the old per-node scheduler. The
+33-slow-recipient control checks concurrent grace deadlines across groups;
+it does not measure production CPU under slow-peer load.

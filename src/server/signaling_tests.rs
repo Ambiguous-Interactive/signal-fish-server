@@ -6849,8 +6849,75 @@ async fn transport_status_change_fans_out_to_v3_room_peers_only() {
     );
 }
 
+/// #826: read-only reports still wait for an admitted room mutation.
 #[tokio::test(start_paused = true)]
-async fn transport_status_slow_peers_share_one_timeout_window() {
+async fn transport_report_snapshot_waits_for_room_mutation_after_caller_cancellation() {
+    let server = create_test_server().await;
+    let (reporter, mut reporter_rx) = register_client(&server).await;
+    let (observer, mut observer_rx) = register_client(&server).await;
+    for player in [reporter, observer] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room = create_db_room(&server, reporter).await;
+    assert!(server
+        .database
+        .add_player_to_room(&room, player_info(observer, "Observer"))
+        .await
+        .unwrap());
+    for player in [reporter, observer] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room)
+            .await;
+    }
+    let mutation = server
+        .message_coordinator
+        .lock_room_event_mutation(&room)
+        .await;
+    let report_server = server.clone();
+    let caller = tokio::spawn(async move {
+        report_server
+            .handle_client_message(
+                &reporter,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected: false,
+                },
+            )
+            .await;
+    });
+    timeout(Duration::from_secs(1), async {
+        while server.metrics.relay_fallback.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("report accepts its state before room admission");
+    tokio::task::yield_now().await;
+    assert!(
+        !caller.is_finished(),
+        "the report snapshot must wait for room mutation"
+    );
+    let pending = observer_rx.try_recv();
+    assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    drop(mutation);
+    expect_peer_transport_status(&mut observer_rx, reporter, Transport::WebRtc, false).await;
+    for receiver in [&mut reporter_rx, &mut observer_rx] {
+        let pending = receiver.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
+    }
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+async fn assert_transport_status_slow_peers_share_one_timeout_window(slow_peer_count: u8) {
     let server = create_test_server_with_config(ServerConfig {
         websocket_config: WebSocketConfig {
             slow_consumer_timeout_ms: 5_000,
@@ -6860,31 +6927,31 @@ async fn transport_status_slow_peers_share_one_timeout_window() {
     })
     .await;
     let (reporter, _reporter_rx) = register_client(&server).await;
-    let (slow_a, _slow_a_rx) = register_client_with_queue_capacity(&server, 1).await;
-    let (slow_b, _slow_b_rx) = register_client_with_queue_capacity(&server, 1).await;
-    for player in [reporter, slow_a, slow_b] {
+    server.set_client_protocol(&reporter, v3_webrtc());
+    let room_id = create_db_room_with_max(&server, reporter, slow_peer_count + 1).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reporter, room_id)
+        .await;
+    let mut slow_receivers = Vec::new();
+    for index in 0..slow_peer_count {
+        let (player, receiver) = register_client_with_queue_capacity(&server, 1).await;
+        slow_receivers.push(receiver);
         server.set_client_protocol(&player, v3_webrtc());
-    }
-    let room_id = create_db_room_with_max(&server, reporter, 3).await;
-    for (player, name) in [(slow_a, "slow-a"), (slow_b, "slow-b")] {
-        server
+        assert!(server
             .database
-            .add_player_to_room(&room_id, player_info(player, name))
+            .add_player_to_room(&room_id, player_info(player, &format!("slow-{index}")))
             .await
-            .expect("add slow member");
-    }
-    for player in [reporter, slow_a, slow_b] {
+            .unwrap());
         server
             .connection_manager
             .assign_client_to_room(&player, room_id)
             .await;
-    }
-    for player in [slow_a, slow_b] {
         server
             .message_coordinator
             .send_to_player(&player, Arc::new(ServerMessage::Pong))
             .await
-            .expect("fill slow peer queue");
+            .unwrap();
     }
 
     let fanout = {
@@ -6906,7 +6973,7 @@ async fn transport_status_slow_peers_share_one_timeout_window() {
             .metrics
             .websocket_backpressure_events
             .load(Ordering::Relaxed)
-            == 2
+            == u64::from(slow_peer_count)
         {
             break;
         }
@@ -6917,7 +6984,7 @@ async fn transport_status_slow_peers_share_one_timeout_window() {
             .metrics
             .websocket_backpressure_events
             .load(Ordering::Relaxed),
-        2
+        u64::from(slow_peer_count)
     );
     tokio::time::advance(Duration::from_millis(4_999)).await;
     assert_eq!(
@@ -6933,7 +7000,7 @@ async fn transport_status_slow_peers_share_one_timeout_window() {
             .metrics
             .websocket_slow_consumer_disconnects
             .load(Ordering::Relaxed)
-            == 2
+            == u64::from(slow_peer_count)
         {
             break;
         }
@@ -6944,10 +7011,20 @@ async fn transport_status_slow_peers_share_one_timeout_window() {
             .metrics
             .websocket_slow_consumer_disconnects
             .load(Ordering::Relaxed),
-        2,
-        "both fan-out waits expire in the same timeout window"
+        u64::from(slow_peer_count),
+        "all fan-out waits expire in the same timeout window"
     );
     fanout.await.expect("fan-out task must not panic");
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_status_slow_peers_share_one_timeout_window() {
+    assert_transport_status_slow_peers_share_one_timeout_window(2).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_status_slow_peers_across_groups_share_one_timeout_window() {
+    assert_transport_status_slow_peers_share_one_timeout_window(33).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -8031,7 +8108,7 @@ async fn recv_refusal_source(
     message
 }
 
-async fn assert_running_mesh_signaling_live(blocked_signal: bool) {
+async fn assert_running_mesh_signaling_live(blocked_signal: bool, report_while_blocked: bool) {
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (alice, mut alice_rx, room) = register_refusal_source(&server).await;
     let (bob, mut bob_rx) = register_client(&server).await;
@@ -8163,6 +8240,31 @@ async fn assert_running_mesh_signaling_live(blocked_signal: bool) {
     } else {
         None
     };
+    let report = if report_while_blocked {
+        let report_server = server.clone();
+        let report = tokio::spawn(async move {
+            report_server
+                .handle_client_message(
+                    &alice,
+                    ClientMessage::TransportStatus {
+                        transport: Transport::WebRtc,
+                        connected: true,
+                    },
+                )
+                .await;
+        });
+        timeout(Duration::from_secs(1), async {
+            while server.metrics.p2p_established.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the report reaches room admission after accepting its state");
+        tokio::task::yield_now().await;
+        Some(report)
+    } else {
+        None
+    };
     timeout(
         Duration::from_millis(10),
         server.handle_signal_in_generation(
@@ -8174,6 +8276,20 @@ async fn assert_running_mesh_signaling_live(blocked_signal: bool) {
     )
     .await
     .expect("a held control delivery cannot stop a healthy mesh offer");
+    if report_while_blocked {
+        for receiver in [&mut bob_rx, &mut charlie_rx] {
+            let status = recv(receiver).await;
+            assert!(
+                matches!(status.as_ref(), ServerMessage::PeerTransportStatus {
+                peer_id, transport: Transport::WebRtc, connected: true,
+            } if *peer_id == alice)
+            );
+        }
+        timeout(Duration::from_millis(10), report.unwrap())
+            .await
+            .expect("an informational report must pass an unrelated slow signal")
+            .unwrap();
+    }
     assert!(
         matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal } if *from == bob && *actual == generation && *signal == json!({"Offer": "healthy mesh"}))
     );
@@ -8230,13 +8346,19 @@ async fn assert_running_mesh_signaling_live(blocked_signal: bool) {
 /// #826: a held authority refusal cannot stop healthy mesh offers.
 #[tokio::test(start_paused = true)]
 async fn authority_refusal_keeps_running_mesh_signaling_live() {
-    assert_running_mesh_signaling_live(false).await;
+    assert_running_mesh_signaling_live(false, false).await;
 }
 
 /// #826: a slow signal target cannot stop offers between healthy peers.
 #[tokio::test(start_paused = true)]
 async fn backpressured_signal_keeps_running_mesh_signaling_live() {
-    assert_running_mesh_signaling_live(true).await;
+    assert_running_mesh_signaling_live(true, false).await;
+}
+
+/// #826: a report queued behind slow ICE must not stop healthy mesh offers.
+#[tokio::test(start_paused = true)]
+async fn transport_report_during_backpressured_signal_keeps_mesh_live() {
+    assert_running_mesh_signaling_live(true, true).await;
 }
 
 async fn assert_signal_refusal_releases_room(refusal: &str) {

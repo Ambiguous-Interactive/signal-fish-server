@@ -64,7 +64,6 @@ Close this adoption decision with no new format. Do not change v2/v3 tokens,
 capabilities, mixed-room enforcement, defaults, or server dependencies.
 The independent catalog task
 [#678](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/678)
-and optional compression experiment
-[#773](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/773)
-remain separate. New evidence must satisfy the same gate before reopening
+remains separate. The [relay compression decision](COMPRESSION.md) records
+the independent #773 study. New evidence must satisfy the same gate before reopening
 an adoption proposal.

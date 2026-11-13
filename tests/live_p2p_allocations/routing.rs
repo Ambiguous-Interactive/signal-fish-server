@@ -247,14 +247,18 @@ pub(crate) fn game_start_shares_configuration() {
 /// Compare complete steady-state delivery after exercising both report states.
 /// Retain first-use profiles: macOS can add one retained allocation on first use.
 pub(crate) fn transport_report_delivery_cost() {
+    let counts = [2_u128, 3, 4, 16, 31, 32, 64, 255];
     let mut profiles = Vec::new();
     for warm_owned_scheduler in [false, true] {
-        for count in [2_u128, 3, 4, 16, 64] {
+        for count in counts {
             allocation_harness::block_on(async {
                 allocation_harness::warm_current_thread_runtime().await;
                 let server = EnhancedGameServer::new(
                     ServerConfig::default(),
-                    ProtocolConfig::default(),
+                    ProtocolConfig {
+                        max_players_limit: 255,
+                        ..ProtocolConfig::default()
+                    },
                     RelayTypeConfig::default(),
                     SessionConfig::default(),
                     TurnConfig::default(),
@@ -279,7 +283,7 @@ pub(crate) fn transport_report_delivery_cost() {
                             "status-profile".into(),
                             Some("STAT01".into()),
                             format!("Player{index}"),
-                            Some(64),
+                            Some(255),
                             Some(false),
                             None,
                             None,
@@ -349,7 +353,22 @@ pub(crate) fn transport_report_delivery_cost() {
             });
         }
     }
-    for profiles in profiles.chunks_exact(5) {
+    for profiles in profiles.chunks_exact(counts.len()) {
+        let per_recipient = profiles[2]
+            .allocations
+            .checked_sub(profiles[1].allocations)
+            .expect("the generic delivery cost grows with recipients");
+        for (count, profile) in counts
+            .into_iter()
+            .zip(profiles)
+            .filter(|(count, _)| *count >= 32)
+        {
+            let count = usize::try_from(count).unwrap();
+            let groups = (count - 1).div_ceil(16);
+            let projection = profiles[2].allocations + (count - 4) * per_recipient;
+            assert!(profile.allocations <= projection + 2 * groups + 4,
+                "large report fan-out allocates one scheduling node per recipient: count={count} projection={projection} profiles={profiles:?}");
+        }
         let generic_single_recipient = profiles[1]
             .allocations
             .checked_mul(2)

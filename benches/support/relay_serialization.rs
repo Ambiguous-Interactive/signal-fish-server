@@ -218,14 +218,15 @@ impl Fixture {
         };
 
         let warm_message = relay_message(scenario, RELAYS_PER_SAMPLE as u64 + 1);
-        let warmed = fixture.run_messages(std::slice::from_ref(&warm_message), true);
+        let warmed = fixture.run_messages(std::slice::from_ref(&warm_message), true, |_, _| {});
         fixture.assert_non_vacuous(&warmed, 1);
         fixture
     }
 
+    #[allow(dead_code)]
     pub fn run_sample(&mut self) -> Ledger {
         let messages = std::mem::take(&mut self.messages);
-        let ledger = self.run_messages(&messages, true);
+        let ledger = self.run_messages(&messages, true, |_, _| {});
         self.messages = messages;
         self.assert_non_vacuous(&ledger, RELAYS_PER_SAMPLE);
         ledger
@@ -240,14 +241,33 @@ impl Fixture {
     #[allow(dead_code)] // Shared support is compiled separately for the allocation benchmark.
     pub fn run_timed_sample(&mut self) -> Ledger {
         let messages = std::mem::take(&mut self.messages);
-        let ledger = self.run_messages(&messages, false);
+        let ledger = self.run_messages(&messages, false, |_, _| {});
         self.messages = messages;
         self.assert_non_vacuous(&ledger, RELAYS_PER_SAMPLE);
         debug_assert_eq!(ledger.output_sha256, [0; 32]);
         ledger
     }
 
-    fn run_messages(&mut self, messages: &[Arc<ServerMessage>], hash_output: bool) -> Ledger {
+    /// Capture exact production frames while retaining the normal relay ledger.
+    #[allow(dead_code)]
+    pub fn captured_sample(&mut self) -> (Ledger, Vec<(PlayerId, Message)>) {
+        let messages = std::mem::take(&mut self.messages);
+        let mut frames = Vec::new();
+        let ledger = self.run_messages(&messages, true, |recipient, frame| {
+            frames.push((recipient, frame.clone()));
+        });
+        self.messages = messages;
+        self.assert_non_vacuous(&ledger, RELAYS_PER_SAMPLE);
+        assert_eq!(frames.len() as u64, ledger.materialized);
+        (ledger, frames)
+    }
+
+    fn run_messages(
+        &mut self,
+        messages: &[Arc<ServerMessage>],
+        hash_output: bool,
+        mut observe: impl FnMut(PlayerId, &Message),
+    ) -> Ledger {
         let attempts_before = self
             .metrics
             .websocket_delivery_attempts
@@ -336,6 +356,7 @@ impl Fixture {
                     ledger.json_encodes += projected.json_encodes;
                     ledger.message_pack_encodes += projected.message_pack_encodes;
                     ledger.message_pack_decodes += projected.message_pack_decodes;
+                    observe(*player_id, &projected.frame);
                     match projected.frame {
                         Message::Text(text) => {
                             ledger.text_frames += 1;

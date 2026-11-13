@@ -86,13 +86,16 @@ impl TransportStatusFanOut {
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
         // filtering is v3-only but deliberately transport-agnostic: a
         // relay-only client still needs to know that a peer fell back.
-        let delivered = if let [recipient] = self.recipients.as_slice() {
-            self.deliver_to(server, recipient).await
+        const MAX_INLINE_RECIPIENTS: usize = 30;
+        const RECIPIENTS_PER_GROUP: usize = 16;
+
+        let delivered = if self.recipients.len() <= MAX_INLINE_RECIPIENTS {
+            self.deliver_group(server, &self.recipients).await
         } else {
             futures_util::future::join_all(
                 self.recipients
-                    .iter()
-                    .map(|recipient| self.deliver_to(server, recipient)),
+                    .chunks(RECIPIENTS_PER_GROUP)
+                    .map(|recipients| self.deliver_group(server, recipients)),
             )
             .await
             .into_iter()
@@ -102,6 +105,21 @@ impl TransportStatusFanOut {
         // Count one event only when at least one peer received the status.
         if delivered {
             server.metrics.record_transport_status_fanout();
+        }
+    }
+
+    async fn deliver_group(&self, server: &EnhancedGameServer, recipients: &[PlayerId]) -> bool {
+        if let [recipient] = recipients {
+            self.deliver_to(server, recipient).await
+        } else {
+            futures_util::future::join_all(
+                recipients
+                    .iter()
+                    .map(|recipient| self.deliver_to(server, recipient)),
+            )
+            .await
+            .into_iter()
+            .any(std::convert::identity)
         }
     }
 
@@ -684,28 +702,11 @@ impl EnhancedGameServer {
         // generation-scoped state was still recorded above.
         let room_id = room_id?;
 
-        // Keep membership and connection generations fixed while resolving
-        // this room-wide status event's recipient snapshot. The sender
-        // lifecycle lock is already held, so this follows the same
-        // lifecycle -> room ordering as join/leave/reconnect. The gate is
-        // released BEFORE delivery (see the caller): the snapshot below never
-        // parks, while delivery does. Sequenced publishers keep their
-        // CALLER's task from parking under the gate by transferring the guard
-        // into the FIFO job that publishes (the job itself may still park on
-        // backpressured delivery while retaining the guard — the documented
-        // sequenced-publication design); this path is stricter: NOTHING holds
-        // the gate at any point during delivery. Truth at dispatch is carried
-        // by per-recipient revalidation instead of the gate:
-        // `send_to_player_in_room` re-checks membership under the room
-        // routing gate, the fan-out re-checks the negotiated v3 capability
-        // per leg, and the socket writer fail-closed-drops any v3-only frame
-        // that still reaches a pre-v3 queue — so neither a departed member
-        // nor a replacement v2 connection (reconnect identity swap) can
-        // observe this v3-only frame.
-        let _room_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
+        /*
+            Snapshot membership without excluding other read-only signaling work.
+            Queue-commit checks retain delivery truth after this fence releases.
+        */
+        let _room_snapshot_guard = self.message_coordinator.lock_room_signal(&room_id).await;
 
         // Cheap non-consuming preflight before the fallible/O(room) membership
         // snapshot below. The consuming check still happens after recipient

@@ -184,8 +184,9 @@ struct RoomEventMutationLease {
     _lane: Arc<RoomEventLane>,
 }
 
-/// A signal may share a room fence with other signals, while room changes stay exclusive.
-/// Keep this guard until delivery finishes. It cannot enqueue a room mutation.
+/// Signals and read-only room snapshots share a fence while room changes stay exclusive.
+/// Signals retain it through delivery; snapshots release it before delivery.
+/// This guard cannot enqueue a room mutation.
 pub struct RoomSignalGuard {
     _lease: RoomSignalLease,
 }
@@ -2121,8 +2122,9 @@ pub trait MessageCoordinator: Send + Sync {
     /// [`Self::enqueue_room_event`].
     async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard;
 
-    /// Fence a signal against room mutations. Signals from independent sources may share
-    /// this fence; callers must serialize each source and retain the fence through delivery.
+    /// Fence signals and read-only snapshots against room mutations.
+    /// Independent sources may share this fence. Signals serialize each source and retain
+    /// the fence through delivery; informational snapshots release it before delivery.
     /// The default preserves exclusive ordering for existing coordinator implementations.
     async fn lock_room_signal(&self, room_id: &RoomId) -> RoomSignalGuard {
         RoomSignalGuard {
