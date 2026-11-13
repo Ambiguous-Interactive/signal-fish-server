@@ -17398,3 +17398,40 @@ the private reference-client transport graph; the signaling server and external
 SDKs do not depend on this copy. The public wrapper uses abort. This does not
 explain historical #1120 or prove #1184's independent-peer reachability, and
 replacement-release qualification remains in #912.
+
+Review also requested driver-level flush evidence. The RTC
+`graceful_shutdown_replay_flushes_after_final_parked_read` control parks exact
+gameplay, loses COMPLETE, ingests the peer's real ACK retry and performs the
+final application read before polling output. It requires replay handoff and
+retirement without another input. All three focused RTC graceful-close controls
+pass in Nextest `437bd79b-11a9-499c-9d2b-f85a6dd7ce60`. Packet input and resumed
+reads arm the existing flush; that flush collects retirement after transmits,
+and the wrapper repeats its write pass after read progress. No driver defect
+or production repair is claimed from this integration qualification.
+
+### A20/A22 — Session 696 pre-join unreliable receipt investigation
+
+New follow-up: [#1639](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1639),
+related to existing #1240 and #826. Native interop job `132206185062` on
+PR #1638 head `f13d76a5` fails before the late joiner exists. Its actual checkout
+is merge `7b67e3bb8d444511838c2099aef0667dfc8ba5ea`. After seat-holder departure,
+inc0's new incumbent link opens all three Godot-profile channels, exchanges
+reliable data and reports WebRTC connected. Its second receipt, on the
+unreliable channel, is missing at the unchanged pre-join deadline. The profile's
+one-millisecond packet lifetime permits local expiry, but the retained evidence
+does not establish that cause or a transport defect.
+
+The sequential fixture discarded the other incumbent's unread output after
+inc0 failed. Both original observation sequences now run concurrently; a failed
+endpoint cannot cancel the other's diagnostic collection. The fixture still
+requires both results and reports both diagnostics on failure. Exact receipt
+counts, events, channel lifetime and deadlines remain unchanged. A focused
+negative control checks either endpoint failing while the other completes.
+This repairs evidence retention; it does not identify the historical loss.
+
+The complete failed job log is retained. The run has no artifacts. One narrow
+unchanged local workload passes in Nextest `cbab8402`, with source and binary
+identities retained. Reference-profile and Godot-profile final controls also
+pass after the diagnostic repair. These are qualification histories, not proof
+that the original incident is repaired. Keep #1639 open. Do not count this
+session-created follow-up as a pre-existing issue addressed or closed.
