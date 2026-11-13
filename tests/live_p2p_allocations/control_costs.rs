@@ -375,3 +375,132 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
         }
     });
 }
+
+/// Refused room settings do not copy stored peer connection metadata.
+pub(crate) fn room_setting_refusal_skips_player_metadata() {
+    use signal_fish_server::protocol::{
+        ClientMessage, ErrorCode, PlayerInfo, RoomOperationId, RoomOperationRequest,
+        RoomOperationResult,
+    };
+    use signal_fish_server::server::allocation_benchmark::enable_room_operations_for_measurement;
+    for unban in [false, true] {
+        for count in [2_u128, 16, 64] {
+            let mut profiles = Vec::new();
+            for bytes in [0, 1024, 64 * 1024] {
+                allocation_harness::block_on(async {
+                    allocation_harness::warm_current_thread_runtime().await;
+                    let server = EnhancedGameServer::new(
+                        ServerConfig::default(),
+                        ProtocolConfig::default(),
+                        RelayTypeConfig::default(),
+                        SessionConfig::default(),
+                        TurnConfig::default(),
+                        DatabaseConfig::InMemory,
+                        MetricsConfig::default(),
+                        CoordinationConfig::default(),
+                        TransportSecurityConfig::default(),
+                        vec![],
+                    )
+                    .await
+                    .unwrap();
+                    let authority = Uuid::from_u128(1);
+                    let requester = Uuid::from_u128(2);
+                    let room = server
+                        .database()
+                        .create_room(
+                            "setting-cost".into(),
+                            None,
+                            255,
+                            true,
+                            authority,
+                            "relay".into(),
+                            "test".into(),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    let metadata = serde_json::json!({"nested":["x".repeat(bytes)]});
+                    for index in 2..=count {
+                        assert!(server
+                            .database()
+                            .add_player_to_room(
+                                &room.id,
+                                PlayerInfo {
+                                    id: Uuid::from_u128(index),
+                                    name: format!("player-{index}"),
+                                    connection_info: Some(ConnectionInfo::Custom {
+                                        data: metadata.clone()
+                                    }),
+                                    is_authority: false,
+                                    is_ready: false,
+                                    connected_at: None,
+                                    epoch: None,
+                                    seq: None,
+                                    region_id: "test".into(),
+                                }
+                            )
+                            .await
+                            .unwrap());
+                    }
+                    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+                    server.connect_client(requester, sender).await;
+                    negotiate_webrtc_for_measurement(&server, &requester);
+                    enable_room_operations_for_measurement(&server, &requester);
+                    server.assign_client_to_room(&requester, room.id).await;
+                    for measured in [false, true] {
+                        let operation_id = RoomOperationId::from_u128(999);
+                        let operation = if unban {
+                            RoomOperationRequest::UnbanPlayer {
+                                player_id: authority,
+                            }
+                        } else {
+                            RoomOperationRequest::SetRoomAccess { password: None }
+                        };
+                        let message = ClientMessage::RoomOperation {
+                            operation_id,
+                            operation: Box::new(operation),
+                        };
+                        let region = stats_alloc::Region::new(ALLOCATOR);
+                        server.handle_client_message(&requester, message).await;
+                        let stats = region.change();
+                        let response = receiver.try_recv().unwrap();
+                        assert!(
+                            matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+                            if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {error_code: Some(ErrorCode::NotRoomAuthority), ..}))
+                        );
+                        let pending = receiver.try_recv();
+                        assert!(
+                            matches!(pending, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+                            "unexpected room-setting message: {pending:?}"
+                        );
+                        if measured {
+                            println!("ROOM_SETTING_REFUSAL unban={unban} members={count} bytes={bytes} stats={stats:?}");
+                            profiles.push(stats);
+                        }
+                    }
+                    let stored = server
+                        .database()
+                        .get_room_by_id(&room.id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(stored.authority_player, Some(authority));
+                    assert!(stored.password.is_none());
+                    for player in stored
+                        .players
+                        .values()
+                        .filter(|player| player.id != authority)
+                    {
+                        assert!(
+                            matches!(&player.connection_info, Some(ConnectionInfo::Custom {data}) if *data == metadata)
+                        );
+                    }
+                });
+            }
+            for profile in &profiles {
+                assert!(profile.bytes_allocated <= profiles[0].bytes_allocated + 256,
+                    "room-setting refusal copied peer metadata: unban={unban} count={count} profiles={profiles:?}");
+            }
+        }
+    }
+}

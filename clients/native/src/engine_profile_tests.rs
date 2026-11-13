@@ -2411,3 +2411,64 @@ fn receive_permit_releases_payload_before_message_credit() {
     );
     assert!(waiting.as_mut().poll(&mut context).is_ready());
 }
+
+#[tokio::test]
+async fn active_consumer_drains_saturated_reliable_callbacks_on_one_worker() {
+    const PACKETS: u32 = 2048;
+    const PACKET_BYTES: usize = 4096;
+    for receiver_offers in [false, true] {
+        let mut pair = unconnected_negotiated_pair();
+        for generation in 0u8..2 {
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let peer = pair.sender_id;
+            let (channel, held) =
+                saturate_held_reliable_callbacks(&mut pair, PACKET_BYTES, generation).await;
+            resume_reliable_callbacks(&mut pair);
+            let mut received = 0u32;
+            let mut expected = vec![0xff; PACKET_BYTES];
+            expected[4] = generation;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while received < PACKETS {
+                    let event = pair.receiver_events.recv().await.unwrap();
+                    if !pair.receiver.is_current_event(&event) { continue; }
+                    match event {
+                        EngineEvent::ChannelBinaryMessage {label, data, queue_permit, ..} => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            expected[..4].copy_from_slice(&received.to_be_bytes());
+                            assert_eq!(data, expected);
+                            received += 1;
+                            drop(queue_permit);
+                        }
+                        EngineEvent::ChannelReceiveRejected { failure, .. } => panic!("a ready consumer must run before the callback task exhausts its budget: receiver_offers={receiver_offers} generation={generation} received={received} failure={failure:?} held={held}"),
+                        EngineEvent::ChannelClosed { label, reason, .. } => panic!("reliable recovery closed {label}: {reason:?}"),
+                        _ => {}
+                    }
+                }
+                while channel.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::time::sleep(TRANSPORT_OBSERVATION_POLL_INTERVAL).await;
+                }
+            }).await.expect("active consumption drains exact reliable bytes and sender debt");
+            let snapshot = pair.receiver.diagnostic_snapshot(peer);
+            assert_eq!(
+                snapshot["channels"][RELIABLE_LABEL]["receipts"],
+                serde_json::json!({"raw":PACKETS,"admitted":PACKETS,"rejected":0,"discarded":0})
+            );
+            assert!(snapshot["receive_failure"].is_null());
+            assert_eq!(snapshot["receive_budget"]["pending_messages"], 0);
+            assert_eq!(snapshot["receive_budget"]["pending_bytes"], 0);
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+        }
+        pair.cleanup().await;
+    }
+}

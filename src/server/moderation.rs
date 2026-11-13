@@ -363,11 +363,10 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
-        if !self
-            .require_room_authority(authority_id, operation_id, &room_id)
-            .await
-        {
+        if let Err((message, code)) = self.check_room_authority(authority_id, &room_id).await {
             drop(unban_event_guard);
+            self.fail_operation(authority_id, operation_id, message, code)
+                .await;
             return;
         }
         let unban_applied = self
@@ -490,11 +489,10 @@ impl EnhancedGameServer {
             .message_coordinator
             .lock_room_event_mutation(&room_id)
             .await;
-        if !self
-            .require_room_authority(authority_id, operation_id, &room_id)
-            .await
-        {
+        if let Err((message, code)) = self.check_room_authority(authority_id, &room_id).await {
             drop(access_event_guard);
+            self.fail_operation(authority_id, operation_id, message, code)
+                .await;
             return;
         }
         let applied = self.database.set_room_password(&room_id, credential).await;
@@ -1518,52 +1516,28 @@ impl EnhancedGameServer {
         drop(target_lifecycle_guard);
     }
 
-    /// Refuse unless the room's current authority is `authority_id`.
-    /// Used by the moderation operations that do not target a seat
-    /// (`SetRoomAccess`, `UnbanPlayer`); callers hold the room mutation gate
-    /// across this check and their subsequent write, so the role can neither
-    /// change nor lose its holder between the two.
-    async fn require_room_authority(
-        self: &Arc<Self>,
+    /// Check the current role while callers retain their room mutation guard.
+    /// Callers release that guard before delivering any refusal.
+    async fn check_room_authority(
+        &self,
         authority_id: &PlayerId,
-        operation_id: RoomOperationId,
         room_id: &RoomId,
-    ) -> bool {
-        let room = match self.database.get_room_by_id(room_id).await {
+    ) -> Result<(), (&'static str, ErrorCode)> {
+        let room = match self.database.get_room_start_snapshot(room_id).await {
             Ok(Some(room)) => room,
-            Ok(None) => {
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Room no longer exists",
-                    ErrorCode::RoomNotFound,
-                )
-                .await;
-                return false;
-            }
+            Ok(None) => return Err(("Room no longer exists", ErrorCode::RoomNotFound)),
             Err(error) => {
-                tracing::error!(%authority_id, %room_id, %error, "Moderation failed to load room");
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Failed to load room",
-                    ErrorCode::StorageError,
-                )
-                .await;
-                return false;
+                tracing::error!(%authority_id, %room_id, %error, "Room setting failed to load room");
+                return Err(("Failed to load room", ErrorCode::StorageError));
             }
         };
         if room.authority_player != Some(*authority_id) {
-            self.fail_operation(
-                authority_id,
-                operation_id,
+            return Err((
                 "Only the room's authority player may moderate this room",
                 ErrorCode::NotRoomAuthority,
-            )
-            .await;
-            return false;
+            ));
         }
-        true
+        Ok(())
     }
 
     /// Send the correlated terminal failure for a moderation operation.

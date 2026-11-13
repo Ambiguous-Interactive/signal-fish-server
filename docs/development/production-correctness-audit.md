@@ -100,6 +100,31 @@ baseline. It maps audit ownership; it does not certify these operations.
 
 ## Bounded histories without a confirmed defect
 
+### A11/A20 — Session 690 active consumer on one worker
+
+Existing issues: #1264 and #1240. A new current-thread Engine control uses the
+Godot negotiated-channel profile, both receiver offer roles, and two fresh
+physical generations. Each cell stops callback polling, offers 2,048 distinct
+4 KiB reliable packets, and requires actual SCTP receive-credit refusal before
+resuming the production callback loop and an active application consumer.
+It checks the complete ordered payload, sender debt, all receipt counters,
+receive-budget release, and absence of a terminal receive verdict.
+
+The initial control passes without a runtime repair in Nextest
+`1946f937-f400-459b-a460-86a1c0f2f496` (22.411 seconds). This adds a one-worker
+history to the existing multi-worker controls. It does not reproduce or explain
+the historical terminal event in #1264, establish Godot runtime compatibility, or
+close either investigation. No receive budget or timeout changes.
+
+The new `godot_profile_completes_server_brokered_peer_exchange` service control
+starts the real server and two native CLI processes with the Godot channel profile.
+It requires the server's Mesh/WebRTC plan, all three negotiated channel
+open events, both required exchange labels in both directions, and accepted
+transport reports. Nextest `1bc7ff5c-71dd-4cb3-92cb-59cf390ecf5e` passes in
+1.60 seconds. This qualifies the native profile through real server signaling;
+it does not replace Godot native/Web runtime or remote-network qualification
+under #1240 and #1244.
+
 ### A11 — Session 502 signal admission and target departure
 
 At the [base commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/ba65aa23087e3be0a9b4d6f60d14363a31b1bb63),
@@ -16958,3 +16983,38 @@ order stay unchanged. Cross-source leave-refusal timing qualification remains
 open in Rust #300, .NET #153 and Godot #578. Native reference Engine changes do
 not modify these separate SDK implementations. Component controls do not prove
 SDK runtime compatibility or complete the wider #826/#636 campaigns.
+
+### F352: refused room settings held live signaling admission
+
+Existing campaigns: #826 and #636. Defect: [#1625](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1625).
+The `UnbanPlayer` and `SetRoomAccess` handlers acquire the room mutation guard,
+then call a helper that awaits a correlated refusal before returning. A full
+requester queue retains that guard through the slow-consumer wait. Other room
+members cannot admit an Offer, Answer, or ICE signal during that wait.
+
+The repair separates the stored role decision from reply delivery. Successful
+writes retain their guard. Every refusal drops it before sending the same
+correlated result with the same code, text, and reply-budget charge. The role
+read uses the existing compact start snapshot rather than cloning all player
+and spectator metadata. No room policy or wire schema changes.
+
+The initial real classified-queue control fails on the original handler in
+Nextest `751f4e61-ba58-4f93-b5b6-e350e3f48a3f`. The final history creates a
+three-player Mesh/WebRTC session, consumes its shared SessionPlan generation,
+fills the requester's control queue, and waits for actual reply backpressure.
+Before releasing that queue, the room gate must be available and an exact
+current-generation Offer must reach a healthy peer. Draining the original
+Pongs then yields exactly one correlated `NotRoomAuthority` result. Both
+setting paths pass in Nextest `03650665-61cc-44dd-8b2d-4c84fedd8e42`.
+Existing successful setting, unban, refusal-classification, and reply-budget
+controls also pass. These are in-process delivery histories, not a claim about
+all socket schedules.
+
+The complete-handler allocation control covers both operations, 2/16/64 stored
+members, and 0/1 KiB/64 KiB legacy metadata. The steady refusal uses 9 allocations
+and 1,176 bytes across those profiles. Restoring the full-room snapshot fails
+the metadata-independent cost assertion. The exact correlated result and
+unchanged room metadata are checked outside each measured region.
+
+SDK timing qualification is tracked in Rust #300, .NET #153, and Godot #578.
+Server coverage does not establish SDK runtime parity.
