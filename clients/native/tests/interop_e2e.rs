@@ -1188,6 +1188,17 @@ fn uuid_of(id: &str) -> Uuid {
 #[tokio::test(flavor = "multi_thread")]
 async fn late_join_authoritative_replan_real_webrtc_n3() {
     let _serial = acquire_serial().await;
+    qualify_late_join_authoritative_replan("reference", &["reliable", "unreliable"]).await;
+}
+
+/// #1240: retain all negotiated channels across a live three-player seat replacement.
+#[tokio::test(flavor = "multi_thread")]
+async fn godot_profile_late_join_rebuilds_live_three_player_mesh() {
+    let _serial = acquire_serial().await;
+    qualify_late_join_authoritative_replan("godot", &["reliable", "ordered", "unreliable"]).await;
+}
+
+async fn qualify_late_join_authoritative_replan(profile: &str, labels: &[&str]) {
     let server = spawn_server("mesh").await;
     let server_url = server.v3_ws_url();
     let workdir = tempfile::tempdir().expect("create client workdir");
@@ -1217,12 +1228,19 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
     // (`--peers 3` => two distinct senders: the other incumbent + the
     // joiner), which makes its receipt deterministic, not merely likely.
     let incumbent_args = [
+        "--channel-profile",
+        profile,
         "--expect-total-peers",
         "4",
         "--success-release-file",
         success_release_path,
     ];
-    let joiner_args = ["--success-release-file", success_release_path];
+    let joiner_args = [
+        "--channel-profile",
+        profile,
+        "--success-release-file",
+        success_release_path,
+    ];
     let inc_relays = [relay_payload_for("inc0"), relay_payload_for("inc1")];
     let joiner_relay = relay_payload_for("joiner");
     let mut inc0 = spawn_client(
@@ -1659,6 +1677,64 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
             leaver_id,
             "{who}: the first departure must be the seat-holder"
         );
+    }
+
+    let final_generation = joiner_plan["generation"].clone();
+    for (client, original_peer) in [
+        (&inc0, Some(inc_ids[1].as_str())),
+        (&inc1, Some(inc_ids[0].as_str())),
+        (&joiner, None),
+    ] {
+        let plans = events_named(&client.events, "session_plan");
+        let final_plan = plans.last().unwrap();
+        assert_eq!(final_plan["generation"], final_generation);
+        let final_peers: BTreeSet<_> = plan_peers(final_plan, &client.name)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let final_plan_at = client
+            .events
+            .iter()
+            .rposition(|event| event["event"] == "session_plan")
+            .unwrap();
+        let phases = if let Some(peer) = original_peer {
+            vec![
+                (
+                    &client.events[..final_plan_at],
+                    BTreeSet::from([peer.to_string()]),
+                ),
+                (&client.events[final_plan_at..], final_peers),
+            ]
+        } else {
+            vec![(client.events.as_slice(), final_peers)]
+        };
+        let mut initial_physical_generations = BTreeMap::new();
+        for (phase, peers) in phases {
+            let opened = events_named(phase, "channel_open");
+            let expected: BTreeSet<_> = peers
+                .iter()
+                .flat_map(|peer| labels.iter().map(move |label| (peer.as_str(), *label)))
+                .collect();
+            let actual: BTreeSet<_> = opened
+                .iter()
+                .map(|event| (str_field(event, "peer"), str_field(event, "label")))
+                .collect();
+            assert_eq!(actual, expected, "{}: exact required channels", client.name);
+            assert_eq!(opened.len(), expected.len());
+            for event in opened {
+                let key = (
+                    str_field(event, "peer").to_string(),
+                    str_field(event, "label").to_string(),
+                );
+                let generation = event["generation"].as_u64().unwrap();
+                if let Some(previous) = initial_physical_generations.insert(key, generation) {
+                    assert!(
+                        generation > previous,
+                        "retained pair must use a fresh physical link"
+                    );
+                }
+            }
+        }
     }
 
     // The original incumbent link contributes four receipts. The refreshed

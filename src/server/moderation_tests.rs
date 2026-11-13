@@ -11,6 +11,272 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+/// #826: a refused transfer retains its result after observer cancellation.
+#[tokio::test(start_paused = true)]
+async fn canceled_transfer_refusal_retains_result_and_source_order() {
+    for expected in [
+        ErrorCode::InvalidInput,
+        ErrorCode::NotInRoom,
+        ErrorCode::NotRoomAuthority,
+        ErrorCode::TransferTargetNotFound,
+        ErrorCode::RoomNotFound,
+        ErrorCode::StorageError,
+    ] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (actor, mut receiver) =
+            register_client(&server, "127.0.0.1:49304".parse().unwrap()).await;
+        if expected != ErrorCode::NotInRoom {
+            join_seated_player(&server, &actor, &mut receiver, "TRFCAN", "host").await;
+            if expected == ErrorCode::NotRoomAuthority {
+                server.handle_authority_request(&actor, false).await;
+            }
+            if expected == ErrorCode::RoomNotFound {
+                server
+                    .database
+                    .delete_room(&server.get_client_room(&actor).await.unwrap())
+                    .await
+                    .unwrap();
+            }
+        }
+        drain_receiver(&mut receiver);
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        if expected == ErrorCode::StorageError {
+            database.fail_get_room_by_id_for_test(true);
+        }
+        let target = if expected == ErrorCode::InvalidInput {
+            actor
+        } else {
+            PlayerId::new_v4()
+        };
+        for _ in 0..8 {
+            server
+                .message_coordinator
+                .send_to_player(&actor, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap();
+        }
+        let operation_id = RoomOperationId::new_v4();
+        let caller = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                server
+                    .handle_transfer_authority_operation(&actor, operation_id, target)
+                    .await
+            }
+        });
+        timeout(Duration::from_secs(1), async {
+            while server
+                .metrics
+                .websocket_backpressure_events
+                .load(Ordering::Acquire)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("transfer refusal reaches real queue backpressure");
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+        let mut next_operation = Box::pin(lifecycle.lock());
+        assert!(
+            futures_util::poll!(&mut next_operation).is_pending(),
+            "the refused transfer must retain its result and source order"
+        );
+        drop(next_operation);
+        let ping = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.handle_ping(&actor).await }
+        });
+        for _ in 0..8 {
+            assert!(matches!(
+                receiver.recv().await.unwrap().as_ref(),
+                ServerMessage::Pong
+            ));
+        }
+        let result = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+        if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {
+            error_code: Some(actual), ..} if *actual == expected))
+        );
+        timeout(Duration::from_secs(1), ping)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await.unwrap().as_ref(),
+            ServerMessage::Pong
+        ));
+        assert!(drain_receiver(&mut receiver).is_empty());
+        database.fail_get_room_by_id_for_test(false);
+    }
+}
+
+/// #826: cancellation during validation preserves the storage result and committed role.
+#[tokio::test]
+async fn canceled_transfer_finishes_its_storage_decision() {
+    for storage_error in [false, true] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (actor, mut actor_rx) =
+            register_client(&server, "127.0.0.1:49305".parse().unwrap()).await;
+        let (target, mut target_rx) =
+            register_client(&server, "127.0.0.1:49306".parse().unwrap()).await;
+        join_seated_player(&server, &actor, &mut actor_rx, "TRWAIT", "host").await;
+        join_seated_player(&server, &target, &mut target_rx, "TRWAIT", "guest").await;
+        drain_receiver(&mut actor_rx);
+        drain_receiver(&mut target_rx);
+        let room = server.get_client_room(&actor).await.unwrap();
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        database.pause_next_get_room_by_id_for_test();
+        let operation_id = RoomOperationId::new_v4();
+        let caller = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                server
+                    .handle_transfer_authority_operation(&actor, operation_id, target)
+                    .await
+            }
+        });
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_paused_get_room_by_id_for_test(),
+        )
+        .await
+        .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        database.fail_get_room_by_id_for_test(storage_error);
+        database.release_paused_get_room_by_id_for_test();
+        let response = recv_until(&mut actor_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert!(
+            matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+            if *actual == operation_id && if storage_error {
+                matches!(result.as_ref(), RoomOperationResult::OperationFailed {error_code: Some(ErrorCode::StorageError), ..})
+            } else { matches!(result.as_ref(), RoomOperationResult::AuthorityTransferred {player_id} if *player_id == target) })
+        );
+        database.fail_get_room_by_id_for_test(false);
+        assert_eq!(
+            server
+                .database
+                .get_room_by_id(&room)
+                .await
+                .unwrap()
+                .unwrap()
+                .authority_player,
+            Some(if storage_error { actor } else { target })
+        );
+        let target_events = drain_receiver(&mut target_rx);
+        assert_eq!(target_events.len(), usize::from(!storage_error));
+        if !storage_error {
+            assert!(
+                matches!(target_events[0].as_ref(), ServerMessage::AuthorityChanged {
+                authority_player: Some(actual), you_are_authority: true } if *actual == target)
+            );
+        }
+    }
+}
+
+/// #826: a canceled refusal must not hold healthy mesh signaling behind its reply.
+#[tokio::test(start_paused = true)]
+async fn canceled_transfer_refusal_preserves_live_mesh_signaling() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (room, mut peers, generation) = live_moderation_room(&server, "TRMESH", 3).await;
+    let actor = peers[1].id;
+    let target = peers[0].id;
+    for _ in 0..8 {
+        server
+            .message_coordinator
+            .send_to_player(&actor, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let operation_id = RoomOperationId::new_v4();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_transfer_authority_operation(&actor, operation_id, target)
+                .await
+        }
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+    let mut lock = Box::pin(lifecycle.lock());
+    assert!(futures_util::poll!(&mut lock).is_pending());
+    drop(lock);
+    let room_guard = timeout(
+        Duration::from_secs(1),
+        server.message_coordinator.lock_room_event_mutation(&room),
+    )
+    .await
+    .unwrap();
+    drop(room_guard);
+    assert_live_moderation_signal(&server, target, &mut peers[2], generation).await;
+    let sender = peers[2].id;
+    assert_live_moderation_signal(&server, sender, &mut peers[0], generation).await;
+    for _ in 0..8 {
+        assert!(matches!(
+            peers[1].receiver.recv().await.unwrap().as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    let response = recv_until(&mut peers[1].receiver, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(
+        matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+        if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {
+            error_code: Some(ErrorCode::NotRoomAuthority), ..}))
+    );
+    let _released = timeout(Duration::from_secs(1), lifecycle.lock())
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        Some(target)
+    );
+}
+
 /// #826: admitted ready publication retains source order after observer cancellation.
 #[tokio::test(start_paused = true)]
 async fn canceled_ready_publication_retains_source_order() {

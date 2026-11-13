@@ -142,7 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep room counts and occupancy percentiles consistent in each in-memory dashboard sample (#1349).
 - Preserve replay loss when Rust embedders clear buffered room events (#1347).
 - Retry interrupted heartbeat updates so active rooms can renew their expiry window (#1344).
-- Finish committed authority transfers in room order after caller cancellation (#1342).
+- Preserve authority-transfer results and room order after caller cancellation (#1342, #1631).
 - Notify room peers when cleanup removes authority after a failed departure (#1339).
 - Publish committed authority changes even when the request response cannot be sent (#1337).
 - Reject invalid authority transfers and store valid transfers before announcing the new authority (#1334).

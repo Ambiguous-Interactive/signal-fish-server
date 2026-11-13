@@ -607,6 +607,33 @@ impl EnhancedGameServer {
             return;
         };
         let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let transaction = tokio::spawn(async move {
+            server
+                .transfer_authority_transaction(
+                    &authority_id,
+                    operation_id,
+                    target_id,
+                    lifecycle,
+                    authority_lifecycle_guard,
+                )
+                .await;
+        });
+        if let Err(error) = transaction.await {
+            tracing::error!(%authority_id, %error, "Authority transfer transaction failed");
+        }
+    }
+
+    /// Retain the source through validation, storage, publication and the result.
+    async fn transfer_authority_transaction(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        lifecycle: Arc<ClientLifecycle>,
+        authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) {
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -661,7 +688,7 @@ impl EnhancedGameServer {
         };
         let room = match self
             .database
-            .get_room_player_snapshot(&room_id, &target_id)
+            .get_room_member_snapshot(&room_id, &target_id)
             .await
         {
             Ok(Some(room)) => room,
@@ -703,7 +730,7 @@ impl EnhancedGameServer {
             .await;
             return;
         }
-        if room.player.is_none() {
+        if !room.is_member {
             drop(routes);
             drop(transfer_event_guard);
             self.metrics.increment_authority_transfer_conflicts();
@@ -762,24 +789,16 @@ impl EnhancedGameServer {
             .await;
             return;
         }
-        let server = Arc::clone(self);
-        let authority_id = *authority_id;
-        let transaction = tokio::spawn(async move {
-            server
-                .transfer_authority_owned(
-                    authority_id,
-                    operation_id,
-                    target_id,
-                    room_id,
-                    authority_lifecycle_guard,
-                    transfer_event_guard,
-                    routes,
-                )
-                .await;
-        });
-        if let Err(error) = transaction.await {
-            tracing::error!(%authority_id, %error, "Authority transfer transaction failed");
-        }
+        self.transfer_authority_owned(
+            *authority_id,
+            operation_id,
+            target_id,
+            room_id,
+            authority_lifecycle_guard,
+            transfer_event_guard,
+            routes,
+        )
+        .await;
     }
 
     /// Finish the role write and ordered announcement after caller cancellation.

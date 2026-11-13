@@ -162,6 +162,15 @@ pub struct RoomPlayerSnapshot {
     pub authority_player: Option<PlayerId>,
 }
 
+/// Authority and selected member presence from one storage read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomMemberSnapshot {
+    /// Whether the selected player has a stored seat in this room.
+    pub is_member: bool,
+    /// The authority identity stored alongside the selected membership.
+    pub authority_player: Option<PlayerId>,
+}
+
 /// Restored actor and application ownership from one room storage read.
 #[derive(Debug, Clone)]
 pub struct RoomReconnectSnapshot {
@@ -831,6 +840,22 @@ pub trait GameDatabase: Send + Sync {
             .map(|room| RoomSpectatorSnapshot {
                 room_code: room.code,
                 spectators: room.spectators.into_values().collect(),
+            }))
+    }
+
+    /// Read authority and selected member presence without requiring player metadata.
+    /// Pending rooms and storage errors match [`Self::get_room_player_snapshot`].
+    async fn get_room_member_snapshot(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<RoomMemberSnapshot>> {
+        Ok(self
+            .get_room_player_snapshot(room_id, player_id)
+            .await?
+            .map(|room| RoomMemberSnapshot {
+                is_member: room.player.is_some(),
+                authority_player: room.authority_player,
             }))
     }
 
@@ -2998,6 +3023,24 @@ impl GameDatabase for InMemoryDatabase {
                 Vec::new()
             }
         }))
+    }
+
+    async fn get_room_member_snapshot(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<Option<RoomMemberSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .map(|room| RoomMemberSnapshot {
+                is_member: room.players.contains_key(player_id),
+                authority_player: room.authority_player,
+            }))
     }
 
     /// Copy only the selected member while holding one room read lock.
