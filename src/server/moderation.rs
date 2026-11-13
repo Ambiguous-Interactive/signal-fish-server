@@ -337,6 +337,26 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let task = tokio::spawn(async move {
+            server
+                .unban_player_owned(&authority_id, operation_id, target_id, lifecycle)
+                .await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%authority_id, %error, "Room setting transaction failed");
+        }
+    }
+
+    /// Retain the source lifecycle through the stored decision and correlated reply.
+    async fn unban_player_owned(
+        &self,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
         let _authority_lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *authority_id
             || !self
@@ -446,6 +466,26 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let server = Arc::clone(self);
+        let authority_id = *authority_id;
+        let task = tokio::spawn(async move {
+            server
+                .set_room_access_owned(&authority_id, operation_id, password, lifecycle)
+                .await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%authority_id, %error, "Room setting transaction failed");
+        }
+    }
+
+    /// Retain the source lifecycle through the stored decision and correlated reply.
+    async fn set_room_access_owned(
+        &self,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        password: Option<String>,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
         let _authority_lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *authority_id
             || !self
@@ -1201,7 +1241,7 @@ impl EnhancedGameServer {
         let Some(room_id) = self.get_client_room(authority_id).await else {
             return Err(("Not currently in a room", ErrorCode::NotInRoom));
         };
-        let room = match self.database.get_room_by_id(&room_id).await {
+        let room = match self.database.get_room_start_snapshot(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 return Err(("Room no longer exists", ErrorCode::RoomNotFound));
@@ -1253,7 +1293,11 @@ impl EnhancedGameServer {
         // previous kick landed) between the routing check and now, and the
         // authority may have changed hands. Re-validate both rather than
         // trusting the pre-gate snapshot.
-        let room = match self.database.get_room_by_id(&room_id).await {
+        let room = match self
+            .database
+            .get_room_player_snapshot(&room_id, target_id)
+            .await
+        {
             Ok(Some(room)) => room,
             Ok(None) => {
                 return Err(("Room no longer exists", ErrorCode::RoomNotFound));
@@ -1277,7 +1321,7 @@ impl EnhancedGameServer {
             Some(manager) => manager.pending_reconnection_room(target_id).await,
             None => None,
         };
-        let target_seated_in_row = room.players.contains_key(target_id);
+        let target_seated_in_row = room.player.is_some();
         if !target_seated_in_row && pending_record_room != Some(room_id) {
             return Err((
                 "Moderation target is not a member of this room",

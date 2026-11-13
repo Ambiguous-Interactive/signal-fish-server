@@ -42,6 +42,12 @@ reconnect claims, and session plans also belong to the process.
 | Planned drain | Drain mode commits locally before notifications. `GoingAway` uses a nonblocking best-effort enqueue and may be skipped when the queue is full or gone | The server later requests close `4000 server_shutdown`; the close is authoritative when observed, but a broken transport may expose only failure. Drain does not arm reconnect records | The drained process transfers no room state | Optional v3 `GoingAway`, close `4000`, or transport failure |
 | Unexpected process loss | None | Every connection and the room authority disappear together | Room, tokens, control replay, relay counters, and plans are lost | Transport failure only; clients rebuild application state |
 
+Admitted `UnbanPlayer` and `SetRoomAccess` operations retain owned work through
+the stored decision and correlated result. Canceling a server library caller's
+wait does not cancel that work. The source lifecycle orders later operations
+after the result. Queue backpressure still follows the normal delivery deadline;
+a lost connection can prevent the client from observing the result.
+
 Neither queue commit nor WebSocket write completion proves a disk flush,
 replica quorum, client application observation, or end-to-end gameplay-state
 commit.

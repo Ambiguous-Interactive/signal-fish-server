@@ -8701,6 +8701,8 @@ async fn room_setting_refusals_release_the_room_before_reply_backpressure() {
         })
         .await
         .expect("refused room setting reaches its full reply queue");
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
         let mut available = Box::pin(server.message_coordinator.lock_room_event_mutation(&room));
         let released = futures_util::poll!(&mut available);
         assert!(
@@ -8727,7 +8729,6 @@ async fn room_setting_refusals_release_the_room_before_reply_backpressure() {
                 ServerMessage::Pong
             ));
         }
-        caller.await.unwrap();
         let response = recv_refusal_source(&mut alice_rx).await;
         let ServerMessage::RoomOperationResult {
             operation_id: actual,

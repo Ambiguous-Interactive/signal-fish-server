@@ -17018,3 +17018,75 @@ unchanged room metadata are checked outside each measured region.
 
 SDK timing qualification is tracked in Rust #300, .NET #153, and Godot #578.
 Server coverage does not establish SDK runtime parity.
+
+### F353: caller cancellation lost room-setting results
+
+Session 691 starts at the [baseline](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/4e4d922d2a495a45e70ed84a5cb9b5eecc58be89).
+Existing campaigns: #826 and #636. New finding: [#1626](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1626).
+`UnbanPlayer` and `SetRoomAccess` ran on the observer task. A committed setting
+could wait on a full reply queue, then lose its correlated result when that
+observer was canceled. The source lifecycle also released before the result.
+
+The original handler fails the real bounded-queue control in Nextest
+`60cb92c4-efd7-4460-995d-93dd28ab8b3d`. The repair captures the source lifecycle
+in owned work and retains it through the stored decision and correlated reply.
+Room mutation admission still releases before reply delivery. Both settings
+cover success, role refusal, storage-wait cancellation, and storage-read failure.
+The storage failure uses the first-party fault seam; it is not a reported
+ordinary in-memory storage incident. The cancellation control also requires a
+later Ping to follow the original result. The classified-queue finalized mesh
+history cancels the observer while the refusal is backpressured, then requires
+an exact current-generation Offer between healthy peers before draining it.
+All three final controls pass in Nextest `aa79d6d2-19e1-4222-bf38-a4c6ec12bc90`.
+The earlier moderation matrix passes all 49 selected controls in Nextest
+`258571e0-845b-4076-b38f-e9f7e70f770b`.
+
+Kick and ban validation now read compact room policy, then only the selected
+member after the target lifecycle wait. Existing target/role revalidation and
+refusal codes remain unchanged. The complete-handler allocation control covers
+both role refusal and absent-target refusal, room size, and peer metadata size.
+The ARM capacity audit records its costs and the explicit task-ownership cost.
+
+External clients: Rust `src/client_core.rs` blob `ef296f63` recognizes the result
+names but does not expose these settings through `ClientOperation`. Godot
+`sf_events.gd` blob `5c4e66e6` decodes their correlated envelope and payloads.
+.NET state-machine blob `98094169`, reader blob `c3e8e047` and kind-name blob
+`3459509d` do not establish room-setting result parity. Schemas, commands and
+codes stay unchanged. Delayed-result assessment remains in Rust #300, .NET #153
+and Godot #578. No SDK migration or runtime parity is claimed.
+
+### A11/A20: Godot-profile service recovery after host election
+
+Existing issue: #1240. Two real native CLI processes use the Godot channel
+profile with the real server's Host/WebRTC plan. The creator initially hosts
+and answers. Its connection departs after exact reliable exchange while the
+unreliable half remains held. The survivor becomes host. The creator restores
+the same player/room identity with a rotated token, then offers to the survivor.
+Both endpoints reopen reliable, ordered and unreliable channels and complete
+the exact fresh-link reliable/unreliable exchange. The survivor's physical
+Engine generation must advance. The restoring process replaces both Engine
+and event receiver, so its local counter can restart.
+
+The first expanded assertion incorrectly required that restarted counter to
+advance. The retained `native-service-final.log` failure establishes that test
+assumption error, not a production defect. The final control keeps separate
+lifetime evidence and exact channel/role/receipt requirements. Final Nextest
+`60d18778-3f3e-48b8-854f-d148f9ff0b78` passes both the new control and the
+separate original Reference-profile restore. These are native-profile
+service histories, not Godot runtime, multiplayer framing or remote-network
+qualification. #1240 and the historical #1244/#1264 investigations remain open.
+
+### A22: capacity-runner socket latency control
+
+Existing investigation: #1352. The runner left Nagle enabled on ordinary and
+receive-clamped plain TCP sockets. The actual-socket control fails on original
+source in Nextest `24748126-996a-41d3-bc01-fe8bc77ba1da`. Each runner dial now
+requests TCP_NODELAY before the WebSocket handshake. The TLS dial delegates the
+same setting to the existing tokio-tungstenite option. The socket control
+checks both plain paths; it does not exercise TLS.
+
+The unchanged two-room replacement workload and lifecycle-cancellation control
+pass with the socket control in Nextest `d9e52f8d-140a-43fc-a487-8ff3ff4dfb26`.
+All delivery/replay assertions, offered rates, lag bounds and drain windows stay
+unchanged. This removes a confirmed measurement confound. It does not establish
+that Nagle caused the historical coverage timeout. #1352 remains open.

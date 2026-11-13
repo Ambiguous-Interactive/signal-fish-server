@@ -376,14 +376,21 @@ pub(crate) fn same_room_registration_keeps_membership_storage() {
     });
 }
 
-/// Refused room settings do not copy stored peer connection metadata.
-pub(crate) fn room_setting_refusal_skips_player_metadata() {
+/// Refused room operations do not copy stored peer connection metadata.
+pub(crate) fn room_operation_refusal_skips_player_metadata() {
     use signal_fish_server::protocol::{
         ClientMessage, ErrorCode, PlayerInfo, RoomOperationId, RoomOperationRequest,
         RoomOperationResult,
     };
     use signal_fish_server::server::allocation_benchmark::enable_room_operations_for_measurement;
-    for unban in [false, true] {
+    for operation_name in [
+        "access",
+        "unban",
+        "kick",
+        "ban",
+        "kick-missing",
+        "ban-missing",
+    ] {
         for count in [2_u128, 16, 64] {
             let mut profiles = Vec::new();
             for bytes in [0, 1024, 64 * 1024] {
@@ -442,6 +449,25 @@ pub(crate) fn room_setting_refusal_skips_player_metadata() {
                             .await
                             .unwrap());
                     }
+                    let missing_target = operation_name.ends_with("-missing");
+                    let expected_authority = if missing_target { requester } else { authority };
+                    if missing_target {
+                        assert!(server
+                            .database()
+                            .update_room_authority(&room.id, Some(requester))
+                            .await
+                            .unwrap());
+                    }
+                    let target = if missing_target {
+                        Uuid::from_u128(9000)
+                    } else {
+                        authority
+                    };
+                    let expected_code = if missing_target {
+                        ErrorCode::KickTargetNotFound
+                    } else {
+                        ErrorCode::NotRoomAuthority
+                    };
                     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
                     server.connect_client(requester, sender).await;
                     negotiate_webrtc_for_measurement(&server, &requester);
@@ -449,12 +475,17 @@ pub(crate) fn room_setting_refusal_skips_player_metadata() {
                     server.assign_client_to_room(&requester, room.id).await;
                     for measured in [false, true] {
                         let operation_id = RoomOperationId::from_u128(999);
-                        let operation = if unban {
-                            RoomOperationRequest::UnbanPlayer {
+                        let operation = match operation_name {
+                            "unban" => RoomOperationRequest::UnbanPlayer {
                                 player_id: authority,
+                            },
+                            "kick" | "kick-missing" => {
+                                RoomOperationRequest::KickPlayer { player_id: target }
                             }
-                        } else {
-                            RoomOperationRequest::SetRoomAccess { password: None }
+                            "ban" | "ban-missing" => {
+                                RoomOperationRequest::BanPlayer { player_id: target }
+                            }
+                            _ => RoomOperationRequest::SetRoomAccess { password: None },
                         };
                         let message = ClientMessage::RoomOperation {
                             operation_id,
@@ -466,15 +497,15 @@ pub(crate) fn room_setting_refusal_skips_player_metadata() {
                         let response = receiver.try_recv().unwrap();
                         assert!(
                             matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
-                            if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {error_code: Some(ErrorCode::NotRoomAuthority), ..}))
+                            if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::OperationFailed {error_code: Some(code), ..} if *code == expected_code))
                         );
                         let pending = receiver.try_recv();
                         assert!(
                             matches!(pending, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
-                            "unexpected room-setting message: {pending:?}"
+                            "unexpected room-operation message: {pending:?}"
                         );
                         if measured {
-                            println!("ROOM_SETTING_REFUSAL unban={unban} members={count} bytes={bytes} stats={stats:?}");
+                            println!("ROOM_OPERATION_REFUSAL operation={operation_name} members={count} bytes={bytes} stats={stats:?}");
                             profiles.push(stats);
                         }
                     }
@@ -484,7 +515,7 @@ pub(crate) fn room_setting_refusal_skips_player_metadata() {
                         .await
                         .unwrap()
                         .unwrap();
-                    assert_eq!(stored.authority_player, Some(authority));
+                    assert_eq!(stored.authority_player, Some(expected_authority));
                     assert!(stored.password.is_none());
                     for player in stored
                         .players
@@ -499,7 +530,7 @@ pub(crate) fn room_setting_refusal_skips_player_metadata() {
             }
             for profile in &profiles {
                 assert!(profile.bytes_allocated <= profiles[0].bytes_allocated + 256,
-                    "room-setting refusal copied peer metadata: unban={unban} count={count} profiles={profiles:?}");
+                    "room-operation refusal copied peer metadata: operation={operation_name} count={count} profiles={profiles:?}");
             }
         }
     }

@@ -3530,7 +3530,18 @@ async fn await_restore_peer_message(
 #[tokio::test]
 async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
     let _serial = acquire_serial().await;
-    let mut server = spawn_server("mesh").await;
+    qualify_active_room_restore("reference", "mesh", 2).await;
+}
+
+/// #1240: retain negotiated Godot channels through host loss, election and restore.
+#[tokio::test]
+async fn godot_profile_restores_live_service_after_host_election() {
+    let _serial = acquire_serial().await;
+    qualify_active_room_restore("godot", "host", 3).await;
+}
+
+async fn qualify_active_room_restore(profile: &str, topology: &str, channels: usize) {
+    let mut server = spawn_server(topology).await;
     let url = server.v3_ws_url();
     let workdir = tempfile::tempdir().expect("WebRTC restore workdir");
     let disconnect = workdir.path().join("disconnect");
@@ -3540,6 +3551,8 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
     let unreliable = workdir.path().join("unreliable");
     let success = workdir.path().join("success");
     let common = [
+        "--channel-profile",
+        profile,
         "--exchange-release-file",
         incumbent_exchange.to_str().unwrap(),
         "--unreliable-exchange-release-file",
@@ -3557,6 +3570,8 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
             exchange: true,
             relay_payload: None,
             extra_args: &[
+                "--channel-profile",
+                profile,
                 "--exchange-release-file",
                 exchange.to_str().unwrap(),
                 "--unreliable-exchange-release-file",
@@ -3590,7 +3605,7 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
         client.await_event("exchange_ready", EVENT_TIMEOUT).await;
         assert_eq!(
             events_named(&client.events, "channel_open").len(),
-            2,
+            channels,
             "{}",
             client.diagnostics()
         );
@@ -3600,6 +3615,16 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
         player_id_of(&restoring.events, "restoring-p2p"),
         player_id_of(&incumbent.events, "incumbent-p2p"),
     ];
+    if topology == "host" {
+        for (index, client) in [&restoring, &incumbent].into_iter().enumerate() {
+            let plan = session_plan(&client.events, &client.name, "host", 1);
+            assert_eq!(plan["host"], ids[0], "the creator hosts before departure");
+            assert_eq!(
+                plan_peers(plan, &client.name),
+                vec![(ids[1 - index].clone(), index == 1)]
+            );
+        }
+    }
     std::fs::write(&exchange, b"exchange").unwrap();
     std::fs::write(&incumbent_exchange, b"exchange").unwrap();
     for client in [&mut restoring, &mut incumbent] {
@@ -3626,9 +3651,9 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
     assert_eq!(restored["token_rotated"], true);
     restoring.await_event("exchange_ready", EVENT_TIMEOUT).await;
     // The incumbent keeps its logical exchange gate, so wait directly for
-    // two newly opened channels rather than requiring a repeated ready event.
+    // newly opened required channels rather than requiring a repeated ready event.
     tokio::time::timeout(EVENT_TIMEOUT, async {
-        while events_named(&incumbent.events, "channel_open").len() < 4 {
+        while events_named(&incumbent.events, "channel_open").len() < 2 * channels {
             incumbent.await_event("channel_open", EVENT_TIMEOUT).await;
         }
     })
@@ -3637,8 +3662,8 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
     for client in [&restoring, &incumbent] {
         assert_eq!(
             events_named(&client.events, "channel_open").len(),
-            4,
-            "both channels reopen; {}",
+            2 * channels,
+            "all required channels reopen; {}",
             client.diagnostics()
         );
     }
@@ -3673,6 +3698,48 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
         assert!(events_named(&client.events, "channel_message")
             .iter()
             .all(|event| event["label"] == RELIABLE));
+    }
+    if topology == "host" {
+        for (index, client) in [&restoring, &incumbent].into_iter().enumerate() {
+            let plans = events_named(&client.events, "session_plan");
+            let latest = plans.last().unwrap();
+            assert_eq!(latest["topology"], "host");
+            assert_eq!(latest["transport"], "webrtc");
+            assert_eq!(
+                plan_peers(latest, &client.name),
+                vec![(ids[1 - index].clone(), index == 0)]
+            );
+            assert_eq!(
+                latest["host"], ids[1],
+                "the survivor keeps its elected host role after restore"
+            );
+            let latest_opens: Vec<_> =
+                events_named(&client.events[initial_log_lengths[index]..], "channel_open");
+            let labels: BTreeSet<_> = latest_opens
+                .iter()
+                .map(|event| str_field(event, "label"))
+                .collect();
+            assert_eq!(
+                labels,
+                BTreeSet::from(["reliable", "ordered", "unreliable"])
+            );
+            let initial_generation = events_named(&client.events, "channel_open")[0]["generation"]
+                .as_u64()
+                .unwrap();
+            let fresh_generations: BTreeSet<_> = latest_opens
+                .iter()
+                .map(|event| event["generation"].as_u64().unwrap())
+                .collect();
+            assert_eq!(fresh_generations.len(), 1);
+            /* Restore replaces the Engine and its event receiver. Only the survivor
+            retains an Engine whose local generation counter must advance. */
+            if index == 1 {
+                assert!(
+                    !fresh_generations.contains(&initial_generation),
+                    "the survivor must retire the old physical generation"
+                );
+            }
+        }
     }
     std::fs::write(unreliable, b"unreliable").unwrap();
     for client in [&mut restoring, &mut incumbent] {

@@ -11,6 +11,236 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+/// #826: canceling an admitted setting must retain its exact result and source order.
+#[tokio::test(start_paused = true)]
+async fn canceled_room_settings_retain_their_correlated_results() {
+    for unban in [false, true] {
+        for refused in [false, true] {
+            let server = create_test_server_with(ServerConfig::default()).await;
+            let (actor, mut receiver) =
+                register_client(&server, "127.0.0.1:49300".parse().unwrap()).await;
+            join_seated_player(&server, &actor, &mut receiver, "CANCEL", "host").await;
+            drain_receiver(&mut receiver);
+            let room = server.get_client_room(&actor).await.unwrap();
+            let target = PlayerId::new_v4();
+            server
+                .database
+                .set_room_ban(&room, &target, true)
+                .await
+                .unwrap();
+            if refused {
+                server.handle_authority_request(&actor, false).await;
+                drain_receiver(&mut receiver);
+            }
+            for _ in 0..8 {
+                server
+                    .message_coordinator
+                    .send_to_player(&actor, Arc::new(ServerMessage::Pong))
+                    .await
+                    .unwrap();
+            }
+            let operation_id = RoomOperationId::new_v4();
+            let caller = tokio::spawn({
+                let server = Arc::clone(&server);
+                async move {
+                    if unban {
+                        server
+                            .handle_unban_player_operation(&actor, operation_id, target)
+                            .await;
+                    } else {
+                        server
+                            .handle_set_room_access_operation(
+                                &actor,
+                                operation_id,
+                                Some("join-code".into()),
+                            )
+                            .await;
+                    }
+                }
+            });
+            timeout(Duration::from_secs(1), async {
+                while server
+                    .metrics
+                    .websocket_backpressure_events
+                    .load(Ordering::Acquire)
+                    == 0
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the setting result reaches real queue backpressure");
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+            let mut next_operation = Box::pin(lifecycle.lock());
+            assert!(
+                futures_util::poll!(&mut next_operation).is_pending(),
+                "the admitted operation must retain source ordering after caller cancellation"
+            );
+            drop(next_operation);
+            let ping = tokio::spawn({
+                let server = Arc::clone(&server);
+                async move { server.handle_ping(&actor).await }
+            });
+            for _ in 0..8 {
+                assert!(matches!(
+                    receiver.recv().await.unwrap().as_ref(),
+                    ServerMessage::Pong
+                ));
+            }
+            let response = timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("canceling the caller must not lose the admitted setting result")
+                .unwrap();
+            let ServerMessage::RoomOperationResult {
+                operation_id: actual,
+                result,
+            } = response.as_ref()
+            else {
+                panic!("expected correlated setting result: {response:?}");
+            };
+            assert_eq!(*actual, operation_id);
+            if refused {
+                assert!(matches!(
+                    result.as_ref(),
+                    RoomOperationResult::OperationFailed {
+                        error_code: Some(ErrorCode::NotRoomAuthority),
+                        ..
+                    }
+                ));
+            } else if unban {
+                assert!(
+                    matches!(result.as_ref(), RoomOperationResult::PlayerUnbanned { player_id } if *player_id == target)
+                );
+            } else {
+                assert!(matches!(
+                    result.as_ref(),
+                    RoomOperationResult::RoomAccessUpdated {
+                        requires_password: true
+                    }
+                ));
+            }
+            let stored = server
+                .database
+                .get_room_by_id(&room)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.is_banned(&target), refused || !unban);
+            assert_eq!(stored.password.is_some(), !refused && !unban);
+            timeout(Duration::from_secs(1), ping)
+                .await
+                .unwrap()
+                .unwrap();
+            let next_reply = receiver.recv().await.unwrap();
+            assert!(
+                matches!(next_reply.as_ref(), ServerMessage::Pong),
+                "the next source operation must follow the setting result"
+            );
+            assert!(drain_receiver(&mut receiver).is_empty());
+        }
+    }
+}
+
+/// #1626: observer cancellation cannot interrupt an admitted storage decision.
+#[tokio::test]
+async fn canceled_room_settings_finish_storage_decisions() {
+    for unban in [false, true] {
+        for storage_error in [false, true] {
+            let server = create_test_server_with(ServerConfig::default()).await;
+            let (actor, mut receiver) =
+                register_client(&server, "127.0.0.1:49301".parse().unwrap()).await;
+            join_seated_player(&server, &actor, &mut receiver, "STWAIT", "host").await;
+            drain_receiver(&mut receiver);
+            let room = server.get_client_room(&actor).await.unwrap();
+            let target = PlayerId::new_v4();
+            server
+                .database
+                .set_room_ban(&room, &target, true)
+                .await
+                .unwrap();
+            let database = server
+                .database
+                .as_any()
+                .downcast_ref::<crate::database::InMemoryDatabase>()
+                .unwrap();
+            database.pause_next_get_room_by_id_for_test();
+            let operation_id = RoomOperationId::new_v4();
+            let caller = tokio::spawn({
+                let server = Arc::clone(&server);
+                async move {
+                    if unban {
+                        server
+                            .handle_unban_player_operation(&actor, operation_id, target)
+                            .await;
+                    } else {
+                        server
+                            .handle_set_room_access_operation(
+                                &actor,
+                                operation_id,
+                                Some("join-code".into()),
+                            )
+                            .await;
+                    }
+                }
+            });
+            timeout(
+                Duration::from_secs(1),
+                database.wait_for_paused_get_room_by_id_for_test(),
+            )
+            .await
+            .unwrap();
+            caller.abort();
+            assert!(caller.await.unwrap_err().is_cancelled());
+            database.fail_get_room_by_id_for_test(storage_error);
+            database.release_paused_get_room_by_id_for_test();
+            let response = timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("the owned storage decision must reach its correlated reply")
+                .unwrap();
+            let ServerMessage::RoomOperationResult {
+                operation_id: actual,
+                result,
+            } = response.as_ref()
+            else {
+                panic!("expected room setting result: {response:?}");
+            };
+            assert_eq!(*actual, operation_id);
+            if storage_error {
+                assert!(matches!(
+                    result.as_ref(),
+                    RoomOperationResult::OperationFailed {
+                        error_code: Some(ErrorCode::StorageError),
+                        ..
+                    }
+                ));
+            } else if unban {
+                assert!(
+                    matches!(result.as_ref(), RoomOperationResult::PlayerUnbanned {player_id} if *player_id == target)
+                );
+            } else {
+                assert!(matches!(
+                    result.as_ref(),
+                    RoomOperationResult::RoomAccessUpdated {
+                        requires_password: true
+                    }
+                ));
+            }
+            database.fail_get_room_by_id_for_test(false);
+            let stored = server
+                .database
+                .get_room_by_id(&room)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.is_banned(&target), storage_error || !unban);
+            assert_eq!(stored.password.is_some(), !storage_error && !unban);
+            assert!(drain_receiver(&mut receiver).is_empty());
+        }
+    }
+}
+
 /// Drain a receiver without discarding results: every drained frame stays
 /// available for assertions (same shape as the room-service drain helper).
 fn drain_receiver(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Vec<Arc<ServerMessage>> {
