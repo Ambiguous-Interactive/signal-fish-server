@@ -1035,3 +1035,70 @@ async fn canceled_cleanup_preparation_releases_partial_storage_fences() {
         .is_empty());
     assert!(database.room_exists(&room.id).await.unwrap());
 }
+
+/// #636: membership-only reads preserve pending visibility, missing rows and read failures.
+#[tokio::test]
+async fn member_snapshot_preserves_room_visibility_and_storage_errors() {
+    let database = InMemoryDatabase::new();
+    let actor = PlayerId::from_u128(1);
+    let missing = PlayerId::from_u128(2);
+    let room = database
+        .create_pending_room_classified(
+            "member-view".into(),
+            Some("MBVIEW".into()),
+            4,
+            true,
+            actor,
+            "relay".into(),
+            "test".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    for published in [false, true] {
+        if published {
+            database.publish_room(&room.id).await.unwrap();
+        }
+        for (player, is_member) in [(actor, true), (missing, false)] {
+            assert_eq!(
+                database
+                    .get_room_member_snapshot(&room.id, &player)
+                    .await
+                    .unwrap(),
+                Some(RoomMemberSnapshot {
+                    is_member,
+                    authority_player: Some(actor)
+                })
+            );
+        }
+    }
+    assert_eq!(
+        database
+            .get_room_member_snapshot(&RoomId::nil(), &actor)
+            .await
+            .unwrap(),
+        None
+    );
+    database.fail_get_room_by_id_for_test(true);
+    assert!(database
+        .get_room_member_snapshot(&room.id, &actor)
+        .await
+        .is_err());
+    database.fail_get_room_by_id_for_test(false);
+    database.pause_next_get_room_by_id_for_test();
+    let mut read = Box::pin(database.get_room_member_snapshot(&room.id, &actor));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    assert!(database
+        .update_room_authority(&room.id, None)
+        .await
+        .unwrap());
+    database.release_paused_get_room_by_id_for_test();
+    assert_eq!(
+        read.await.unwrap().unwrap(),
+        RoomMemberSnapshot {
+            is_member: true,
+            authority_player: None
+        }
+    );
+}

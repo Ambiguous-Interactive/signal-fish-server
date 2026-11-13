@@ -384,6 +384,8 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
     };
     use signal_fish_server::server::allocation_benchmark::enable_room_operations_for_measurement;
     for operation_name in [
+        "transfer",
+        "transfer-success",
         "rotate-success",
         "rotate",
         "access",
@@ -429,6 +431,17 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                         .await
                         .unwrap();
                     let metadata = serde_json::json!({"nested":["x".repeat(bytes)]});
+                    assert!(server
+                        .database()
+                        .update_player_connection_info(
+                            &room.id,
+                            &authority,
+                            ConnectionInfo::Custom {
+                                data: metadata.clone()
+                            }
+                        )
+                        .await
+                        .unwrap());
                     for index in 2..=count {
                         assert!(server
                             .database()
@@ -458,7 +471,9 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                     } else {
                         authority
                     };
-                    if missing_target || operation_name == "rotate-success" {
+                    if missing_target
+                        || matches!(operation_name, "rotate-success" | "transfer-success")
+                    {
                         assert!(server
                             .database()
                             .update_room_authority(&room.id, Some(requester))
@@ -480,10 +495,28 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                     negotiate_webrtc_for_measurement(&server, &requester);
                     enable_room_operations_for_measurement(&server, &requester);
                     server.assign_client_to_room(&requester, room.id).await;
+                    let (target_sender, mut target_receiver) = tokio::sync::mpsc::channel(4);
+                    if operation_name == "transfer-success" {
+                        server.connect_client(authority, target_sender).await;
+                        negotiate_webrtc_for_measurement(&server, &authority);
+                        server.assign_client_to_room(&authority, room.id).await;
+                    }
                     for measured in [false, true] {
+                        if operation_name == "transfer-success" {
+                            assert!(server
+                                .database()
+                                .update_room_authority(&room.id, Some(requester))
+                                .await
+                                .unwrap());
+                        }
                         let operation_id = RoomOperationId::from_u128(999);
                         let operation = match operation_name {
                             "rotate" | "rotate-success" => RoomOperationRequest::RegenerateRoomCode,
+                            "transfer" | "transfer-success" => {
+                                RoomOperationRequest::TransferAuthority {
+                                    player_id: authority,
+                                }
+                            }
                             "unban" => RoomOperationRequest::UnbanPlayer {
                                 player_id: authority,
                             },
@@ -502,8 +535,25 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                         let region = stats_alloc::Region::new(ALLOCATOR);
                         server.handle_client_message(&requester, message).await;
                         let stats = region.change();
+                        if operation_name == "transfer-success" {
+                            let actor_view = receiver.try_recv().unwrap();
+                            let target_view = target_receiver.try_recv().unwrap();
+                            assert!(
+                                matches!(actor_view.as_ref(), ServerMessage::AuthorityChanged {
+                                authority_player: Some(player), you_are_authority: false } if *player == authority)
+                            );
+                            assert!(
+                                matches!(target_view.as_ref(), ServerMessage::AuthorityChanged {
+                                authority_player: Some(player), you_are_authority: true } if *player == authority)
+                            );
+                        }
                         let response = receiver.try_recv().unwrap();
-                        if operation_name == "rotate-success" {
+                        if operation_name == "transfer-success" {
+                            assert!(
+                                matches!(response.as_ref(), ServerMessage::RoomOperationResult {operation_id: actual, result}
+                                if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::AuthorityTransferred {player_id} if *player_id == authority))
+                            );
+                        } else if operation_name == "rotate-success" {
                             let ServerMessage::RoomOperationResult {
                                 operation_id: actual,
                                 result,
@@ -560,11 +610,7 @@ pub(crate) fn room_operation_refusal_skips_player_metadata() {
                         .unwrap();
                     assert_eq!(stored.authority_player, Some(expected_authority));
                     assert!(stored.password.is_none());
-                    for player in stored
-                        .players
-                        .values()
-                        .filter(|player| player.id != authority)
-                    {
+                    for player in stored.players.values() {
                         assert!(
                             matches!(&player.connection_info, Some(ConnectionInfo::Custom {data}) if *data == metadata)
                         );

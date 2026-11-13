@@ -17180,3 +17180,64 @@ both room orders remain checked. The unrelated-pending negative control still
 fails loudly before gate release. The observation exists in all test builds,
 including packaged unit tests; production builds keep the original lock path.
 The final focused readiness and boundary cohort passes all 23 controls.
+
+### F357: canceled authority-transfer validation lost its result
+
+Session 693 starts at
+[d6ed7b0d](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/d6ed7b0d0ec2e15f1b45d7d7dc1ce522f08c3730).
+Existing campaigns: #826 and #636. Finding: [#1631](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1631).
+Transfer validation and refusals belonged to the observer task. Only a validated
+grant entered owned work. Canceling the observer during a backpressured refusal
+lost its correlated result and released source ordering before completion.
+
+The real eight-slot reply-queue control fails against the original handler in
+Nextest `7acefd20-e2a6-4e45-874b-4cde6b513dbb`. The source lifecycle becomes
+available while the refused transfer still awaits delivery. The repair captures
+the acquired source guard in owned work before validation and retains the storage decision,
+publication and result. The grant keeps its existing room FIFO and route fence.
+Refusals release the room mutation fence before waiting for reply capacity.
+
+The expanded controls cover roomless, self, role, missing-target, missing-room
+and storage refusals. Each retains its exact correlated code and orders a later
+Ping after the result. Separate cancellation during a paused storage read checks
+both a committed grant and the classified storage failure. A finalized
+three-player Mesh/WebRTC control requires exact current-generation signals both
+ways between healthy peers while the canceled actor's refusal stays blocked.
+All five selected controls pass in Nextest `c684b724-7b58-4d19-95f6-e8c1a728dc72`.
+The final-source transfer cohort also checks all existing grant, departure,
+route-revalidation, role-precedence and start-game race controls.
+These are server-component histories, not attribution of a historical network failure.
+
+The compact storage read returns authority and selected membership together.
+Its default delegates to the existing player snapshot, preserving custom-adapter
+compatibility. In-memory reads copy neither player names nor connection metadata.
+A storage control covers pending/published visibility, absent rooms/members,
+read failures and current authority after a held read. Its first fixture tried
+to assign authority to an absent member; storage correctly refused that write.
+The corrected fixture asserts an accepted role release before reading it.
+
+External SDK inspection retains separate timing qualification in Rust #300,
+.NET #153 and Godot #578. Rust `client_core.rs` blob `ef296f63` recognizes the
+transfer result; Godot `sf_events.gd` blob `5c4e66e6` validates its player ID.
+.NET state-machine blob `98094169` does not establish transfer-result parity.
+The wire schemas, commands and error codes do not change. Server controls do
+not establish external SDK runtime parity or require a schema migration.
+
+### A11/A20: negotiated-profile live mesh seat replacement
+
+Existing issue: #1240. A new real-service history uses two incumbent native CLI
+processes with the Godot channel profile. A third seat-holder leaves after
+finalization without pairing. The incumbents complete exact reliable/unreliable
+exchange before a new negotiated-profile player fills that seat. The server
+publishes one shared fresh SessionPlan generation. Both incumbents rebuild their
+retained link and add the joiner with the deterministic opposite offer roles.
+
+Every planned endpoint opens reliable, ordered and unreliable channels exactly
+once per physical generation. Retained peer/channel generations advance. The
+history preserves all 16 exact gameplay receipts across the old pair and fresh
+three-player mesh, the exact transport-status transitions, and the pre/post-join
+WebSocket relay receipts. The joiner receives no historical relay traffic.
+Nextest `401b92ed-36d3-447c-b9af-f94338ae1536` passes this new history and the
+separate original Reference-profile control. This uses native Engines with
+Godot's negotiated channel profile. Actual Godot multiplayer framing, remote
+networks and historical #1244/#1264 attribution remain open.

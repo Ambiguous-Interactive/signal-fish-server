@@ -7079,3 +7079,32 @@ The control also retains all prior room-setting and seat-removal refusal cells.
 These are warmed Linux ARM64 debug allocation measurements. They do not establish
 release throughput or remote-network latency. The change affects server storage
 and handler work; it does not change the wire schema or room-code behavior.
+
+## Session 693 — authority-transfer membership projection
+
+Existing campaign: #636. Baseline:
+[d6ed7b0d](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/d6ed7b0d0ec2e15f1b45d7d7dc1ce522f08c3730).
+Transfer validation copied a selected PlayerInfo even though it needed only
+membership presence and room authority. The complete-handler refusal control
+fails on original source in Nextest `ca188ed2-67ef-4d53-8b09-2275e571ab88`: empty target metadata uses
+2,105 allocated bytes; 65,536 bytes of metadata raises that to 67,641 bytes.
+The retained source log records the full run identity.
+
+`get_room_member_snapshot` now reads selected presence and authority under one
+storage read lock. Existing adapters inherit a default that delegates to their
+player snapshot. Their existing visibility and error behavior stays intact;
+they can override the new method to remove metadata copies.
+
+The final complete-handler control, Nextest `6d7c4e1c-42cf-4835-b2e2-28b3107b1b9a`, varies 2/16/64 stored
+members and 0/1,024/65,536 bytes of nested metadata per player. Across all nine
+refused-transfer cells, it uses 11 allocations and 2,320 allocated bytes.
+Successful transfers use 27 allocations and 8,712 bytes across the same profiles.
+The success control checks both personalized role events and the correlated
+result. Refusal, final authority and all stored metadata remain exact. The earlier
+profiles for room settings, code rotation and removal also pass.
+
+The new owned validation task preserves correlated results and source ordering
+when the observer is canceled (#1631). That task increases the fixed empty-input
+byte cost while removing metadata-dependent growth. These are warmed Linux ARM64
+debug observations. They do not establish release throughput, remote latency or
+node capacity. The wire contract and gameplay relay paths do not change.
