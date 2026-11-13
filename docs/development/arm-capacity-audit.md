@@ -7042,3 +7042,40 @@ correlated result after observer cancellation (#1626). The kick/ban profiles
 remain independent of unrelated room metadata. These are warmed Linux ARM64
 debug allocation observations, not release throughput, network latency or a
 node-capacity guarantee. No relay hot path changes.
+
+## Session 692 — complete room-code rotation snapshots
+
+Existing campaign: #636. The baseline is
+[165d6910](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/165d69100757982942a9f48752a50c43cbb39fa5).
+The complete `RegenerateRoomCode` handler copied the full room before checking
+its authority. Its successful storage write also returned a full room copy.
+Both copies included unrelated players' stored connection metadata.
+
+The refused-operation control fails on original source in Nextest
+`325acf49-d9bf-4488-ace3-879d3c9e01a4`. With two members, increasing one member's
+metadata from zero to 65,536 bytes raises allocation from 5,033 to 70,569 bytes.
+After fixing the initial read, the new success control still fails in Nextest
+`bd2b4535-9855-44d7-a296-ab76bc0bd788`: the successful handler rises from 7,085 to
+72,621 bytes. This separately identifies the returned storage copy.
+
+Read and write projections now return only room identity and authority.
+The compact and full writes share one atomic registry, activity-clock and
+session-record update. Existing storage adapters retain default methods that
+call their full-room methods. They can override the projections to avoid copies.
+The original full-room API stays available.
+
+The final complete-handler control passes in Nextest
+`6c400fb2-159c-4e23-b746-8cfdbd3bf8e7`. It includes 2, 16 and 64 members and
+0, 1,024 and 65,536 bytes of connection metadata per unrelated member.
+Every rotation checks its correlated result and the new registry entry.
+It also checks the stored authority and metadata. Across all nine cells:
+
+| Complete operation | Allocations | Allocated bytes |
+| --- | ---: | ---: |
+| Successful code rotation | 33 | 4,859 |
+| Refused code rotation | 8 | 2,127 |
+
+The control also retains all prior room-setting and seat-removal refusal cells.
+These are warmed Linux ARM64 debug allocation measurements. They do not establish
+release throughput or remote-network latency. The change affects server storage
+and handler work; it does not change the wire schema or room-code behavior.

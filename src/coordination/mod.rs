@@ -179,6 +179,28 @@ pub struct RoomEventMutationGuard {
     lease: Arc<RoomEventMutationLease>,
 }
 
+#[cfg(test)]
+impl RoomEventMutationGuard {
+    pub(crate) fn mutation_attempt_count_for_test(&self) -> usize {
+        self.lease
+            ._lane
+            .mutation_attempts
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait_for_mutation_attempt_after_for_test(&self, attempts: usize) {
+        loop {
+            let notification = self.lease._lane.mutation_attempt_notify.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            if self.mutation_attempt_count_for_test() > attempts {
+                return;
+            }
+            notification.await;
+        }
+    }
+}
+
 struct RoomEventMutationLease {
     _guard: tokio::sync::OwnedRwLockWriteGuard<()>,
     _lane: Arc<RoomEventLane>,
@@ -234,6 +256,10 @@ struct RoomEventLane {
     room_id: RoomId,
     owner: Weak<RoomEventSequencer>,
     mutation_gate: Arc<tokio::sync::RwLock<()>>,
+    #[cfg(test)]
+    mutation_attempts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    mutation_attempt_notify: tokio::sync::Notify,
     queue: Mutex<RoomEventQueue>,
     #[cfg(test)]
     post_job_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -385,6 +411,10 @@ impl RoomEventSequencer {
             room_id,
             owner: Arc::downgrade(self),
             mutation_gate: Arc::new(tokio::sync::RwLock::new(())),
+            #[cfg(test)]
+            mutation_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            mutation_attempt_notify: tokio::sync::Notify::new(),
             queue: Mutex::new(RoomEventQueue::default()),
             #[cfg(test)]
             post_job_pause: Mutex::new(None),
@@ -404,7 +434,21 @@ impl RoomEventSequencer {
 
     pub(crate) async fn lock(self: &Arc<Self>, room_id: RoomId) -> RoomEventMutationGuard {
         let lane = self.lane(room_id);
+        #[cfg(not(test))]
         let guard = Arc::clone(&lane.mutation_gate).write_owned().await;
+        #[cfg(test)]
+        let guard = {
+            let acquisition = Arc::clone(&lane.mutation_gate).write_owned();
+            tokio::pin!(acquisition);
+            let first_poll = futures_util::poll!(acquisition.as_mut());
+            lane.mutation_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            lane.mutation_attempt_notify.notify_waiters();
+            match first_poll {
+                std::task::Poll::Ready(guard) => guard,
+                std::task::Poll::Pending => acquisition.await,
+            }
+        };
         RoomEventMutationGuard {
             lease: Arc::new(RoomEventMutationLease {
                 _guard: guard,

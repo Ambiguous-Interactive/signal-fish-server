@@ -159,7 +159,7 @@ const RESTORE_SCENARIO_CEILING_SECS: u64 = 2 * (45 + 45) + (45 + 90);
 /// two-wave ceiling by every scenario).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
-        + 10 * STANDARD_SCENARIO_CEILING_SECS
+        + 12 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS
         + EXCHANGE_CUTOFF_SCENARIO_CEILING_SECS
         + UNSUPPORTED_FORMAT_WAVE_SECS
@@ -2488,6 +2488,70 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
         assert_exchange_sent_to(&run.logs[index], who, &peers);
         assert_exchange_received_from(&run.logs[index], who, &peers);
         assert_transport_status_true(&run.logs[index], who);
+    }
+}
+
+/// #1240: qualify all negotiated-channel pairs in three-player service topologies.
+#[tokio::test(flavor = "multi_thread")]
+async fn godot_profile_three_player_mesh_and_host_exchange() {
+    let _serial = acquire_serial().await;
+    for topology in ["mesh", "host"] {
+        let configs = std::array::from_fn(|_| ClientConfig {
+            extra_args: &["--channel-profile", "godot"],
+            ..ClientConfig::full()
+        });
+        let run = run_three_clients(topology, "interop-godot-three", &configs).await;
+        let mut generation = None;
+        for (index, who) in CLIENT_NAMES.iter().enumerate() {
+            let peers = if topology == "mesh" || index == 0 {
+                run.other_ids(index)
+            } else {
+                BTreeSet::from([run.ids[0].as_str()])
+            };
+            let window = run.window(index);
+            let plan = session_plan(window, who, topology, peers.len());
+            if let Some(expected) = generation {
+                assert_eq!(plan["generation"], expected);
+            }
+            generation = Some(plan["generation"].clone());
+            let expected_plan: BTreeSet<_> = peers
+                .iter()
+                .map(|peer| {
+                    (
+                        (*peer).to_string(),
+                        if topology == "mesh" {
+                            run.ids[index].as_str() < *peer
+                        } else {
+                            index != 0
+                        },
+                    )
+                })
+                .collect();
+            assert_eq!(
+                plan_peers(plan, who).into_iter().collect::<BTreeSet<_>>(),
+                expected_plan
+            );
+            if topology == "host" {
+                assert_eq!(plan["host"], run.ids[0]);
+            } else {
+                assert!(plan["host"].is_null());
+            }
+            assert_pair_connected_exactly(window, who, &peers);
+            let opened: BTreeSet<_> = events_named(window, "channel_open")
+                .iter()
+                .map(|event| (str_field(event, "peer"), str_field(event, "label")))
+                .collect();
+            let expected_opened: BTreeSet<_> = peers
+                .iter()
+                .flat_map(|peer| ["reliable", "ordered", "unreliable"].map(|label| (*peer, label)))
+                .collect();
+            assert_eq!(opened, expected_opened);
+            assert_eq!(events_named(window, "channel_open").len(), peers.len() * 3);
+            assert_exchange_received_from(&run.logs[index], who, &peers);
+            assert_exchange_sent_to(&run.logs[index], who, &peers);
+            assert_transport_status_true(&run.logs[index], who);
+            assert_live_relay_floor(&run, index);
+        }
     }
 }
 

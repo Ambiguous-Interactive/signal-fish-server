@@ -21,7 +21,7 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let _lifecycle_guard = lifecycle.lock().await;
+        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -64,55 +64,64 @@ impl EnhancedGameServer {
             "Processing authority request with coordinator"
         );
 
-        match self
-            .room_coordinator
-            .handle_authority_request(&room_id, player_id, become_authority)
-            .await
-        {
-            Ok(outcome) => {
-                tracing::info!(
-                    %player_id,
-                    granted = outcome.granted(),
-                    denial = ?outcome.denial(),
-                    "Authority request processed"
-                );
-                // A denial is a 1:1 refusal reply to an unbudgeted request
-                // kind, so it charges the per-connection error-reply budget
-                // (issue #518). The coordinator's FIFO job may already have
-                // enqueued this one response; the charge still pins the
-                // semantic `4006` close at the first exhausted observation,
-                // and the pinned close stops later frames from producing
-                // further denials.
-                if outcome.denial().is_some() {
-                    self.connection_manager.charge_error_reply(player_id).await;
-                }
-            }
-            Err(e) => {
-                tracing::error!("Authority request failed: {}", e);
-
-                // Charged like the direct refusal above (issue #518).
-                if !self.connection_manager.charge_error_reply(player_id).await {
-                    return;
-                }
-                if let Err(e) = self
-                    .message_coordinator
-                    .send_to_player(
-                        player_id,
-                        Arc::new(ServerMessage::AuthorityResponse {
-                            granted: false,
-                            reason: Some("Internal error".to_string()),
-                            error_code: Some(ErrorCode::InternalError),
-                        }),
-                    )
-                    .await
-                {
-                    tracing::error!(
+        let room_coordinator = Arc::clone(&self.room_coordinator);
+        let connection_manager = Arc::clone(&self.connection_manager);
+        let message_coordinator = Arc::clone(&self.message_coordinator);
+        let player_id = *player_id;
+        let completion = tokio::spawn(async move {
+            let _lifecycle_guard = lifecycle_guard;
+            let player_id = &player_id;
+            match room_coordinator
+                .handle_authority_request(&room_id, player_id, become_authority)
+                .await
+            {
+                Ok(outcome) => {
+                    tracing::info!(
                         %player_id,
-                        "Failed to send error response via coordinator: {}",
-                        e
+                        granted = outcome.granted(),
+                        denial = ?outcome.denial(),
+                        "Authority request processed"
                     );
+                    // A denial is a 1:1 refusal reply to an unbudgeted request
+                    // kind, so it charges the per-connection error-reply budget
+                    // (issue #518). The coordinator's FIFO job may already have
+                    // enqueued this one response; the charge still pins the
+                    // semantic `4006` close at the first exhausted observation,
+                    // and the pinned close stops later frames from producing
+                    // further denials.
+                    if outcome.denial().is_some() {
+                        connection_manager.charge_error_reply(player_id).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Authority request failed: {}", e);
+
+                    // Charged like the direct refusal above (issue #518).
+                    if !connection_manager.charge_error_reply(player_id).await {
+                        return;
+                    }
+                    if let Err(e) = message_coordinator
+                        .send_to_player(
+                            player_id,
+                            Arc::new(ServerMessage::AuthorityResponse {
+                                granted: false,
+                                reason: Some("Internal error".to_string()),
+                                error_code: Some(ErrorCode::InternalError),
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            %player_id,
+                            "Failed to send error response via coordinator: {}",
+                            e
+                        );
+                    }
                 }
             }
+        });
+        if let Err(error) = completion.await {
+            tracing::error!(%player_id, %error, "Authority request transaction failed");
         }
     }
 }

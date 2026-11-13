@@ -17090,3 +17090,93 @@ pass with the socket control in Nextest `d9e52f8d-140a-43fc-a487-8ff3ff4dfb26`.
 All delivery/replay assertions, offered rates, lag bounds and drain windows stay
 unchanged. This removes a confirmed measurement confound. It does not establish
 that Nagle caused the historical coverage timeout. #1352 remains open.
+
+### F354: authority completion outlived its source lifecycle
+
+Session 692 starts at
+[165d6910](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/165d69100757982942a9f48752a50c43cbb39fa5).
+Existing campaign: #826. Finding: [#1628](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1628).
+The room coordinator retained an authority transaction after its caller was
+canceled. The server handler still held the source lifecycle on that caller.
+Cancellation therefore released source ordering before the response and role
+publication completed. Later player actions could run while the old request
+still waited for its reply queue.
+
+The real bounded-queue control fails on baseline in Nextest
+`f26d9b81-c4ed-44b9-b2e4-a98bae9bdd66`: the lifecycle lock becomes available
+while the authority response is still backpressured. The server now moves its
+owned lifecycle guard into a completion task around the coordinator call and
+its result handling. The public receiver and wire shapes stay unchanged.
+Grant and refusal controls keep the source locked after caller cancellation,
+require the exact authority result, and order a later Ping after completion.
+A separate three-player finalized mesh pauses after the durable role release,
+cancels the observer and requires response, role publication and Ping in that
+order. Healthy peers then exchange exact current-generation signals both ways.
+The initial expanded pair passes in Nextest
+`ad3b5352-07c9-4b53-a98a-76fcf5eb3efc`.
+
+Existing refusal controls retain room-gate release while the actor stops reading.
+The source-order repair adds an owned server task; it does not change the room
+publication fence. Server cancellation tests do not prove a historical network
+incident or external SDK runtime parity. Timing assessment remains tracked in
+Rust #300, .NET #153 and Godot #578. All three recognize the existing authority
+response. Their supported delayed-result behavior still needs qualification.
+
+### A11/A20: three-player negotiated-profile service topology
+
+Existing issue: #1240. New real-service histories run three native CLI processes
+with the opt-in Godot channel profile in both Mesh/WebRTC and Host/WebRTC.
+Every planned pair opens reliable, ordered and unreliable channels. All seats
+agree on the plan generation. The mesh has six directed endpoints with
+opposite offer roles per pair. The host star has four directed endpoints and
+no client-to-client pair. Every planned pair exchanges exact reliable and
+unreliable payloads both ways. All three seats also exchange their distinct
+WebSocket relay payloads in the same session.
+
+The new control passes in Nextest `b679b2ff-3ef4-480a-846d-f7fd684c1d02`.
+This extends the prior two-seat service proof. It uses native Engines with
+Godot's negotiated channel profile; it does not run Godot multiplayer framing,
+qualify remote networks, or attribute historical #1244/#1264 failures.
+Keep the wider #1240 runtime and network qualification open.
+
+### F355–F356: lobby publication outlived its source lifecycle
+
+Existing campaign: #826. Finding: [#1630](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1630).
+The adjacent `PlayerReady` and `StartGame` handlers had the same ownership split.
+Their coordinators retained admitted ready updates and game-start publications,
+but observer cancellation released the server's source lifecycle. A later
+same-player action could overtake the lobby event or complete game-start baseline.
+Refusals also belonged to the observer task and could lose their reply.
+
+Two independent controls fail against the original handlers in Nextest
+`5b112800-18b0-4357-8594-4660251ba711`. Each fills the source's real reply queue,
+waits for measured publication backpressure, cancels its observer and proves
+that the lifecycle unlocked while publication remained active. Each handler now
+retains its source guard in an owned completion task through its coordinator
+and result handling. Public receivers, typed refusals and wire shapes stay the
+same. The shared error sender retains the existing reply behavior.
+
+The new success controls require ready publication, or `GameStarting` followed
+by `SessionPlan`, before a later same-player Pong. Refusal controls retain the
+exact `InvalidRoomState` and `GameStartNotReady` responses after cancellation.
+The expanded local cohort passes all 23 controls in Nextest
+`22cba8c9-8f40-44ae-90f3-69a439a53b7c`.
+
+The first expanded cohort passed 21 controls and rejected two older concurrency
+fixtures. Those fixtures treated the first observer poll as room-queue admission.
+An owned worker can start later. The revised fixtures observe the room writer's
+first actual lock poll before admitting the next actor. They retain both room
+orders and every membership, role, generation and delivery assertion. The
+observation counter and wakeup are test-only. Production room fencing is unchanged.
+SDK timing assessment remains separate in Rust #300, .NET #153 and Godot #578.
+
+The first hosted root suite at `91217f84` passed 1,538 tests, then rejected two
+additional admission/departure fixtures for the same reason. Their custom
+observer wakers no longer identify the room-lock waker inside an owned lobby
+worker. The focused local reproduction fails both fixtures in Nextest
+`8aa0ee7f-ec57-4f6d-a1f4-f02d009cc80f`. They now await each actual room-lock
+admission before polling the next operation. Exact baseline/event order and
+both room orders remain checked. The unrelated-pending negative control still
+fails loudly before gate release. The observation exists in all test builds,
+including packaged unit tests; production builds keep the original lock path.
+The final focused readiness and boundary cohort passes all 23 controls.

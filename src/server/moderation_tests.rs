@@ -11,6 +11,317 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+/// #826: admitted ready publication retains source order after observer cancellation.
+#[tokio::test(start_paused = true)]
+async fn canceled_ready_publication_retains_source_order() {
+    qualify_canceled_lobby_publication(false, false).await;
+}
+
+/// #826: game-start plans retain source order after observer cancellation.
+#[tokio::test(start_paused = true)]
+async fn canceled_game_start_publication_retains_source_order() {
+    qualify_canceled_lobby_publication(true, false).await;
+}
+
+/// #1630: refused ready/start outcomes survive canceled observers too.
+#[tokio::test(start_paused = true)]
+async fn canceled_lobby_refusals_retain_their_results() {
+    for starting in [false, true] {
+        qualify_canceled_lobby_publication(starting, true).await;
+    }
+}
+
+async fn qualify_canceled_lobby_publication(starting: bool, refused: bool) {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (actor, mut receiver) = register_client(&server, "127.0.0.1:49303".parse().unwrap()).await;
+    server.set_client_protocol(
+        &actor,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![
+                crate::protocol::Transport::Relay,
+                crate::protocol::Transport::WebRtc,
+            ],
+            topologies: vec![
+                crate::protocol::Topology::Relay,
+                crate::protocol::Topology::Mesh,
+            ],
+        },
+    );
+    join_seated_player(&server, &actor, &mut receiver, "LOBBYC", "host").await;
+    drain_receiver(&mut receiver);
+    if starting != refused {
+        server.handle_player_ready(&actor).await;
+        drain_receiver(&mut receiver);
+    }
+    if !starting && refused {
+        server.handle_start_game(&actor).await;
+        drain_receiver(&mut receiver);
+    }
+    for _ in 0..8 {
+        server
+            .message_coordinator
+            .send_to_player(&actor, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            if starting {
+                server.handle_start_game(&actor).await;
+            } else {
+                server.handle_player_ready(&actor).await;
+            }
+        }
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Acquire)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("lobby publication reaches real queue backpressure");
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+    let mut next_operation = Box::pin(lifecycle.lock());
+    assert!(
+        futures_util::poll!(&mut next_operation).is_pending(),
+        "admitted lobby publication must retain source order: starting={starting}"
+    );
+    drop(next_operation);
+    let ping = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { server.handle_ping(&actor).await }
+    });
+    for _ in 0..8 {
+        assert!(matches!(
+            receiver.recv().await.unwrap().as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    let first = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    if refused {
+        let expected = if starting {
+            ErrorCode::GameStartNotReady
+        } else {
+            ErrorCode::InvalidRoomState
+        };
+        assert!(
+            matches!(first.as_ref(), ServerMessage::Error {error_code: Some(actual), ..} if *actual == expected)
+        );
+    } else if starting {
+        assert!(matches!(first.as_ref(), ServerMessage::GameStarting { .. }));
+        let plan = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(plan.as_ref(), ServerMessage::SessionPlan(_)));
+    } else {
+        assert!(matches!(
+            first.as_ref(),
+            ServerMessage::LobbyStateChanged {
+                all_ready: true,
+                ..
+            }
+        ));
+    }
+    timeout(Duration::from_secs(1), ping)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        receiver.recv().await.unwrap().as_ref(),
+        ServerMessage::Pong
+    ));
+    let _guard = timeout(Duration::from_secs(1), lifecycle.lock())
+        .await
+        .unwrap();
+}
+
+/// #826: an admitted authority decision must retain its source lifecycle after cancellation.
+#[tokio::test(start_paused = true)]
+async fn canceled_authority_request_retains_source_order() {
+    for granted in [false, true] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (actor, mut receiver) =
+            register_client(&server, "127.0.0.1:49302".parse().unwrap()).await;
+        join_seated_player(&server, &actor, &mut receiver, "AUTHRQ", "host").await;
+        drain_receiver(&mut receiver);
+        for _ in 0..8 {
+            server
+                .message_coordinator
+                .send_to_player(&actor, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap();
+        }
+        let caller = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.handle_authority_request(&actor, !granted).await }
+        });
+        timeout(Duration::from_secs(1), async {
+            while server
+                .metrics
+                .websocket_backpressure_events
+                .load(Ordering::Acquire)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("authority response reaches queue backpressure");
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+        let mut next_operation = Box::pin(lifecycle.lock());
+        assert!(
+            futures_util::poll!(&mut next_operation).is_pending(),
+            "authority completion must retain source order after caller cancellation"
+        );
+        drop(next_operation);
+        let ping = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.handle_ping(&actor).await }
+        });
+        for _ in 0..8 {
+            assert!(matches!(
+                receiver.recv().await.unwrap().as_ref(),
+                ServerMessage::Pong
+            ));
+        }
+        let response = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(response.as_ref(), ServerMessage::AuthorityResponse {granted: actual, ..} if *actual == granted)
+        );
+        if granted {
+            let changed = receiver.recv().await.unwrap();
+            assert!(matches!(
+                changed.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: None,
+                    ..
+                }
+            ));
+        }
+        timeout(Duration::from_secs(1), ping)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await.unwrap().as_ref(),
+            ServerMessage::Pong
+        ));
+        let _guard = timeout(Duration::from_secs(1), lifecycle.lock())
+            .await
+            .expect("completion releases the source lifecycle");
+    }
+}
+
+/// #1628: retain the source through a committed storage wait and live mesh publication.
+#[tokio::test]
+async fn canceled_committed_authority_request_preserves_live_mesh_order() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Mesh,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (room_id, mut peers, generation) = live_moderation_room(&server, "AUTHCM", 3).await;
+    let actor = peers[0].id;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_authority_request_after_commit_for_test();
+    let caller = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { server.handle_authority_request(&actor, false).await }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_authority_request_commit_for_test(),
+    )
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let lifecycle = server.connection_manager.client_lifecycle(&actor).unwrap();
+    let mut next_operation = Box::pin(lifecycle.lock());
+    assert!(
+        futures_util::poll!(&mut next_operation).is_pending(),
+        "committed authority storage must retain the source lifecycle"
+    );
+    drop(next_operation);
+    let ping = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move { server.handle_ping(&actor).await }
+    });
+    database.release_authority_request_commit_for_test();
+    timeout(Duration::from_secs(1), ping)
+        .await
+        .unwrap()
+        .unwrap();
+    let messages = drain_receiver(&mut peers[0].receiver);
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(matches!(
+        messages[0].as_ref(),
+        ServerMessage::AuthorityResponse { granted: true, .. }
+    ));
+    assert!(matches!(
+        messages[1].as_ref(),
+        ServerMessage::AuthorityChanged {
+            authority_player: None,
+            ..
+        }
+    ));
+    assert!(matches!(messages[2].as_ref(), ServerMessage::Pong));
+    for peer in peers.iter_mut().skip(1) {
+        let messages = drain_receiver(&mut peer.receiver);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(matches!(
+            messages[0].as_ref(),
+            ServerMessage::AuthorityChanged {
+                authority_player: None,
+                ..
+            }
+        ));
+    }
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        None
+    );
+    let sender = peers[1].id;
+    assert_live_moderation_signal(&server, sender, &mut peers[2], generation).await;
+    let sender = peers[2].id;
+    assert_live_moderation_signal(&server, sender, &mut peers[1], generation).await;
+    assert!(peers
+        .iter()
+        .all(|peer| peer.close.requested_reason().is_none()));
+}
+
 /// #826: canceling an admitted setting must retain its exact result and source order.
 #[tokio::test(start_paused = true)]
 async fn canceled_room_settings_retain_their_correlated_results() {

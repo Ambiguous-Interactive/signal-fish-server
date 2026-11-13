@@ -1533,6 +1533,20 @@ fn count_lobby_state_changed(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) 
     }
 }
 
+async fn poll_room_operation_to_gate<F: std::future::Future>(
+    mut operation: std::pin::Pin<&mut F>,
+    gate: &crate::coordination::RoomEventMutationGuard,
+) {
+    let attempts = gate.mutation_attempt_count_for_test();
+    assert!(futures_util::poll!(operation.as_mut()).is_pending());
+    timeout(
+        Duration::from_secs(1),
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("the operation must enter the room mutation queue before the next actor");
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn concurrent_unready_and_start_follow_room_gate_order() {
@@ -1570,11 +1584,11 @@ async fn concurrent_unready_and_start_follow_room_gate_order() {
         let toggle = server.handle_player_ready(&toggler);
         tokio::pin!(start, toggle);
         if start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
-            assert!(futures_util::poll!(&mut toggle).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
+            poll_room_operation_to_gate(toggle.as_mut(), &gate).await;
         } else {
-            assert!(futures_util::poll!(&mut toggle).is_pending());
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(toggle.as_mut(), &gate).await;
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         for messages in [&mut starter_messages, &mut toggler_messages] {
             let pending = messages.try_recv();
@@ -1769,7 +1783,7 @@ async fn concurrent_join_and_start_follow_room_membership_order() {
         let start = server.handle_start_game(&starter);
         tokio::pin!(start);
         if start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         let lifecycle = server.connection_manager.client_lifecycle(&joiner).unwrap();
         let attempts = lifecycle.lock_attempt_count_for_test();
@@ -1801,7 +1815,7 @@ async fn concurrent_join_and_start_follow_room_membership_order() {
         .await
         .expect("owned join must reach its lifecycle before release");
         if !start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         assert_eq!(server.get_client_room(&joiner).await, None);
         assert_eq!(
@@ -2104,13 +2118,13 @@ async fn concurrent_leave_and_start_publish_exact_membership_in_both_orders() {
         let start = server.handle_start_game(&starter);
         tokio::pin!(start);
         if start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         let leave = server.leave_room_locked(&leaver, true);
         tokio::pin!(leave);
         assert!(futures_util::poll!(&mut leave).is_pending());
         if !start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         assert_eq!(server.get_client_room(&leaver).await, Some(room_id));
         assert_eq!(
@@ -2281,9 +2295,9 @@ async fn concurrent_transfer_and_start_use_committed_authority_in_both_orders() 
         tokio::pin!(transfer, start);
         if transfer_first {
             assert!(futures_util::poll!(&mut transfer).is_pending());
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         } else {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
             assert!(futures_util::poll!(&mut transfer).is_pending());
         }
         let before = server
@@ -2547,7 +2561,7 @@ async fn concurrent_direct_endpoint_and_start_publish_consistent_generations() {
         let start = server.handle_start_game(&starter);
         tokio::pin!(start);
         if start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         let lifecycle = server.connection_manager.client_lifecycle(&host).unwrap();
         let updating_server = Arc::clone(&server);
@@ -2570,7 +2584,7 @@ async fn concurrent_direct_endpoint_and_start_publish_consistent_generations() {
         .await
         .expect("endpoint update must hold its lifecycle at the room gate");
         if !start_first {
-            assert!(futures_util::poll!(&mut start).is_pending());
+            poll_room_operation_to_gate(start.as_mut(), &gate).await;
         }
         let before = server
             .database
