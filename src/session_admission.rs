@@ -20,7 +20,8 @@ pub(crate) fn ice_pregather_eligible(
         && !finalized
         && recipient.version >= 3
         && recipient.transports.contains(&Transport::WebRtc)
-        && recipient.topologies.contains(&desired)
+        && (recipient.topologies.contains(&desired)
+            || (desired == Topology::Mesh && recipient.topologies.contains(&Topology::Host)))
 }
 
 /// The sticky per-room session decision recorded when a room finalizes to a
@@ -187,6 +188,39 @@ pub(crate) fn joiner_supports_sticky_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pregather_covers_every_executable_webrtc_fallback() {
+        for desired in [Topology::Relay, Topology::Host, Topology::Mesh] {
+            for mask in 0_u8..8 {
+                let profile = NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::WebRtc],
+                    topologies: [Topology::Relay, Topology::Host, Topology::Mesh]
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) != 0)
+                        .map(|(_, topology)| topology)
+                        .collect(),
+                };
+                let members = [SessionMember {
+                    player_id: Uuid::from_u128(1),
+                    player_name: "peer".into(),
+                    is_authority: false,
+                    joined_at: chrono::DateTime::UNIX_EPOCH,
+                    direct_endpoint: None,
+                    capabilities: crate::session_capability::SessionCapabilities::from(&profile),
+                }];
+                let selected =
+                    finalize_session_plan(None, members.as_slice(), desired, false, true);
+                assert_eq!(
+                    ice_pregather_eligible(true, true, desired, false, &profile),
+                    selected.transport == Transport::WebRtc,
+                    "desired={desired:?} topology_mask={mask} selected={selected:?}"
+                );
+            }
+        }
+    }
 
     /// #1464: compare the complete plan with the ADR table and sorted candidates.
     #[test]

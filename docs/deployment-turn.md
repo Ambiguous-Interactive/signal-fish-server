@@ -155,7 +155,7 @@ Operationally this means:
   and host-failover re-plans always receive freshly minted credentials.
 - **ICE pre-gather mints at join time.** With `session.enable_ice_pregather`
   (the default), every eligible v3 client — one that negotiated the WebRTC
-  transport and the game's desired topology — joining or reconnecting into a
+  transport and a WebRTC topology within the game's ceiling — joining or reconnecting into a
   non-relay-desired game's lobby receives a freshly minted credential on
   `RoomJoined` / `Reconnected` — before, and in addition to, the one in its
   eventual `SessionPlan`. For capacity planning that means **issuance scales

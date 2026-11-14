@@ -508,6 +508,7 @@ def projection_mutations():
         "pregather-version": ("src/session_admission.rs", "recipient.version >= 3", "recipient.version >= 2"),
         "pregather-transport": ("src/session_admission.rs", "recipient.transports.contains(&Transport::WebRtc)", "true"),
         "pregather-topology": ("src/session_admission.rs", "recipient.topologies.contains(&desired)", "true"),
+        "pregather-fallback": ("src/session_admission.rs", "desired == Topology::Mesh", "false"),
         "axes-version": ("src/session_capability.rs", "if negotiated_version < 3 {", "if negotiated_version < 2 {"),
         "axes-transport-floor": ("src/session_capability.rs", "transports.push(Transport::Relay);", "let _ = &mut transports;"),
         "axes-topology-floor": ("src/session_capability.rs", "topologies.push(Topology::Relay);", "let _ = &mut topologies;"),

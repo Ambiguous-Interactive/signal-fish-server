@@ -2148,9 +2148,8 @@ lobby wait** instead of adding that latency at game start. The field is populate
   per-recipient `SessionPlan` (pre-gathering too would double-mint), and a room floored to relay stays relay
   (sticky), so pre-gather is pointless there, and
 - the recipient negotiated v3 **and** the `webrtc` transport, and
-- the recipient's negotiated topologies contain the game's desired topology — the relay-desired argument applied
-  per-recipient: the ladder seats a member on a rung only when that member negotiated the rung's topology, so a
-  relay-only-topology client can never appear in any WebRTC plan and its credentials could never be used.
+- the recipient negotiated a WebRTC topology at or below the game's ceiling: Host for a Host ceiling, or
+  Mesh or Host for a Mesh ceiling. A host-only client can use the Host/WebRTC fallback of a mesh-preferring game.
 
 In every other case the field is **absent from the wire entirely**, so the v2 `RoomJoined` / `Reconnected` bytes
 are untouched. The `SessionPlan` ICE list **supersedes** the pre-gather list: clients should always apply the most

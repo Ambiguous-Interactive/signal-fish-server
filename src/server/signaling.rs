@@ -862,8 +862,11 @@ impl EnhancedGameServer {
     /// that shapes plan peer lists: the relay forwards signals between any two
     /// transport-capable endpoints without reinterpreting the plan.
     pub(crate) fn supports_webrtc_signaling(&self, player_id: &PlayerId) -> bool {
-        self.client_supports_v3(player_id)
-            && self.client_supports_transport(player_id, Transport::WebRtc)
+        self.connection_manager
+            .project_protocol(player_id, |protocol| {
+                protocol.version >= 3 && protocol.transports.contains(&Transport::WebRtc)
+            })
+            .unwrap_or(false)
     }
 
     async fn reject_signal(

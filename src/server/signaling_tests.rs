@@ -8839,3 +8839,65 @@ async fn signal_route_lookup_failure_replies_and_preserves_retry_budget() {
     );
     assert_eq!(valid_signal_budget_used(&server, &alice).await, 1);
 }
+
+#[tokio::test]
+#[ignore = "isolated WebRTC eligibility lookup profile"]
+async fn webrtc_eligibility_lookup_profile() {
+    let server = create_test_server().await;
+    let (player, _receiver) = register_client(&server).await;
+    server.set_client_protocol(&player, v3_webrtc());
+    for round in 0..6 {
+        for combined in [false, true] {
+            let started = tokio::time::Instant::now();
+            for _ in 0..200_000 {
+                let eligible = if combined {
+                    server.supports_webrtc_signaling(&player)
+                } else {
+                    server.client_supports_v3(&player)
+                        && server.client_supports_transport(&player, Transport::WebRtc)
+                };
+                assert!(std::hint::black_box(eligible));
+            }
+            println!(
+                "WEBRTC_ELIGIBILITY round={round} combined={combined} elapsed_us={}",
+                started.elapsed().as_micros()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn signaling_eligibility_uses_one_current_protocol_profile() {
+    let server = create_test_server().await;
+    let (player, _receiver) = register_client(&server).await;
+    for version in [0, 2, 3, 4, u16::MAX] {
+        for mask in 0_u8..8 {
+            for topologies in [
+                vec![],
+                vec![Topology::Relay],
+                vec![Topology::Host, Topology::Mesh],
+            ] {
+                server.set_client_protocol(
+                    &player,
+                    NegotiatedProtocol {
+                        version,
+                        transports: [Transport::Relay, Transport::Direct, Transport::WebRtc]
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(index, _)| mask & (1 << index) != 0)
+                            .map(|(_, transport)| transport)
+                            .collect(),
+                        topologies,
+                    },
+                );
+                assert_eq!(
+                    server.supports_webrtc_signaling(&player),
+                    version >= 3 && mask & 4 != 0,
+                    "version={version} transport_mask={mask}"
+                );
+            }
+        }
+    }
+    server.disconnect_client(&player).await;
+    assert!(!server.supports_webrtc_signaling(&player));
+}

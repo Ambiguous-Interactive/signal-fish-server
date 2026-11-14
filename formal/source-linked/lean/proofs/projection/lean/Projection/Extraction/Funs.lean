@@ -78,7 +78,7 @@ impl_def session_capability.Transport.Insts.CoreCmpPartialEqTransport :
 }
 
 /-- [signal_fish_proof_core::session_admission::ice_pregather_eligible]:
-    Source: 'src/../../../../src/session_admission.rs', lines 10:0-24:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 10:0-25:1 -/
 def session_admission.ice_pregather_eligible
   (enable_pregather : Bool) (enable_webrtc : Bool)
   (desired : session_capability.Topology) (finalized : Bool)
@@ -112,9 +112,22 @@ def session_admission.ice_pregather_eligible
               let s1 ←
                 alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref
                   recipient.topologies
-              core.slice.Slice.contains
-                session_capability.Topology.Insts.CoreCmpPartialEqTopology s1
-                desired
+              let b2 ←
+                core.slice.Slice.contains
+                  session_capability.Topology.Insts.CoreCmpPartialEqTopology s1
+                  desired
+              if b2
+              then ok true
+              else
+                let b3 ←
+                  session_capability.Topology.Insts.CoreCmpPartialEqTopology.eq
+                    desired session_capability.Topology.Mesh
+                if b3
+                then
+                  core.slice.Slice.contains
+                    session_capability.Topology.Insts.CoreCmpPartialEqTopology
+                    s1 session_capability.Topology.Host
+                else ok false
             else ok false
           else ok false
       else ok false
@@ -122,7 +135,7 @@ def session_admission.ice_pregather_eligible
   else ok false
 
 /-- [signal_fish_proof_core::session_admission::joiner_supports_sticky_plan]:
-    Source: 'src/../../../../src/session_admission.rs', lines 178:0-185:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 179:0-186:1 -/
 def session_admission.joiner_supports_sticky_plan
   (protocol : session_capability.NegotiatedProtocol)
   (stored : session_admission.ActiveSessionPlan) :

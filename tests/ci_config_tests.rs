@@ -35296,8 +35296,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     With 57 shards, ceil(568/57) * 29s remains 290s.
     570 (was 568): shared signal fence constructors add two return-value sites (#1617).
     With 57 shards, ceil(570/57) * 29s remains 290s.
+    574 (was 570): the Host/WebRTC pre-gather fallback adds four decision sites.
+    With 58 shards, ceil(574/58) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 570;
+const MUTATION_TOTAL_MUTANTS: u32 = 574;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -35565,12 +35567,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/57"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/58"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/57` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/58` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -35721,7 +35723,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/57 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/58 --print-cmd",
         violations.join("\n")
     );
 }

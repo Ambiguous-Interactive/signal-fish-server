@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 #[derive(Debug, Clone, Default)]
-pub struct ReceivedCounts(Vec<(ReceiptName, u64)>);
+pub struct ReceivedCounts(Box<[(ReceiptName, u64)]>);
 
 impl ReceivedCounts {
     pub fn iter(&self) -> impl Iterator<Item = (&ReceiptName, &u64)> {
@@ -48,7 +48,7 @@ impl FromIterator<(ReceiptName, u64)> for ReceivedCounts {
             earlier.1 = later.1;
             true
         });
-        Self(entries)
+        Self(entries.into_boxed_slice())
     }
 }
 
@@ -84,6 +84,44 @@ impl<'de> Deserialize<'de> for ReceivedCounts {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn compact_counts_retain_only_unique_sender_storage() {
+        for senders in [0, 1, 2, 3, 15, 63, 254] {
+            let entries = (0..senders).flat_map(|sender| {
+                (0..17).map(move |count| (ReceiptName::from(format!("peer-{sender:03}")), count))
+            });
+            let mut legacy: Vec<_> = entries.clone().collect();
+            legacy.sort_by(|left, right| left.0.cmp(&right.0));
+            legacy.dedup_by(|later, earlier| {
+                if later.0 != earlier.0 {
+                    return false;
+                }
+                earlier.1 = later.1;
+                true
+            });
+            let counts: ReceivedCounts = entries.collect();
+            assert_eq!(
+                counts
+                    .iter()
+                    .map(|(name, count)| (name.clone(), *count))
+                    .collect::<Vec<_>>(),
+                legacy
+            );
+            let legacy_bytes = legacy.capacity() * std::mem::size_of::<(ReceiptName, u64)>();
+            let compact_bytes = std::mem::size_of_val(counts.0.as_ref());
+            println!("SUMMARY_STORAGE senders={senders} legacy_bytes={legacy_bytes} compact_bytes={compact_bytes}");
+            if senders > 0 {
+                assert!(compact_bytes < legacy_bytes);
+            }
+            assert_eq!(counts.0.len(), senders);
+            assert_eq!(
+                std::mem::size_of_val(&counts),
+                2 * std::mem::size_of::<usize>()
+            );
+            assert!(counts.values().all(|count| *count == 16));
+        }
+    }
 
     #[test]
     fn compact_counts_preserve_tree_map_json_and_last_duplicate_values() {

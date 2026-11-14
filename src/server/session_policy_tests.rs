@@ -5513,7 +5513,8 @@ fn ice_pregather_adapter_matches_protocol_matrix() {
                                         && state_index != 2
                                         && version > 2
                                         && mask & 32 != 0
-                                        && mask & (1 << desired_index) != 0;
+                                        && (mask & (1 << desired_index) != 0
+                                            || (desired_index == 2 && mask & 2 != 0));
                                     assert_eq!(
                                         ice_pregather_eligible(&cfg, "matrix-game", state, &profile),
                                         expected,
@@ -5662,12 +5663,12 @@ fn ice_pregather_eligibility_flips_every_conjunct_independently() {
         &LobbyState::Waiting,
         &v3_relay_only_topology
     ));
-    // ... and a host-capped set cannot seat a mesh-desired game's rung ...
+    // A host-capable client can use the Host/WebRTC fallback below Mesh.
     let v3_host_capable = NegotiatedProtocol {
         topologies: vec![Topology::Relay, Topology::Host],
         ..v3_webrtc()
     };
-    assert!(!ice_pregather_eligible(
+    assert!(ice_pregather_eligible(
         &cfg,
         "unmapped-game",
         &LobbyState::Waiting,
