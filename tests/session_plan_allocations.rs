@@ -589,6 +589,10 @@ fn main() {
             live_p2p_allocations::authority_release_skips_survivor_metadata,
         ),
         allocation_harness::trial(
+            "conditional_room_delivery_avoids_unused_drain_channel",
+            targeted_costs::conditional_room_delivery_avoids_unused_drain_channel,
+        ),
+        allocation_harness::trial(
             "transport_report_delivery_cost",
             live_p2p_allocations::transport_report_delivery_cost,
         ),

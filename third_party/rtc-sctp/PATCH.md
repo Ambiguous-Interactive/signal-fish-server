@@ -86,6 +86,11 @@ The added `stream_reset_test.rs` contains deterministic
 Sans-I/O controls for both reset directions, sequence replay and wrap, simultaneous
 close, delayed DATA, DATA/reset response reordering, drain, forward TSN,
 metadata limits, denied requests, retries, and outgoing fragment ordering.
+`reset_conformance_test.rs` adds a remote packet script for #1184. It checks
+RFC 6525's cross-stream implicit reset acknowledgment, old unread gameplay,
+future ordered progress, graceful shutdown, and wrapped request/TSN values.
+The independent usrsctp source agrees with the implicit-ack interpretation;
+no executed usrsctp or public-client incident is claimed.
 These controls qualify the local repair. They do not claim full RFC 6525 support
 for parameter types that upstream does not implement.
 The procedures follow [RFC 6525](https://www.rfc-editor.org/rfc/rfc6525.html),
@@ -601,3 +606,32 @@ send-debt retirement. Existing zero/small-window and abandoned-prefix controls
 retain current receiver-space reports and one-probe assertions. This confirms
 a native SCTP accounting defect. It does not establish the historical causes
 of #1319, #1244, #1264 or any remote-network incident.
+
+The independent peer probe for #1184 runs an unmodified usrsctp build on Linux.
+It confirms matching versus mismatched cross-stream acknowledgment, actual
+new SSN 0, timed expiry/FORWARD TSN, and reliable SSN 1. It models the local
+application-drain fence by replacing a success response with InProgress.
+This confirms independent implementation behavior; strict RFC interpretation
+and public-client reachability remain separate qualifications.
+
+Run from the repository root with CMake, Git and a POSIX C compiler:
+
+```sh
+probe_root=$(mktemp -d)
+git init "$probe_root/source"
+git -C "$probe_root/source" remote add origin https://github.com/sctplab/usrsctp.git
+git -C "$probe_root/source" fetch --depth 1 origin c625e21950600460cb5c6075616eb1622df2b06a
+git -C "$probe_root/source" checkout --detach FETCH_HEAD
+cmake -S "$probe_root/source" -B "$probe_root/build" \
+  -Dsctp_build_programs=OFF -Dsctp_build_shared_lib=OFF
+cmake --build "$probe_root/build" --parallel 4
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+  -I "$probe_root/source/usrsctplib" tests/fixtures/sctp_implicit_reset_peer.c \
+  "$probe_root/build/usrsctplib/libusrsctp.a" -pthread -o "$probe_root/probe"
+"$probe_root/probe"
+"$probe_root/probe" --mismatch-first
+```
+
+Both commands must report `PASS`, new SSN 0, forward SSN 0, reliable SSN 1,
+and exactly two application receipts. Assertions must remain enabled.
+The probe adds no server or client runtime dependency.
