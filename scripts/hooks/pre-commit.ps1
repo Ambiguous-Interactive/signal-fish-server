@@ -453,7 +453,7 @@ function Get-StagedOrWorkingTreeText {
         return $text
     }
 
-    $absolutePath = Join-Path $script:RepoRoot $Path
+    $absolutePath = [IO.Path]::GetFullPath($Path, $script:RepoRoot)
     if (Test-Path -LiteralPath $absolutePath) {
         return [System.IO.File]::ReadAllText($absolutePath)
     }
@@ -468,7 +468,7 @@ function Get-WorktreeText {
         return $script:WorktreeTextCache[$Path]
     }
 
-    $absolutePath = Join-Path $script:RepoRoot $Path
+    $absolutePath = [IO.Path]::GetFullPath($Path, $script:RepoRoot)
     if (-not (Test-Path -LiteralPath $absolutePath)) {
         return $null
     }
@@ -793,7 +793,7 @@ function Set-WorktreeText {
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content
     )
 
-    $absolutePath = Join-Path $script:RepoRoot $Path
+    $absolutePath = [IO.Path]::GetFullPath($Path, $script:RepoRoot)
     [System.IO.File]::WriteAllText($absolutePath, $Content, [System.Text.UTF8Encoding]::new($false))
     $script:WorktreeTextCache[$Path] = $Content
 }
@@ -1118,7 +1118,7 @@ function New-WorktreeSkillsIndexContent {
     [array]::Sort($paths, [System.StringComparer]::Ordinal)
 
     foreach ($path in $paths) {
-        $absolutePath = Join-Path $script:RepoRoot $path
+        $absolutePath = [IO.Path]::GetFullPath($path, $script:RepoRoot)
         try {
             $content = [System.IO.File]::ReadAllText($absolutePath)
         } catch {
@@ -1657,7 +1657,7 @@ function Repair-DocVersionsIfNeeded {
         }
 
         if ($script:InspectWorktree) {
-            $absolutePath = Join-Path $script:RepoRoot $path
+            $absolutePath = [IO.Path]::GetFullPath($path, $script:RepoRoot)
             [System.IO.File]::WriteAllText($absolutePath, $expected, [System.Text.UTF8Encoding]::new($false))
             $script:WorktreeTextCache[$path] = $expected
             [void]$repaired.Add($path)
@@ -1772,7 +1772,7 @@ function Get-ChangelogRustTextCache {
             $plannedBytes = [long]0
             foreach ($entry in $entries) {
                 $oldBytes = [Text.Encoding]::UTF8.GetByteCount($texts[$entry.Old])
-                $newBytes = [IO.FileInfo]::new((Join-Path $script:RepoRoot $entry.Path)).Length
+                $newBytes = [IO.FileInfo]::new(([IO.Path]::GetFullPath($entry.Path, $script:RepoRoot))).Length
                 if ($oldBytes -gt $script:MaxBatchedBlobBytes - $plannedBytes) { $cache.Clear(); return $cache }
                 $plannedBytes += $oldBytes
                 if ($newBytes -gt $script:MaxBatchedBlobBytes - $plannedBytes) { $cache.Clear(); return $cache }
@@ -1781,7 +1781,7 @@ function Get-ChangelogRustTextCache {
             }
         }
         foreach ($entry in $entries) {
-            $newContent = if ($script:InspectWorktree) { [IO.File]::ReadAllText((Join-Path $script:RepoRoot $entry.Path)) } else { $texts[$entry.New] }
+            $newContent = if ($script:InspectWorktree) { [IO.File]::ReadAllText(([IO.Path]::GetFullPath($entry.Path, $script:RepoRoot))) } else { $texts[$entry.New] }
             if ($script:InspectWorktree) {
                 $newBytes = [Text.Encoding]::UTF8.GetByteCount($newContent)
                 if ($newBytes -gt $script:MaxBatchedBlobBytes - $retainedBytes) { $cache.Clear(); return $cache }
@@ -1837,7 +1837,7 @@ function Test-FileDiffIsTestOnly {
     }
     $script:HeadTextCache[$Path] = $oldResult.Stdout
     $oldLines = $oldResult.Stdout -split "`n"
-    $newContent = if ($script:InspectWorktree) { [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot $Path)) } else { $newBlob.Stdout }
+    $newContent = if ($script:InspectWorktree) { [System.IO.File]::ReadAllText(([IO.Path]::GetFullPath($Path, $script:RepoRoot))) } else { $newBlob.Stdout }
     if (Test-RustDocumentationOnlyChange -OldContent $oldResult.Stdout -NewContent $newContent) {
         return $true
     }
