@@ -4660,7 +4660,23 @@ async fn prune_active_session_plans_drops_only_dead_rooms() {
     server.active_session_plans.insert(live_room.id, entry);
     server.active_session_plans.insert(dead_room_id, entry);
 
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.fail_get_room_by_id_for_test(true);
+    assert_eq!(server.prune_active_session_plans().await, 0);
+    assert_eq!(server.active_session_plan(&live_room.id), Some(entry));
+    assert_eq!(server.active_session_plan(&dead_room_id), Some(entry));
+    database.fail_get_room_by_id_for_test(false);
+    database.reset_get_room_by_id_calls_for_test();
     let removed = server.prune_active_session_plans().await;
+    assert_eq!(
+        database.get_room_by_id_calls_for_test(),
+        1,
+        "one storage snapshot must cover every cached session"
+    );
 
     assert_eq!(removed, 1, "exactly the dead room's entry is pruned");
     assert_eq!(server.active_session_plan(&live_room.id), Some(entry));

@@ -17595,3 +17595,88 @@ Controls cover closed queues, slow-target expiry, canceled observation and
 backpressured source replies. The latter checks room mutation admission while
 the refusal is pending and verifies that the source lifecycle still orders the
 reply. SDK runtime qualification remains separate from server controls.
+
+### F367: room-cache pruning repeated storage admission for every room
+
+Session 701 starts at main `144d0352`. Existing #636 gains bounded batch
+lookups for stored P2P session plans, lobby readiness and room application
+mappings. The original three pruning paths each perform one room-storage
+admission per candidate. Restoring those original paths fails all three
+focused controls: two candidates require two reads rather than one.
+
+`GameDatabase::retain_missing_room_ids` retains a compatible default for
+external adapters. The shipped in-memory implementation checks at most 256
+candidates per room read lock and compacts the original candidate buffer.
+There is no replacement allocation. The locks release between groups, so the
+complete cache does not become one unbounded storage critical section.
+Candidate order and duplicates remain intact. Pending rooms count as present.
+A batch error or canceled lookup commits no cache removal. A batch error can
+leave its scratch candidate list incomplete; callers discard that list.
+The default logs an individual room-read failure, excludes the unresolved ID
+from confirmed-missing output, and continues with other candidates. A failed
+ID cannot block cleanup for healthy storage reads before or after it.
+
+The database controls cover empty, live, pending and missing IDs, duplicates,
+255/256/257/1000/4096 candidate boundaries, stable buffer pointers, storage
+failure and a deletion while lookup waits. The three cache controls preserve
+live entries after failed reads and remove only confirmed missing rooms on
+retry. The P2P control starts a real two-player server mesh and checks its
+shared generation and exact signal payloads while pruning waits and after
+observer cancellation. It verifies the server contract, not physical WebRTC
+transport or remote-network performance. The 4096-candidate path takes 16
+storage admissions; no end-to-end throughput or latency gain is claimed.
+A Linux arm64 Rust 1.94.0 debug/all-feature profile compares the same pending
+and missing IDs through the public storage API. At 4096 candidates, individual
+lookups allocate 4096 times and 491520 bytes; the batch allocates once and 176
+bytes. The 2/16/255/256/257 controls also reduce allocated bytes and calls while
+preserving exact output, buffer address and capacity. Empty cache paths return
+before creating a batch future. These are transient allocation measurements,
+not retained heap, peak RSS or a node capacity result.
+
+Existing #826 gains these storage and cancellation controls. It remains open,
+as does #636. Existing #1441 is addressed separately by the shared Rustdoc
+classifier and staged/worktree fixtures. No spectator feature or dependency
+remediation is included.
+
+External source assessment reads Rust `client_core.rs` blob `ef296f63`, .NET
+`SignalFishStateMachine.cs` blob `98094169`, and Godot `sf_events.gd` blob
+`5c4e66e6`. These clients consume the existing session messages and do not
+implement the server storage API. This change preserves message schemas,
+peer generations, ordering, capability gates and defaults. Each client is
+unaffected; no migration or client tracking issue is required for this batch
+lookup. This source assessment does not claim new SDK runtime qualification.
+
+### F368: documentation classification must preserve generated runtime data
+
+Existing #1441 gains a shared staged/worktree/checker Rustdoc classifier.
+The first candidate removed documentation inside macro input. Independent
+compiled controls show why that was unsafe: `stringify!` can return the doc
+attribute text, and Clap derives can include field docs in CLI help. Unicode
+macro names, imported derives and shadowed attribute bindings are also checked.
+The first candidate and its timings are not final qualification.
+
+The repaired classifier retains macro token trees and uncertain attributed
+items. Its bounded signature walk protects generic-const expression blocks and
+outer statement semicolons. The ordinary root `async_trait` exception assumes
+the inspected pinned 0.1.92 dependency and rejects ambiguous bindings. Its
+expansion transforms signatures and bodies, adds lint attributes, and preserves
+documentation. Matched compiled controls return the same answer and differ
+only in doc attributes. This is a narrow supported transformation, not a
+semantic proof for arbitrary macro expansion.
+
+A second review found that a committed revision range used worktree text as
+its new side. A committed runtime edit could be hidden by an unstaged doc-only
+file. Both `A...B` and `A..B` now read the new blob from `B`; single-base checks
+still compare against disk. Four controls preserve both directions of that
+distinction. Literal data, Unicode normalization, attributes and runtime edits
+remain outside the documentation exemption. No internal release-note entry is
+added for this tooling repair.
+
+The seven-file method-doc fixture passes below one second, but replaying the
+same edits in this full repository still takes about 1.3 seconds. Exact-blob
+batch reads reduced that replay from about 2.6 seconds. The cache keeps the
+existing 2 MiB source byte bound, including worktree contents, and rejects
+mode/type changes. Functional classification and compiled controls pass;
+Issue #1441 remains open for its full-workload timing acceptance. The session's
+actual mixed commit hook completes in 571 ms. The smaller fixture does not
+prove the full repository timing target.

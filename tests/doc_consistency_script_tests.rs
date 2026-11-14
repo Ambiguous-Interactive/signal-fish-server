@@ -160,6 +160,16 @@ fn run_checker_with_fixture_and_tags(
         .unwrap_or_else(|e| panic!("Failed to read {}: {e}", script_src.display()));
     write_file(&script_dst, &script);
 
+    for path in [
+        "scripts/check-rust-documentation.ps1",
+        "scripts/hooks/rust-documentation.ps1",
+    ] {
+        write_file(
+            &temp_root.path().join(path),
+            &fs::read_to_string(repo_root().join(path)).unwrap(),
+        );
+    }
+
     for (path, content) in base_fixture_files() {
         write_file(&temp_root.path().join(path), &content);
     }
@@ -223,6 +233,7 @@ fn run_checker_with_fixture_and_tags(
 }
 
 #[test]
+#[serial_test::serial]
 fn test_release_compare_rejects_existing_tag_without_dated_section() {
     let changelog = "# Changelog\n\n\
         The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n\
@@ -329,6 +340,7 @@ fn evaluate_script_case(case: ScriptCase) -> Option<String> {
 }
 
 #[test]
+#[serial_test::serial]
 fn native_extracted_test_modules_are_internal_but_runtime_stays_in_scope() {
     for (path, expected_exit) in [
         ("clients/native/src/engine_close_tests.rs", 0),
@@ -394,6 +406,7 @@ fn evaluate_script_cases_in_batches(cases: Vec<ScriptCase>) -> Vec<String> {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
     let stale_dependency_doc =
         "# Generated\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n";
@@ -444,6 +457,7 @@ fn test_markdown_discovery_prunes_generated_trees_at_any_depth() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_markdown_discovery_excludes_only_root_session_notes() {
     let path_dependency_doc =
         "# Local note\n\nsignal-fish-server = { path = \"../signal-fish-server\" }\n";
@@ -488,6 +502,7 @@ fn test_markdown_discovery_excludes_only_root_session_notes() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_markdown_discovery_keeps_llm_guidance_in_version_sync_scope() {
     let stale_llm_doc =
         "# Agent Guidance\n\n```toml\n[dependencies]\nsignal-fish-server = \"0.0.9\"\n```\n";
@@ -512,6 +527,7 @@ fn test_markdown_discovery_keeps_llm_guidance_in_version_sync_scope() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_doc_consistency_script_data_driven_cases() {
     let cases = vec![
         // ---------------------------------------------------------------
@@ -1437,6 +1453,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 /// The pattern from ci.yml (with `-i` for case-insensitive matching):
 ///   `(^bump |^chore\(deps\)|dependabot|dependency.bump|update.*dependencies)`
 #[test]
+#[serial_test::serial]
 fn test_dep_detect_commit_message_pattern_data_driven() {
     // This is the ERE pattern from the CI workflow, converted to Rust regex.
     // The CI uses `grep -qiE`, so we replicate case-insensitive matching.
@@ -1597,6 +1614,16 @@ fn run_checker_with_git_base(
     head_overrides: &[(&str, &str)],
     args: &[&str],
 ) -> (i32, String) {
+    run_checker_with_committed_range(base_overrides, head_overrides, &[], &[], args)
+}
+
+fn run_checker_with_committed_range(
+    base_overrides: &[(&str, &str)],
+    head_overrides: &[(&str, &str)],
+    worktree_overrides: &[(&str, &str)],
+    executable_paths: &[&str],
+    args: &[&str],
+) -> (i32, String) {
     let temp_root = unique_temp_dir("doc-consistency-git-base");
     let script_src = repo_root().join("scripts/check-doc-consistency.sh");
     let script = fs::read_to_string(&script_src)
@@ -1605,6 +1632,16 @@ fn run_checker_with_git_base(
         &temp_root.path().join("scripts/check-doc-consistency.sh"),
         &script,
     );
+
+    for path in [
+        "scripts/check-rust-documentation.ps1",
+        "scripts/hooks/rust-documentation.ps1",
+    ] {
+        write_file(
+            &temp_root.path().join(path),
+            &fs::read_to_string(repo_root().join(path)).unwrap(),
+        );
+    }
 
     for (path, content) in base_fixture_files() {
         write_file(&temp_root.path().join(path), &content);
@@ -1630,6 +1667,40 @@ fn run_checker_with_git_base(
 
     for (path, content) in head_overrides {
         write_file(&temp_root.path().join(path), content);
+    }
+    if !executable_paths.is_empty() {
+        for arguments in [
+            vec!["config", "core.fileMode", "false"],
+            vec!["add", "."],
+            [
+                vec!["update-index", "--chmod=+x", "--"],
+                executable_paths.to_vec(),
+            ]
+            .concat(),
+        ] {
+            let status = Command::new("git")
+                .args(arguments)
+                .current_dir(temp_root.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "set fixture executable mode");
+        }
+    }
+    if !worktree_overrides.is_empty() {
+        for arguments in [
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "fixture head"],
+        ] {
+            let status = Command::new("git")
+                .args(arguments)
+                .current_dir(temp_root.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "commit fixture range head");
+        }
+        for (path, content) in worktree_overrides {
+            write_file(&temp_root.path().join(path), content);
+        }
     }
 
     let mut command = bash_command();
@@ -1657,6 +1728,7 @@ fn run_checker_with_git_base(
 }
 
 #[test]
+#[serial_test::serial]
 fn empty_staged_diff_passes_changelog_gate() {
     let (exit, output) = run_checker_with_git_base(&[], &[], &["--staged"]);
 
@@ -1668,6 +1740,7 @@ fn empty_staged_diff_passes_changelog_gate() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_only_rust_diff_passes_changelog_gate_with_diff_base() {
     let insertion = "        assert!(super::ready());\n    }\n";
     let replacement = "        assert!(super::ready());\n    }\n\n    #[test]\n    fn ready_still_true() {\n        assert!(super::ready());\n    }\n";
@@ -1691,6 +1764,7 @@ fn test_only_rust_diff_passes_changelog_gate_with_diff_base() {
 }
 
 #[test]
+#[serial_test::serial]
 fn production_hunk_above_test_module_still_requires_changelog() {
     let head = TEST_MODULE_SRC_BASE.replace("    true", "    false");
     assert_ne!(head, TEST_MODULE_SRC_BASE, "fixture edit must apply");
@@ -1710,6 +1784,7 @@ fn production_hunk_above_test_module_still_requires_changelog() {
 }
 
 #[test]
+#[serial_test::serial]
 fn changed_files_mode_without_diff_base_stays_conservative() {
     // Same test-only delta as the passing case, but without --diff-base the
     // gate cannot see hunks and must keep the file in scope; the failure
@@ -1734,6 +1809,7 @@ fn changed_files_mode_without_diff_base_stays_conservative() {
 }
 
 #[test]
+#[serial_test::serial]
 fn deleting_production_code_after_test_module_requires_changelog() {
     // The base file violates the file-final convention (production code
     // continues past the test module). Deleting that trailing production
@@ -1757,6 +1833,7 @@ fn deleting_production_code_after_test_module_requires_changelog() {
 }
 
 #[test]
+#[serial_test::serial]
 fn deleting_from_a_file_without_a_test_module_requires_changelog() {
     // The base file has no test module at all, so there is no test region
     // to delete from: every non-blank deletion is a production change.
@@ -1782,6 +1859,7 @@ fn deleting_from_a_file_without_a_test_module_requires_changelog() {
 }
 
 #[test]
+#[serial_test::serial]
 fn deleting_test_code_from_a_clean_module_stays_exempt() {
     // Both sides satisfy the file-final convention; removing part of the
     // test module is internal work and needs no entry.
@@ -1802,4 +1880,97 @@ fn deleting_test_code_from_a_clean_module_stays_exempt() {
         exit, 0,
         "removing test code from a file-final test module must stay exempt.\n{output}"
     );
+}
+
+#[test]
+#[serial_test::serial]
+fn rustdoc_only_diff_passes_checker_but_literal_and_runtime_changes_do_not() {
+    let base = "pub fn ready() -> bool { true }\n";
+    for (name, changed, expected) in [
+        (
+            "line docs",
+            "/// Readiness.\npub fn ready() -> bool { true }\n",
+            0,
+        ),
+        (
+            "block docs",
+            "/** Readiness. */\npub fn ready() -> bool { true }\n",
+            0,
+        ),
+        (
+            "mixed runtime",
+            "/// Readiness.\npub fn ready() -> bool { false }\n",
+            1,
+        ),
+        (
+            "attribute",
+            "/// Readiness.\n#[inline]\npub fn ready() -> bool { true }\n",
+            1,
+        ),
+    ] {
+        let (code, output) = run_checker_with_git_base(
+            &[("src/core.rs", base)],
+            &[("src/core.rs", changed)],
+            &["--diff-base", "HEAD", "--changed-files", "src/core.rs"],
+        );
+        assert_eq!(code, expected, "{name}: {output}");
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn rustdoc_text_inside_a_raw_literal_still_requires_a_changelog() {
+    let base = "const S: &str = r##\"\n/// Old value.\n\"##;\n";
+    let changed = base.replace("Old", "New");
+    let (code, output) = run_checker_with_git_base(
+        &[("src/core.rs", base)],
+        &[("src/core.rs", &changed)],
+        &["--diff-base", "HEAD", "--changed-files", "src/core.rs"],
+    );
+    assert_eq!(code, 1, "literal data must stay user-visible: {output}");
+}
+
+#[test]
+#[serial_test::serial]
+fn rustdoc_checker_uses_both_committed_range_trees_instead_of_unstaged_content() {
+    let base = "pub fn ready() -> bool { true }\n";
+    let runtime = "pub fn ready() -> bool { false }\n";
+    let docs = "/// Readiness.\npub fn ready() -> bool { true }\n";
+    for range in ["HEAD~1...HEAD", "HEAD~1..HEAD"] {
+        for (committed, disk, expected) in [(runtime, docs, 1), (docs, runtime, 0)] {
+            let (code, output) = run_checker_with_committed_range(
+                &[("src/core.rs", base)],
+                &[("src/core.rs", committed)],
+                &[("src/core.rs", disk)],
+                &[],
+                &["--diff-base", range, "--changed-files", "src/core.rs"],
+            );
+            assert_eq!(
+                code, expected,
+                "range={range}, committed={committed:?}, disk={disk:?}: {output}"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn rustdoc_with_mode_change_still_requires_a_changelog() {
+    for args in [
+        vec!["--staged"],
+        vec!["--diff-base", "HEAD", "--changed-files", "src/core.rs"],
+    ] {
+        let (code, output) = run_checker_with_committed_range(
+            &[("src/core.rs", "pub fn ready() -> bool { true }\n")],
+            &[(
+                "src/core.rs",
+                "/// Readiness.\npub fn ready() -> bool { true }\n",
+            )],
+            &[],
+            &["src/core.rs"],
+            &args,
+        );
+        assert_ne!(code, 0, "mode change must require a changelog: {output}");
+        assert!(output.contains("without CHANGELOG.md update"), "{output}");
+    }
 }

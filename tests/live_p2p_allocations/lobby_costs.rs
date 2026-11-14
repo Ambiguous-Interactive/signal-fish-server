@@ -34,7 +34,7 @@ pub(crate) fn unready_start_skips_player_metadata() {
     let mut profiles = Vec::new();
     for bytes in [0, 1024, 65536] {
         allocation_harness::block_on(async {
-            tokio::task::yield_now().await;
+            allocation_harness::warm_current_thread_runtime().await;
             let server = server().await;
             let mut receivers = Vec::new();
             for index in 1..=2 {
@@ -258,4 +258,98 @@ pub(crate) fn app_identity_lookup_does_not_copy_text() {
             assert_eq!(server.client_app_id(&player), Some(Uuid::from_u128(21)));
         });
     }
+}
+
+/// Keep cold task-registry setup visible while checking the warmed measurement boundary.
+pub(crate) fn runtime_registry_warmup_retains_exact_spawn_cost() {
+    let mut cold = Vec::with_capacity(8);
+    let mut warm = Vec::with_capacity(8);
+    for (warmed, samples) in [(false, &mut cold), (true, &mut warm)] {
+        allocation_harness::block_on(async {
+            if warmed {
+                allocation_harness::warm_current_thread_runtime().await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+            for _ in 0..8 {
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                let task = tokio::spawn(std::future::ready(()));
+                let id = task.id();
+                task.await.unwrap();
+                let stats = region.change();
+                samples.push((id, stats));
+            }
+        });
+    }
+    println!("RUNTIME_REGISTRY cold={cold:?} warm={warm:?}");
+    let baseline = &warm[0].1;
+    for (_, stats) in &warm {
+        assert_eq!(stats.allocations, baseline.allocations);
+        assert_eq!(stats.bytes_allocated, baseline.bytes_allocated);
+        assert_eq!(stats.reallocations, 0);
+    }
+}
+
+/// #636: bounded cache filtering removes per-room future allocations without copying rows.
+pub(crate) fn room_cache_filter_batches_storage_allocations() {
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let database = InMemoryDatabase::new();
+        let live = database
+            .create_pending_room_classified(
+                "cache-cost".into(),
+                Some("COST01".into()),
+                2,
+                false,
+                Uuid::from_u128(1),
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let storage: &dyn GameDatabase = std::hint::black_box(&database);
+        assert!(storage.room_exists(&live.id).await.unwrap());
+        for count in [2_usize, 16, 255, 256, 257, 4_096] {
+            let mut candidates: Vec<_> = (0..count)
+                .map(|index| {
+                    if index % 2 == 0 {
+                        live.id
+                    } else {
+                        Uuid::from_u128(2)
+                    }
+                })
+                .collect();
+            let mut individually_missing = Vec::with_capacity(count);
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            for room in &candidates {
+                if !storage.room_exists(room).await.unwrap() {
+                    individually_missing.push(*room);
+                }
+            }
+            let individual = region.change();
+            let pointer = candidates.as_ptr();
+            let capacity = candidates.capacity();
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            storage
+                .retain_missing_room_ids(&mut candidates)
+                .await
+                .unwrap();
+            let batch = region.change();
+            assert_eq!(candidates, individually_missing);
+            assert_eq!(candidates.as_ptr(), pointer);
+            assert_eq!(candidates.capacity(), capacity);
+            assert!(
+                batch.allocations < individual.allocations,
+                "count={count}, individual={individual:?}, batch={batch:?}"
+            );
+            assert!(
+                batch.bytes_allocated < individual.bytes_allocated,
+                "count={count}, individual={individual:?}, batch={batch:?}"
+            );
+            assert_eq!(batch.reallocations, 0);
+            println!("ROOM_CACHE count={count} individual={individual:?} batch={batch:?}");
+        }
+    });
 }

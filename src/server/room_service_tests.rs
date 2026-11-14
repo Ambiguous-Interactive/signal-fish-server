@@ -1261,6 +1261,7 @@ struct DrainAfterCreateDatabase {
     inner: Arc<dyn GameDatabase>,
     track_sessions: bool,
     fail_room_lookup: bool,
+    fail_room_exists_for: Option<RoomId>,
     panic_room_exists_once: AtomicBool,
     panic_rollback_once: AtomicBool,
     panic_rollback_always: AtomicBool,
@@ -1293,6 +1294,7 @@ impl DrainAfterCreateDatabase {
             inner,
             track_sessions: false,
             fail_room_lookup: false,
+            fail_room_exists_for: None,
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
@@ -1332,6 +1334,7 @@ impl DrainAfterCreateDatabase {
             inner,
             track_sessions: false,
             fail_room_lookup: false,
+            fail_room_exists_for: None,
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
@@ -1364,6 +1367,7 @@ impl DrainAfterCreateDatabase {
             inner,
             track_sessions: false,
             fail_room_lookup: false,
+            fail_room_exists_for: None,
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
@@ -1396,6 +1400,7 @@ impl DrainAfterCreateDatabase {
             inner,
             track_sessions: false,
             fail_room_lookup: false,
+            fail_room_exists_for: None,
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
@@ -1428,6 +1433,7 @@ impl DrainAfterCreateDatabase {
             inner,
             track_sessions: false,
             fail_room_lookup: false,
+            fail_room_exists_for: None,
             panic_room_exists_once: AtomicBool::new(false),
             panic_rollback_once: AtomicBool::new(false),
             panic_rollback_always: AtomicBool::new(false),
@@ -1736,6 +1742,9 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 
     async fn room_exists(&self, room_id: &RoomId) -> anyhow::Result<bool> {
+        if self.fail_room_exists_for == Some(*room_id) {
+            anyhow::bail!("injected per-room existence failure");
+        }
         assert!(
             !self.panic_room_exists_once.swap(false, Ordering::AcqRel),
             "injected room-existence panic"
@@ -18663,4 +18672,61 @@ async fn delayed_kick_refusal_cannot_reach_a_restored_authority() {
     assert!(
         matches!(response.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), crate::protocol::RoomOperationResult::OperationFailed { error_code: Some(ErrorCode::InvalidInput), .. }))
     );
+}
+
+/// #636/#826: existing storage adapters retain the missing-room filter contract.
+#[tokio::test]
+async fn missing_room_batch_default_preserves_order_duplicates_and_errors() {
+    let inner = Arc::new(InMemoryDatabase::new());
+    let live = inner
+        .create_room(
+            "batch-default".into(),
+            Some("BATCH1".into()),
+            2,
+            false,
+            PlayerId::new_v4(),
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut adapter = DrainAfterCreateDatabase::new(inner.clone());
+    let first = RoomId::new_v4();
+    let last = RoomId::new_v4();
+    let mut candidates = vec![first, live.id, last, first];
+    let pointer = candidates.as_ptr();
+    adapter
+        .retain_missing_room_ids(&mut candidates)
+        .await
+        .unwrap();
+    assert_eq!(candidates, vec![first, last, first]);
+    assert_eq!(candidates.as_ptr(), pointer);
+    adapter.fail_room_exists_for = Some(last);
+    let after_failure = RoomId::new_v4();
+    candidates = vec![first, last, live.id, after_failure];
+    adapter
+        .retain_missing_room_ids(&mut candidates)
+        .await
+        .unwrap();
+    assert_eq!(
+        candidates,
+        vec![first, after_failure],
+        "a failed ID cannot block unrelated confirmed cleanup"
+    );
+    inner.fail_get_room_by_id_for_test(true);
+    adapter
+        .retain_missing_room_ids(&mut candidates)
+        .await
+        .unwrap();
+    assert!(
+        candidates.is_empty(),
+        "unknown room state cannot authorize cache removal"
+    );
+    inner.reset_get_room_by_id_calls_for_test();
+    adapter
+        .retain_missing_room_ids(&mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(inner.get_room_by_id_calls_for_test(), 0);
 }

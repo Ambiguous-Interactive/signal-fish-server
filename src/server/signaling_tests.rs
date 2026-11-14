@@ -9005,3 +9005,108 @@ async fn slow_signal_target_returns_delivery_failure_after_grace() {
     assert!(matches!(tail, Err(mpsc::error::TryRecvError::Empty)));
     assert_eq!(server.metrics.signals_relayed.load(Ordering::Relaxed), 1);
 }
+
+/// #826/#636: housekeeping must preserve a running mesh across read waits and cancellation.
+#[tokio::test(start_paused = true)]
+async fn p2p_session_remains_live_while_cache_pruning_waits_or_is_canceled() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    for player in [alice, bob] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room = create_db_room_with_max(&server, alice, 2).await;
+    server
+        .database
+        .add_player_to_room(&room, player_info(bob, "Bob"))
+        .await
+        .unwrap();
+    for player in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room)
+            .await;
+    }
+    for player in [alice, bob] {
+        server.handle_player_ready(&player).await;
+    }
+    server.handle_start_game(&alice).await;
+    let stored = server.active_session_plan(&room).unwrap();
+    assert_eq!(
+        (stored.topology, stored.transport),
+        (Topology::Mesh, Transport::WebRtc)
+    );
+    let mut generation = None;
+    for receiver in [&mut alice_rx, &mut bob_rx] {
+        let mut recipient_generation = None;
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => match message.as_ref() {
+                    ServerMessage::SessionPlan(plan) => {
+                        assert_eq!(plan.peers.len(), 1);
+                        assert!(recipient_generation.replace(plan.generation).is_none());
+                    }
+                    ServerMessage::LobbyStateChanged { .. }
+                    | ServerMessage::GameStarting { .. } => {}
+                    other => panic!("unexpected mesh setup message: {other:?}"),
+                },
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(error) => panic!("mesh setup queue closed: {error:?}"),
+            }
+        }
+        let recipient_generation = recipient_generation.unwrap();
+        if let Some(generation) = generation {
+            assert_eq!(generation, recipient_generation);
+        }
+        generation = Some(recipient_generation);
+    }
+    let generation = generation.unwrap();
+    let dead = uuid::Uuid::new_v4();
+    server.active_session_plans.insert(dead, stored);
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .unwrap();
+    for cancel in [false, true] {
+        database.pause_next_get_room_by_id_for_test();
+        let task_server = server.clone();
+        let prune = tokio::spawn(async move { task_server.prune_active_session_plans().await });
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_paused_get_room_by_id_for_test(),
+        )
+        .await
+        .unwrap();
+        let payload = json!({"candidate": if cancel {"canceled scan"} else {"held scan"}});
+        timeout(
+            Duration::from_secs(1),
+            server.handle_signal_in_generation(&alice, bob, generation, payload.clone()),
+        )
+        .await
+        .expect("a waiting cache scan cannot hold P2P room publication");
+        assert!(
+            matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual_generation, signal } if *from == alice && *actual_generation == generation && *signal == payload)
+        );
+        assert_eq!(server.active_session_plan(&room), Some(stored));
+        assert_eq!(server.active_session_plan(&dead), Some(stored));
+        if cancel {
+            prune.abort();
+            assert!(prune.await.unwrap_err().is_cancelled());
+        } else {
+            database.release_paused_get_room_by_id_for_test();
+            assert_eq!(prune.await.unwrap(), 1);
+            assert!(server.active_session_plan(&dead).is_none());
+            server.active_session_plans.insert(dead, stored);
+        }
+    }
+    assert_eq!(server.prune_active_session_plans().await, 1);
+    assert_eq!(server.active_session_plan(&room), Some(stored));
+    let alice_pending = alice_rx.try_recv();
+    assert!(matches!(
+        alice_pending,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let bob_pending = bob_rx.try_recv();
+    assert!(matches!(bob_pending, Err(mpsc::error::TryRecvError::Empty)));
+}

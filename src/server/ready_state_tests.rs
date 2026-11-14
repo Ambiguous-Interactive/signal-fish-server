@@ -261,7 +261,23 @@ async fn prune_ready_players_drops_only_dead_rooms() {
     let before = server.room_coordinator.ready_player_room_ids().await;
     assert!(before.contains(&live_room.id) && before.contains(&dead_room.id));
 
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.fail_get_room_by_id_for_test(true);
+    assert_eq!(server.prune_ready_players().await, 0);
+    let retained = server.room_coordinator.ready_player_room_ids().await;
+    assert!(retained.contains(&live_room.id) && retained.contains(&dead_room.id));
+    database.fail_get_room_by_id_for_test(false);
+    database.reset_get_room_by_id_calls_for_test();
     let removed = server.prune_ready_players().await;
+    assert_eq!(
+        database.get_room_by_id_calls_for_test(),
+        1,
+        "one storage snapshot must cover every ready room"
+    );
     assert_eq!(removed, 1, "exactly the dead room's ready entry is pruned");
 
     let after = server.room_coordinator.ready_player_room_ids().await;
