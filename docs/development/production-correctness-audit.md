@@ -17773,3 +17773,17 @@ peer transport; Godot uses browser WebRTC or the Godot extension. The
 signaling wire, defaults, plan ordering and error behavior do not change. Rust, .NET and Godot clients require no migration
 for this internal server allocation change or the native test-only control.
 The SCTP runtime repair is unchanged. External SDK qualification is not claimed.
+
+### A11 — Refused-start allocation comparisons retain one room identity
+
+The macOS full run for `770c674e` fails `unready_start_skips_player_metadata`
+in job `132582434564`. Six fresh-identity cells vary by 64-byte increments;
+the failure is retained in #1650. The allocation site remains unproven.
+The probe previously changed runtime, server and random room identity with
+each payload size. It now changes only metadata on one server and room,
+records the first sample for each readiness state separately, and compares
+all three steady-state payload cells with exact equality. Exact refusal,
+empty queues, both readiness states and non-finalized state remain required.
+Restoring full-room snapshot cloning fails the revised oracle. This removes
+a confounded comparison without adding tolerance or attributing the original
+64-byte site. #1650 remains open and does not count as an existing issue fixed.

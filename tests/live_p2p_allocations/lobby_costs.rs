@@ -31,97 +31,109 @@ async fn server() -> Arc<EnhancedGameServer> {
 }
 
 pub(crate) fn unready_start_skips_player_metadata() {
-    let mut profiles = Vec::new();
-    for bytes in [0, 1024, 65536] {
-        allocation_harness::block_on(async {
-            allocation_harness::warm_current_thread_runtime().await;
-            let server = server().await;
-            let mut receivers = Vec::new();
-            for index in 1..=2 {
-                let id = Uuid::from_u128(index);
-                let (sender, receiver) = tokio::sync::mpsc::channel(32);
-                receivers.push(receiver);
-                server.connect_client(id, sender).await;
-                negotiate_webrtc_for_measurement(&server, &id);
-                server
-                    .handle_join_room(
-                        &id,
-                        "unready".into(),
-                        Some("UNRDY1".into()),
-                        format!("Player{index}"),
-                        Some(4),
-                        Some(false),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-            }
-            let actor = Uuid::from_u128(1);
-            let room = server.get_client_room(&actor).await.unwrap();
-            for index in 1..=2 {
-                assert!(server
-                    .database()
-                    .update_player_connection_info(
-                        &room,
-                        &Uuid::from_u128(index),
-                        ConnectionInfo::Custom {
-                            data: serde_json::json!({"nested":["x".repeat(bytes)]})
-                        }
-                    )
-                    .await
-                    .unwrap());
-            }
-            for receiver in &mut receivers {
-                drain_membership_setup(receiver, false);
-            }
-            for ready_actor in [false, true] {
-                if ready_actor {
-                    server.handle_player_ready(&actor).await;
-                    for receiver in &mut receivers {
-                        let message = receiver.try_recv().unwrap();
-                        assert!(
-                            matches!(message.as_ref(), ServerMessage::LobbyStateChanged {
-                            lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
-                            ready_players, all_ready: false,
-                        } if ready_players == &[actor])
-                        );
-                        assert_membership_queue_empty(receiver);
-                    }
-                }
-                let region = stats_alloc::Region::new(ALLOCATOR);
-                server.handle_start_game(&actor).await;
-                let stats = region.change();
-                println!("UNREADY_START bytes={bytes} ready_actor={ready_actor} stats={stats:?}");
-                profiles.push((ready_actor, stats.bytes_allocated));
-                let reply = receivers[0].try_recv().unwrap();
-                assert!(
-                    matches!(
-                        reply.as_ref(),
-                        ServerMessage::Error {
-                            error_code: Some(ErrorCode::GameStartNotReady),
-                            ..
-                        }
-                    ),
-                    "{reply:?}"
-                );
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let server = server().await;
+        let mut receivers = Vec::new();
+        for index in 1..=2 {
+            let id = Uuid::from_u128(index);
+            let (sender, receiver) = tokio::sync::mpsc::channel(32);
+            receivers.push(receiver);
+            server.connect_client(id, sender).await;
+            negotiate_webrtc_for_measurement(&server, &id);
+            server
+                .handle_join_room(
+                    &id,
+                    "unready".into(),
+                    Some("UNRDY1".into()),
+                    format!("Player{index}"),
+                    Some(4),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        let actor = Uuid::from_u128(1);
+        let room = server.get_client_room(&actor).await.unwrap();
+        for receiver in &mut receivers {
+            drain_membership_setup(receiver, false);
+        }
+        for ready_actor in [false, true] {
+            if ready_actor {
+                server.handle_player_ready(&actor).await;
                 for receiver in &mut receivers {
+                    let message = receiver.try_recv().unwrap();
+                    assert!(
+                        matches!(message.as_ref(), ServerMessage::LobbyStateChanged {
+                        lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
+                        ready_players, all_ready: false,
+                    } if ready_players == &[actor])
+                    );
                     assert_membership_queue_empty(receiver);
                 }
-                assert_ne!(
-                    server.database().get_room_lobby_state(&room).await.unwrap(),
-                    Some(signal_fish_server::protocol::LobbyState::Finalized)
-                );
             }
-        });
+            set_start_metadata(&server, room, 0).await;
+            let cold = refused_start_cost(&server, actor, room, &mut receivers).await;
+            println!("UNREADY_START_COLD ready_actor={ready_actor} stats={cold:?}");
+            let mut profiles = Vec::new();
+            for bytes in [0, 1024, 65536] {
+                set_start_metadata(&server, room, bytes).await;
+                let stats = refused_start_cost(&server, actor, room, &mut receivers).await;
+                println!("UNREADY_START bytes={bytes} ready_actor={ready_actor} stats={stats:?}");
+                profiles.push(stats.bytes_allocated);
+            }
+            assert!(profiles.iter().all(|bytes| *bytes == profiles[0]),
+                "rejected start copied player metadata: ready_actor={ready_actor} profiles={profiles:?}");
+        }
+    });
+}
+
+async fn set_start_metadata(server: &EnhancedGameServer, room: Uuid, bytes: usize) {
+    for index in 1..=2 {
+        assert!(server
+            .database()
+            .update_player_connection_info(
+                &room,
+                &Uuid::from_u128(index),
+                ConnectionInfo::Custom {
+                    data: serde_json::json!({"nested":["x".repeat(bytes)]}),
+                },
+            )
+            .await
+            .unwrap());
     }
-    for chunk in profiles.chunks_exact(2) {
-        assert_eq!(
-            chunk,
-            &profiles[..2],
-            "rejected start copied player metadata: {profiles:?}"
-        );
+}
+
+async fn refused_start_cost(
+    server: &EnhancedGameServer,
+    actor: Uuid,
+    room: Uuid,
+    receivers: &mut [tokio::sync::mpsc::Receiver<Arc<ServerMessage>>],
+) -> stats_alloc::Stats {
+    let region = stats_alloc::Region::new(ALLOCATOR);
+    server.handle_start_game(&actor).await;
+    let stats = region.change();
+    let reply = receivers[0].try_recv().unwrap();
+    assert!(
+        matches!(
+            reply.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::GameStartNotReady),
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    for receiver in receivers {
+        assert_membership_queue_empty(receiver);
     }
+    assert_ne!(
+        server.database().get_room_lobby_state(&room).await.unwrap(),
+        Some(signal_fish_server::protocol::LobbyState::Finalized)
+    );
+    stats
 }
 
 pub(crate) fn ready_snapshot_scales_with_ready_members() {
