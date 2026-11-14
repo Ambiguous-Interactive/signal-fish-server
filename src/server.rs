@@ -4610,10 +4610,10 @@ impl InMemoryMessageCoordinator {
             members: impl Iterator<Item = PlayerId>,
         ) -> Vec<PlayerId> {
             let mut inline = [PlayerId::nil(); CAPACITY];
-            let mut count = 0;
+            let mut count = 0_usize;
             for (slot, player) in inline.iter_mut().zip(members) {
                 *slot = player;
-                count += 1;
+                count = count.saturating_add(1);
             }
             inline[..count].to_vec()
         }

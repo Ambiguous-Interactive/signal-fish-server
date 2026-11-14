@@ -7216,7 +7216,8 @@ Base: main `8b056f70`. Existing campaigns: #636 and #775.
 The server's routed-member snapshot and route lease both counted eligible
 members, then repeated the same membership and role checks to fill the vector.
 They now filter once into bounded synchronous scratch for up to 255 candidates.
-Small rooms use 16 slots. The returned vector still has exactly its retained
+Small rooms use 16 slots. The bounded counter uses saturating arithmetic.
+The returned vector still has exactly its retained
 length as capacity. Empty eligible sets allocate no vector storage. Larger
 custom rosters retain the former exact-count fallback. Routing locks, filtering
 rules and sorted identities stay unchanged. Scratch does not cross an await.
@@ -7227,12 +7228,12 @@ under the same production locks. One unoptimized Linux ARM64 process uses
 
 | Candidates | Eligible | Former calls (us) | Single-pass calls (us) |
 | --- | --- | --- | --- |
-| 2 | 2 | 30,067–30,333 | 23,767–24,776 |
-| 2 | 1 | 38,117–38,386 | 27,811–28,070 |
-| 16 | 16 | 121,449–133,291 | 81,253–81,367 |
-| 16 | 8 | 178,251–187,562 | 101,102–101,710 |
-| 255 | 255 | 1,874,751–2,088,555 | 1,275,085–1,338,249 |
-| 255 | 127 | 2,655,758–2,702,289 | 1,482,463–1,500,907 |
+| 2 | 2 | 30,312–30,901 | 23,972–25,289 |
+| 2 | 1 | 38,896–38,974 | 27,071–27,506 |
+| 16 | 16 | 124,505–134,548 | 81,697–82,733 |
+| 16 | 8 | 184,888–193,379 | 104,314–116,851 |
+| 255 | 255 | 1,988,726–1,991,188 | 1,266,369–1,273,251 |
+| 255 | 127 | 2,662,277–2,702,167 | 1,523,368–1,534,848 |
 
 This measures snapshot cost, not service throughput or gameplay latency. A
 predicate-count control checks one visit per candidate within the shipped

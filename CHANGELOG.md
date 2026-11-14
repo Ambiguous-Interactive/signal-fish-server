@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reduce routing work for live P2P room snapshots (#636).
+- Reduce server work during live P2P room changes (#636).
 - Reduce server memory used to retry delayed authority changes (#636).
 - Reduce server memory used for small-room P2P transport reports, room-code changes, and refused room operations (#636).
 - Reduce server memory used to send live P2P join and reconnect events (#636).
