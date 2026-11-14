@@ -248,3 +248,53 @@ pub(crate) fn player_events_do_not_copy_hidden_metadata() {
         );
     }
 }
+
+/// #636: conditional P2P reports need no channel for an absent drain signal.
+pub(crate) fn conditional_room_delivery_avoids_unused_drain_channel() {
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = Uuid::from_u128(702);
+        let player = Uuid::from_u128(1);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        coordinator
+            .register_local_client(
+                player,
+                Some(room),
+                ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+            )
+            .await
+            .unwrap();
+        let message = Arc::new(ServerMessage::PeerTransportStatus {
+            peer_id: Uuid::from_u128(2),
+            transport: Transport::WebRtc,
+            connected: true,
+        });
+        for measured in [false, true] {
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            assert!(coordinator
+                .send_to_player_in_room_if(&player, &room, message.clone(), &|| true)
+                .await
+                .unwrap());
+            let stats = region.change();
+            assert!(Arc::ptr_eq(&message, &receiver.try_recv().unwrap()));
+            println!("CONDITIONAL_ROOM_COST measured={measured} stats={stats:?}");
+            if measured {
+                assert_eq!(
+                    stats.allocations, 1,
+                    "only the async-trait future needs storage: {stats:?}"
+                );
+                assert_eq!(stats.reallocations, 0);
+            }
+        }
+        assert!(!coordinator
+            .send_to_player_in_room_if(&player, &room, message, &|| false)
+            .await
+            .unwrap());
+        let tail = receiver.try_recv();
+        assert!(matches!(
+            tail,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}

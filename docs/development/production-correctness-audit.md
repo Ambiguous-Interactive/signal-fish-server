@@ -17680,3 +17680,96 @@ mode/type changes. Functional classification and compiled controls pass;
 Issue #1441 remains open for its full-workload timing acceptance. The session's
 actual mixed commit hook completes in 571 ms. The smaller fixture does not
 prove the full repository timing target.
+
+### A20 — Scripted and independent reset peers qualify #1184 recovery
+
+Session 702 starts at `bb3b1931`. The new
+`scripted_peer_preserves_future_sequence_through_graceful_shutdown` control
+uses one Association and a remote packet script. The remote reset decisions
+and sequence progression do not use the Association sender implementation.
+The control runs with ordinary and wrapping TSNs and reset request numbers.
+An initial fixture inherited zero ports and verification tags. The qualified
+trace sets nonzero established-connection values; the initial fixture is not
+used as conformance evidence.
+
+The script exercises the implementation policy at [RFC 6525 sections 5.1.1, 5.1.2, 5.2.2 and 5.2.7](https://www.rfc-editor.org/rfc/rfc6525.html#section-5.2.2):
+
+1. The local outgoing reset of stream 1 receives success. The remote side has
+   no unread incoming data. Its outgoing stream-1 reset names the last old TSN.
+2. The local receiver retains the old unread message and reports InProgress.
+   This is the implementation's application-drain fence, beyond the RFC's TSN
+   fence. The remote still has only one reset request outstanding.
+3. The local application requests a stream-2 reset after its first outgoing
+   request has been acknowledged. Its response sequence names the remote's
+   outstanding stream-1 reset. The local implementation and usrsctp treat this
+   acknowledgment as performed and reset the original outgoing SSN. The strict
+   RFC interpretation of that step remains qualified below.
+4. The remote loses and expires new SSN 0, then forwards that TSN and SSN.
+   After the local shutdown starts and the old reader drains, reliable SSN 1
+   arrives before the remote receives SHUTDOWN. Exact bytes remain readable
+   after terminal closure. New writes and reopen are refused; markers and
+   timers clear, and exactly one Drained event follows the final read.
+
+The independent [usrsctp input path at c625e219](https://github.com/sctplab/usrsctp/blob/c625e21950600460cb5c6075616eb1622df2b06a/usrsctplib/netinet/sctp_input.c#L4284)
+confirms the key interpretation: a matching response sequence invokes its
+performed-reset handler before processing the new request's stream list.
+That handler resets the streams from the original outgoing request.
+
+The new `tests/fixtures/sctp_implicit_reset_peer.c` probe executes unmodified
+usrsctp `c625e219` on this ARM host. A no-thread AF_CONN pair completes its
+actual handshake. The harness replaces the original success response with
+InProgress to model the receiver's application-drain fence, then holds the
+stream-2 request. The positive history delivers that original request. A
+separate `--mismatch-first` control first injects a wrong response sequence:
+no outgoing reset event occurs until the matching request arrives. Actual
+DATA starts at new SSN 0, expires on the wire, advances FORWARD TSN through
+SSN 0, and delivers exact reliable SSN 1. Both sockets release before
+`usrsctp_finish` returns success. Build and run commands are in PATCH.md.
+
+This establishes independent implementation behavior. The injected InProgress
+models an application fence beyond RFC E2, so it does not by itself prove a
+complete exchange conforms strictly to RFC 6525. E1 acknowledges a request;
+H4 explicitly resets outgoing streams after a successful Response Parameter.
+The interpretation joining those steps remains a protocol qualification.
+No public-client incident, required behavior of every peer, or #1120 cause
+is claimed. The public wrapper still uses abort. With the marker repair ablated, the new control
+fails because accepted SSN 1 is not readable through terminal closure. The
+restored source passes alongside the three existing reset/shutdown controls.
+Keep #1184 open until its strict-peer protocol qualification is resolved.
+The accepted-DATA repair and actual independent-peer ordering are now covered
+by separate controls.
+
+### F369 — Conditional P2P delivery allocates an unused drain channel
+
+Session 702 advances existing #636 and #826. Both scalar conditional room-send
+paths create a watch channel whose sender never changes. Each recipient pays
+for that channel even though the send has no drain source. Use a generic
+drain source in the reservation helper. Scalar sends use a zero-size absent
+source; room transactions keep their original watch receiver and cancellation
+precedence. An initial Option wrapper increased the retained future storage
+for 255-recipient publications from 549,641 to 557,833 bytes, exceeding the
+unchanged 553,000-byte all-feature ceiling. Both hosted Ubuntu runs and a
+narrow local control reproduced the regression. The generic source restores
+549,641 bytes without changing that ceiling.
+
+Matched all-feature exact-delivery controls measure two allocations and 2,248
+bytes before the repair, versus one allocation and 1,624 bytes after it on
+this ARM host. The remaining allocation is the async-trait future. Complete
+unchanged transport-report workloads measure 7 to 6 allocations for two
+members and 142 to 79 for 64 members, saving 624 and 39,312 bytes respectively. Both
+scheduler warm-up cohorts preserve every exact receipt and empty-tail check.
+These are allocation measurements, not latency or capacity claims.
+
+The existing legacy/classified deadline histories now also run without a drain
+receiver. They retain exact and late expiry, early released capacity with a
+late producer poll, refill, receiver closure, generation retirement, and
+canceled-wait accounting. Real drain-enabled publication remains covered.
+This change does not attribute the separate historical macOS #1436 mismatch.
+
+External-client assessment: current Rust manifest `da8f2d16`, .NET README
+`e467c871` and Godot README `58f880b1` describe separate signaling clients.
+Rust has no private native RTC dependency; .NET owns signaling rather than
+peer transport; Godot uses browser WebRTC or the Godot extension. The
+signaling wire, defaults, plan ordering and error behavior do not change. Rust, .NET and Godot clients require no migration
+for this internal server allocation change or the native test-only control.
+The SCTP runtime repair is unchanged. External SDK qualification is not claimed.

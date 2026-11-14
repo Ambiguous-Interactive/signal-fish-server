@@ -1,7 +1,7 @@
 use super::game_data::broadcast_game_data_with;
 use super::{
-    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, RoutingGate,
-    RoutingGateRegistry,
+    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, NoDeliveryDrain,
+    RoutingGate, RoutingGateRegistry,
 };
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliverySender,
@@ -23,6 +23,7 @@ enum ControlCapacityWait {
     InitialTransition,
     ConditionalDelivery,
     ConditionalReservation,
+    ConditionalReservationWithoutDrain,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -355,14 +356,21 @@ fn start_control_capacity_wait(
                     .unwrap_or(DeliveryOutcome::Canceled)
             })
         }
-        ControlCapacityWait::ConditionalReservation => {
+        ControlCapacityWait::ConditionalReservation
+        | ControlCapacityWait::ConditionalReservationWithoutDrain => {
             let (drain_tx, drain) = watch::channel(false);
             Box::pin(async move {
                 let _drain_tx = drain_tx;
-                match coordinator
-                    .reserve_one_if(player_id, handle, &|| true, drain, None, None)
-                    .await
-                {
+                let reservation = if matches!(case, ControlCapacityWait::ConditionalReservation) {
+                    coordinator
+                        .reserve_one_if(player_id, handle, &|| true, drain, None, None)
+                        .await
+                } else {
+                    coordinator
+                        .reserve_one_if(player_id, handle, &|| true, NoDeliveryDrain, None, None)
+                        .await
+                };
+                match reservation {
                     ConditionalDeliveryReservation::SlowConsumer { .. } => {
                         DeliveryOutcome::SlowConsumer
                     }
@@ -479,6 +487,7 @@ async fn expired_control_capacity_waits_cannot_revive_after_capacity_returns() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
     let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
     let boundaries = [DeadlineBoundary::Exact, DeadlineBoundary::Post];
@@ -567,6 +576,7 @@ async fn cancelling_a_parked_conditional_wait_resolves_attempt_accounting() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
     let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
 
@@ -642,6 +652,7 @@ async fn predeadline_control_capacity_release_survives_delayed_producer_poll() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
 
     for (index, case) in cases.into_iter().enumerate() {
@@ -739,6 +750,7 @@ async fn refilled_control_capacity_released_after_deadline_cannot_be_claimed() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
 
     for (index, case) in cases.into_iter().enumerate() {
@@ -787,6 +799,7 @@ async fn queue_closure_at_or_after_the_deadline_precedes_slow_consumer_expiry() 
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
     let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
     let boundaries = [DeadlineBoundary::Exact, DeadlineBoundary::Post];
@@ -850,6 +863,7 @@ async fn classified_generation_cancellation_at_the_deadline_precedes_slow_consum
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
 
     for (index, case) in cases.into_iter().enumerate() {

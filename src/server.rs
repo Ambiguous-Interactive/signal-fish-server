@@ -2727,6 +2727,39 @@ impl Drop for RoutingGate {
     }
 }
 
+trait DeliveryDrain: Send {
+    fn is_draining(&self) -> bool;
+    fn changed(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), watch::error::RecvError>> + Send + '_;
+}
+
+impl DeliveryDrain for watch::Receiver<bool> {
+    fn is_draining(&self) -> bool {
+        *self.borrow()
+    }
+
+    fn changed(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), watch::error::RecvError>> + Send + '_ {
+        watch::Receiver::changed(self)
+    }
+}
+
+struct NoDeliveryDrain;
+
+impl DeliveryDrain for NoDeliveryDrain {
+    fn is_draining(&self) -> bool {
+        false
+    }
+
+    fn changed(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), watch::error::RecvError>> + Send + '_ {
+        std::future::pending()
+    }
+}
+
 enum ConditionalDeliveryReservation {
     Reserved {
         player_id: PlayerId,
@@ -4111,11 +4144,11 @@ impl InMemoryMessageCoordinator {
         player_id: PlayerId,
         handle: ClientDeliveryHandle,
         should_send: &(dyn Fn() -> bool + Send + Sync),
-        mut drain: watch::Receiver<bool>,
+        mut drain: impl DeliveryDrain,
         room_id: Option<RoomId>,
         on_full: Option<&(dyn Fn() + Send + Sync)>,
     ) -> ConditionalDeliveryReservation {
-        if *drain.borrow() || !should_send() {
+        if drain.is_draining() || !should_send() {
             return ConditionalDeliveryReservation::Canceled;
         }
 
@@ -4181,14 +4214,14 @@ impl InMemoryMessageCoordinator {
                     // then wins an exact-boundary race with returned capacity.
                     biased;
                     changed = drain.changed() => {
-                        if changed.is_ok() && *drain.borrow() {
+                        if changed.is_ok() && drain.is_draining() {
                             tracing::debug!(%player_id, "Conditional delivery reservation canceled for shutdown drain");
                         }
                         self.record_canceled_delivery(player_id);
                         ConditionalDeliveryReservation::Canceled
                     }
                     deadline = &mut timeout => {
-                        if *drain.borrow() || !should_send() {
+                        if drain.is_draining() || !should_send() {
                             self.record_canceled_delivery(player_id);
                             return ConditionalDeliveryReservation::Canceled;
                         }
@@ -4246,7 +4279,7 @@ impl InMemoryMessageCoordinator {
                     }
                     result = &mut reserve => match result {
                         Ok(permit) => {
-                            if *drain.borrow() || !should_send() {
+                            if drain.is_draining() || !should_send() {
                                 self.record_canceled_delivery(player_id);
                                 ConditionalDeliveryReservation::Canceled
                             } else {
@@ -4898,13 +4931,12 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let on_full: Option<&(dyn Fn() + Send + Sync)> = Some(&record_full);
         #[cfg(not(feature = "trace-validation"))]
         let on_full = None;
-        let (_drain_tx, drain) = watch::channel(false);
         let reservation = self
             .reserve_one_if(
                 *player_id,
                 handle,
                 should_send,
-                drain,
+                NoDeliveryDrain,
                 Some(*room_id),
                 on_full,
             )
@@ -5101,14 +5133,13 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             return Ok(false);
         };
 
-        let (_drain_tx, drain) = watch::channel(false);
         let should_send = || true;
         let reservation = self
             .reserve_one_if(
                 *player_id,
                 handle,
                 &should_send,
-                drain,
+                NoDeliveryDrain,
                 Some(*room_id),
                 None,
             )
