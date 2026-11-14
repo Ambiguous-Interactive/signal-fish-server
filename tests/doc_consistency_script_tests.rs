@@ -1614,13 +1614,14 @@ fn run_checker_with_git_base(
     head_overrides: &[(&str, &str)],
     args: &[&str],
 ) -> (i32, String) {
-    run_checker_with_committed_range(base_overrides, head_overrides, &[], args)
+    run_checker_with_committed_range(base_overrides, head_overrides, &[], &[], args)
 }
 
 fn run_checker_with_committed_range(
     base_overrides: &[(&str, &str)],
     head_overrides: &[(&str, &str)],
     worktree_overrides: &[(&str, &str)],
+    executable_paths: &[&str],
     args: &[&str],
 ) -> (i32, String) {
     let temp_root = unique_temp_dir("doc-consistency-git-base");
@@ -1666,6 +1667,24 @@ fn run_checker_with_committed_range(
 
     for (path, content) in head_overrides {
         write_file(&temp_root.path().join(path), content);
+    }
+    if !executable_paths.is_empty() {
+        for arguments in [
+            vec!["config", "core.fileMode", "false"],
+            vec!["add", "."],
+            [
+                vec!["update-index", "--chmod=+x", "--"],
+                executable_paths.to_vec(),
+            ]
+            .concat(),
+        ] {
+            let status = Command::new("git")
+                .args(arguments)
+                .current_dir(temp_root.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "set fixture executable mode");
+        }
     }
     if !worktree_overrides.is_empty() {
         for arguments in [
@@ -1923,6 +1942,7 @@ fn rustdoc_checker_uses_both_committed_range_trees_instead_of_unstaged_content()
                 &[("src/core.rs", base)],
                 &[("src/core.rs", committed)],
                 &[("src/core.rs", disk)],
+                &[],
                 &["--diff-base", range, "--changed-files", "src/core.rs"],
             );
             assert_eq!(
@@ -1930,5 +1950,27 @@ fn rustdoc_checker_uses_both_committed_range_trees_instead_of_unstaged_content()
                 "range={range}, committed={committed:?}, disk={disk:?}: {output}"
             );
         }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn rustdoc_with_mode_change_still_requires_a_changelog() {
+    for args in [
+        vec!["--staged"],
+        vec!["--diff-base", "HEAD", "--changed-files", "src/core.rs"],
+    ] {
+        let (code, output) = run_checker_with_committed_range(
+            &[("src/core.rs", "pub fn ready() -> bool { true }\n")],
+            &[(
+                "src/core.rs",
+                "/// Readiness.\npub fn ready() -> bool { true }\n",
+            )],
+            &[],
+            &["src/core.rs"],
+            &args,
+        );
+        assert_ne!(code, 0, "mode change must require a changelog: {output}");
+        assert!(output.contains("without CHANGELOG.md update"), "{output}");
     }
 }

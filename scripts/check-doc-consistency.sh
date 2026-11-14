@@ -752,6 +752,10 @@ file_diff_is_test_only() {
     local diff_output
     diff_output="$("${diff_cmd[@]}" 2>/dev/null || true)"
     [ -n "$diff_output" ] || return 1
+    # File mode changes are production changes even when all text edits are docs.
+    if grep -Eq '^(old|new) mode ' <<< "$diff_output"; then
+        return 1
+    fi
     grep -q '^@@ ' <<< "$diff_output" || return 1
 
     local new_content old_content

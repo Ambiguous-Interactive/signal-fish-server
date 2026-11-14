@@ -206,6 +206,11 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
     }
     $old = "use doc_capture::Clone;`n#[derive(Clone)]`nstruct Args {`n/// OLD`nvalue: String,`n}`nfn main() { println!(`"{}`", captured()); }`n"
     Assert-Compiled-Change -Name builtin_derive_shadow -OldContent $old -NewContent $old.Replace('OLD', 'NEW') -Extra @('--extern', "doc_capture=$library")
+    foreach ($attribute in @('macro_use', 'macro_use(Clone)', 'cfg_attr(all(), macro_use)')) {
+        $old = "#[$attribute]`nextern crate doc_capture;`n#[derive(Clone)]`nstruct Args {`n/// OLD`nvalue: String,`n}`nfn main() { println!(`"{}`", captured()); }`n"
+        $name = 'macro_prelude_' + @('macro_use', 'macro_use(Clone)', 'cfg_attr(all(), macro_use)').IndexOf($attribute)
+        Assert-Compiled-Change -Name $name -OldContent $old -NewContent $old.Replace('OLD', 'NEW') -Extra @('--extern', "doc_capture=$library")
+    }
     [IO.File]::WriteAllText((Join-Path $temporary 'server.rs'), $source)
     Git add server.rs
     Git commit -qm 'restore server baseline'

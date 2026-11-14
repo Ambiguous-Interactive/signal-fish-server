@@ -157,6 +157,14 @@ function Remove-RustDocumentationComments {
     $productionCode = if ($testModule.Success) { $code.Substring(0, $testModule.Index) } else { $code }
     $deriveNames = '(?:Clone|Copy|Debug|Default|Eq|Hash|Ord|PartialEq|PartialOrd)'
     $trustedBuiltinDerives = $true
+    foreach ($attribute in $attributes) {
+        if ($attribute.Index -ge $productionCode.Length) { break }
+        if ([regex]::IsMatch($attribute.Groups['body'].Value, '\bmacro_use\b')) {
+            $trustedBuiltinDerives = $false
+            $trustedAsyncTrait = $false
+            break
+        }
+    }
     foreach ($import in [regex]::Matches($productionCode, '(?s)\buse\b[^;]*;')) {
         if ($import.Value.Contains('*') -or [regex]::IsMatch($import.Value, "\b$deriveNames\b")) { $trustedBuiltinDerives = $false; break }
     }
