@@ -1242,6 +1242,7 @@ jobs:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2.9.3
         with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           workspaces: tools/repo-checks
       - uses: taiki-e/install-action@v2.90.2
         with:
@@ -1280,6 +1281,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@v2.9.3
         with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           workspaces: fuzz
       - name: Check every fuzz target against current server APIs
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
@@ -1300,6 +1302,8 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - uses: taiki-e/install-action@v2.90.2
         with:
           tool: cargo-nextest@0.9.149

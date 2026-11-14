@@ -60,9 +60,17 @@ fn every_root_test_source_has_exactly_one_cargo_owner() {
     for directory in [root.join("tests"), root.join("tools/repo-checks/tests")] {
         for entry in std::fs::read_dir(directory).expect("test sources") {
             let source = entry.expect("directory entry").path();
-            if source
-                .extension()
-                .is_some_and(|extension| extension == "rs")
+            // Cargo also auto-discovers tests/<target>/main.rs. Helper module
+            // directories with only mod.rs are not independent targets.
+            let source = if source.is_dir() {
+                source.join("main.rs")
+            } else {
+                source
+            };
+            if source.is_file()
+                && source
+                    .extension()
+                    .is_some_and(|extension| extension == "rs")
             {
                 let source = source.canonicalize().expect("source exists");
                 assert_eq!(

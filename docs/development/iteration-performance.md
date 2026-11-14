@@ -25,7 +25,7 @@ The causes are independent and compound:
 | Duplicate verification | Ubuntu ran in PR and manual CI for the same head | Normal delivery uses PR CI |
 | Nested builds | Package and privacy checks consumed 265 + 172 seconds serially in session 701 macOS tests | Separate packaging qualification |
 | Broad proof triggers | Four Lean fault shards consumed about 78 job-minutes in session 702 | Positive proofs for affected source; deep fault campaigns separately |
-| Coupled test graphs | 109 integration targets; CI configuration tests exceeded 36,000 lines | Independent repository-check package |
+| Coupled test graphs | 110 integration targets; CI configuration tests exceeded 36,000 lines | Independent repository-check package |
 | Repeated compilation | Quick Check type-checked all targets before lint and tests | Cheap prerequisite and parallel compilation |
 | Unbounded coordination | Repeated consensus and late unrelated fixes restarted CI | One task owner and bounded review |
 | Ignored archive traversal | Several local Markdown guard scans each exceeded 90 seconds walking session history | Enumerate tracked and non-ignored files with Git first |
@@ -141,3 +141,9 @@ After Git-based inventory discovery, the final suite completed in 26.529 seconds
 with 384 passing tests and one intentional skip. This is a bounded
 before/after observation, not a repeated-run speed percentile. Added controls
 exercise ignored directories and operation outside a Git checkout.
+
+A hosted regression exposed Cargo's directory-style test discovery. Comparing
+actual baseline and candidate Cargo metadata found 110 original integration
+targets, including `tests/capacity_runner/main.rs`. The restored explicit
+inventory preserves all 110 and adds one ownership guard. The guard covers
+both top-level test files and directory-style `main.rs` targets.

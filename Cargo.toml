@@ -667,3 +667,7 @@ path = "tests/webrtc_mesh_budget_e2e.rs"
 [[test]]
 name = "websocket_test_helpers_tests"
 path = "tests/websocket_test_helpers_tests.rs"
+
+[[test]]
+name = "capacity_runner"
+path = "tests/capacity_runner/main.rs"
