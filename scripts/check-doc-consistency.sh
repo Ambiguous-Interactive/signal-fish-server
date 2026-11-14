@@ -729,12 +729,19 @@ file_diff_is_test_only() {
             # so the old-content read must use that merge base, not A's tip.
             [ -n "$DIFF_BASE" ] || return 1
             diff_cmd=(git diff "$DIFF_BASE" -U0 -- "$path")
-            local old_rev="${DIFF_BASE%%...*}"
+            local old_rev="$DIFF_BASE"
+            new_content_cmd=(cat "$path")
             if [[ "$DIFF_BASE" == *"..."* ]]; then
-                old_rev="$(git merge-base "${DIFF_BASE%%...*}" "${DIFF_BASE##*...}" 2>/dev/null || true)"
+                local left_rev="${DIFF_BASE%%...*}" right_rev="${DIFF_BASE##*...}"
+                old_rev="$(git merge-base "${left_rev:-HEAD}" "${right_rev:-HEAD}" 2>/dev/null || true)"
+                new_content_cmd=(git show "${right_rev:-HEAD}:$path")
+            elif [[ "$DIFF_BASE" == *".."* ]]; then
+                old_rev="${DIFF_BASE%%..*}"
+                local right_rev="${DIFF_BASE##*..}"
+                old_rev="${old_rev:-HEAD}"
+                new_content_cmd=(git show "${right_rev:-HEAD}:$path")
             fi
             [ -n "$old_rev" ] || return 1
-            new_content_cmd=(cat "$path")
             old_content_cmd=(git show "${old_rev}:$path")
             ;;
         *)
@@ -752,6 +759,11 @@ file_diff_is_test_only() {
     old_content="$("${old_content_cmd[@]}" 2>/dev/null || true)"
     [ -n "$new_content" ] || return 1
     [ -n "$old_content" ] || return 1
+
+    if printf '%s\0%s' "$old_content" "$new_content" | pwsh -NoLogo -NoProfile -NonInteractive -File \
+        "$(dirname "${BASH_SOURCE[0]}")/check-rust-documentation.ps1"; then
+        return 0
+    fi
 
     # File-final layout convention: the last top-level `#[cfg(test)]` marker
     # opens the test module and no top-level item follows it. Between the

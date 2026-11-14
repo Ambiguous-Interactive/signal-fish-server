@@ -1420,3 +1420,47 @@ async fn maintenance_recovers_abandoned_room_code_while_room_gc_waits() {
     maintenance.await.unwrap();
     recovered.expect("failed creation must release its room code while GC remains held");
 }
+
+/// #636/#826: cached room cleanup must preserve live and pending P2P room state.
+#[tokio::test]
+async fn application_cache_pruning_uses_one_snapshot_and_retries_storage_failure() {
+    let server = server().await;
+    let live = server
+        .database
+        .create_pending_room_classified(
+            "batch-cache".into(),
+            Some("BATCH1".into()),
+            2,
+            true,
+            PlayerId::new_v4(),
+            "relay".into(),
+            "test".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let dead = RoomId::new_v4();
+    let application = uuid::Uuid::new_v4();
+    server.room_applications.insert(live.id, application);
+    server.room_applications.insert(dead, application);
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.fail_get_room_by_id_for_test(true);
+    assert_eq!(server.prune_room_applications().await, 0);
+    assert_eq!(server.room_application_id(&live.id), Some(application));
+    assert_eq!(server.room_application_id(&dead), Some(application));
+    database.fail_get_room_by_id_for_test(false);
+    database.reset_get_room_by_id_calls_for_test();
+    assert_eq!(server.prune_room_applications().await, 1);
+    assert_eq!(database.get_room_by_id_calls_for_test(), 1);
+    assert_eq!(server.room_application_id(&live.id), Some(application));
+    assert_eq!(server.room_application_id(&dead), None);
+    server.room_applications.clear();
+    database.reset_get_room_by_id_calls_for_test();
+    assert_eq!(server.prune_room_applications().await, 0);
+    assert_eq!(database.get_room_by_id_calls_for_test(), 0);
+}

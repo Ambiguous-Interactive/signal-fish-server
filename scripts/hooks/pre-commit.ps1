@@ -33,6 +33,8 @@ $script:HookPolicyFiles = @(
     ".githooks/pre-push",
     "scripts/hooks/native-process.ps1",
     "scripts/hooks/internal-refactor.ps1",
+    "scripts/hooks/rust-documentation.ps1",
+    "scripts/check-rust-documentation.ps1",
     "scripts/check-internal-refactor.ps1",
     "scripts/hooks/pre-commit.ps1",
     "scripts/hooks/pre-commit-rust.ps1",
@@ -1735,11 +1737,59 @@ function Test-ChangelogGateInternalPath {
     $false
 }
 
+. (Join-Path $PSScriptRoot "rust-documentation.ps1")
+
+function Get-ChangelogRustTextCache {
+    param([AllowEmptyCollection()][string[]]$Paths)
+
+    $cache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    if ($Paths.Count -lt 3) { return $cache }
+    try {
+        $diffArgs = if ($script:InspectWorktree) { @() } else { @("--cached") }
+        $raw = Invoke-Native -FileName git -Arguments (@("diff", "--raw", "--no-abbrev", "--no-renames", "-z") + $diffArgs + @("HEAD", "--") + $Paths)
+        if ($raw.ExitCode -ne 0) { return $cache }
+        $records = $raw.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+        $entries = [System.Collections.Generic.List[object]]::new()
+        $objects = [System.Collections.Generic.List[string]]::new()
+        for ($index = 0; $index + 1 -lt $records.Length; $index += 2) {
+            $fields = $records[$index].TrimStart(':').Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+            if ($fields.Length -ne 5) { return $cache }
+            $path = $records[$index + 1]
+            if ($Paths -cnotcontains $path) { continue }
+            if ($fields[0] -cne $fields[1] -or $fields[0] -cnotin @('100644', '100755')) {
+                $cache[$path] = @{ Reject = $true }
+                continue
+            }
+            $entry = @{ Path = $path; Old = $fields[2]; New = $fields[3] }
+            $entries.Add($entry)
+            $objects.Add($entry.Old)
+            if (-not $script:InspectWorktree) { $objects.Add($entry.New) }
+        }
+        if ($objects.Count -eq 0) { return $cache }
+        $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray()
+        foreach ($entry in $entries) {
+            $newContent = if ($script:InspectWorktree) { [IO.File]::ReadAllText((Join-Path $script:RepoRoot $entry.Path)) } else { $texts[$entry.New] }
+            $cache[$entry.Path] = @{ Reject = $false; Old = $texts[$entry.Old]; New = $newContent }
+        }
+    } catch {
+        $cache.Clear()
+    }
+    return $cache
+}
+
 function Test-FileDiffIsTestOnly {
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path,
+        [AllowNull()][object]$CachedContent = $null
+    )
 
     if (-not $Path.EndsWith(".rs", [System.StringComparison]::Ordinal)) {
         return $false
+    }
+
+    if ($null -ne $CachedContent) {
+        if ($CachedContent.Reject) { return $false }
+        if (Test-RustDocumentationOnlyChange -OldContent $CachedContent.Old -NewContent $CachedContent.New) { return $true }
     }
 
     # Mode-aware tree selection: hunks and content must describe the same
@@ -1749,7 +1799,7 @@ function Test-FileDiffIsTestOnly {
     # HEAD and reads the new side from disk.
     $diffArgs = if ($script:InspectWorktree) { @() } else { @("--cached") }
     $diff = Invoke-Native -FileName "git" -Arguments (@("diff") + $diffArgs + @("HEAD", "-U0", "--", $Path))
-    if ($diff.ExitCode -ne 0 -or [string]::IsNullOrEmpty($diff.Stdout) -or -not $diff.Stdout.Contains("@@ ")) {
+    if ($diff.ExitCode -ne 0 -or [string]::IsNullOrEmpty($diff.Stdout) -or -not $diff.Stdout.Contains("@@ ") -or $diff.Stdout -cmatch '(?m)^(?:old|new) mode ') {
         return $false
     }
 
@@ -1769,6 +1819,10 @@ function Test-FileDiffIsTestOnly {
     }
     $script:HeadTextCache[$Path] = $oldResult.Stdout
     $oldLines = $oldResult.Stdout -split "`n"
+    $newContent = if ($script:InspectWorktree) { [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot $Path)) } else { $newBlob.Stdout }
+    if (Test-RustDocumentationOnlyChange -OldContent $oldResult.Stdout -NewContent $newContent) {
+        return $true
+    }
 
     # File-final layout convention: the last top-level `#[cfg(test)]` marker
     # opens the test module and no top-level item follows it. Between the
@@ -1995,8 +2049,11 @@ function Test-ChangelogGate {
 
     # Test-module-only Rust diffs are internal work, not changelog material
     # (issue #722); the checker applies the same exemption.
+    $rustPaths = [string[]]@($nonInternal | Where-Object { $_.EndsWith('.rs', [StringComparison]::Ordinal) -and $refactorPaths -cnotcontains $_ })
+    $rustTexts = Get-ChangelogRustTextCache -Paths $rustPaths
     $remaining = @($nonInternal | Where-Object {
-        $refactorPaths -cnotcontains $_ -and -not (Test-FileDiffIsTestOnly -Path $_)
+        $cached = if ($rustTexts.ContainsKey($_)) { $rustTexts[$_] } else { $null }
+        $refactorPaths -cnotcontains $_ -and -not (Test-FileDiffIsTestOnly -Path $_ -CachedContent $cached)
     })
     if ($remaining.Count -eq 0) {
         Pass "Changelog gate"

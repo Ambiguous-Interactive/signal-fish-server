@@ -549,6 +549,14 @@ fn main() {
             setup_costs::session_selection_keeps_capabilities_inline,
         ),
         allocation_harness::trial(
+            "room_cache_filter_batches_storage_allocations",
+            lobby_costs::room_cache_filter_batches_storage_allocations,
+        ),
+        allocation_harness::trial(
+            "runtime_registry_warmup_retains_exact_spawn_cost",
+            lobby_costs::runtime_registry_warmup_retains_exact_spawn_cost,
+        ),
+        allocation_harness::trial(
             "unready_start_skips_player_metadata",
             lobby_costs::unready_start_skips_player_metadata,
         ),

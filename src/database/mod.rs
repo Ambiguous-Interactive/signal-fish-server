@@ -927,6 +927,29 @@ pub trait GameDatabase: Send + Sync {
         Ok(self.get_room_by_id(room_id).await?.is_some())
     }
 
+    /// Retain candidate IDs whose rooms are absent, preserving order and duplicates.
+    /// Pending rooms count as present. Exclude unresolved IDs from a successful result.
+    /// The default logs individual read failures and keeps checking other candidates.
+    /// On a batch error, callers must discard the result. Adapters may batch reads.
+    async fn retain_missing_room_ids(&self, room_ids: &mut Vec<RoomId>) -> Result<()> {
+        let mut missing = 0;
+        for index in 0..room_ids.len() {
+            let room_id = room_ids[index];
+            match self.room_exists(&room_id).await {
+                Ok(false) => {
+                    room_ids[missing] = room_id;
+                    missing += 1;
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to check cached room; retaining its state for retry");
+                }
+            }
+        }
+        room_ids.truncate(missing);
+        Ok(())
+    }
+
     /// Add player to room (atomic operation).
     ///
     /// Implementations must store `is_authority` derived from the room's
@@ -3088,6 +3111,27 @@ impl GameDatabase for InMemoryDatabase {
         Ok(self.rooms.read().await.contains_key(room_id))
     }
 
+    /// Resolve missing entries in bounded groups without copying room rows.
+    async fn retain_missing_room_ids(&self, room_ids: &mut Vec<RoomId>) -> Result<()> {
+        const ROOMS_PER_READ: usize = 256;
+
+        let mut missing = 0;
+        for start in (0..room_ids.len()).step_by(ROOMS_PER_READ) {
+            #[cfg(test)]
+            self.before_room_read_for_test().await?;
+            let rooms = self.rooms.read().await;
+            let end = start.saturating_add(ROOMS_PER_READ).min(room_ids.len());
+            for index in start..end {
+                if !rooms.contains_key(&room_ids[index]) {
+                    room_ids[missing] = room_ids[index];
+                    missing += 1;
+                }
+            }
+        }
+        room_ids.truncate(missing);
+        Ok(())
+    }
+
     /// Admit one new player while preserving every existing membership.
     /// Refresh both activity clocks under the room lock after admission.
     /// Refusals preserve the clocks and session join count.
@@ -4252,6 +4296,97 @@ mod tests {
             .get_room_reconnect_snapshot(&RoomId::nil(), &actor)
             .await
             .is_err());
+    }
+
+    /// #636/#826: cache pruning shares one coherent row lookup and no replacement buffer.
+    #[tokio::test]
+    async fn missing_room_batch_preserves_order_duplicates_pending_rows_and_allocation() {
+        let database = InMemoryDatabase::new();
+        let live = create_test_room(&database, "batch-live", "BATCH1")
+            .await
+            .unwrap();
+        let pending = database
+            .create_pending_room_classified(
+                "batch-pending".into(),
+                Some("BATCH2".into()),
+                2,
+                true,
+                PlayerId::new_v4(),
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let first = RoomId::new_v4();
+        let last = RoomId::new_v4();
+        for input in [
+            vec![],
+            vec![live.id, pending.id],
+            vec![first, live.id, last, first, pending.id],
+            vec![last, last],
+        ] {
+            let expected: Vec<_> = input
+                .iter()
+                .copied()
+                .filter(|id| *id == first || *id == last)
+                .collect();
+            let mut candidates = input;
+            let pointer = candidates.as_ptr();
+            let capacity = candidates.capacity();
+            database.reset_get_room_by_id_calls_for_test();
+            let expected_reads = u32::from(!candidates.is_empty());
+            database
+                .retain_missing_room_ids(&mut candidates)
+                .await
+                .unwrap();
+            assert_eq!(candidates, expected);
+            assert_eq!(candidates.as_ptr(), pointer);
+            assert_eq!(candidates.capacity(), capacity);
+            assert_eq!(database.get_room_by_id_calls_for_test(), expected_reads);
+        }
+        for count in [255_usize, 256, 257, 1_000, 4_096] {
+            let mut candidates: Vec<_> = (0..count)
+                .map(|index| [first, live.id, last, pending.id][index % 4])
+                .collect();
+            let expected: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|id| *id == first || *id == last)
+                .collect();
+            let pointer = candidates.as_ptr();
+            database.reset_get_room_by_id_calls_for_test();
+            database
+                .retain_missing_room_ids(&mut candidates)
+                .await
+                .unwrap();
+            assert_eq!(candidates, expected, "batch boundary {count}");
+            assert_eq!(candidates.as_ptr(), pointer);
+            assert_eq!(
+                database.get_room_by_id_calls_for_test(),
+                u32::try_from(count.div_ceil(256)).unwrap()
+            );
+        }
+        database
+            .fail_get_room_by_id
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut candidates = vec![first, live.id];
+        assert!(database
+            .retain_missing_room_ids(&mut candidates)
+            .await
+            .is_err());
+        assert_eq!(candidates, vec![first, live.id]);
+        database
+            .fail_get_room_by_id
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        database.pause_next_get_room_by_id_for_test();
+        let mut read = Box::pin(database.retain_missing_room_ids(&mut candidates));
+        assert!(futures_util::poll!(&mut read).is_pending());
+        database.delete_room(&live.id).await.unwrap();
+        database.release_paused_get_room_by_id_for_test();
+        read.await.unwrap();
+        assert_eq!(candidates, vec![first, live.id]);
     }
 
     /// Background metrics must not consume pauses or observations for room operations.

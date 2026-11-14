@@ -37,6 +37,14 @@ Every commit path:
   the same change, so a missing entry fails at commit time instead of in the
   hosted `Doc Consistency` job
 
+Rustdoc-only edits in existing Rust files can omit a release note when the
+shared classifier verifies unchanged source outside recognized documentation.
+Macro input and unrecognized attribute contexts stay in scope. Documentation
+that can change generated behavior, such as CLI help, still needs a release
+note. The classifier supports the inspected pinned `async_trait` dependency
+only with an unambiguous root binding. Staged and worktree modes use the same
+rule. Revision-range checks read both committed trees.
+
 Production Rust commit path:
 
 - explicit `panic!`/`todo!`/`unimplemented!`/`unreachable!` macro additions in

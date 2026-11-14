@@ -24920,7 +24920,8 @@ fn test_nextest_config_exists_and_is_valid() {
             && normalized.contains(
                 "filter = 'test(/when_pwsh_available/)'\n\
 test-group = 'powershell-subprocess'",
-            ),
+            )
+            && normalized.contains("filter = 'binary(doc_consistency_script_tests)'\ntest-group = 'powershell-subprocess'"),
         ".config/nextest.toml must serialize direct PowerShell integration tests across \
          nextest's per-test processes. Keep those tests named `*_when_pwsh_available`."
     );

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server work during P2P session and lobby cleanup (#636).
 - Pre-gather ICE for host-only clients when a mesh-preferring game can use Host/WebRTC.
 - Reduce server locking and routing work during live P2P plan publication, room changes, and WebRTC signaling (#636).
 - Reduce server memory used to retry delayed authority changes (#636).

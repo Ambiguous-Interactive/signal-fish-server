@@ -81,6 +81,16 @@ slow-timeout = { period = "300s", terminate-after = 3 }
 filter = 'test(/when_pwsh_available/)'
 test-group = 'powershell-subprocess'
 
+# The documentation checker now shares the PowerShell lexer with the hook.
+[[profile.default.overrides]]
+filter = 'binary(doc_consistency_script_tests)'
+test-group = 'powershell-subprocess'
+
+# Retain the cold and warm task-registry evidence for the allocation investigation.
+[[profile.default.overrides]]
+filter = 'test(runtime_registry_warmup_retains_exact_spawn_cost)'
+success-output = "immediate"
+
 # CI-specific profile — reserved for future per-job tuning.
 # Activate with: cargo nextest run --profile ci
 # Inherits all [profile.default] settings and adds CI-tuned overrides.

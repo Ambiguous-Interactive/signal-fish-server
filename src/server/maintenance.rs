@@ -377,23 +377,22 @@ impl EnhancedGameServer {
     /// Drop process-local application mappings for rooms removed by any
     /// storage cleanup path, including count-only inactive-room cleanup.
     pub(crate) async fn prune_room_applications(&self) -> usize {
-        let room_ids: Vec<RoomId> = self
+        let mut room_ids: Vec<RoomId> = self
             .room_applications
             .iter()
             .map(|entry| *entry.key())
             .collect();
+        if room_ids.is_empty() {
+            return 0;
+        }
+        if let Err(error) = self.database.retain_missing_room_ids(&mut room_ids).await {
+            tracing::warn!(%error, "Failed to verify cached room applications; retaining them for retry");
+            return 0;
+        }
         let mut removed = 0usize;
         for room_id in room_ids {
-            match self.database.room_exists(&room_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    if self.room_applications.remove(&room_id).is_some() {
-                        removed = removed.saturating_add(1);
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%room_id, %error, "Failed to verify cached room application mapping; retaining it for retry");
-                }
+            if self.room_applications.remove(&room_id).is_some() {
+                removed = removed.saturating_add(1);
             }
         }
         removed
@@ -475,28 +474,23 @@ impl EnhancedGameServer {
     /// room-removal path. A transient storage error keeps the entry for the next
     /// tick rather than risk clearing a live room's ready set.
     pub(crate) async fn prune_ready_players(&self) -> usize {
-        let room_ids = self.room_coordinator.ready_player_room_ids().await;
+        let mut room_ids = self.room_coordinator.ready_player_room_ids().await;
+        if room_ids.is_empty() {
+            return 0;
+        }
+        if let Err(error) = self.database.retain_missing_room_ids(&mut room_ids).await {
+            tracing::warn!(%error, "Failed to check rooms while pruning ready players");
+            return 0;
+        }
         let mut removed = 0usize;
         for room_id in room_ids {
-            match self.database.room_exists(&room_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    if self
-                        .room_coordinator
-                        .clear_ready_players(&room_id)
-                        .await
-                        .is_ok()
-                    {
-                        removed = removed.saturating_add(1);
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        %room_id,
-                        error = %err,
-                        "Failed to check room existence while pruning ready players"
-                    );
-                }
+            if self
+                .room_coordinator
+                .clear_ready_players(&room_id)
+                .await
+                .is_ok()
+            {
+                removed = removed.saturating_add(1);
             }
         }
         removed

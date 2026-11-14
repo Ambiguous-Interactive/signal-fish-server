@@ -807,29 +807,22 @@ impl EnhancedGameServer {
     pub(crate) async fn prune_active_session_plans(&self) -> usize {
         // Snapshot the keys first: never hold a DashMap entry/iterator guard
         // across the `.await`s below.
-        let room_ids: Vec<RoomId> = self
+        let mut room_ids: Vec<RoomId> = self
             .active_session_plans
             .iter()
             .map(|entry| *entry.key())
             .collect();
-
+        if room_ids.is_empty() {
+            return 0;
+        }
+        if let Err(error) = self.database.retain_missing_room_ids(&mut room_ids).await {
+            tracing::warn!(%error, "Failed to check rooms while pruning active session plans");
+            return 0;
+        }
         let mut removed = 0usize;
         for room_id in room_ids {
-            match self.database.room_exists(&room_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    if self.active_session_plans.remove(&room_id).is_some() {
-                        removed = removed.saturating_add(1);
-                    }
-                }
-                // Transient storage error: keep the entry and retry next tick.
-                Err(err) => {
-                    tracing::warn!(
-                        %room_id,
-                        error = %err,
-                        "Failed to check room existence while pruning active session plans"
-                    );
-                }
+            if self.active_session_plans.remove(&room_id).is_some() {
+                removed = removed.saturating_add(1);
             }
         }
         removed
