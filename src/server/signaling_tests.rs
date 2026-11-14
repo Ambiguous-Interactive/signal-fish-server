@@ -9001,6 +9001,7 @@ async fn slow_signal_target_returns_delivery_failure_after_grace() {
             ServerMessage::Pong
         ));
     }
-    assert!(bob_rx.try_recv().is_err());
+    let tail = bob_rx.try_recv();
+    assert!(matches!(tail, Err(mpsc::error::TryRecvError::Empty)));
     assert_eq!(server.metrics.signals_relayed.load(Ordering::Relaxed), 1);
 }

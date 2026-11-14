@@ -6848,7 +6848,8 @@ async fn room_plan_publication_bounds_role_snapshot_locking() {
         for receiver in &mut receivers {
             assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &first));
             assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &second));
-            assert!(receiver.try_recv().is_err());
+            let tail = receiver.try_recv();
+            assert!(matches!(tail, Err(mpsc::error::TryRecvError::Empty)));
         }
         profiles.push((count, reads));
     }
