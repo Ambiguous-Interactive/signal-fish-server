@@ -13,7 +13,8 @@ theorem pregather_contract (enabled webrtc finalized : Bool) (desired : Topology
       (enabled && webrtc && decide (desired ≠ .Relay) && !finalized &&
         decide (profile.version.val ≥ 3) &&
         decide (Transport.WebRtc ∈ profile.transports.val) &&
-        decide (desired ∈ profile.topologies.val)) := by
+        (decide (desired ∈ profile.topologies.val) ||
+          (decide (desired = .Mesh) && decide (Topology.Host ∈ profile.topologies.val)))) := by
   cases enabled <;> cases webrtc <;> cases desired <;> cases finalized <;>
     simp [ice_pregather_eligible, CoreModels.core.cmp.PartialEq.ne.default, topology_eq,
       alloc.vec.Vec.Insts.CoreOpsDerefDerefSlice.deref, alloc.vec.Vec.as_slice,
@@ -24,6 +25,7 @@ theorem pregather_contract (enabled webrtc finalized : Bool) (desired : Topology
       Aeneas.Std.bind, Bind.bind]
   all_goals (try split) <;> (try simp_all)
   all_goals (try split) <;> (try simp_all)
+  all_goals (try split) <;> (try simp_all)
 
 /-- The gate agrees with the actual profile projection and WebRTC support predicate. -/
 theorem pregather_support_contract (enabled webrtc finalized : Bool) (desired : Topology)
@@ -31,14 +33,19 @@ theorem pregather_support_contract (enabled webrtc finalized : Bool) (desired : 
     ice_pregather_eligible enabled webrtc desired finalized profile =
       (do let caps ← SessionCapabilities.Insts.CoreConvertFromShared0NegotiatedProtocol.from profile
           let supported ← supports_session caps desired .WebRtc
-          RustM.ok (enabled && webrtc && decide (desired ≠ .Relay) && !finalized && supported)) := by
+          let hostSupported ← supports_session caps .Host .WebRtc
+          RustM.ok (enabled && webrtc && decide (desired ≠ .Relay) && !finalized &&
+            (supported || (decide (desired = .Mesh) && hostSupported)))) := by
   rw [pregather_contract, profile_fields_contract, projection_contract]
   simp only [bind_tc_ok, support_contract]
   cases desired <;>
-    simp [topologyMember, transportMember, Bool.and_assoc, Bool.and_comm, Bool.and_left_comm]
+    simp [topologyMember, transportMember, Bool.and_assoc, Bool.and_comm, Bool.and_left_comm, Bool.and_or_distrib_right]
 
 /-- Both upgraded topologies are reachable, including future versions and duplicate axes. -/
 theorem pregather_outcomes :
+    ice_pregather_eligible true true .Mesh false
+      { version := 3#u16, transports := ⟨[Transport.WebRtc], by scalar_tac⟩,
+        topologies := ⟨[Topology.Host], by scalar_tac⟩ } = RustM.ok true ∧
     ice_pregather_eligible true true .Mesh false
       { version := 3#u16, transports := ⟨[Transport.WebRtc], by scalar_tac⟩,
         topologies := ⟨[Topology.Mesh], by scalar_tac⟩ } = RustM.ok true ∧

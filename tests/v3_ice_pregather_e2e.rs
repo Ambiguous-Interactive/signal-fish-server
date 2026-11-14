@@ -2,7 +2,7 @@
 //! (the `RoomJoined` ICE pre-gather contract in `docs/protocol.md`).
 //!
 //! An eligible v3 client — one that negotiated the WebRTC transport and the
-//! game's desired topology — joining (or reconnecting into) a non-finalized
+//! a WebRTC topology within the game's ceiling — joining (or reconnecting into) a non-finalized
 //! room of a non-relay-desired game must receive the composed ICE list (static
 //! `session.ice_servers` first, then the `[turn]` STUN entry, then a freshly
 //! minted per-player TURN credential) directly on `RoomJoined` / `Reconnected`,
@@ -996,4 +996,112 @@ async fn reconnect_into_active_session_pregathers_nothing_but_plan_carries_ice()
         "pre-gather must not fire for a reconnect into a Finalized room"
     );
     running_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn host_only_peers_pregather_before_mesh_game_falls_back_to_host() {
+    let (running, server) = start_server_with(mesh_session_config(), enabled_turn_config()).await;
+    let mut first = connect(running.addr()).await;
+    let mut second = connect(running.addr()).await;
+    for peer in [&mut first, &mut second] {
+        authenticate(
+            peer,
+            Some(3),
+            Some(vec![Transport::Relay, Transport::WebRtc]),
+            Some(vec![Topology::Relay, Topology::Host]),
+        )
+        .await;
+    }
+    let first_join = join_room(&mut first, "mesh-game", None, "First").await;
+    let second_join = join_room(
+        &mut second,
+        "mesh-game",
+        Some(first_join.room_code.clone()),
+        "Second",
+    )
+    .await;
+    for joined in [&first_join, &second_join] {
+        assert_eq!(joined.ice_servers.len(), 3);
+        let username = joined.ice_servers[2].username.as_deref().unwrap();
+        assert!(username.ends_with(&format!(":{}", joined.player_id)));
+    }
+    assert_eq!(
+        server
+            .metrics()
+            .ice_pregather_emitted
+            .load(Ordering::Relaxed),
+        2
+    );
+    ready(&mut first).await;
+    await_ready_count(&mut first, 1).await;
+    await_ready_count(&mut second, 1).await;
+    ready(&mut second).await;
+    await_ready_count(&mut first, 2).await;
+    await_ready_count(&mut second, 2).await;
+    send(&mut first, &ClientMessage::StartGame).await;
+    let (first_plan, second_plan) = tokio::join!(
+        read_finalization(&mut first),
+        read_finalization(&mut second)
+    );
+    let first_plan = first_plan.unwrap();
+    let second_plan = second_plan.unwrap();
+    for plan in [&first_plan, &second_plan] {
+        assert_eq!(plan.topology, Topology::Host);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.ice_servers.len(), 3);
+        assert_eq!(plan.peers.len(), 1);
+    }
+    assert_eq!(first_plan.generation, second_plan.generation);
+    assert_eq!(first_plan.peers[0].player_id, second_join.player_id);
+    assert_eq!(second_plan.peers[0].player_id, first_join.player_id);
+    assert_ne!(first_plan.peers[0].initiate, second_plan.peers[0].initiate);
+    for reverse in [false, true] {
+        let (source, target, sender, recipient) = if reverse {
+            (
+                &mut second,
+                &mut first,
+                second_join.player_id,
+                first_join.player_id,
+            )
+        } else {
+            (
+                &mut first,
+                &mut second,
+                first_join.player_id,
+                second_join.player_id,
+            )
+        };
+        let expected = serde_json::json!({"candidate": "host-fallback"});
+        send(
+            source,
+            &ClientMessage::Signal {
+                to: recipient,
+                generation: first_plan.generation,
+                signal: expected.clone(),
+            },
+        )
+        .await;
+        next_matching_server_message_within(
+            target,
+            SERVER_MESSAGE_TIMEOUT,
+            "fallback signal",
+            |message| match message {
+                ServerMessage::Signal {
+                    from,
+                    generation,
+                    signal,
+                } if from == sender
+                    && generation == first_plan.generation
+                    && signal == expected =>
+                {
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .await;
+    }
+    first.close(None).await.unwrap();
+    second.close(None).await.unwrap();
+    running.shutdown().await;
 }

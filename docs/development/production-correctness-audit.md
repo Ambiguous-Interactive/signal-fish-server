@@ -17499,3 +17499,74 @@ blob `533aed6f` decodes the supplied host and offer direction. None computes a
 host from server join timestamps. There is no wire migration or established
 SDK source defect. Separate runtime qualification remains in Rust #300, .NET
 issue #153 and Godot #578; source inspection does not prove SDK runtime parity.
+
+### F364: ICE pre-gather omitted an executable Host/WebRTC fallback
+
+Session 699 starts at main `4103ea8a`. Existing campaigns: #826 and #636.
+The pre-gather gate required the game's exact desired topology, while game
+start treats that topology as a ceiling. A v3 Host/WebRTC client in a
+mesh-preferring lobby therefore received no join-time ICE even though the
+same production selector could start its room on Host/WebRTC. This delayed
+its opportunity to gather candidates. No failed physical handshake or
+measured end-to-end latency improvement is established.
+
+The original-source control fails in Nextest
+`fa9bfa0f-6596-4112-8e30-4f5877a607b1`: the one-member
+selector returns Host/WebRTC while the pre-gather gate returns false. The
+gate now accepts Host under a Mesh ceiling. Relay-only profiles, Host ceilings
+with Mesh-only profiles, old versions, disabled switches and finalized rooms
+remain excluded. The independent 110,592-case wrapper matrix includes the
+fallback. A real WebSocket control joins two host-only clients, checks each
+recipient's ICE, starts the Host/WebRTC session, checks both peer plans and
+relays exact generation-tagged signals in both directions. Restoring the old
+gate also fails this WebSocket control at the empty ICE list. The candidate
+passes with the existing lobby and active-session reconnect controls in Nextest
+`ecb5f4ba-2414-4b4d-a5b1-0e456c6ecfa0`. This verifies the server path; it does not establish a new physical WebRTC qualification.
+
+Existing #1464 gains updated source-linked pre-gather and support theorems,
+a reachable fallback result and a compiled missing-fallback fault. The old
+missing-fallback behavior and the permissive topology fault both fail their
+owning proof and have kernel-checked wrong-result witnesses. Restored source
+passes deterministic extraction, the required projection proofs and the axiom
+audit. No proof assumption or existing fault check was removed. Configuration,
+current room identity, credential composition, delivery and concurrency remain
+separate obligations; #1464 and #826 stay open.
+
+Existing #636 also gains a measured single-snapshot WebRTC signaling predicate.
+It keeps the transport-only contract, independent of topology. Existing #775
+gains exact retained summary storage; the capacity audit records the memory
+control and its limits. Neither broad campaign is complete.
+
+External assessment reads Rust `client_core.rs` blob `ef296f63`, .NET
+`SignalFishStateMachine.cs` blob `98094169`, and Godot `sf_events.gd` blob
+`5c4e66e6`. Rust permits ICE metadata on v3 joins. The .NET and Godot entry
+points process membership through their existing baseline paths. These reads
+do not prove runtime pre-gather behavior. Qualify host-only join and lobby
+reconnect, then apply the later SessionPlan ICE in Rust #300, .NET #153 and
+Godot #578. The wire schema does not change; no required migration is established.
+
+### F365: late-join success observation stopped before reading all peers
+
+Session 699 records a related #1639 failure after late join on head `4ab8ed74`,
+[run 43566040021](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/43566040021),
+job `132360003044`. Inc0 generation 3 records reliable raw/admitted 1/1 and
+unreliable 0/0 for its link to the joiner. All required channels have open
+callbacks; missing-sent is empty. The existing deadline expires. This differs
+from the original pre-join failure. The 628,744-byte raw log is retained under
+`progress/session-699/native-hosted-failed.log`.
+
+The final success gate still read inc0, inc1 and joiner sequentially. Inc0's
+failed observation stopped the test before it read the other two histories.
+The candidate observes all success gates concurrently, catches each failure,
+and prints all three diagnostics before rejecting the run. It also reuses
+that observer for the existing pre-join gates. The per-client deadlines,
+required receipts, payload checks, one-millisecond lifetime and scenario
+workload remain unchanged. A held-reader barrier control fails with sequential
+observation and passes with the candidate. Failure controls preserve the
+results of every other endpoint when any one observation panics.
+
+A matched local Godot-profile late-join control passes in Nextest
+`96338cc6-7c55-4910-a587-235e98755fd4`. That pass repairs no historical receipt
+loss and does not locate it. The missing receipt remains open in #1639. The
+change repairs first-party evidence collection for the next recurrence; it
+must not be reported as a transport-delivery fix.

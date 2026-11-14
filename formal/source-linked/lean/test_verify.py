@@ -70,7 +70,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each actual backend mutation must change exactly one production decision."""
         definitions = (verify.negotiation_mutations(), verify.capability_mutations(),
                        verify.projection_mutations())
-        self.assertEqual(sum(map(len, definitions)), 87)
+        self.assertEqual(sum(map(len, definitions)), 88)
         verify.check_mutation_anchors(verify.ROOT)
 
     def test_mutation_preflight_rejects_source_drift_before_external_commands(self):
@@ -241,7 +241,7 @@ class RequiredAggregation(unittest.TestCase):
         """Each omitted gate must reject its own contract, after successful extraction."""
         diagnostic = "error: Projection/Verification/Pregather.lean:42:6: unsolved goals\n"
         names = [name for name in verify.projection_mutations() if name.startswith("pregather-")]
-        self.assertEqual(len(names), 7)
+        self.assertEqual(len(names), 8)
         for name in names:
             verify.check_proof_rejection(SimpleNamespace(returncode=1, stdout=diagnostic),
                                          "projection", name)

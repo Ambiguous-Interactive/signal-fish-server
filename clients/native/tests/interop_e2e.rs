@@ -1268,49 +1268,64 @@ async fn await_incumbent_pre_join(incumbent: &mut ClientProcess) {
     }
 }
 
-async fn await_both_incumbent_observations(
-    first: impl std::future::Future<Output = ()>,
-    second: impl std::future::Future<Output = ()>,
-) -> [bool; 2] {
+async fn await_client_observations<const N: usize>(
+    observations: [impl std::future::Future<Output = ()>; N],
+) -> [bool; N] {
     use futures_util::FutureExt;
-    let (first, second) = tokio::join!(
-        std::panic::AssertUnwindSafe(first).catch_unwind(),
-        std::panic::AssertUnwindSafe(second).catch_unwind(),
-    );
-    [first.is_ok(), second.is_ok()]
+    let results = futures_util::future::join_all(
+        observations
+            .into_iter()
+            .map(|observation| std::panic::AssertUnwindSafe(observation).catch_unwind()),
+    )
+    .await;
+    std::array::from_fn(|index| results[index].is_ok())
 }
 
-/// #1639: retain the opposite endpoint after either pre-join observation fails.
-#[tokio::test]
-async fn incumbent_observation_failure_retains_both_endpoint_results() {
-    for failed in [0, 1] {
-        let first_completed = std::cell::Cell::new(false);
-        let second_completed = std::cell::Cell::new(false);
-        let result = await_both_incumbent_observations(
-            async {
-                if failed == 0 {
-                    panic!("first endpoint has missing unreliable receipt");
-                }
-                tokio::task::yield_now().await;
-                first_completed.set(true);
-            },
-            async {
-                if failed == 1 {
-                    panic!("second endpoint has missing unreliable receipt");
-                }
-                tokio::task::yield_now().await;
-                second_completed.set(true);
-            },
-        )
+async fn await_client_success(client: &mut ClientProcess) {
+    client
+        .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
         .await;
-        assert_eq!(result, [failed != 0, failed != 1]);
-        assert_eq!(first_completed.get(), failed != 0);
-        assert_eq!(second_completed.get(), failed != 1);
+}
+
+/// #1639: retain every endpoint when either the pre-join or success gate fails.
+#[tokio::test]
+async fn client_observation_failure_retains_all_endpoint_results() {
+    for failed in 0..3 {
+        let completed: [std::cell::Cell<bool>; 3] =
+            std::array::from_fn(|_| std::cell::Cell::new(false));
+        let completed = &completed;
+        let result = await_client_observations([0, 1, 2].map(|index| async move {
+            if index == failed {
+                panic!("endpoint has a missing unreliable receipt");
+            }
+            tokio::task::yield_now().await;
+            completed[index].set(true);
+        }))
+        .await;
+        for index in 0..3 {
+            assert_eq!(result[index], index != failed);
+            assert_eq!(completed[index].get(), index != failed);
+        }
     }
     assert_eq!(
-        await_both_incumbent_observations(async {}, async {}).await,
-        [true, true]
+        await_client_observations([0, 1, 2].map(|_| async {})).await,
+        [true; 3]
     );
+}
+
+#[tokio::test]
+async fn held_client_observation_keeps_all_endpoint_readers_active() {
+    let readers = tokio::sync::Barrier::new(3);
+    let readers = &readers;
+    let results = tokio::time::timeout(
+        Duration::from_secs(1),
+        await_client_observations([0, 1, 2].map(|_| async move {
+            readers.wait().await;
+        })),
+    )
+    .await
+    .expect("all endpoint readers must progress while another reader waits");
+    assert_eq!(results, [true; 3]);
 }
 
 async fn qualify_late_join_authoritative_replan(profile: &str, labels: &[&str]) {
@@ -1430,10 +1445,10 @@ async fn qualify_late_join_authoritative_replan(profile: &str, labels: &[&str]) 
     //  - `game_data_received`: likewise, the server processed the OTHER
     //    incumbent's relay payload (the only possible pre-join sender) and
     //    fanned it out, so the joiner can never receive incumbent GameData.
-    let readiness = await_both_incumbent_observations(
+    let readiness = await_client_observations([
         await_incumbent_pre_join(&mut inc0),
         await_incumbent_pre_join(&mut inc1),
-    )
+    ])
     .await;
     assert!(
         readiness.iter().all(|ready| *ready),
@@ -1467,11 +1482,19 @@ async fn qualify_late_join_authoritative_replan(profile: &str, labels: &[&str]) 
     // sibling teardown can race the status-fan-out oracle below. Once every
     // process has reported the barrier, release them together; assertions use
     // each log's pre-PlayerLeft scenario window.
-    for client in [&mut inc0, &mut inc1, &mut joiner] {
-        client
-            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
-            .await;
-    }
+    let completion = await_client_observations([
+        await_client_success(&mut inc0),
+        await_client_success(&mut inc1),
+        await_client_success(&mut joiner),
+    ])
+    .await;
+    assert!(
+        completion.iter().all(|complete| *complete),
+        "late-join success gates failed ({completion:?}); inc0: {}; inc1: {}; joiner: {}",
+        inc0.diagnostics(),
+        inc1.diagnostics(),
+        joiner.diagnostics(),
+    );
     for incumbent in [&mut inc0, &mut inc1] {
         for name in ["channel_message", "channel_message_sent"] {
             await_event_count(incumbent, name, 6, EVENT_TIMEOUT).await;

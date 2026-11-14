@@ -1061,28 +1061,28 @@ trigger and retained evidence pipeline.
 `session_admission::ice_pregather_eligible` owns the production conjunction used
 by the server's pre-gather wrapper. The wrapper supplies the two configuration
 switches, resolved desired topology, finalized-room flag and actual negotiated
-profile. This is an internal refactor. Rust, .NET and Godot clients have no
-protocol, API, configuration or observable behavior changes and need no updates.
+profile. Host-only profiles in mesh-preferring games can pre-gather for the
+Host/WebRTC fallback. Client runtime qualification remains separate.
 
-`Projection.pregather_contract` checks that ICE is eligible exactly when both
-switches are on, the desired topology is non-relay, the room is not finalized,
-the version is at least three, and the profile contains WebRTC and the desired
-topology. It covers all boolean inputs, all desired topologies, every `u16`
-version and arbitrary representable vectors, including empty, duplicate and
-reordered axes. The exact `RustM.ok` result includes termination in the extracted
-model. `pregather_support_contract` connects this decision to the actual
+`Projection.pregather_contract` checks that ICE is eligible exactly when both switches
+are on, the desired topology is non-relay, the room is not finalized, the version is at
+least three, and the profile contains WebRTC and a topology within the ceiling: Host for
+Host, or Mesh or Host for Mesh. It covers all boolean inputs, all desired topologies,
+every `u16` version and arbitrary representable vectors, including empty, duplicate and
+reordered axes. The exact `RustM.ok` result includes termination in the extracted model.
+`pregather_support_contract` connects this decision to the actual
 `From<&NegotiatedProtocol>` projection and `supports_session` decision.
-`pregather_outcomes` proves reachable Mesh and Host acceptance, future-version
-and duplicate-axis acceptance, and old-version and missing-transport refusal.
-The required proofs live in `Projection/Verification/Pregather.lean` and their
-axiom reports are mandatory in the existing projection gate.
+`pregather_outcomes` proves reachable Mesh and Host acceptance, future-version and
+duplicate-axis acceptance, and old-version and missing-transport refusal. The required
+proofs live in `Projection/Verification/Pregather.lean` and their axiom reports are
+mandatory in the existing projection gate.
 
-Seven compiled production faults bypass the pre-gather switch, WebRTC switch,
+Eight compiled production faults bypass the pre-gather switch, WebRTC switch,
 relay-desired exclusion, finalized-room exclusion, version floor, transport
-membership or topology membership. Only semantic failures in the owning
+membership or topology membership, or remove the Host fallback. Only semantic failures in the owning
 pre-gather proof count as rejections. Each fault also requires an audited kernel
-witness that the extracted function returns true for a profile that the omitted
-gate must reject. The runner retains source, extraction, proof, pins, hashes,
+witness that the extracted function returns the wrong result for the omitted
+gate or fallback. The runner retains source, extraction, proof, pins, hashes,
 commands and timings and requires restored-green deterministic regeneration.
 An independent Rust wrapper matrix checks 110,592 cases, including every
 capability subset, all lobby states, old/future versions, mapped and default

@@ -246,15 +246,9 @@ pub(crate) fn desired_topology_for(game_name: &str, cfg: &SessionConfig) -> Topo
 ///   stays byte-identical), and
 /// - the recipient negotiated the WebRTC transport (a relay/direct-only client
 ///   never runs ICE), and
-/// - the recipient's negotiated topologies contain the game's desired topology
-///   (the relay-desired "credentials that can never be used" argument applied
-///   per-recipient: the selection ladder seats a member on a rung only when
-///   that member negotiated the rung's topology, so a relay-only-topology
-///   recipient can never appear in *any* WebRTC plan and minting for it would
-///   hand out live TURN credentials that can never be used. A recipient that
-///   negotiated only a rung below the desired one forfeits the head start —
-///   the finalize-time `SessionPlan` still delivers its ICE if the whole room
-///   settles there).
+/// - the recipient negotiated a WebRTC topology at or below the game's ceiling:
+///   Host for a Host ceiling, or Mesh or Host for a Mesh ceiling. A host-only
+///   client can use the Host/WebRTC fallback of a mesh-preferring game.
 #[must_use]
 pub(crate) fn ice_pregather_eligible(
     cfg: &SessionConfig,

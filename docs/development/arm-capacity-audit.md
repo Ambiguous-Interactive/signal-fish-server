@@ -7270,3 +7270,33 @@ not change. Both campaigns remain open.
 The unchanged room-replacement workload also passes in Nextest
 `f7d68cdd-f034-4961-8ea6-36a449f87216`. That control does not attribute or repair
 the historical coverage timeout in #1352. That issue remains open.
+
+## Session 699 — signaling profile reads and exact summary storage
+
+Existing campaigns: #636 and #775. Server source starts at `4103ea8a`.
+
+`supports_webrtc_signaling` read protocol version and transport through two
+connection-map lookups. It now evaluates both fields under one borrowed
+profile. The isolated `webrtc_eligibility_lookup_profile` compares that
+production call with the former two-lookup expression, with 200,000 calls
+per cell and six paired rounds. The initial ARM debug sample used about
+152–158 ms for two lookups and 79–89 ms for one. These are local predicate
+costs, not end-to-end gameplay latency or throughput results. The focused
+matrix keeps the v3 and WebRTC gates, all transport subsets, topology
+independence, replacement profiles and missing-connection behavior.
+
+`ReceivedCounts` kept the construction vector's spare capacity after sorting
+and last-key-wins deduplication. It now owns an exact boxed slice. The red
+control on original source retained 17 entry slots for one unique sender.
+The matched 17-repeat fixtures retain 272 versus 16 bytes for one sender,
+4,352 versus 240 bytes for 15 senders, and 69,632 versus 4,064 bytes for 254
+senders. These figures cover entry storage only, not shared name allocations,
+allocator metadata or process RSS. The header falls from three to two words.
+Exact name/count order, final duplicate values, JSON shape, invalid input
+rejection, live reliable delivery and artifact replay remain checked.
+
+This removes retained construction slack. It does not bound all raw events,
+complete the planned ten-minute C3 workload or locate the historical generator
+stalls. #775 and #636 remain open. The server also pre-gathers ICE for the
+Host/WebRTC fallback below a Mesh ceiling; F364 records that independent
+user-facing improvement and the separate proof and runtime limits.

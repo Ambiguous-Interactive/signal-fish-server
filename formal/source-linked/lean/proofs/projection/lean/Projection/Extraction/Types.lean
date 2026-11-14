@@ -48,7 +48,7 @@ structure session_capability.NegotiatedProtocol where
   topologies : alloc.vec.Vec session_capability.Topology
 
 /-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
-    Source: 'src/../../../../src/session_admission.rs', lines 43:0-47:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 44:0-48:1 -/
 structure session_admission.ActiveSessionPlan where
   topology : session_capability.Topology
   transport : session_capability.Transport
