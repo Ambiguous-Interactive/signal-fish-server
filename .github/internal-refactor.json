@@ -5,7 +5,7 @@
     {
       "path": "Cargo.toml",
       "before": "09a62be7c0bdfe413d66d87788f9642aaced7b87",
-      "after": "b5a1801fd5889813208907fe42ca811cb5a20fb0"
+      "after": "487ddd913a00c3d2f172f994663651eb606711f0"
     },
     {
       "path": "docs/adr/ci-cd-preventative-measures.md",

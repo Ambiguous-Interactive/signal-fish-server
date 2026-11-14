@@ -10322,6 +10322,10 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
         ),
         ("**/*.md", "Markdown documentation files"),
         ("src/**", "Public library and binary doc-comments"),
+        (
+            "build.rs",
+            "Build script controls the Rustdoc compilation cfg",
+        ),
         ("examples/**", "Public examples"),
         ("Cargo.toml", "Dependency changes affect doc builds"),
         ("Cargo.lock", "Lockfile changes affect doc builds"),
@@ -32705,6 +32709,7 @@ fn test_doc_yaml_bootstrap_uses_pinned_verified_download() {
             "examples/**",
             "Cargo.toml",
             "Cargo.lock",
+            "build.rs",
             "mkdocs.yml",
             "requirements-docs.txt",
             "rust-toolchain.toml",

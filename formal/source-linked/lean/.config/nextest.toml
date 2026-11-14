@@ -1,0 +1,8 @@
+# Pure production-core tests use no server-specific binary filters or groups.
+[profile.default]
+fail-fast = true
+failure-output = "immediate-final"
+success-output = "never"
+
+[profile.ci]
+inherits = "default"

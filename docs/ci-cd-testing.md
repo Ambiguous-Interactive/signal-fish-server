@@ -605,10 +605,11 @@ cargo fmt --check
 ### Full CI Validation Locally
 
 ```bash
-# Run the full mandatory workflow (same as CI)
+# Explicit deep diagnosis; routine iteration uses scripts/dev-loop.sh
 cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
+cargo test --manifest-path tools/repo-checks/Cargo.toml
 
 # Additionally run CI-specific checks
 ./scripts/check-ci-config.sh

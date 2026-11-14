@@ -43,11 +43,16 @@
 
 set -euo pipefail
 
+# Resolve before changing directories so relative invocations and --help work
+# from any directory inside the checkout.
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+cd "$(dirname "$SCRIPT_PATH")/.."
+
 usage() {
     # Print the leading comment block (lines 2..first non-comment) so --help
     # never leaks shell code regardless of how long the header grows.
     awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
-        "${BASH_SOURCE[0]}"
+        "$SCRIPT_PATH"
 }
 
 DRY_RUN=0
@@ -131,6 +136,34 @@ run_cargo() {
     fi
 }
 
+core_sources=""
+if [ -f scripts/ci-cohort.py ]; then
+    core_sources=$(python3 scripts/ci-cohort.py --core-sources)
+fi
+
+is_core_source() {
+    printf '%s\n' "$core_sources" | grep -qFx "$1"
+}
+
+# Directory targets may contain main.rs and helper modules. Resolve registered
+# target names from Cargo manifests, including names different from the folder.
+directory_targets() {
+    python3 -c 'import pathlib,sys,tomllib
+source=pathlib.Path(sys.argv[1])
+for filename in ("Cargo.toml", "tools/repo-checks/Cargo.toml"):
+    manifest=pathlib.Path(filename)
+    if not manifest.exists():
+        continue
+    data=tomllib.loads(manifest.read_text())
+    for target in data.get("test", []):
+        entry=(manifest.parent / target.get("path", "tests/" + target["name"] + ".rs")).resolve()
+        if entry.name == "main.rs" and source.resolve().is_relative_to(entry.parent):
+            print(target["name"])
+    if filename == "Cargo.toml" and data.get("package", {}).get("autotests", True):
+        if len(source.parts) > 2 and pathlib.Path(*source.parts[:2], "main.rs").is_file():
+            print(source.parts[1])' "$1"
+}
+
 # The independent tooling crate owns explicit test targets whose sources stay
 # under tests/. Keep source discovery fast without loading Cargo's build graph.
 route_target() {
@@ -150,6 +183,19 @@ route_target() {
     fi
 }
 
+# Reuse metadata only inside this invocation. Never carry compiled evidence
+# across edits, runs or packages.
+reuse_dirs=()
+# ShellCheck versions before trap-function recognition need this annotation.
+# shellcheck disable=SC2317
+cleanup_reuse() {
+    local directory
+    for directory in ${reuse_dirs[@]+"${reuse_dirs[@]}"}; do
+        rm -rf -- "$directory"
+    done
+}
+trap cleanup_reuse EXIT
+
 run_batch() {
     local manifest="$1"
     local filter="$2"
@@ -158,19 +204,26 @@ run_batch() {
     local manifest_args=()
     local filter_args=()
     local batch_features=("${feature_args[@]+"${feature_args[@]}"}")
-    # Server feature names do not belong to the independent tooling package.
-    if [ "$manifest" = tools/repo-checks/Cargo.toml ]; then
+    if [ "$manifest" = tools/repo-checks/Cargo.toml ] || [ "$manifest" = formal/source-linked/lean/Cargo.toml ]; then
         batch_features=()
     fi
     [ -z "$manifest" ] || manifest_args+=(--manifest-path "$manifest")
     [ -z "$filter" ] || filter_args+=(-E "$filter")
-    # Validate every requested filter against nextest's actual discovered tests.
-    # Listing and execution share the same scoped build; a valid pattern must
-    # never hide an empty sibling pattern in the merged OR expression.
-    if [ "$DRY_RUN" -eq 0 ]; then
+    local execution_args=("${manifest_args[@]+"${manifest_args[@]}"}" "${batch_features[@]+"${batch_features[@]}"}" "$@")
+    if [ "$DRY_RUN" -eq 0 ] && [ -n "$patterns" ]; then
+        local directory
+        directory=$(mktemp -d "${TMPDIR:-/tmp}/signal-fish-dev-loop.XXXXXX") || { overall=1; return 0; }
+        reuse_dirs+=("$directory")
+        if ! cargo nextest list "${execution_args[@]}" --list-type binaries-only --message-format json > "$directory/binaries.json" ||
+            ! cargo metadata ${manifest_args[@]+"${manifest_args[@]}"} ${batch_features[@]+"${batch_features[@]}"} --format-version 1 > "$directory/cargo.json"; then
+            echo "dev-loop: scoped build metadata failed; tests were not run" >&2
+            overall=1
+            return 0
+        fi
+        execution_args=(--binaries-metadata "$directory/binaries.json" --cargo-metadata "$directory/cargo.json")
         local pattern
         for pattern in $patterns; do
-            if ! cargo nextest list ${manifest_args[@]+"${manifest_args[@]}"} ${batch_features[@]+"${batch_features[@]}"} "$@" -E "test($pattern)" --message-format json |
+            if ! cargo nextest list "${execution_args[@]}" -E "test($pattern)" --message-format json |
                 python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if any(case["filter-match"]["status"] == "matches" and not case["ignored"] for suite in data["rust-suites"].values() for case in suite["testcases"].values()) else 1)'; then
                 echo "dev-loop: '$pattern' matched no runnable tests or test discovery failed" >&2
                 overall=1
@@ -178,7 +231,7 @@ run_batch() {
             fi
         done
     fi
-    run_cargo cargo nextest run ${manifest_args[@]+"${manifest_args[@]}"} ${batch_features[@]+"${batch_features[@]}"} --no-tests fail "$@" ${filter_args[@]+"${filter_args[@]}"} || overall=1
+    run_cargo cargo nextest run "${execution_args[@]}" --no-tests fail ${filter_args[@]+"${filter_args[@]}"} || overall=1
     if [ "$WITH_CLIPPY" -eq 1 ]; then
         run_cargo cargo clippy ${manifest_args[@]+"${manifest_args[@]}"} ${batch_features[@]+"${batch_features[@]}"} "$@" -- -D warnings || overall=1
     fi
@@ -187,12 +240,14 @@ run_batch() {
 run_batches() {
     [ "${#root_args[@]}" -eq 0 ] || run_batch "" "$1" "$root_patterns" "${root_args[@]}"
     [ "${#tool_args[@]}" -eq 0 ] || run_batch tools/repo-checks/Cargo.toml "$1" "$tool_patterns" "${tool_args[@]}"
+    [ "${#core_args[@]}" -eq 0 ] || run_batch formal/source-linked/lean/Cargo.toml "$1" "$core_patterns" "${core_args[@]}"
     return 0
 }
 
 overall=0
 root_patterns=""
 tool_patterns=""
+core_patterns=""
 
 # Append $1 to the owners list unless it is already present.
 add_owner() {
@@ -235,6 +290,7 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
     fi
 
     lib_owner=0
+    core_owner=0
     main_owner=0
     client_manifests=()
     tooling_manifest_changed=0
@@ -250,7 +306,11 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
                 lib_owner=1
                 ;;
             Cargo.toml | Cargo.lock | build.rs | src/*.rs)
-                lib_owner=1
+                if is_core_source "$file"; then
+                    core_owner=1
+                else
+                    lib_owner=1
+                fi
                 ;;
             tools/repo-checks/Cargo.toml | tools/repo-checks/Cargo.lock | tools/repo-checks/*.rs)
                 tooling_manifest_changed=1
@@ -263,6 +323,11 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
                         # target that includes it (same rule as pattern mode).
                         sub="${rel%%/*}"
                         helper_found=0
+                        while IFS= read -r directory_target; do
+                            [ -n "$directory_target" ] || continue
+                            add_owner "$directory_target.rs"
+                            helper_found=1
+                        done < <(directory_targets "$file")
                         for top in tests/*.rs; do
                             [ -f "$top" ] || continue
                             if grep -qE "(^|[^a-zA-Z0-9_])mod ${sub}([^a-zA-Z0-9_]|$)" "$top"; then
@@ -315,12 +380,14 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
     # Collect root checks before invoking Cargo; one build covers all owners.
     root_args=()
     tool_args=()
+    core_args=()
+    [ "$core_owner" -eq 0 ] || core_args+=(--lib)
     [ "$lib_owner" -eq 0 ] || root_args+=(--lib)
     [ "$main_owner" -eq 0 ] || root_args+=(--bin signal-fish-server)
     for target in ${owners[@]+"${owners[@]}"}; do
         route_target "${target%.rs}"
     done
-    if [ "$lib_owner" -eq 1 ] || [ "${#owners[@]}" -gt 0 ]; then
+    if [ "$lib_owner" -eq 1 ] || [ "$core_owner" -eq 1 ] || [ "${#owners[@]}" -gt 0 ]; then
         route_target async_timeout_policy_scan
         route_target loud_test_failures_scan
     fi
@@ -371,6 +438,10 @@ for pattern in "${PATTERN_ARGS[@]}"; do
                 # and run under every top-level target that includes the
                 # module, so those targets own the pattern.
                 sub="${rel%%/*}"
+                while IFS= read -r directory_target; do
+                    [ -n "$directory_target" ] || continue
+                    add_owner "test:$directory_target"
+                done < <(directory_targets "$file")
                 for top in tests/*.rs; do
                     [ -f "$top" ] || continue
                     if grep -qE "(^|[^a-zA-Z0-9_])mod ${sub}([^a-zA-Z0-9_]|$)" "$top"; then
@@ -392,9 +463,13 @@ for pattern in "${PATTERN_ARGS[@]}"; do
         esac
     done < <(grep -rlF --include='*.rs' "$name" tests/ tools/repo-checks/tests/ tools/repo-checks/src/ 2>/dev/null || true)
 
-    if grep -rqF --include='*.rs' "$name" src/ 2>/dev/null; then
-        add_owner "lib"
-    fi
+    while IFS= read -r file; do
+        if is_core_source "$file"; then
+            add_owner core-lib
+        else
+            add_owner lib
+        fi
+    done < <(grep -rlF --include='*.rs' "$name" src/ 2>/dev/null || true)
 
     if [ "${#owners[@]}" -eq 0 ]; then
         echo "dev-loop: no owning target found for '$pattern' (searched '$name' in tests/ and src/)" >&2
@@ -408,6 +483,7 @@ for pattern in "${PATTERN_ARGS[@]}"; do
         case "$owner" in
             lib) key="@lib" ;;
             tool-lib) key="@tool-lib" ;;
+            core-lib) key="@core-lib" ;;
             test:*) key="t:${owner#test:}" ;;
         esac
         # Parallel indexed arrays (Bash 3.2-compatible: no associative
@@ -447,6 +523,7 @@ join_filter() {
 
 root_args=()
 tool_args=()
+core_args=()
 filters=""
 idx=0
 while [ "$idx" -lt "${#owner_keys[@]}" ]; do
@@ -457,9 +534,12 @@ while [ "$idx" -lt "${#owner_keys[@]}" ]; do
     case "$key" in
         @lib) root_args+=(--lib); routed_tool=0 ;;
         @tool-lib) tool_args+=(--lib); routed_tool=1 ;;
+        @core-lib) core_args+=(--lib); routed_tool=2 ;;
         t:*) route_target "${key#t:}" ;;
     esac
-    if [ "$routed_tool" -eq 1 ]; then
+    if [ "$routed_tool" -eq 2 ]; then
+        core_patterns="$core_patterns ${owner_patterns[$idx]}"
+    elif [ "$routed_tool" -eq 1 ]; then
         tool_patterns="$tool_patterns ${owner_patterns[$idx]}"
     else
         root_patterns="$root_patterns ${owner_patterns[$idx]}"

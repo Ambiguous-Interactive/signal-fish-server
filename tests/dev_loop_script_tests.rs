@@ -528,7 +528,13 @@ fn test_dev_loop_propagates_empty_selection_from_real_cargo_process() {
     let cargo = bin.join("cargo");
     write_file(
         &cargo,
-        "#!/bin/sh\ncase \" $* \" in *' --no-tests fail '*) exit 4;; *) exit 0;; esac\n",
+        r#"#!/bin/sh
+case "$1 $2" in
+    'nextest list') printf '{"rust-suites":{"fixture":{"testcases":{"test_alpha_runs":{"filter-match":{"status":"matches"},"ignored":false}}}}}\n' ;;
+    'nextest run') printf '%s\n' "$*" > "$DEV_LOOP_CARGO_LOG"; exit 4 ;;
+    *) printf '{}\n' ;;
+esac
+"#,
     );
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
         .expect("make cargo fixture executable");
@@ -540,9 +546,16 @@ fn test_dev_loop_propagates_empty_selection_from_real_cargo_process() {
         .arg("scripts/dev-loop.sh")
         .arg("test_alpha_runs")
         .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
+        .env("DEV_LOOP_CARGO_LOG", temp_root.path().join("executed"))
         .current_dir(temp_root.path())
         .output()
         .expect("run real script with cargo fixture");
+    let actual_run = fs::read_to_string(temp_root.path().join("executed"))
+        .expect("fixture must reach test execution");
+    assert!(
+        actual_run.contains("--no-tests fail"),
+        "execution must fail on empty selection: {actual_run}"
+    );
     assert!(
         !output.status.success(),
         "empty selections must propagate as failures: {output:?}"
@@ -651,6 +664,8 @@ if [ "$1 $2" = 'nextest list' ]; then
         *) status=matches ;;
     esac
     printf '{"rust-suites":{"fixture":{"testcases":{"test_alpha_runs":{"filter-match":{"status":"%s"},"ignored":false}}}}}\n' "$status"
+elif [ "$1" = metadata ]; then
+    printf '{}\n'
 else
     echo executed > "$DEV_LOOP_CARGO_LOG"
 fi
@@ -724,5 +739,293 @@ fn test_dev_loop_owns_tooling_sources_and_root_build_inputs() {
     assert!(
         output.contains("--lib"),
         "build.rs affects the runtime compilation: {output}"
+    );
+}
+
+fn seed_core_ownership(temp_root: &Path) {
+    write_file(
+        &temp_root.join("scripts/ci-cohort.py"),
+        &fs::read_to_string(repo_root().join("scripts/ci-cohort.py"))
+            .expect("read shared owner map"),
+    );
+    write_file(
+        &temp_root.join("formal/source-linked/lean/verify.py"),
+        "SOURCES = (\"src/protocol_core.rs\",)\n",
+    );
+    write_file(
+        &temp_root.join("formal/source-linked/lean/src/lib.rs"),
+        "#[path = \"../../../../src/protocol_core.rs\"]\nmod protocol_core;\n",
+    );
+    write_file(
+        &temp_root.join("src/protocol_core.rs"),
+        "#[cfg(test)]\nmod tests { #[test] fn test_core_projection_runs() {} }\n",
+    );
+    write_file(
+        &temp_root.join("tools/repo-checks/Cargo.toml"),
+        "[package]\nname = \"repo-checks\"\n[[test]]\nname = \"async_timeout_policy_scan\"\n[[test]]\nname = \"loud_test_failures_scan\"\n",
+    );
+}
+
+#[test]
+fn test_dev_loop_routes_core_patterns_and_changes_without_root_builds() {
+    let temp_root = unique_temp_dir("dev-loop-core-owner");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    seed_core_ownership(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+    let (code, output) = run_dev_loop_changed(
+        temp_root.path(),
+        &[
+            "--dry-run",
+            "--features",
+            "tls",
+            "test_core_projection_runs",
+        ],
+    );
+    assert_eq!(code, 0, "production-core pattern must resolve: {output}");
+    assert!(
+        output.contains("--manifest-path formal/source-linked/lean/Cargo.toml")
+            && output.contains("--lib"),
+        "use existing production-core crate: {output}"
+    );
+    assert!(
+        !output.contains("--features"),
+        "server-only features cannot leak into proof core: {output}"
+    );
+    write_file(
+        &temp_root.path().join("src/protocol_core.rs"),
+        "#[cfg(test)]\nmod tests { #[test] fn test_core_projection_changed() {} }\n",
+    );
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "core source delta must resolve: {output}");
+    let commands: Vec<_> = output
+        .lines()
+        .filter(|line| line.starts_with("DRY-RUN:"))
+        .collect();
+    assert_eq!(
+        commands.len(),
+        2,
+        "core plus scanner package only: {output}"
+    );
+    assert!(
+        commands.iter().all(|line| line.contains("--manifest-path")),
+        "core delta must not compile root tests: {output}"
+    );
+    assert!(
+        output.contains("--test async_timeout_policy_scan")
+            && output.contains("--test loud_test_failures_scan"),
+        "source-policy coverage must remain: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_core_and_server_patterns_keep_separate_builds() {
+    let temp_root = unique_temp_dir("dev-loop-mixed-core-owner");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    seed_core_ownership(temp_root.path());
+    let (code, output) = run_dev_loop_changed(
+        temp_root.path(),
+        &["--dry-run", "test_core_projection_runs", "test_alpha_unit"],
+    );
+    assert_eq!(code, 0, "mixed source patterns resolve: {output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("cargo nextest run"))
+            .count(),
+        2,
+        "each package owns its build: {output}"
+    );
+    assert!(
+        output.contains("DRY-RUN: cargo nextest run --lib --no-tests fail"),
+        "server source still gets real root tests: {output}"
+    );
+    assert!(
+        output.contains("--manifest-path formal/source-linked/lean/Cargo.toml"),
+        "core source keeps its fast owner: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_directory_targets_own_entrypoints_and_modules() {
+    let temp_root = unique_temp_dir("dev-loop-directory-owner");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    write_file(&temp_root.path().join("Cargo.toml"), "[package]\nname = \"fixture\"\nautotests = false\n[[test]]\nname = \"capacity_runner\"\npath = \"tests/capacity/main.rs\"\n");
+    write_file(
+        &temp_root.path().join("tests/capacity/main.rs"),
+        "#[test]\nfn test_capacity_entry() {}\nmod helpers;\n",
+    );
+    write_file(
+        &temp_root.path().join("tests/capacity/helpers.rs"),
+        "pub fn helper() {}\n",
+    );
+    commit_fixture_repo(temp_root.path());
+    for file in ["main.rs", "helpers.rs"] {
+        let path = temp_root.path().join("tests/capacity").join(file);
+        let original = fs::read_to_string(&path).expect("read directory fixture");
+        write_file(&path, &format!("{original}\n// changed\n"));
+        let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+        assert_eq!(code, 0, "directory source must resolve: {output}");
+        assert!(
+            output.contains("--test capacity_runner"),
+            "registered name owns both entrypoint and module: {output}"
+        );
+        write_file(&path, &original);
+    }
+    let (code, output) =
+        run_dev_loop_changed(temp_root.path(), &["--dry-run", "test_capacity_entry"]);
+    assert_eq!(code, 0, "directory target pattern resolves: {output}");
+    assert!(
+        output.contains("--test capacity_runner"),
+        "directory pattern must preserve registered name: {output}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_dev_loop_metadata_is_fresh_and_failure_cannot_reuse_previous_build() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_root = unique_temp_dir("dev-loop-native-metadata");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    let bin = temp_root.path().join("bin");
+    let cargo = bin.join("cargo");
+    write_file(
+        &cargo,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$DEV_LOOP_CARGO_LOG"
+case "$1 $2" in
+    'metadata --format-version')
+        if [ -f "$DEV_LOOP_FAIL_METADATA" ]; then exit 7; fi
+        printf '{}\n' ;;
+    'nextest list')
+        printf '{"rust-suites":{"fixture":{"testcases":{"test_alpha_runs":{"filter-match":{"status":"matches"},"ignored":false}}}}}\n' ;;
+    'nextest run') exit 0 ;;
+    *) exit 8 ;;
+esac
+"#,
+    );
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make cargo fixture executable");
+    let log = temp_root.path().join("commands");
+    let fail_metadata = temp_root.path().join("fail-metadata");
+    let scratch = temp_root.path().join("scratch");
+    fs::create_dir(&scratch).expect("metadata scratch directory");
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let fixture_path = std::env::join_paths(paths).expect("fixture PATH");
+    let run = || {
+        bash_command()
+            .arg("scripts/dev-loop.sh")
+            .arg("test_alpha_runs")
+            .env("PATH", &fixture_path)
+            .env("DEV_LOOP_CARGO_LOG", &log)
+            .env("DEV_LOOP_FAIL_METADATA", &fail_metadata)
+            .env("TMPDIR", &scratch)
+            .current_dir(temp_root.path())
+            .output()
+            .expect("run metadata fixture")
+    };
+    let output = run();
+    assert!(
+        output.status.success(),
+        "matching cached discovery must execute tests: {output:?}"
+    );
+    assert_eq!(
+        fs::read_dir(&scratch).expect("scratch").count(),
+        0,
+        "metadata must be removed after success"
+    );
+    write_file(
+        &temp_root.path().join("tests/foo.rs"),
+        "#[test]\nfn test_alpha_runs() {}\n// edited after first build\n",
+    );
+    write_file(&fail_metadata, "fail");
+    let output = run();
+    assert!(
+        !output.status.success(),
+        "new metadata failure cannot reuse old evidence: {output:?}"
+    );
+    let commands = fs::read_to_string(&log).expect("captured commands");
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|line| line.contains("--list-type binaries-only"))
+            .count(),
+        2,
+        "every invocation must build current sources: {commands}"
+    );
+    let runs: Vec<_> = commands
+        .lines()
+        .filter(|line| line.starts_with("nextest run "))
+        .collect();
+    assert_eq!(
+        runs.len(),
+        1,
+        "failed metadata must prevent the second execution: {commands}"
+    );
+    assert!(
+        runs[0].contains("--binaries-metadata")
+            && runs[0].contains("--cargo-metadata")
+            && !runs[0].contains("--test"),
+        "native reuse must omit conflicting Cargo selectors: {commands}"
+    );
+    assert_eq!(
+        fs::read_dir(&scratch).expect("scratch").count(),
+        0,
+        "metadata must be removed after failure"
+    );
+}
+
+#[test]
+fn test_dev_loop_resolves_checkout_from_nested_working_directory() {
+    let temp_root = unique_temp_dir("dev-loop-nested-working-directory");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+    let nested = temp_root.path().join("nested/deeper");
+    fs::create_dir_all(&nested).expect("create nested working directory");
+    let run = |args: &[&str]| {
+        let output = bash_command()
+            .arg("../../scripts/dev-loop.sh")
+            .args(args)
+            .current_dir(&nested)
+            .output()
+            .expect("invoke from nested working directory");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success(),
+            "nested invocation must succeed: {text}"
+        );
+        text
+    };
+    assert!(
+        run(&["--dry-run", "test_alpha_runs"]).contains("--test foo"),
+        "named selection must resolve at checkout root"
+    );
+    assert!(
+        run(&["--help"]).contains("Usage:"),
+        "help must read the absolute script path after changing directory"
+    );
+    write_file(
+        &temp_root.path().join("src/lib.rs"),
+        "#[cfg(test)] mod tests { #[test] fn changed() {} }\n",
+    );
+    let changed = run(&["--dry-run", "--changed"]);
+    assert!(
+        changed.contains("--lib"),
+        "nested invocation must discover root source changes: {changed}"
+    );
+    assert!(
+        !changed.contains("nothing to run"),
+        "nested Git pathspec must not falsely report a clean tree: {changed}"
     );
 }

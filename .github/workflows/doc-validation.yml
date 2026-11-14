@@ -40,6 +40,7 @@ on:
       - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "build.rs"
       - "mkdocs.yml"
       - "requirements-docs.txt"
       - "rust-toolchain.toml"

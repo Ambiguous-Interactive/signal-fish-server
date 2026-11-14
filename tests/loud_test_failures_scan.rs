@@ -29,6 +29,8 @@
 //! that risks false positives. The guarded-return case above is covered because
 //! it is the common real shape.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,7 +40,7 @@ use syn::{Block, Expr, ImplItem, Item, Macro, Meta, Stmt};
 
 #[test]
 fn test_failures_are_not_silently_swallowed() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = common::repo_root();
 
     // Same roots as the timeout/try_recv scans: the reference client's sources
     // and tests are held to the identical discipline.

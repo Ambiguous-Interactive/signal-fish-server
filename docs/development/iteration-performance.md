@@ -47,8 +47,12 @@ contracts and distinguish those clients from repository reference fixtures.
 
 Use `bash scripts/dev-loop.sh <test-name>` for red-green iteration. Use
 `bash scripts/dev-loop.sh --clippy --changed` for changed-target validation.
-Resolve shared helpers to every owning target. Empty requested selections
-must fail. One process owns a shared Cargo target directory at a time.
+Resolve shared helpers to every owning target. The four feature-independent
+core modules use the existing proof-core package, which imports their actual
+production source. Keep server behavior checks on named public integration
+contracts where possible; root unit filtering still compiles the large unit
+binary. Full CI retains root unit and integration coverage. Empty requested
+selections must fail. One process owns a shared Cargo target directory at a time.
 
 The default `scripts/test.sh` and `scripts/run-local-ci.sh` commands use the
 scoped loop. Their `--deep` option retains broad local checks for diagnosis.
@@ -147,3 +151,27 @@ actual baseline and candidate Cargo metadata found 110 original integration
 targets, including `tests/capacity_runner/main.rs`. The restored explicit
 inventory preserves all 110 and adds one ownership guard. The guard covers
 both top-level test files and directory-style `main.rs` targets.
+
+The first corrected hosted head (`8e01ce11`) passed 50 checks with success or
+applicable skips. Root runtime verification still took 14 minutes 10 seconds:
+229 seconds compilation and 539.202 seconds test execution, plus setup and
+controls. Its capacity runner consumed 183.595 test-seconds in the serialized
+process group, including a 52.809-second payload case. This observation
+motivated an affected capacity job and full deep coverage instead of routine
+PR execution. It does not establish a new CI percentile.
+
+The initial matched raw-unit experiment also rejected the assumption that
+tooling isolation improves root unit compilation: eleven completed protocol
+pairs had medians 27.596 seconds baseline and 26.853 seconds candidate. These
+partial samples and interrupted attempts remain separate from final workflow
+measurements. The 10-second target was missed for raw root unit rebuilds.
+The next experiment reuses the existing proof-core test package for the same
+production decision modules and public integration contracts for server work.
+It introduces no production interface or new test framework.
+
+Within each named-test invocation, the runner now builds once and uses native
+nextest metadata for per-pattern validation and execution. Metadata is fresh
+for every invocation and removed afterwards, so a later edit cannot reuse a
+stale binary through this path. One unchanged-root probe measured 1.430 seconds
+with reuse versus 1.705 seconds with repeated Cargo discovery. This single
+sample is not a performance bound.

@@ -108,6 +108,7 @@ jobs:
   # gate, and the remaining schedule cost is minutes of Linux time per day.
   quick-check:
     outputs:
+      capacity: ${{ steps.changes.outputs.capacity }}
       packaging: ${{ steps.changes.outputs.packaging }}
       fuzz: ${{ steps.changes.outputs.fuzz }}
     name: Quick Check
@@ -1316,11 +1317,56 @@ jobs:
         shell: bash
         run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
 
+  capacity-qualification:
+    name: Capacity Qualification
+    needs: quick-check
+    if: github.event_name == 'pull_request' && needs.quick-check.outputs.capacity == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Read pinned toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - uses: taiki-e/install-action@v2.90.2
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Record CPU budget before capacity qualification
+        run: bash scripts/record-test-cpu-evidence.sh
+      - name: Run complete affected capacity qualification
+        run: >-
+          cargo nextest run --locked --all-features --profile ci --cargo-profile ci
+          --test capacity_runner --no-tests fail
+      - name: Record CPU budget after capacity qualification
+        if: always()
+        run: bash scripts/record-test-cpu-evidence.sh
+      - name: Retain capacity qualification attempts
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: capacity-qualification-${{ github.run_attempt }}
+          path: target/capacity-attempts/${{ github.run_id }}/${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Root caches may contain nested packaging workspaces from deep jobs.
+      - name: Drop trybuild artifacts before cache save
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+
   required-result:
     name: Required PR Result
     if: ${{ always() && github.event_name == 'pull_request' }}
     needs: [quick-check, ci-matrix, lint, nextest, relay-allocations, deny, msrv, docker,
-            repository-checks, fuzz-check, package-validation]
+            repository-checks, fuzz-check, package-validation, capacity-qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1330,4 +1376,5 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
           FUZZ: ${{ needs.quick-check.outputs.fuzz }}
           PACKAGING: ${{ needs.quick-check.outputs.packaging }}
+          CAPACITY: ${{ needs.quick-check.outputs.capacity }}
         run: python3 scripts/ci-cohort.py --required-result

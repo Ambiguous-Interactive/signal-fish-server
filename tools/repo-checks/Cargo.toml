@@ -140,3 +140,11 @@ path = "tests/ownership.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[test]]
+name = "async_timeout_policy_scan"
+path = "../../tests/async_timeout_policy_scan.rs"
+
+[[test]]
+name = "loud_test_failures_scan"
+path = "../../tests/loud_test_failures_scan.rs"

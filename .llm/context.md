@@ -113,6 +113,10 @@ and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
 
 - Iterate with `bash scripts/dev-loop.sh <test-name>`; scope builds to owning targets.
 - Validate changes with `bash scripts/dev-loop.sh --clippy --changed [base-ref]`.
+- Prefer named public integration contracts for server iteration. A root unit-test
+  filter still compiles the entire large unit-test binary. The runner reuses the
+  existing proof-core package for feature-independent decision-module tests and
+  the independent tooling package for source-policy scans; full CI checks composition.
 - Run `cargo fmt` and the full root lint gate once before publication, not each loop.
 - Do not run full test sweeps, docs, dependency scans, or mutation campaigns locally
   except to reproduce a hosted failure. Broad local scripts require `--deep`.

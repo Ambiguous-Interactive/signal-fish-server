@@ -12,13 +12,16 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR/.."
+
 # Normal development uses scoped verification. Keep the historical full suite
 # available explicitly for reproducing hosted failures.
 if [ "${1:-}" = "--deep" ]; then
     shift
 else
     # Existing feature flags stay scoped. Legacy verbosity belongs to --deep.
-    exec bash "$(dirname "${BASH_SOURCE[0]}")/dev-loop.sh" --clippy --changed "$@"
+    exec bash "$SCRIPT_DIR/dev-loop.sh" --clippy --changed "$@"
 fi
 
 echo "Signal Fish Test Suite"

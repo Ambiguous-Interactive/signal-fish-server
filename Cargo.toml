@@ -381,10 +381,6 @@ name = "asymmetric_bandwidth_flap_e2e"
 path = "tests/asymmetric_bandwidth_flap_e2e.rs"
 
 [[test]]
-name = "async_timeout_policy_scan"
-path = "tests/async_timeout_policy_scan.rs"
-
-[[test]]
 name = "auth_integration_tests"
 path = "tests/auth_integration_tests.rs"
 
@@ -455,10 +451,6 @@ path = "tests/load_tests.rs"
 [[test]]
 name = "lobby_integration_tests"
 path = "tests/lobby_integration_tests.rs"
-
-[[test]]
-name = "loud_test_failures_scan"
-path = "tests/loud_test_failures_scan.rs"
 
 [[test]]
 name = "mixed_encoding_relay_e2e"

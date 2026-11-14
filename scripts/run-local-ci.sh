@@ -17,15 +17,26 @@
 
 set -euo pipefail
 
-# Normal development uses scoped verification. Keep the historical full suite
-# available explicitly for reproducing hosted failures.
-if [ "${1:-}" = "--deep" ]; then
-    shift
-elif [ "${1:-}" = "--fix" ]; then
+# Resolve the checkout before forwarding relative Git paths to the scoped loop.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR/.."
+DEEP_MODE=false
+FIX_REQUESTED=false
+LOCAL_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --deep) DEEP_MODE=true ;;
+        --fix) FIX_REQUESTED=true; LOCAL_ARGS+=("$arg") ;;
+        *) LOCAL_ARGS+=("$arg") ;;
+    esac
+done
+set -- ${LOCAL_ARGS[@]+"${LOCAL_ARGS[@]}"}
+if [ "$FIX_REQUESTED" = true ] && [ "$DEEP_MODE" = false ]; then
     echo "Use --deep --fix for broad automatic fixes" >&2
     exit 2
-elif [ "$#" -eq 0 ]; then
-    exec bash "$(dirname "${BASH_SOURCE[0]}")/dev-loop.sh" --clippy --changed
+fi
+if [ "$DEEP_MODE" = false ] && [ "$#" -eq 0 ]; then
+    exec bash "$SCRIPT_DIR/dev-loop.sh" --clippy --changed
 fi
 
 # Color output (disable if not a TTY)
@@ -60,7 +71,7 @@ for arg in "$@"; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--fast] [--fix]"
+            echo "Usage: $0 [--fast] [--deep [--fix]]"
             echo ""
             echo "Options:"
             echo "  --fast    Skip slow checks (tests, clippy, nested policy scans)"
