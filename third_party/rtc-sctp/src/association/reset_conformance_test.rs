@@ -10,6 +10,11 @@ fn scripted_peer_preserves_future_sequence_through_graceful_shutdown() -> Result
         receiver.peer_last_tsn = remote_initial.wrapping_sub(1);
         receiver.peer_next_rsn = Some(remote_initial);
         receiver.ack_mode = AckMode::NoDelay;
+        receiver.source_port = 5000;
+        receiver.destination_port = 5001;
+        receiver.my_verification_tag = 0x1020_3040;
+        receiver.peer_verification_tag = 0x5060_7080;
+        receiver.handshake_completed = true;
         let ppi = PayloadProtocolIdentifier::Binary;
         receiver.open_stream(1, ppi)?;
         receiver.open_stream(2, ppi)?;
@@ -48,6 +53,10 @@ fn scripted_peer_preserves_future_sequence_through_graceful_shutdown() -> Result
         let requests = receiver.gather_outbound(now).0;
         let first = outgoing_request(&requests);
         assert_eq!(first.stream_identifiers, [1]);
+        assert_eq!(
+            first.reconfig_response_sequence_number,
+            remote_initial.wrapping_sub(1)
+        );
         assert_eq!(first.sender_last_tsn, receiver.my_next_tsn.wrapping_sub(1));
 
         // RFC 6525 5.2.2 E3/E5: the remote incoming stream has no unread DATA.

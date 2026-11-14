@@ -17688,6 +17688,9 @@ Session 702 starts at `bb3b1931`. The new
 uses one Association and a remote packet script. The remote reset decisions
 and sequence progression do not use the Association sender implementation.
 The control runs with ordinary and wrapping TSNs and reset request numbers.
+An initial fixture inherited zero ports and verification tags. The qualified
+trace sets nonzero established-connection values; the initial fixture is not
+used as conformance evidence.
 
 The trace follows [RFC 6525 sections 5.1.1, 5.1.2, 5.2.2 and 5.2.7](https://www.rfc-editor.org/rfc/rfc6525.html#section-5.2.2):
 
