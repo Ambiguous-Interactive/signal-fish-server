@@ -186,9 +186,10 @@ static struct socket *make_socket(struct link *link) {
   struct sctp_event event = {SCTP_ALL_ASSOC, SCTP_STREAM_RESET_EVENT, 1};
   assert(usrsctp_setsockopt(s, IPPROTO_SCTP, SCTP_EVENT, &event,
                             sizeof(event)) == 0);
-  struct sctp_rtoinfo rto = {0, 100, 100, 100};
-  assert(usrsctp_setsockopt(s, IPPROTO_SCTP, SCTP_RTOINFO, &rto, sizeof(rto)) ==
-         0);
+  struct sctp_rtoinfo retransmission_timeout = {0, 100, 100, 100};
+  assert(usrsctp_setsockopt(s, IPPROTO_SCTP, SCTP_RTOINFO,
+                            &retransmission_timeout,
+                            sizeof(retransmission_timeout)) == 0);
   struct sockaddr_conn address = {0};
   address.sconn_family = AF_CONN;
   address.sconn_port = htons(5000);
