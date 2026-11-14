@@ -175,3 +175,12 @@ for every invocation and removed afterwards, so a later edit cannot reuse a
 stale binary through this path. One unchanged-root probe measured 1.430 seconds
 with reuse versus 1.705 seconds with repeated Cargo discovery. This single
 sample is not a performance bound.
+
+Hook profiling found another obsolete path: body-only skill changes searched
+for legacy headings before rebuilding the full catalog. The replacement uses
+the existing metadata parser and bounded batched Git blobs. Name, title,
+description, file-list, mode, index, and generator changes retain full checks.
+An isolated project-filesystem worktree profile passed in 664 milliseconds;
+small staged body-only cases measured 225–234 milliseconds versus 291 before.
+These fixture observations do not erase the recorded 1.2–1.3-second broad
+commits. Normal source commits skip catalog work.

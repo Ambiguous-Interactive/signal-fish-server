@@ -36722,3 +36722,81 @@ fn test_mutation_total_mutants_constant_matches_list() {
          Verify: cargo mutants --list | grep -c ."
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn test_pre_commit_skill_body_fast_path_preserves_metadata_when_pwsh_available() {
+    let output = Command::new("pwsh").args([
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", r#"
+        . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+        function Assert($condition, $message) { if (-not $condition) { throw $message } }
+        $script:FixturePath = '.llm/skills/example/SKILL.md'
+        $script:FixtureStatus = 'M'
+        $script:FixtureOld = @'
+---
+name: example
+description: >-
+  Example description.
+---
+# Example skill
+
+Old body.
+'@
+        $script:FixtureNew = $script:FixtureOld.Replace('Old body.', 'New body.')
+        function Invoke-Native {
+            param($FileName, [string[]]$Arguments)
+            if ($Arguments -contains '--raw') {
+                return [pscustomobject]@{ ExitCode=0; Output=''; Stdout=":100644 100644 old new $script:FixtureStatus`0$script:FixturePath`0" }
+            }
+            # The obsolete title-only fast path must fail this regression.
+            return [pscustomobject]@{ ExitCode=$(if ($Arguments -contains 'grep') { 1 } else { 0 }); Output=''; Stdout='' }
+        }
+        function Get-IndexBlobTexts {
+            param([string[]]$ObjectIds)
+            $result = [Collections.Generic.Dictionary[string,string]]::new()
+            $result['old'] = $script:FixtureOld
+            $result['new'] = $script:FixtureNew
+            return $result
+        }
+        $paths = [string[]]@($script:FixturePath)
+        Assert (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths) 'frontmatter body-only edit must use the fast path'
+        foreach ($pair in @(@('name: example', 'name: renamed'), @('# Example skill', '# Changed title'), @('Example description.', 'Changed description.'))) {
+            $script:FixtureNew = $script:FixtureOld.Replace($pair[0], $pair[1])
+            Assert (-not (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths)) 'changed metadata must require full catalog verification'
+        }
+        $script:FixtureNew = 'malformed metadata'
+        Assert (-not (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths)) 'malformed metadata must fall back'
+        $script:FixtureNew = $script:FixtureOld.Replace('Old body.', 'New body.')
+        foreach ($status in @('A', 'D', 'T', 'R')) {
+            $script:FixtureStatus = $status
+            Assert (-not (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths)) 'skill inventory changes must fall back'
+        }
+        $script:FixtureStatus = 'M'
+        Assert (-not (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles @($script:FixturePath, '.llm/skills/index.md'))) 'index edits must require full catalog verification'
+        $scratch = Join-Path ([IO.Path]::GetTempPath()) ('signal-fish-skill-body-' + [Guid]::NewGuid())
+        try {
+            $script:RepoRoot = $scratch
+            $file = Join-Path $scratch $script:FixturePath
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file))
+            [IO.File]::WriteAllText($file, $script:FixtureNew)
+            Assert (Test-WorktreeSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths) 'worktree body edit must use the same metadata contract'
+            [IO.File]::WriteAllText($file, $script:FixtureOld.Replace('name: example', 'name: changed'))
+            Assert (-not (Test-WorktreeSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths)) 'worktree metadata edit must fall back'
+        } finally { if (Test-Path $scratch) { Remove-Item -Recurse -Force $scratch } }
+        "#,
+    ]).current_dir(repo_root()).output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("Skipping hook metadata fixture: PowerShell is not installed.");
+            return;
+        }
+        Err(error) => panic!("run hook metadata fixture: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "hook metadata controls failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
