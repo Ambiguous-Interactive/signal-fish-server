@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Pre-gather ICE for host-only clients when a mesh-preferring game can use Host/WebRTC.
-- Reduce server work during live P2P room changes and WebRTC signaling (#636).
+- Reduce server locking and routing work during live P2P plan publication, room changes, and WebRTC signaling (#636).
 - Reduce server memory used to retry delayed authority changes (#636).
 - Reduce server memory used for small-room P2P transport reports, room-code changes, and refused room operations (#636).
 - Reduce server memory used to send live P2P join and reconnect events (#636).
@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Return an error when an admitted WebRTC signal cannot reach its target (#1645).
 - Keep P2P host selection stable for players with no stored join time (#1642).
 - Report failed WebRTC routing checks so peers can retry signaling (#1640).
 - Preserve router refusal replies and command order when an embedding caller is canceled (#1637).

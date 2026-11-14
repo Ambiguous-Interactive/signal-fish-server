@@ -8901,3 +8901,102 @@ async fn signaling_eligibility_uses_one_current_protocol_profile() {
     server.disconnect_client(&player).await;
     assert!(!server.supports_webrtc_signaling(&player));
 }
+
+/// A closed target queue must not turn an admitted offer into silent success.
+#[tokio::test]
+async fn closed_signal_target_returns_delivery_failure() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, bob, bob_rx) = webrtc_pair_in_room(&server).await;
+    drop(bob_rx);
+    server
+        .handle_signal(&alice, bob, json!({"Offer": "closed-target"}))
+        .await;
+    let response = recv(&mut alice_rx).await;
+    assert_eq!(
+        error_code(response.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+}
+
+/// Failure replies retain source order and survive observer cancellation without holding the room.
+#[tokio::test(start_paused = true)]
+async fn canceled_signal_delivery_failure_releases_room_before_reply_backpressure() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, bob, bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    for _ in 0..alice_rx.max_capacity() {
+        server
+            .message_coordinator
+            .send_to_player(&alice, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    drop(bob_rx);
+    let mut signal = Box::pin(server.handle_signal(&alice, bob, json!({"Offer":"closed-target"})));
+    assert!(futures_util::poll!(&mut signal).is_pending());
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failure reply reaches source backpressure");
+    drop(signal);
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let mut source = Box::pin(Arc::clone(&lifecycle).lock_owned());
+    assert!(futures_util::poll!(&mut source).is_pending());
+    let room_guard = timeout(
+        Duration::from_millis(20),
+        server.message_coordinator.lock_room_event_mutation(&room),
+    )
+    .await
+    .expect("reply backpressure must release the room fence");
+    drop(room_guard);
+    for _ in 0..alice_rx.max_capacity() {
+        assert!(matches!(
+            recv(&mut alice_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    assert_eq!(
+        error_code(recv(&mut alice_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    timeout(Duration::from_secs(1), &mut source)
+        .await
+        .expect("owned refusal releases the source after delivery");
+}
+
+/// An expired target grace window produces a refusal after the admitted send fails.
+#[tokio::test(start_paused = true)]
+async fn slow_signal_target_returns_delivery_failure_after_grace() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    for _ in 0..bob_rx.max_capacity() {
+        server
+            .message_coordinator
+            .send_to_player(&bob, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    server
+        .handle_signal(&alice, bob, json!({"Answer":"slow-target"}))
+        .await;
+    assert_eq!(
+        error_code(recv(&mut alice_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    for _ in 0..bob_rx.max_capacity() {
+        assert!(matches!(
+            recv(&mut bob_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    assert!(bob_rx.try_recv().is_err());
+    assert_eq!(server.metrics.signals_relayed.load(Ordering::Relaxed), 1);
+}

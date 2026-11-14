@@ -369,11 +369,11 @@ impl EnhancedGameServer {
         // up to the slow-consumer grace window and is then loudly disconnected
         // (metrics + close), abandoning its queue only with the connection.
         let coordinator = Arc::clone(&self.message_coordinator);
+        let connection_manager = Arc::clone(&self.connection_manager);
         let from = *from;
         let completion = tokio::spawn(async move {
-            let _signal_publication_guard = signal_publication_guard;
             let _lifecycle_guard = lifecycle_guard;
-            coordinator
+            let result = coordinator
                 .send_to_player_in_room(
                     &to,
                     &from_room,
@@ -383,7 +383,30 @@ impl EnhancedGameServer {
                         signal,
                     }),
                 )
-                .await
+                .await;
+            drop(signal_publication_guard);
+            let (message, code) = match result {
+                Ok(true) => return Ok(()),
+                Ok(false) => (
+                    "Signal target is no longer available; refresh the peer connection",
+                    ErrorCode::SignalTargetNotFound,
+                ),
+                Err(error) => {
+                    tracing::warn!(%from, %to, %error, "Signal delivery failed");
+                    (
+                        "Failed to deliver signal; retry the signal",
+                        ErrorCode::InternalError,
+                    )
+                }
+            };
+            super::messaging::send_error_to_player(
+                connection_manager.as_ref(),
+                coordinator.as_ref(),
+                &from,
+                message.to_string(),
+                Some(code),
+            )
+            .await
         });
         if let Err(error) = completion.await.unwrap_or_else(|error| Err(error.into())) {
             tracing::warn!(%from, %to, %error, "Signal delivery transaction failed");
