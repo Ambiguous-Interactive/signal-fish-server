@@ -9039,10 +9039,19 @@ async fn p2p_session_remains_live_while_cache_pruning_waits_or_is_canceled() {
     let mut generation = None;
     for receiver in [&mut alice_rx, &mut bob_rx] {
         let mut recipient_generation = None;
-        while let Ok(message) = receiver.try_recv() {
-            if let ServerMessage::SessionPlan(plan) = message.as_ref() {
-                assert_eq!(plan.peers.len(), 1);
-                assert!(recipient_generation.replace(plan.generation).is_none());
+        loop {
+            match receiver.try_recv() {
+                Ok(message) => match message.as_ref() {
+                    ServerMessage::SessionPlan(plan) => {
+                        assert_eq!(plan.peers.len(), 1);
+                        assert!(recipient_generation.replace(plan.generation).is_none());
+                    }
+                    ServerMessage::LobbyStateChanged { .. }
+                    | ServerMessage::GameStarting { .. } => {}
+                    other => panic!("unexpected mesh setup message: {other:?}"),
+                },
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(error) => panic!("mesh setup queue closed: {error:?}"),
             }
         }
         let recipient_generation = recipient_generation.unwrap();
@@ -9093,12 +9102,11 @@ async fn p2p_session_remains_live_while_cache_pruning_waits_or_is_canceled() {
     }
     assert_eq!(server.prune_active_session_plans().await, 1);
     assert_eq!(server.active_session_plan(&room), Some(stored));
+    let alice_pending = alice_rx.try_recv();
     assert!(matches!(
-        alice_rx.try_recv(),
+        alice_pending,
         Err(mpsc::error::TryRecvError::Empty)
     ));
-    assert!(matches!(
-        bob_rx.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
-    ));
+    let bob_pending = bob_rx.try_recv();
+    assert!(matches!(bob_pending, Err(mpsc::error::TryRecvError::Empty)));
 }

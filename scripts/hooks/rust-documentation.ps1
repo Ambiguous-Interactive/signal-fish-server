@@ -252,8 +252,15 @@ function Test-RustDocumentationOnlyChange {
         else { $upper = $middle - 1 }
     }
     try {
-        $oldSource = Remove-RustDocumentationComments -Content $OldContent -ChangedStart $changedStart -ChangedEnd ($OldContent.Length - $lower)
-        $newSource = Remove-RustDocumentationComments -Content $NewContent -ChangedStart $changedStart -ChangedEnd ($NewContent.Length - $lower)
+        if ($OldContent.Length - $lower -eq $changedStart) {
+            $newSource = Remove-RustDocumentationComments -Content $NewContent -ChangedStart $changedStart -ChangedEnd ($NewContent.Length - $lower)
+            if ([string]::Equals($OldContent, $newSource, [System.StringComparison]::Ordinal)) { return $true }
+            $oldSource = Remove-RustDocumentationComments -Content $OldContent -ChangedStart $changedStart -ChangedEnd ($OldContent.Length - $lower)
+        } else {
+            $oldSource = Remove-RustDocumentationComments -Content $OldContent -ChangedStart $changedStart -ChangedEnd ($OldContent.Length - $lower)
+            if ([string]::Equals($oldSource, $NewContent, [System.StringComparison]::Ordinal)) { return $true }
+            $newSource = Remove-RustDocumentationComments -Content $NewContent -ChangedStart $changedStart -ChangedEnd ($NewContent.Length - $lower)
+        }
         [string]::Equals($oldSource, $newSource, [System.StringComparison]::Ordinal)
     } catch {
         $false

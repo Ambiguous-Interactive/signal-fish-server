@@ -17671,3 +17671,12 @@ still compare against disk. Four controls preserve both directions of that
 distinction. Literal data, Unicode normalization, attributes and runtime edits
 remain outside the documentation exemption. No internal release-note entry is
 added for this tooling repair.
+
+The seven-file method-doc fixture passes below one second, but replaying the
+same edits in this full repository still takes about 1.3 seconds. Exact-blob
+batch reads reduced that replay from about 2.6 seconds. The cache keeps the
+existing 2 MiB source byte bound, including worktree contents, and rejects
+mode/type changes. Functional classification and compiled controls pass;
+Issue #1441 remains open for its full-workload timing acceptance. The session's
+actual mixed commit hook completes in 571 ms. The smaller fixture does not
+prove the full repository timing target.

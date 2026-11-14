@@ -1603,7 +1603,6 @@ const TEST_MODULE_SRC_BASE: &str = r#"pub fn ready() -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-#[serial_test::serial]
     fn ready_true() {
         assert!(super::ready());
     }

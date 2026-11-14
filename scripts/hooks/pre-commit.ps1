@@ -1767,8 +1767,26 @@ function Get-ChangelogRustTextCache {
         }
         if ($objects.Count -eq 0) { return $cache }
         $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray()
+        $retainedBytes = [long]0
+        if ($script:InspectWorktree) {
+            $plannedBytes = [long]0
+            foreach ($entry in $entries) {
+                $oldBytes = [Text.Encoding]::UTF8.GetByteCount($texts[$entry.Old])
+                $newBytes = [IO.FileInfo]::new((Join-Path $script:RepoRoot $entry.Path)).Length
+                if ($oldBytes -gt $script:MaxBatchedBlobBytes - $plannedBytes) { $cache.Clear(); return $cache }
+                $plannedBytes += $oldBytes
+                if ($newBytes -gt $script:MaxBatchedBlobBytes - $plannedBytes) { $cache.Clear(); return $cache }
+                $plannedBytes += $newBytes
+                $retainedBytes += $oldBytes
+            }
+        }
         foreach ($entry in $entries) {
             $newContent = if ($script:InspectWorktree) { [IO.File]::ReadAllText((Join-Path $script:RepoRoot $entry.Path)) } else { $texts[$entry.New] }
+            if ($script:InspectWorktree) {
+                $newBytes = [Text.Encoding]::UTF8.GetByteCount($newContent)
+                if ($newBytes -gt $script:MaxBatchedBlobBytes - $retainedBytes) { $cache.Clear(); return $cache }
+                $retainedBytes += $newBytes
+            }
             $cache[$entry.Path] = @{ Reject = $false; Old = $texts[$entry.Old]; New = $newContent }
         }
     } catch {

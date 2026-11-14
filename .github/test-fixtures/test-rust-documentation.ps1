@@ -230,6 +230,17 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
             if (-not (Test-FileDiffIsTestOnly -Path $path -CachedContent $cache[$path])) { throw "Cached docs rejected: $path, Worktree=$mode" }
         }
     }
+    $script:InspectWorktree = $true
+    $originalBudget = $script:MaxBatchedBlobBytes
+    try {
+        $script:MaxBatchedBlobBytes = 256
+        foreach ($path in $cachePaths) { [IO.File]::WriteAllText((Join-Path $temporary $path), ("/// " + ('x' * 512) + "`n$source")) }
+        $cache = Get-ChangelogRustTextCache -Paths $cachePaths
+        if ($cache.Count -ne 0) { throw 'Worktree contents exceeded the shared cache byte bound' }
+    } finally {
+        $script:MaxBatchedBlobBytes = $originalBudget
+        foreach ($path in $cachePaths) { [IO.File]::WriteAllText((Join-Path $temporary $path), "/// Cached docs.`n$source") }
+    }
     [IO.File]::WriteAllText((Join-Path $temporary $cachePaths[1]), "/// Mixed docs.`npub fn ready() -> bool { false }`n")
     Git add -- $cachePaths[1]
     $script:InspectWorktree = $false

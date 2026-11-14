@@ -934,11 +934,13 @@ pub trait GameDatabase: Send + Sync {
     async fn retain_missing_room_ids(&self, room_ids: &mut Vec<RoomId>) -> Result<()> {
         let mut missing = 0;
         for index in 0..room_ids.len() {
-            let room_id = room_ids[index];
+            let room_id = room_ids
+                .get(index)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("Invalid room cache candidate index"))?;
             match self.room_exists(&room_id).await {
                 Ok(false) => {
-                    room_ids[missing] = room_id;
-                    missing += 1;
+                    store_missing_room_candidate(room_ids, &mut missing, room_id)?;
                 }
                 Ok(true) => {}
                 Err(error) => {
@@ -2630,6 +2632,19 @@ impl InMemoryDatabase {
     }
 }
 
+fn store_missing_room_candidate(
+    room_ids: &mut [RoomId],
+    missing: &mut usize,
+    room_id: RoomId,
+) -> Result<()> {
+    let destination = room_ids
+        .get_mut(*missing)
+        .ok_or_else(|| anyhow::anyhow!("Invalid room cache output index"))?;
+    *destination = room_id;
+    *missing = missing.saturating_add(1);
+    Ok(())
+}
+
 #[async_trait]
 impl GameDatabase for InMemoryDatabase {
     fn session_records(&self) -> Option<std::sync::Arc<crate::session_records::SessionRecords>> {
@@ -3122,9 +3137,12 @@ impl GameDatabase for InMemoryDatabase {
             let rooms = self.rooms.read().await;
             let end = start.saturating_add(ROOMS_PER_READ).min(room_ids.len());
             for index in start..end {
-                if !rooms.contains_key(&room_ids[index]) {
-                    room_ids[missing] = room_ids[index];
-                    missing += 1;
+                let room_id = room_ids
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid room cache candidate index"))?;
+                if !rooms.contains_key(&room_id) {
+                    store_missing_room_candidate(room_ids, &mut missing, room_id)?;
                 }
             }
         }
