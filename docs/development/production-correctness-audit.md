@@ -17581,7 +17581,9 @@ the sender without the signal or a failure reply. This does not locate the
 historical missing receipts in #853, #889 or #1639.
 
 The closed-target regression fails against the original handler at its bounded
-response wait. The repaired owned worker checks delivery. It sends the existing
+response wait. An older dispatch-metric control also required silence; it now
+requires the explicit failure and retains its exact dispatch-count assertion.
+The repaired owned worker checks delivery. It sends the existing
 `SIGNAL_TARGET_NOT_FOUND` error for a false delivery result and `INTERNAL_ERROR`
 for an adapter failure. It releases the room signal fence before the reply
 wait, retains the source lifecycle through that reply, and continues after

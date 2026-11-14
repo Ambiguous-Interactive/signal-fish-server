@@ -6514,6 +6514,10 @@ async fn handle_signal_counts_valid_dispatch_when_receiver_is_closed() {
         .handle_signal(&alice, bob, json!({ "Offer": "x" }))
         .await;
 
+    assert_eq!(
+        error_code(recv(&mut alice_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
     assert_silent(&mut alice_rx).await;
     assert_eq!(
         server.metrics.signals_relayed.load(Ordering::Relaxed),
@@ -8941,7 +8945,7 @@ async fn canceled_signal_delivery_failure_releases_room_before_reply_backpressur
             .load(Ordering::Relaxed)
             == 0
         {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
