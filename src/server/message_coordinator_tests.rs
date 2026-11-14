@@ -6797,3 +6797,64 @@ fn routed_snapshots_filter_once_with_exact_storage_and_large_input_fallback() {
             .is_empty()
     );
 }
+
+/// #636: a two-phase P2P publication reads each routing role snapshot once.
+#[tokio::test]
+async fn room_plan_publication_bounds_role_snapshot_locking() {
+    let mut profiles = Vec::new();
+    for count in [2_u128, 16, 255] {
+        let coordinator = InMemoryMessageCoordinator::new();
+        let room = RoomId::new_v4();
+        let members: Vec<_> = (1..=count).map(PlayerId::from_u128).collect();
+        let mut receivers = Vec::new();
+        for &player in &members {
+            let (sender, receiver) = mpsc::channel(4);
+            receivers.push(receiver);
+            coordinator
+                .register_local_client(
+                    player,
+                    Some(room),
+                    ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                )
+                .await
+                .unwrap();
+        }
+        let first = Arc::new(ServerMessage::Pong);
+        let second = Arc::new(ServerMessage::Pong);
+        let batches = members
+            .iter()
+            .map(|&player| {
+                RoomRecipientMessages::in_order(player, vec![first.clone(), second.clone()])
+            })
+            .collect();
+        let before = coordinator.spectator_route_reads.load(Ordering::Relaxed);
+        let result = coordinator
+            .commit_room_messages_if_members_with_hook(
+                &room,
+                &members,
+                batches,
+                vec![],
+                Box::new(|| Box::pin(async { Ok(true) })),
+                Box::new(|failed| {
+                    assert_eq!(failed, 0);
+                    true
+                }),
+            )
+            .await
+            .unwrap();
+        let reads = coordinator.spectator_route_reads.load(Ordering::Relaxed) - before;
+        println!("PLAN_ROLE_SNAPSHOTS members={count} reads={reads}");
+        assert_eq!(result, RoomMessageTransactionOutcome::Committed);
+        for receiver in &mut receivers {
+            assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &first));
+            assert!(Arc::ptr_eq(&receiver.try_recv().unwrap(), &second));
+            let tail = receiver.try_recv();
+            assert!(matches!(tail, Err(mpsc::error::TryRecvError::Empty)));
+        }
+        profiles.push((count, reads));
+    }
+    assert!(
+        profiles.iter().all(|(_, reads)| *reads <= 2),
+        "publication must share role snapshots across all recipients and phases: {profiles:?}"
+    );
+}

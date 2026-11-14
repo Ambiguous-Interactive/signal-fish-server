@@ -2565,6 +2565,8 @@ pub struct InMemoryMessageCoordinator {
     // Broadcast recipients with no seated role. Access follows the routing
     // gate and room_players lock so publication and role are one transition.
     spectator_routes: Arc<StdMutex<HashSet<PlayerId>>>,
+    #[cfg(test)]
+    spectator_route_reads: AtomicU32,
     room_routing_gates: RoutingGateRegistry,
     player_routing_gates: RoutingGateRegistry,
     relay_order_gates: RoutingGateRegistry,
@@ -3103,6 +3105,8 @@ impl InMemoryMessageCoordinator {
             room_players: Arc::new(RwLock::new(HashMap::new())),
             player_rooms: Arc::new(StdMutex::new(HashMap::new())),
             spectator_routes: Arc::new(StdMutex::new(HashSet::new())),
+            #[cfg(test)]
+            spectator_route_reads: AtomicU32::new(0),
             room_routing_gates: RoutingGateRegistry::default(),
             player_routing_gates: RoutingGateRegistry::default(),
             relay_order_gates: RoutingGateRegistry::default(),
@@ -4635,11 +4639,17 @@ impl InMemoryMessageCoordinator {
         players
     }
 
-    fn is_spectator_route(&self, player_id: &PlayerId) -> bool {
+    fn read_spectator_routes(&self) -> std::sync::MutexGuard<'_, HashSet<PlayerId>> {
+        #[cfg(test)]
+        self.spectator_route_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.spectator_routes
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .contains(player_id)
+    }
+
+    fn is_spectator_route(&self, player_id: &PlayerId) -> bool {
+        self.read_spectator_routes().contains(player_id)
     }
 
     fn set_spectator_route(&self, player_id: PlayerId, spectator: bool) {
@@ -5418,26 +5428,28 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
 
         loop {
             let mut recipients = self.collect_room_recipients(room_id, None).await;
-            recipients
-                .retain(|(id, _)| !self.is_spectator_route(id) || !spectator_messages.is_empty());
-            let mut seated_routes = recipients
-                .iter()
-                .filter(|(id, _)| !self.is_spectator_route(id));
-            if seated_routes.clone().count() != expected.len()
-                || !seated_routes.all(|(id, _)| expected.binary_search(id).is_ok())
-            {
-                return Ok(RoomMessageTransactionOutcome::RoutingChanged);
-            }
-
-            let mut observer_messages = HashMap::new();
-            for (id, _) in &recipients {
-                if self.is_spectator_route(id) {
-                    observer_messages.insert(
-                        *id,
-                        RoomRecipientMessages::in_order(*id, spectator_messages.clone()),
-                    );
+            let observer_messages = {
+                let spectators = self.read_spectator_routes();
+                recipients
+                    .retain(|(id, _)| !spectators.contains(id) || !spectator_messages.is_empty());
+                let mut seated_routes =
+                    recipients.iter().filter(|(id, _)| !spectators.contains(id));
+                if seated_routes.clone().count() != expected.len()
+                    || !seated_routes.all(|(id, _)| expected.binary_search(id).is_ok())
+                {
+                    return Ok(RoomMessageTransactionOutcome::RoutingChanged);
                 }
-            }
+                let mut observer_messages = HashMap::new();
+                for (id, _) in &recipients {
+                    if spectators.contains(id) {
+                        observer_messages.insert(
+                            *id,
+                            RoomRecipientMessages::in_order(*id, spectator_messages.clone()),
+                        );
+                    }
+                }
+                observer_messages
+            };
 
             if recipients.iter().any(|(player_id, _)| {
                 Self::room_recipient_batch(player_id, &seated_messages, &observer_messages)
@@ -5499,33 +5511,43 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             let _routing = self.room_routing_gates.read(*room_id).await;
             let room_players = self.room_players.read().await;
             let clients = self.local_clients.read().await;
-            let mut current_members = 0_usize;
-            let mut current_recipients = 0_usize;
-            let mut seated_routes_match = true;
-            let mut all_routes_match = true;
-            for (player_id, handle) in room_players
-                .get(room_id)
-                .into_iter()
-                .flat_map(|players| players.iter())
-                .filter_map(|id| clients.get(id).map(|handle| (*id, handle)))
-            {
-                let spectator = self.is_spectator_route(&player_id);
-                if spectator && spectator_messages.is_empty() {
-                    continue;
+            let (current_members, current_recipients, seated_routes_match, all_routes_match) = {
+                let spectators = self.read_spectator_routes();
+                let mut current_members = 0_usize;
+                let mut current_recipients = 0_usize;
+                let mut seated_routes_match = true;
+                let mut all_routes_match = true;
+                for (player_id, handle) in room_players
+                    .get(room_id)
+                    .into_iter()
+                    .flat_map(|players| players.iter())
+                    .filter_map(|id| clients.get(id).map(|handle| (*id, handle)))
+                {
+                    let spectator = spectators.contains(&player_id);
+                    if spectator && spectator_messages.is_empty() {
+                        continue;
+                    }
+                    let reserved = Self::batch_reservation_covers_recipient(
+                        reservations.as_slice(),
+                        player_id,
+                        handle,
+                        RoomBatchReservation::reserved_player,
+                    );
+                    current_recipients = current_recipients.saturating_add(1);
+                    all_routes_match &= reserved;
+                    if !spectator {
+                        current_members = current_members.saturating_add(1);
+                        seated_routes_match &=
+                            reserved && expected.binary_search(&player_id).is_ok();
+                    }
                 }
-                let reserved = Self::batch_reservation_covers_recipient(
-                    reservations.as_slice(),
-                    player_id,
-                    handle,
-                    RoomBatchReservation::reserved_player,
-                );
-                current_recipients = current_recipients.saturating_add(1);
-                all_routes_match &= reserved;
-                if !spectator {
-                    current_members = current_members.saturating_add(1);
-                    seated_routes_match &= reserved && expected.binary_search(&player_id).is_ok();
-                }
-            }
+                (
+                    current_members,
+                    current_recipients,
+                    seated_routes_match,
+                    all_routes_match,
+                )
+            };
             if current_members != expected.len() || !seated_routes_match {
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
@@ -5576,7 +5598,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     // Observer delivery is independent of seated confirmation.
                     // Its queue still accounts failures, but it cannot cancel
                     // player plan phases or degrade a seated publication.
-                    let seated = !self.is_spectator_route(player_id);
+                    let seated = !observer_messages.contains_key(player_id);
                     let Some(batch) =
                         Self::room_recipient_batch(player_id, &seated_messages, &observer_messages)
                     else {
@@ -5678,7 +5700,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                                 continue;
                             };
                             let skipped = permits.iter().filter(|permit| permit.is_some()).count();
-                            if !self.is_spectator_route(player_id) {
+                            if !observer_messages.contains_key(player_id) {
                                 failed_frames = failed_frames.saturating_add(skipped);
                             }
                         }

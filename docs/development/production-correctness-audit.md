@@ -17570,3 +17570,28 @@ A matched local Godot-profile late-join control passes in Nextest
 loss and does not locate it. The missing receipt remains open in #1639. The
 change repairs first-party evidence collection for the next recurrence; it
 must not be reported as a transport-delivery fix.
+
+### F366: admitted WebRTC signals hid failed target delivery
+
+Session 700 found first-party server defect #1645 under existing #826.
+`handle_signal_in_generation_from_lifecycle` checked routing and counted a
+validated dispatch, then ignored `Ok(false)` from `send_to_player_in_room`.
+A closed target queue or an expired slow-target grace window therefore left
+the sender without the signal or a failure reply. This does not locate the
+historical missing receipts in #853, #889 or #1639.
+
+The closed-target regression fails against the original handler at its bounded
+response wait. An older dispatch-metric control also required silence; it now
+requires the explicit failure and retains its exact dispatch-count assertion.
+The repaired owned worker checks delivery. It sends the existing
+`SIGNAL_TARGET_NOT_FOUND` error for a false delivery result and `INTERNAL_ERROR`
+for an adapter failure. It releases the room signal fence before the reply
+wait, retains the source lifecycle through that reply, and continues after
+observer cancellation. The dispatch counter keeps its documented attempt
+meaning; it is not a confirmed receipt counter. Successful signals retain
+exact payload and generation forwarding.
+
+Controls cover closed queues, slow-target expiry, canceled observation and
+backpressured source replies. The latter checks room mutation admission while
+the refusal is pending and verifies that the source lifecycle still orders the
+reply. SDK runtime qualification remains separate from server controls.

@@ -7300,3 +7300,48 @@ complete the planned ten-minute C3 workload or locate the historical generator
 stalls. #775 and #636 remain open. The server also pre-gathers ICE for the
 Host/WebRTC fallback below a Mesh ceiling; F364 records that independent
 user-facing improvement and the separate proof and runtime limits.
+
+### P2P publication role snapshots and collection scratch
+
+Session 700 advances existing #636, #775 and #826 with first-party work.
+A complete two-phase exact-membership publication performed 14, 112 and 1,785
+role-lock reads for 2, 16 and 255 players. The original source fails the new
+bounded-read control. The candidate reads one shared role snapshot before
+reservations and one during final route validation. The retained routing fence
+pins roles through the commit hook and both delivery phases. Phase accounting
+uses the already validated observer batches. Exact membership, queue generation,
+observer churn and degraded-publication rules still apply. This measures lock
+operations; it does not establish an end-to-end latency improvement.
+
+Record collection previously requested a second full-size event buffer whenever
+a nonempty vector had unused capacity. Large runs could temporarily duplicate
+most of an event array merely to free a small tail. Compaction now requests at
+most 16 MiB of replacement element storage per array. Larger arrays retain their
+original buffer, including slack. No event is discarded or reordered by this
+decision. Empty buffers still release their storage. Small-buffer compaction
+keeps the existing fallible reservation and original-buffer recovery rules.
+
+A regression retains every value and checks the original pointer and capacity
+above the scratch threshold. It fails against the original compactor before
+its replacement reservation. The limit bounds requested compaction scratch,
+not allocator overhead, raw-event retention, sorting scratch or process RSS.
+Large retained reservations can still be substantial. Planned ten-minute C3
+qualification and the full #775 acceptance remain open. No workload, receipt,
+replay, ordering or omission requirement was reduced.
+
+Paired isolated debug profiles use one fixed ARM64 executable with SHA-256
+`3f5bb5d5a46cb6cf5bca8e5a37969c282eafda43530f56d768311b595ccfb492`.
+The ignored gap-storage probe compares the former successful copy path with
+the production bounded collector. It verifies every gap identity and sequence.
+Two trials reverse mode order. For 1,000,001 gaps, legacy child peak RSS is
+85,764–85,772 KiB; bounded peak is 47,696 KiB. For 2,000,000 gaps, legacy peak
+is 163,848–163,860 KiB; bounded peak is 86,800–86,864 KiB. The latter keeps
+83,886,080 bytes of original element storage instead of copying into an
+80,000,000-byte replacement. The 100,001-gap control compacts identically in
+both modes. Its 21,816 KiB process floor prevents a useful small-cell RSS
+comparison. The first six attempts used a whole-binary parent hash buffer and
+are retained but excluded because that buffer imposed a larger inherited
+measurement floor. The final parent hashes in fixed chunks. Raw attempts,
+source and binary identities, exact bytes and per-child wait4 measurements
+remain in `progress/session-700/`. These are collection profiles, not live C3
+capacity or end-to-end gameplay measurements.

@@ -1031,14 +1031,19 @@ fn release_unused_capacity<T>(rows: &mut Vec<T>) {
     release_unused_capacity_with_reservation(rows, Vec::try_reserve_exact);
 }
 
-/// Move records only after a successful, sufficient replacement reservation.
+/// Bound temporary storage while releasing slack from small record buffers.
+/// Large buffers keep their original reservation and every recorded event.
 fn release_unused_capacity_with_reservation<T>(
     rows: &mut Vec<T>,
     reserve: impl FnOnce(&mut Vec<T>, usize) -> Result<(), std::collections::TryReserveError>,
 ) {
+    const MAX_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
+
     if rows.is_empty() {
         *rows = Vec::new();
-    } else if rows.len() < rows.capacity() {
+    } else if rows.len() < rows.capacity()
+        && rows.len().saturating_mul(std::mem::size_of::<T>()) <= MAX_COMPACTION_BYTES
+    {
         let mut compacted = Vec::new();
         if reserve(&mut compacted, rows.len()).is_ok()
             && compacted.is_empty()
@@ -1614,8 +1619,29 @@ mod tests {
         }
         let before_bytes =
             log.state.lock().unwrap().gaps.capacity() * std::mem::size_of::<GapEvent>();
+        let legacy =
+            std::env::var("CAPACITY_COMPACTION_PROBE_MODE").unwrap_or_else(|_| "bounded".into());
+        assert!(["bounded", "legacy"].contains(&legacy.as_str()));
         let started = Instant::now();
-        let records = log.take_records();
+        let records = if legacy == "legacy" {
+            let mut state = log.state.lock().unwrap();
+            let mut rows = std::mem::take(&mut state.gaps);
+            if rows.len() < rows.capacity() {
+                let mut compacted = Vec::new();
+                if compacted.try_reserve_exact(rows.len()).is_ok()
+                    && (rows.len()..rows.capacity()).contains(&compacted.capacity())
+                {
+                    compacted.append(&mut rows);
+                    rows = compacted;
+                }
+            }
+            RunRecords {
+                gaps: rows,
+                ..RunRecords::default()
+            }
+        } else {
+            log.take_records()
+        };
         let elapsed_us = started.elapsed().as_micros();
         assert_eq!(crate::config::count_u64(records.gaps.len()), count);
         for (index, event) in records.gaps.iter().enumerate() {
@@ -1627,12 +1653,58 @@ mod tests {
         println!(
             "COLLECTED_GAP_STORAGE_PROFILE {}",
             serde_json::json!({
-                "gaps": count, "before_bytes": before_bytes,
+                "mode": legacy, "gaps": count, "before_bytes": before_bytes,
                 "after_bytes": records.gaps.capacity() * std::mem::size_of::<GapEvent>(),
                 "elapsed_us": elapsed_us,
             })
         );
         std::hint::black_box(records);
+    }
+
+    /// #775: collection must not duplicate a large event buffer to free its slack.
+    #[test]
+    fn large_record_compaction_keeps_evidence_without_unbounded_scratch() {
+        let count = (16 * 1024 * 1024 / std::mem::size_of::<u64>()) + 1;
+        let mut rows = Vec::with_capacity(count + 1);
+        rows.extend((0..count).map(|index| u64::try_from(index).unwrap()));
+        let pointer = rows.as_ptr();
+        let capacity = rows.capacity();
+        release_unused_capacity_with_reservation(&mut rows, |_, _| {
+            panic!("large compaction must not allocate a second event buffer")
+        });
+        assert_eq!(rows.as_ptr(), pointer);
+        assert_eq!(rows.capacity(), capacity);
+        assert_eq!(rows.len(), count);
+        assert!(rows
+            .iter()
+            .enumerate()
+            .all(|(index, value)| *value == u64::try_from(index).unwrap()));
+    }
+
+    /// The scratch ceiling counts element bytes and includes its exact boundary.
+    #[test]
+    fn record_compaction_scratch_limit_is_inclusive() {
+        fn check<T: Default + Clone>() {
+            let limit = 16 * 1024 * 1024 / std::mem::size_of::<T>();
+            for count in [limit - 1, limit, limit + 1] {
+                let mut rows = Vec::with_capacity(count + 1);
+                rows.resize(count, T::default());
+                let pointer = rows.as_ptr();
+                let capacity = rows.capacity();
+                let mut calls = 0;
+                release_unused_capacity_with_reservation(&mut rows, |_, requested| {
+                    calls += 1;
+                    assert_eq!(requested, count);
+                    Ok(())
+                });
+                assert_eq!(calls, usize::from(count <= limit));
+                assert_eq!(rows.as_ptr(), pointer);
+                assert_eq!(rows.capacity(), capacity);
+                assert_eq!(rows.len(), count);
+            }
+        }
+        check::<u8>();
+        check::<u64>();
     }
 
     /// Failed compaction must preserve every record, its original buffer and its capacity.
