@@ -17544,3 +17544,29 @@ points process membership through their existing baseline paths. These reads
 do not prove runtime pre-gather behavior. Qualify host-only join and lobby
 reconnect, then apply the later SessionPlan ICE in Rust #300, .NET #153 and
 Godot #578. The wire schema does not change; no required migration is established.
+
+### F365: late-join success observation stopped before reading all peers
+
+Session 699 records a related #1639 failure after late join on head `4ab8ed74`,
+[run 43566040021](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/43566040021),
+job `132360003044`. Inc0 generation 3 records reliable raw/admitted 1/1 and
+unreliable 0/0 for its link to the joiner. All required channels have open
+callbacks; missing-sent is empty. The existing deadline expires. This differs
+from the original pre-join failure. The 628,744-byte raw log is retained under
+`progress/session-699/native-hosted-failed.log`.
+
+The final success gate still read inc0, inc1 and joiner sequentially. Inc0's
+failed observation stopped the test before it read the other two histories.
+The candidate observes all success gates concurrently, catches each failure,
+and prints all three diagnostics before rejecting the run. It also reuses
+that observer for the existing pre-join gates. The per-client deadlines,
+required receipts, payload checks, one-millisecond lifetime and scenario
+workload remain unchanged. A held-reader barrier control fails with sequential
+observation and passes with the candidate. Failure controls preserve the
+results of every other endpoint when any one observation panics.
+
+A matched local Godot-profile late-join control passes in Nextest
+`96338cc6-7c55-4910-a587-235e98755fd4`. That pass repairs no historical receipt
+loss and does not locate it. The missing receipt remains open in #1639. The
+change repairs first-party evidence collection for the next recurrence; it
+must not be reported as a transport-delivery fix.
