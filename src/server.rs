@@ -2727,6 +2727,39 @@ impl Drop for RoutingGate {
     }
 }
 
+trait DeliveryDrain: Send {
+    fn is_draining(&self) -> bool;
+    fn changed(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), watch::error::RecvError>> + Send + '_;
+}
+
+impl DeliveryDrain for watch::Receiver<bool> {
+    fn is_draining(&self) -> bool {
+        *self.borrow()
+    }
+
+    fn changed(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), watch::error::RecvError>> + Send + '_ {
+        watch::Receiver::changed(self)
+    }
+}
+
+struct NoDeliveryDrain;
+
+impl DeliveryDrain for NoDeliveryDrain {
+    fn is_draining(&self) -> bool {
+        false
+    }
+
+    fn changed(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<(), watch::error::RecvError>> + Send + '_ {
+        std::future::pending()
+    }
+}
+
 enum ConditionalDeliveryReservation {
     Reserved {
         player_id: PlayerId,
@@ -4111,11 +4144,11 @@ impl InMemoryMessageCoordinator {
         player_id: PlayerId,
         handle: ClientDeliveryHandle,
         should_send: &(dyn Fn() -> bool + Send + Sync),
-        mut drain: Option<watch::Receiver<bool>>,
+        mut drain: impl DeliveryDrain,
         room_id: Option<RoomId>,
         on_full: Option<&(dyn Fn() + Send + Sync)>,
     ) -> ConditionalDeliveryReservation {
-        if drain.as_ref().is_some_and(|drain| *drain.borrow()) || !should_send() {
+        if drain.is_draining() || !should_send() {
             return ConditionalDeliveryReservation::Canceled;
         }
 
@@ -4180,20 +4213,15 @@ impl InMemoryMessageCoordinator {
                     // Drain completion retains cancellation precedence. Expiry
                     // then wins an exact-boundary race with returned capacity.
                     biased;
-                    changed = async {
-                        match drain.as_mut() {
-                            Some(drain) => drain.changed().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        if changed.is_ok() && drain.as_ref().is_some_and(|drain| *drain.borrow()) {
+                    changed = drain.changed() => {
+                        if changed.is_ok() && drain.is_draining() {
                             tracing::debug!(%player_id, "Conditional delivery reservation canceled for shutdown drain");
                         }
                         self.record_canceled_delivery(player_id);
                         ConditionalDeliveryReservation::Canceled
                     }
                     deadline = &mut timeout => {
-                        if drain.as_ref().is_some_and(|drain| *drain.borrow()) || !should_send() {
+                        if drain.is_draining() || !should_send() {
                             self.record_canceled_delivery(player_id);
                             return ConditionalDeliveryReservation::Canceled;
                         }
@@ -4251,7 +4279,7 @@ impl InMemoryMessageCoordinator {
                     }
                     result = &mut reserve => match result {
                         Ok(permit) => {
-                            if drain.as_ref().is_some_and(|drain| *drain.borrow()) || !should_send() {
+                            if drain.is_draining() || !should_send() {
                                 self.record_canceled_delivery(player_id);
                                 ConditionalDeliveryReservation::Canceled
                             } else {
@@ -4309,7 +4337,7 @@ impl InMemoryMessageCoordinator {
                         player_id,
                         handle.clone(),
                         should_send,
-                        Some(drain.clone()),
+                        drain.clone(),
                         Some(room_id),
                         None,
                     )
@@ -4411,7 +4439,7 @@ impl InMemoryMessageCoordinator {
                         player_id,
                         handle,
                         should_send,
-                        Some(drain.clone()),
+                        drain.clone(),
                         Some(*room_id),
                         None,
                     )
@@ -4908,7 +4936,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 *player_id,
                 handle,
                 should_send,
-                None,
+                NoDeliveryDrain,
                 Some(*room_id),
                 on_full,
             )
@@ -5107,7 +5135,14 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
 
         let should_send = || true;
         let reservation = self
-            .reserve_one_if(*player_id, handle, &should_send, None, Some(*room_id), None)
+            .reserve_one_if(
+                *player_id,
+                handle,
+                &should_send,
+                NoDeliveryDrain,
+                Some(*room_id),
+                None,
+            )
             .await;
         let ConditionalDeliveryReservation::Reserved {
             sender,

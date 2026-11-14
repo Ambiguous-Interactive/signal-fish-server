@@ -1,7 +1,7 @@
 use super::game_data::broadcast_game_data_with;
 use super::{
-    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, RoutingGate,
-    RoutingGateRegistry,
+    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, NoDeliveryDrain,
+    RoutingGate, RoutingGateRegistry,
 };
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliverySender,
@@ -359,14 +359,18 @@ fn start_control_capacity_wait(
         ControlCapacityWait::ConditionalReservation
         | ControlCapacityWait::ConditionalReservationWithoutDrain => {
             let (drain_tx, drain) = watch::channel(false);
-            let drain =
-                matches!(case, ControlCapacityWait::ConditionalReservation).then_some(drain);
             Box::pin(async move {
                 let _drain_tx = drain_tx;
-                match coordinator
-                    .reserve_one_if(player_id, handle, &|| true, drain, None, None)
-                    .await
-                {
+                let reservation = if matches!(case, ControlCapacityWait::ConditionalReservation) {
+                    coordinator
+                        .reserve_one_if(player_id, handle, &|| true, drain, None, None)
+                        .await
+                } else {
+                    coordinator
+                        .reserve_one_if(player_id, handle, &|| true, NoDeliveryDrain, None, None)
+                        .await
+                };
+                match reservation {
                     ConditionalDeliveryReservation::SlowConsumer { .. } => {
                         DeliveryOutcome::SlowConsumer
                     }
@@ -5933,7 +5937,7 @@ async fn owned_control_reservation_moves_its_sender() {
         let clones_before = sender.clone_operations_for_allocation_benchmark();
         let (_drain, drain) = watch::channel(false);
         let reservation = coordinator
-            .reserve_one_if(player, handle, &|| true, Some(drain), None, None)
+            .reserve_one_if(player, handle, &|| true, drain, None, None)
             .await;
         let clones = sender.clone_operations_for_allocation_benchmark() - clones_before;
         match reservation {

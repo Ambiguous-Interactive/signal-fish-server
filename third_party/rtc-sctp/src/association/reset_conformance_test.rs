@@ -1,7 +1,7 @@
 use super::*;
 
-/// #1184: an RFC 6525 peer can release one reset with another stream's request.
-/// The remote side is a packet script, not a second Association.
+/// #1184: qualify the cross-stream implicit-ack policy used by usrsctp.
+/// The remote side is a packet script; strict RFC interpretation stays qualified.
 #[test]
 fn scripted_peer_preserves_future_sequence_through_graceful_shutdown() -> Result<()> {
     for remote_initial in [100_u32, u32::MAX] {
@@ -100,8 +100,7 @@ fn scripted_peer_preserves_future_sequence_through_graceful_shutdown() -> Result
             first.reconfig_request_sequence_number.wrapping_add(1)
         );
         assert_eq!(second.reconfig_response_sequence_number, remote_initial);
-        // E1 acknowledges the remote reset even though this request names SID 2.
-        // H1-H4 then let the remote sender assign new SSNs to SID 1.
+        /* usrsctp treats this E1 acknowledgment as performed for the old SID. */
         deliver(
             &mut receiver,
             Box::new(ChunkReconfig {
