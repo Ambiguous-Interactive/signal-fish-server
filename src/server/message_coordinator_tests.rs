@@ -23,6 +23,7 @@ enum ControlCapacityWait {
     InitialTransition,
     ConditionalDelivery,
     ConditionalReservation,
+    ConditionalReservationWithoutDrain,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -355,8 +356,11 @@ fn start_control_capacity_wait(
                     .unwrap_or(DeliveryOutcome::Canceled)
             })
         }
-        ControlCapacityWait::ConditionalReservation => {
+        ControlCapacityWait::ConditionalReservation
+        | ControlCapacityWait::ConditionalReservationWithoutDrain => {
             let (drain_tx, drain) = watch::channel(false);
+            let drain =
+                matches!(case, ControlCapacityWait::ConditionalReservation).then_some(drain);
             Box::pin(async move {
                 let _drain_tx = drain_tx;
                 match coordinator
@@ -479,6 +483,7 @@ async fn expired_control_capacity_waits_cannot_revive_after_capacity_returns() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
     let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
     let boundaries = [DeadlineBoundary::Exact, DeadlineBoundary::Post];
@@ -567,6 +572,7 @@ async fn cancelling_a_parked_conditional_wait_resolves_attempt_accounting() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
     let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
 
@@ -642,6 +648,7 @@ async fn predeadline_control_capacity_release_survives_delayed_producer_poll() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
 
     for (index, case) in cases.into_iter().enumerate() {
@@ -739,6 +746,7 @@ async fn refilled_control_capacity_released_after_deadline_cannot_be_claimed() {
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
 
     for (index, case) in cases.into_iter().enumerate() {
@@ -787,6 +795,7 @@ async fn queue_closure_at_or_after_the_deadline_precedes_slow_consumer_expiry() 
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
     let queue_kinds = [ControlQueueKind::Legacy, ControlQueueKind::Classified];
     let boundaries = [DeadlineBoundary::Exact, DeadlineBoundary::Post];
@@ -850,6 +859,7 @@ async fn classified_generation_cancellation_at_the_deadline_precedes_slow_consum
         ControlCapacityWait::InitialTransition,
         ControlCapacityWait::ConditionalDelivery,
         ControlCapacityWait::ConditionalReservation,
+        ControlCapacityWait::ConditionalReservationWithoutDrain,
     ];
 
     for (index, case) in cases.into_iter().enumerate() {
@@ -5923,7 +5933,7 @@ async fn owned_control_reservation_moves_its_sender() {
         let clones_before = sender.clone_operations_for_allocation_benchmark();
         let (_drain, drain) = watch::channel(false);
         let reservation = coordinator
-            .reserve_one_if(player, handle, &|| true, drain, None, None)
+            .reserve_one_if(player, handle, &|| true, Some(drain), None, None)
             .await;
         let clones = sender.clone_operations_for_allocation_benchmark() - clones_before;
         match reservation {

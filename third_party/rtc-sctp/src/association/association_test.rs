@@ -1645,6 +1645,9 @@ fn test_reconfig_backoff_must_double_once() -> Result<()> {
 #[path = "message_selection_test.rs"]
 mod message_selection_test;
 
+#[path = "reset_conformance_test.rs"]
+mod reset_conformance_test;
+
 #[path = "stream_reset_test.rs"]
 mod stream_reset_test;
 

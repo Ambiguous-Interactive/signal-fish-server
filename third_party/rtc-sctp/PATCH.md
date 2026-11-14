@@ -86,6 +86,11 @@ The added `stream_reset_test.rs` contains deterministic
 Sans-I/O controls for both reset directions, sequence replay and wrap, simultaneous
 close, delayed DATA, DATA/reset response reordering, drain, forward TSN,
 metadata limits, denied requests, retries, and outgoing fragment ordering.
+`reset_conformance_test.rs` adds a remote packet script for #1184. It checks
+RFC 6525's cross-stream implicit reset acknowledgment, old unread gameplay,
+future ordered progress, graceful shutdown, and wrapped request/TSN values.
+The independent usrsctp source agrees with the implicit-ack interpretation;
+no executed usrsctp or public-client incident is claimed.
 These controls qualify the local repair. They do not claim full RFC 6525 support
 for parameter types that upstream does not implement.
 The procedures follow [RFC 6525](https://www.rfc-editor.org/rfc/rfc6525.html),
