@@ -6704,3 +6704,96 @@ async fn relay_order_readiness_survives_early_release_and_waiter_cancellation() 
         );
     }
 }
+
+/// #636: compare complete snapshot calls under the production routing locks.
+#[tokio::test]
+#[ignore = "isolated routed-roster profile"]
+async fn routed_roster_filtering_profile() {
+    for count in [2_u128, 16, 255] {
+        for filtered in [false, true] {
+            let coordinator = InMemoryMessageCoordinator::new();
+            let room = RoomId::new_v4();
+            let mut receivers = Vec::new();
+            for index in 0..count {
+                let player = PlayerId::from_u128(index + 1);
+                let (sender, receiver) = mpsc::channel(1);
+                receivers.push(receiver);
+                coordinator
+                    .register_local_client(
+                        player,
+                        Some(room),
+                        ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+                    )
+                    .await
+                    .unwrap();
+                if filtered && index % 2 == 0 {
+                    coordinator.set_spectator_route(player, true);
+                }
+            }
+            for duplicate_scan in [true, false, false, true] {
+                let start = tokio::time::Instant::now();
+                for _ in 0..10_000 {
+                    let members = if duplicate_scan {
+                        let _routing = coordinator.room_routing_gates.read(room).await;
+                        let rooms = coordinator.room_players.read().await;
+                        let clients = coordinator.local_clients.read().await;
+                        let spectators = coordinator.spectator_routes.lock().unwrap();
+                        let members = rooms
+                            .get(&room)
+                            .into_iter()
+                            .flat_map(|members| members.iter().copied())
+                            .filter(|player| {
+                                clients.contains_key(player) && !spectators.contains(player)
+                            });
+                        let mut players = Vec::with_capacity(members.clone().count());
+                        players.extend(members);
+                        players.sort_unstable();
+                        players
+                    } else {
+                        coordinator.routed_player_ids(&room).await.unwrap().unwrap()
+                    };
+                    assert_eq!(
+                        members.len(),
+                        usize::try_from(if filtered { count / 2 } else { count }).unwrap()
+                    );
+                    assert_eq!(members.capacity(), members.len());
+                    std::hint::black_box(members);
+                }
+                println!("ROUTED_ROSTER duplicate_scan={duplicate_scan} calls=10000 candidates={count} filtered={filtered} elapsed_us={}", start.elapsed().as_micros());
+            }
+            std::hint::black_box(receivers);
+        }
+    }
+}
+
+/// #636: bounded routing snapshots visit each candidate once and allocate exact output.
+#[test]
+fn routed_snapshots_filter_once_with_exact_storage_and_large_input_fallback() {
+    for size in [0, 1, 2, 16, 17, 254, 255, 256, 1024] {
+        let members: std::collections::HashSet<_> =
+            (0..size).map(|id| PlayerId::from_u128(id + 1)).collect();
+        for retained_modulus in [1, 2, 3, u128::MAX] {
+            let visits = std::cell::Cell::new(0);
+            let actual =
+                InMemoryMessageCoordinator::routed_player_snapshot(Some(&members), |player| {
+                    visits.set(visits.get() + 1);
+                    player.as_u128() % retained_modulus == 0
+                });
+            let mut expected: Vec<_> = members
+                .iter()
+                .copied()
+                .filter(|player| player.as_u128() % retained_modulus == 0)
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(actual, expected, "size={size} modulus={retained_modulus}");
+            assert_eq!(actual.capacity(), actual.len());
+            if size <= 255 {
+                assert_eq!(visits.get(), members.len());
+            }
+        }
+    }
+    assert!(
+        InMemoryMessageCoordinator::routed_player_snapshot(None, |_| panic!("no candidate"))
+            .is_empty()
+    );
+}

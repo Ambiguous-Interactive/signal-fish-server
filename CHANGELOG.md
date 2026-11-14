@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce routing work for live P2P room snapshots (#636).
 - Reduce server memory used to retry delayed authority changes (#636).
 - Reduce server memory used for small-room P2P transport reports, room-code changes, and refused room operations (#636).
 - Reduce server memory used to send live P2P join and reconnect events (#636).
@@ -73,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep P2P host selection stable when stored player join times are missing (#1642).
 - Report failed WebRTC routing checks so peers can retry signaling (#1640).
 - Preserve router refusal replies and command order when an embedding caller is canceled (#1637).
 - Keep native graceful shutdown registered until its final control replay is handed off (#1145).

@@ -956,29 +956,11 @@ fn missing_churn_rejoins<'a>(
     remaining.into_keys()
 }
 
-/// Check schedule and incarnation evidence, counting each valid planned send once.
-fn scheduled_send_evidence(
-    plans: &[SenderPlan],
-    records: &RunRecords,
-    index: &SendIndex<'_>,
-    reasons: &mut Vec<InvalidReason>,
-) -> u64 {
-    let mut plans: BTreeMap<_, _> = plans
-        .iter()
-        .map(|plan| (plan.name.as_str(), (plan, plan.sends.iter())))
-        .collect();
-    // Send completion and churn share one clock in the same peer task.
-    // Keep one interval per incarnation, never one entry per scheduled send.
-    // Equal microseconds remain admissible on both sides of a boundary because
-    // the artifact clock rounds distinct operations to the same microsecond.
-    let mut epoch_times: BTreeMap<(&str, u32), (u64, Option<u64>)> = if records.churn.is_empty() {
-        BTreeMap::new()
-    } else {
-        plans
-            .keys()
-            .map(|sender| ((*sender, 1), (0, None)))
-            .collect()
-    };
+type SendEpochTimes<'a> = BTreeMap<(&'a str, u32), (u64, Option<u64>)>;
+
+/// Retain send-lifetime overrides only for peers whose recorded churn changes them.
+fn send_epoch_times(records: &RunRecords) -> SendEpochTimes<'_> {
+    let mut epoch_times = BTreeMap::new();
     for event in &records.churn {
         if let Some(epoch) = event.epoch.filter(|epoch| *epoch > 1) {
             if event.phase == ChurnPhase::Rejoined {
@@ -994,11 +976,31 @@ fn scheduled_send_evidence(
     for offset in 0..disconnects.len() {
         let event = &records.churn[disconnects.get(offset).expect("indexed disconnect")];
         let epoch = closing_epochs.entry(event.recipient.as_str()).or_insert(1);
+        if *epoch == 1 {
+            epoch_times
+                .entry((event.recipient.as_str(), 1))
+                .or_insert((0, None));
+        }
         if let Some((_, end)) = epoch_times.get_mut(&(event.recipient.as_str(), *epoch)) {
             *end = Some(event.at_us);
         }
         *epoch = epoch.saturating_add(1);
     }
+    epoch_times
+}
+
+/// Check schedule and incarnation evidence, counting each valid planned send once.
+fn scheduled_send_evidence(
+    plans: &[SenderPlan],
+    records: &RunRecords,
+    index: &SendIndex<'_>,
+    reasons: &mut Vec<InvalidReason>,
+) -> u64 {
+    let mut plans: BTreeMap<_, _> = plans
+        .iter()
+        .map(|plan| (plan.name.as_str(), (plan, plan.sends.iter())))
+        .collect();
+    let epoch_times = send_epoch_times(records);
     let mut previous_key = None;
     let mut covered = false;
     let mut completed = 0;
@@ -1011,13 +1013,10 @@ fn scheduled_send_evidence(
             covered = false;
         }
         previous_key = Some(key);
-        let epoch_time = if records.churn.is_empty() && event.epoch == 1 {
-            Some((0, None))
-        } else {
-            epoch_times
-                .get(&(event.sender.as_str(), event.epoch))
-                .copied()
-        };
+        let epoch_time = epoch_times
+            .get(&(event.sender.as_str(), event.epoch))
+            .copied()
+            .or_else(|| (event.epoch == 1).then_some((0, None)));
         let mismatch = match plans.get_mut(event.sender.as_str()) {
             None => Some(SendPlanMismatch::UnknownSender),
             Some((plan, schedule)) => match usize::try_from(event.seq)
@@ -8646,5 +8645,156 @@ mod coverage_tests {
                 })
             );
         }
+    }
+    /// #775: unaffected initial incarnations need no retained lifetime row.
+    #[test]
+    fn sparse_send_epoch_times_match_dense_lifetimes_and_scale_with_churn() {
+        let names: Vec<_> = (0..15_984).map(|peer| format!("peer-{peer:05}")).collect();
+        for reverse in [false, true] {
+            for malformed in [false, true] {
+                let mut records = RunRecords::default();
+                for (phase, at_us, epoch) in [
+                    (ChurnPhase::Disconnect, 10, None),
+                    (ChurnPhase::Rejoined, 20, Some(2)),
+                    (ChurnPhase::Disconnect, 30, None),
+                    (ChurnPhase::Rejoined, 40, Some(3)),
+                ] {
+                    records.churn.push(ChurnEvent {
+                        recipient: names[0].clone(),
+                        phase,
+                        at_us,
+                        epoch,
+                        tails: BTreeMap::new().into(),
+                    });
+                }
+                if malformed {
+                    records.churn.extend([
+                        ChurnEvent {
+                            recipient: "outside".into(),
+                            phase: ChurnPhase::Disconnect,
+                            at_us: 50,
+                            epoch: None,
+                            tails: BTreeMap::new().into(),
+                        },
+                        ChurnEvent {
+                            recipient: names[0].clone(),
+                            phase: ChurnPhase::Rejoined,
+                            at_us: 60,
+                            epoch: Some(2),
+                            tails: BTreeMap::new().into(),
+                        },
+                        ChurnEvent {
+                            recipient: names[1].clone(),
+                            phase: ChurnPhase::Rejoined,
+                            at_us: 70,
+                            epoch: Some(0),
+                            tails: BTreeMap::new().into(),
+                        },
+                    ]);
+                }
+                if reverse {
+                    records.churn.reverse();
+                }
+                let sparse = send_epoch_times(&records);
+                let mut dense: SendEpochTimes<'_> = names
+                    .iter()
+                    .map(|name| ((name.as_str(), 1), (0, None)))
+                    .collect();
+                for event in &records.churn {
+                    if let Some(epoch) = event.epoch.filter(|epoch| *epoch > 1) {
+                        if event.phase == ChurnPhase::Rejoined {
+                            dense
+                                .entry((event.recipient.as_str(), epoch))
+                                .or_insert((event.at_us, None));
+                        }
+                    }
+                }
+                let disconnects = disconnect_positions(&records.churn, true);
+                let mut closing_epochs = BTreeMap::new();
+                for position in 0..disconnects.len() {
+                    let event = &records.churn[disconnects.get(position).unwrap()];
+                    let epoch = closing_epochs
+                        .entry(event.recipient.as_str())
+                        .or_insert(1_u32);
+                    if let Some((_, end)) = dense.get_mut(&(event.recipient.as_str(), *epoch)) {
+                        *end = Some(event.at_us);
+                    }
+                    *epoch = epoch.saturating_add(1);
+                }
+                for name in &names {
+                    for epoch in 0..=4 {
+                        let actual = sparse
+                            .get(&(name.as_str(), epoch))
+                            .copied()
+                            .or_else(|| (epoch == 1).then_some((0, None)));
+                        assert_eq!(
+                            actual,
+                            dense.get(&(name.as_str(), epoch)).copied(),
+                            "name={name} epoch={epoch} reverse={reverse} malformed={malformed}"
+                        );
+                    }
+                }
+                assert_eq!(sparse.len(), if malformed { 4 } else { 3 });
+                assert_eq!(dense.len(), names.len() + 2);
+                records.churn.clear();
+                assert!(send_epoch_times(&records).is_empty());
+            }
+        }
+    }
+    /// #775: compare one sparse reconnect wave at the planned 999-by-16 roster.
+    #[test]
+    #[ignore = "isolated send-lifetime metadata profile"]
+    fn generator_send_epoch_metadata_profile() {
+        let dense = std::env::var_os("CAPACITY_DENSE_SEND_EPOCHS").is_some();
+        let names: Vec<_> = (0..15_984).map(|peer| format!("peer-{peer:05}")).collect();
+        let mut records = RunRecords::default();
+        for name in names.iter().take(16) {
+            for (phase, at_us, epoch) in [
+                (ChurnPhase::Disconnect, 10, None),
+                (ChurnPhase::Rejoined, 20, Some(2)),
+            ] {
+                records.churn.push(ChurnEvent {
+                    recipient: name.clone(),
+                    phase,
+                    at_us,
+                    epoch,
+                    tails: BTreeMap::new().into(),
+                });
+            }
+        }
+        let before = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = std::time::Instant::now();
+        let rows = if dense {
+            let mut rows: SendEpochTimes<'_> = names
+                .iter()
+                .map(|name| ((name.as_str(), 1), (0, None)))
+                .collect();
+            rows.extend(send_epoch_times(&records));
+            rows
+        } else {
+            send_epoch_times(&records)
+        };
+        let elapsed_us = started.elapsed().as_micros();
+        let after = crate::diagnostics::resident_memory_bytes(std::process::id());
+        assert_eq!(rows.len(), if dense { 16_000 } else { 32 });
+        for name in &names {
+            for epoch in 1..=2 {
+                let actual = rows
+                    .get(&(name.as_str(), epoch))
+                    .copied()
+                    .or_else(|| (epoch == 1).then_some((0, None)));
+                let churned = name.as_str() <= names[15].as_str();
+                let expected = match (churned, epoch) {
+                    (true, 1) => Some((0, Some(10))),
+                    (true, 2) => Some((20, None)),
+                    (_, 1) => Some((0, None)),
+                    _ => None,
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+        println!("SEND_EPOCH_METADATA dense={dense} peers={} churned=16 retained_rows={} elapsed_us={elapsed_us} rss_before={before:?} rss_after={after:?}",
+            names.len(), rows.len());
+        std::hint::black_box(rows);
     }
 }

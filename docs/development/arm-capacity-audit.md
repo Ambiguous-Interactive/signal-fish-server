@@ -7209,3 +7209,63 @@ This measures oracle CPU work, not server throughput or full-run RSS. The
 new index adds roster-bounded scratch; configured raw-event byte admission
 continues to exclude validation indexes. No memory ceiling or ten-minute C3
 qualification follows from these timings. Both campaigns remain open.
+
+## Session 698 — one routing filter and sparse send-lifetime metadata
+
+Base: main `8b056f70`. Existing campaigns: #636 and #775.
+The server's routed-member snapshot and route lease both counted eligible
+members, then repeated the same membership and role checks to fill the vector.
+They now filter once into bounded synchronous scratch for up to 255 candidates.
+Small rooms use 16 slots. The returned vector still has exactly its retained
+length as capacity. Empty eligible sets allocate no vector storage. Larger
+custom rosters retain the former exact-count fallback. Routing locks, filtering
+rules and sorted identities stay unchanged. Scratch does not cross an await.
+
+The ignored `routed_roster_filtering_profile` compares complete old/new calls
+under the same production locks. One unoptimized Linux ARM64 process uses
+10,000 calls per cell in old/new/new/old order. Ranges from the two observations:
+
+| Candidates | Eligible | Former calls (us) | Single-pass calls (us) |
+| --- | --- | --- | --- |
+| 2 | 2 | 30,067–30,333 | 23,767–24,776 |
+| 2 | 1 | 38,117–38,386 | 27,811–28,070 |
+| 16 | 16 | 121,449–133,291 | 81,253–81,367 |
+| 16 | 8 | 178,251–187,562 | 101,102–101,710 |
+| 255 | 255 | 1,874,751–2,088,555 | 1,275,085–1,338,249 |
+| 255 | 127 | 2,655,758–2,702,289 | 1,482,463–1,500,907 |
+
+This measures snapshot cost, not service throughput or gameplay latency. A
+predicate-count control checks one visit per candidate within the shipped
+limit, exact storage and independent sorted output. It covers empty, fully
+filtered, sparse, 16/17, 254/255 and 256/1,024-candidate custom inputs. Existing
+route-change and routing-fence controls still pass.
+
+The generator's scheduled-send validator previously inserted an epoch-one
+lifetime for every planned peer whenever any churn existed. Epoch one has a
+shared default lifetime. The validator now retains only recorded lifetime
+overrides, including first disconnects and announced later incarnations.
+Temporary disconnect counters are released before send validation begins.
+Duplicate, unknown and inactive epochs still feed the same validation rules.
+Dense-reference controls compare known peers across valid, malformed and
+reversed histories. Existing boundary and exact artifact-replay controls pass.
+
+The ignored `generator_send_epoch_metadata_profile` uses 15,984 peers and one
+16-peer reconnect wave. It compares the former dense representation with the
+sparse one in three separate processes per representation, in the same
+unoptimized ARM64 binary:
+
+| Representation | Retained lifetime rows | Construction time (us) | RSS change (bytes) |
+| --- | --- | --- | --- |
+| Dense | 16,000 | 2,335–2,387 | 3,985,408 |
+| Sparse | 32 | 188–229 | 2,564,096 |
+
+RSS samples include allocator and process effects; the 1,421,312-byte difference
+is an observation, not an allocator-independent map-size claim. The exact
+retained-row reduction is independent of RSS. This is metadata qualification,
+not a ten-minute C3 run or a new raw-event memory ceiling. Offered work,
+receipt retention, lag bounds, drain grace and delivery/replay requirements do
+not change. Both campaigns remain open.
+
+The unchanged room-replacement workload also passes in Nextest
+`f7d68cdd-f034-4961-8ea6-36a449f87216`. That control does not attribute or repair
+the historical coverage timeout in #1352. That issue remains open.

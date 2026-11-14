@@ -1847,7 +1847,8 @@ discovery, authenticate it as a network identity, or prove it reachable.
   session's sticky topology/transport pair are electable, and Direct candidates
   must also expose a usable endpoint (a member that cannot run the session is never named host of a
   session it
-  cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break. If no
+  cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break.
+  Missing stored join times sort last and tie by UUID. Normal socket joins record a join time. If no
   member qualifies, the server ends the session and sends every remaining v3 member an explicit
   Relay/Relay plan with no host, endpoint, peers, or ICE servers. This reset has a fresh generation;
   the room stays on the relay floor. A host

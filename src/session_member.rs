@@ -26,6 +26,7 @@ pub(crate) struct SessionMember {
     pub player_id: Uuid,
     pub player_name: String,
     pub is_authority: bool,
+    /// Unknown join times sort last, with UUID order breaking ties.
     pub joined_at: chrono::DateTime<chrono::Utc>,
     pub direct_endpoint: Option<DirectEndpoint>,
     pub capabilities: SessionCapabilities,

@@ -17461,3 +17461,41 @@ informational. Godot event-decoder blob `5c4e66e6` accepts the existing Error
 fields. Source inspection does not prove SDK runtime parity. Qualification
 stays open in Rust #300, .NET #153 and Godot #578. There is no wire migration.
 The wider #826 campaign remains open.
+
+### F363: absent join timestamps made host election depend on snapshot order
+
+Session 698 starts at main `8b056f70`. Existing campaign: #826.
+Finding: [#1642](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1642).
+The full-player and selection-player conversions replaced each absent
+`connected_at` with a separate wall-clock read. Two unknown-time members
+therefore acquired snapshot-order priority before the UUID tie break. The
+original-source control fails in Nextest `2466bb01-9b2c-493a-9743-1d593248eaa9`
+when the larger UUID appears first. The public in-memory `add_player_to_room`
+API preserves an absent timestamp. Normal socket admission records timestamps;
+no historical public gameplay incident is established.
+
+Both conversions now use one fixed last-place value for unknown times. Known
+times, explicit authority preference, capability gates and stored player fields
+stay unchanged. Controls cover full, selection and finalization projections,
+reversed input, known/unknown times and the maximum representable known time.
+An in-memory room-start control stores unknown-time members, uses the real
+finalization handler and checks both Host/WebRTC and Host/Direct publications
+in both input orders. It checks the elected host, shared generation, exact peer
+sets, offer direction and Direct endpoint. WebRTC cases also relay exact
+bidirectional generation-tagged signals through the server. These are server
+queue histories, not a new physical WebRTC gameplay qualification.
+
+Seventeen focused host/routing controls pass in Nextest
+`eff4321e-37d8-4e88-ae59-8162bd65ac32`. The mutation inventory remains 570.
+Existing #636 gains a measured single-pass routing snapshot; existing #775
+gains churn-bounded send-lifetime metadata. The capacity audit records their
+separate evidence and limits. Those three existing campaigns remain open.
+The new finding is excluded from the existing-issue count.
+
+External source assessment: Rust `client_core.rs` blob `ef296f63` validates
+host membership and consumes the authoritative plan. .NET state-machine blob
+`98094169` applies its generation and peer list. Godot `sf_session_types.gd`
+blob `533aed6f` decodes the supplied host and offer direction. None computes a
+host from server join timestamps. There is no wire migration or established
+SDK source defect. Separate runtime qualification remains in Rust #300, .NET
+issue #153 and Godot #578; source inspection does not prove SDK runtime parity.
