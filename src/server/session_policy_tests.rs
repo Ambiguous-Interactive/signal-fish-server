@@ -7995,3 +7995,191 @@ async fn host_leave_panic_recovery_history(consecutive_departure: bool) {
     assert_silent(&mut survivor_receiver).await;
     assert_silent(&mut peer_receiver).await;
 }
+
+/// #826: absent join times must not turn roster order into host priority.
+#[tokio::test]
+async fn missing_join_times_keep_host_election_stable_across_snapshot_paths() {
+    let server = create_server_with_session(host_config()).await;
+    let first = PlayerId::from_u128(1);
+    let second = PlayerId::from_u128(2);
+    for player in [first, second] {
+        let (sender, _receiver) = mpsc::channel(16);
+        server.connect_client(player, sender).await;
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    for known_time in [
+        None,
+        Some(base_time()),
+        Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+    ] {
+        for reverse in [true, false] {
+            let mut first_player = player_info(first, "First", false);
+            first_player.connected_at = known_time;
+            let mut second_player = player_info(second, "Second", false);
+            second_player.connected_at = None;
+            let mut players = vec![first_player, second_player];
+            if reverse {
+                players.reverse();
+            }
+            let capabilities = super::session_policy::SessionCapabilities::from(&v3_webrtc());
+            let projections = [
+                server.session_members_from(&players),
+                server.session_members_from_selection(
+                    players.iter().map(crate::database::SessionPlayer::from),
+                ),
+                players
+                    .iter()
+                    .map(|player| SessionMember::from_finalized_player(player, capabilities, false))
+                    .collect(),
+            ];
+            for members in projections {
+                assert_eq!(
+                    elect_host(None, &members),
+                    Some(first),
+                    "known={known_time:?} reverse={reverse}"
+                );
+                assert_eq!(elect_host(Some(second), &members), Some(second));
+                assert_eq!(
+                    members
+                        .iter()
+                        .find(|member| member.player_id == second)
+                        .unwrap()
+                        .joined_at,
+                    chrono::DateTime::<chrono::Utc>::MAX_UTC,
+                    "unknown timestamps have one stable, last-place key"
+                );
+            }
+        }
+    }
+}
+
+/// Stored members with unknown join times must receive one executable host plan.
+#[tokio::test]
+async fn stored_unknown_join_times_finalize_and_relay_both_signal_directions() {
+    for transport in [Transport::WebRtc, Transport::Direct] {
+        for reverse in [false, true] {
+            let server = create_server_with_session(crate::config::SessionConfig {
+                enable_webrtc: transport == Transport::WebRtc,
+                enable_direct: transport == Transport::Direct,
+                ..host_config()
+            })
+            .await;
+            let first = PlayerId::from_u128(1);
+            let second = PlayerId::from_u128(2);
+            let mut receivers = Vec::new();
+            for player in [first, second] {
+                let (sender, receiver) = mpsc::channel(32);
+                receivers.push(receiver);
+                server.connect_client(player, sender).await;
+                let mut protocol = v3_webrtc();
+                protocol.transports.push(Transport::Direct);
+                server.set_client_protocol(&player, protocol);
+            }
+            let creator = PlayerId::from_u128(3);
+            let room = server
+                .database
+                .create_room(
+                    "host-game".into(),
+                    None,
+                    3,
+                    false,
+                    creator,
+                    "udp".into(),
+                    "region-a".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            server
+                .database
+                .remove_player_from_room(&room.id, &creator)
+                .await
+                .unwrap();
+            let mut members = [first, second];
+            if reverse {
+                members.reverse();
+            }
+            for player in members {
+                let mut info = player_info(player, "Unknown-time", false);
+                info.connected_at = None;
+                info.is_ready = false;
+                info.connection_info = Some(ConnectionInfo::Direct {
+                    host: format!("192.0.2.{}", player.as_u128()),
+                    port: 7777,
+                });
+                assert!(server
+                    .database
+                    .add_player_to_room(&room.id, info)
+                    .await
+                    .unwrap());
+            }
+            publish_room_members(&server, &room.id, &members).await;
+            server
+                .database
+                .transition_room_to_lobby(&room.id)
+                .await
+                .unwrap();
+            for player in members {
+                server.handle_player_ready(&player).await;
+            }
+            for receiver in &mut receivers {
+                loop {
+                    let result = receiver.try_recv();
+                    match result {
+                        Ok(message) => assert!(matches!(
+                            message.as_ref(),
+                            ServerMessage::LobbyStateChanged { .. }
+                        )),
+                        Err(error) => {
+                            assert_eq!(error, mpsc::error::TryRecvError::Empty);
+                            break;
+                        }
+                    }
+                }
+            }
+            server.handle_start_game(&first).await;
+            let mut generation = None;
+            for (index, receiver) in receivers.iter_mut().enumerate() {
+                assert!(matches!(
+                    recv(receiver).await.as_ref(),
+                    ServerMessage::GameStarting { .. }
+                ));
+                let plan = expect_plan(receiver, "unknown-time finalization").await;
+                assert_eq!(plan.topology, Topology::Host);
+                assert_eq!(plan.transport, transport);
+                assert_eq!(
+                    plan.direct_endpoint,
+                    (transport == Transport::Direct).then(|| crate::protocol::DirectEndpoint {
+                        host: "192.0.2.1".into(),
+                        port: 7777
+                    })
+                );
+                assert_eq!(plan.host, Some(first));
+                assert_eq!(plan.peers.len(), 1);
+                assert_eq!(
+                    plan.peers[0].player_id,
+                    if index == 0 { second } else { first }
+                );
+                assert_eq!(plan.peers[0].initiate, index == 1);
+                assert_eq!(*generation.get_or_insert(plan.generation), plan.generation);
+            }
+            let generation = generation.unwrap();
+            if transport == Transport::WebRtc {
+                for (from, to, receiver_index) in [(first, second, 1), (second, first, 0)] {
+                    let signal = serde_json::json!({"Offer": format!("{from}-to-{to}")});
+                    server
+                        .handle_signal_in_generation(&from, to, generation, signal.clone())
+                        .await;
+                    assert!(
+                        matches!(recv(&mut receivers[receiver_index]).await.as_ref(),
+                ServerMessage::Signal { from: actual_from, generation: actual_generation, signal: actual_signal }
+                    if *actual_from == from && *actual_generation == generation && *actual_signal == signal)
+                    );
+                }
+            }
+            for receiver in &mut receivers {
+                assert_plan_queue_empty(receiver);
+            }
+        }
+    }
+}

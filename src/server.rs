@@ -4601,6 +4601,40 @@ impl InMemoryMessageCoordinator {
 }
 
 impl InMemoryMessageCoordinator {
+    /// Filter supported room sizes once while retaining an exact-sized owned roster.
+    fn routed_player_snapshot(
+        members: Option<&HashSet<PlayerId>>,
+        is_routed: impl Fn(&PlayerId) -> bool,
+    ) -> Vec<PlayerId> {
+        fn collect_inline<const CAPACITY: usize>(
+            members: impl Iterator<Item = PlayerId>,
+        ) -> Vec<PlayerId> {
+            let mut inline = [PlayerId::nil(); CAPACITY];
+            let mut count = 0_usize;
+            for (slot, player) in inline.iter_mut().zip(members) {
+                *slot = player;
+                count = count.saturating_add(1);
+            }
+            inline[..count].to_vec()
+        }
+
+        let Some(members) = members else {
+            return Vec::new();
+        };
+        let routed = members.iter().copied().filter(|player| is_routed(player));
+        let mut players = if members.len() <= 16 {
+            collect_inline::<16>(routed)
+        } else if members.len() <= usize::from(u8::MAX) {
+            collect_inline::<255>(routed)
+        } else {
+            let mut players = Vec::with_capacity(routed.clone().count());
+            players.extend(routed);
+            players
+        };
+        players.sort_unstable();
+        players
+    }
+
     fn is_spectator_route(&self, player_id: &PlayerId) -> bool {
         self.spectator_routes
             .lock()
@@ -4964,14 +4998,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .spectator_routes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let members = room_players
-            .get(room_id)
-            .into_iter()
-            .flat_map(|players| players.iter().copied())
-            .filter(|player_id| clients.contains_key(player_id) && !spectators.contains(player_id));
-        let mut players = Vec::with_capacity(members.clone().count());
-        players.extend(members);
-        players.sort_unstable();
+        let players = Self::routed_player_snapshot(room_players.get(room_id), |player| {
+            clients.contains_key(player) && !spectators.contains(player)
+        });
         Ok(Some(players))
     }
 
@@ -4987,14 +5016,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .spectator_routes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let members = room_players
-            .get(room_id)
-            .into_iter()
-            .flat_map(|members| members.iter().copied())
-            .filter(|player| clients.contains_key(player) && !spectators.contains(player));
-        let mut player_ids = Vec::with_capacity(members.clone().count());
-        player_ids.extend(members);
-        player_ids.sort_unstable();
+        let player_ids = Self::routed_player_snapshot(room_players.get(room_id), |player| {
+            clients.contains_key(player) && !spectators.contains(player)
+        });
         Ok(crate::coordination::RoomRoutesLease::new(
             Some(player_ids),
             routing,

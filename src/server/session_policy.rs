@@ -124,7 +124,9 @@ impl SessionMember {
             player_id: player.id,
             player_name: player.name.clone(),
             is_authority: player.is_authority,
-            joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
+            joined_at: player
+                .connected_at
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
             direct_endpoint: include_direct_endpoint
                 .then(|| {
                     player
@@ -145,7 +147,9 @@ impl SessionMember {
             player_id: player.id,
             player_name: player.name,
             is_authority: player.is_authority,
-            joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
+            joined_at: player
+                .connected_at
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
             direct_endpoint: player.direct_endpoint,
             capabilities,
         }
