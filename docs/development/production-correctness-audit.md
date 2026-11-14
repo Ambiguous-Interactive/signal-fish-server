@@ -17435,3 +17435,29 @@ identities retained. Reference-profile and Godot-profile final controls also
 pass after the diagnostic repair. These are qualification histories, not proof
 that the original incident is repaired. Keep #1639 open. Do not count this
 session-created follow-up as a pre-existing issue addressed or closed.
+
+### F362: failed WebRTC route checks discarded the sender result
+
+Session 697 starts at main `84e45a96`. Existing campaign: #826.
+Finding: [#1640](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1640).
+The Signal handler logged a failed `routed_player_pair` lookup and returned
+without a reply. The first-party in-memory lookup is currently infallible;
+this defect affects the fallible custom-coordinator contract. No public
+network incident is established. The injected route-failure regression fails
+on the original handler while waiting for its Error reply.
+
+The handler now returns the existing InternalError without charging the valid
+Signal slot. It releases the room publication fence before the refusal queue
+wait. Existing owned refusal completion retains the source guard and reply
+when the caller is canceled. Controls require a successful retry, silence at
+the failed target, the retained refusal, and exact bidirectional generation
+and payload preservation between the other two peers during backpressure.
+Seven focused refusal controls pass in Nextest `35f33c06-ea5b-4c5f-9a8b-b0530b8d350b`.
+The retained red and green logs are in `progress/session-697/`.
+
+Rust `src/client_core.rs` blob `ef296f63` accepts generic Error and stores its
+code and text. .NET state-machine blob `98094169` treats ServerError as
+informational. Godot event-decoder blob `5c4e66e6` accepts the existing Error
+fields. Source inspection does not prove SDK runtime parity. Qualification
+stays open in Rust #300, .NET #153 and Godot #578. There is no wire migration.
+The wider #826 campaign remains open.

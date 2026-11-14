@@ -8419,6 +8419,9 @@ async fn assert_signal_refusal_releases_room(refusal: &str) {
             .connection_manager
             .bump_game_data_epoch_for_test(&bob),
         "valid_budget_spent" => {}
+        "route_lookup_failed" | "route_lookup_canceled" => server
+            .message_coordinator
+            .fail_next_routed_player_pair_for_test(),
         _ => unreachable!(),
     }
     drop(guard);
@@ -8442,6 +8445,14 @@ async fn assert_signal_refusal_releases_room(refusal: &str) {
             .load(Ordering::Relaxed),
         1
     );
+    let rejected = if refusal == "route_lookup_canceled" {
+        drop(rejected);
+        let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+        assert!(futures_util::poll!(&mut Box::pin(lifecycle.lock())).is_pending());
+        None
+    } else {
+        Some(rejected)
+    };
     let mut room_available = Box::pin(server.message_coordinator.lock_room_event_mutation(&room));
     let released = futures_util::poll!(&mut room_available);
     assert!(
@@ -8458,19 +8469,29 @@ async fn assert_signal_refusal_releases_room(refusal: &str) {
         matches!(recv(&mut charlie_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal }
             if *from == bob && *actual == generation && *signal == json!({"Offer": "healthy"}))
     );
+    server
+        .handle_signal_in_generation(&charlie, bob, generation, json!({"Answer": "healthy"}))
+        .await;
+    assert!(
+        matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal { from, generation: actual, signal }
+        if *from == charlie && *actual == generation && *signal == json!({"Answer": "healthy"}))
+    );
     for _ in 0..4 {
         assert!(matches!(
             recv_refusal_source(&mut alice_rx).await.as_ref(),
             ServerMessage::Pong
         ));
     }
-    rejected.await;
+    if let Some(rejected) = rejected {
+        rejected.await;
+    }
     assert_eq!(
         error_code(recv_refusal_source(&mut alice_rx).await.as_ref()),
         Some(match refusal {
             "sender_unrouted" => ErrorCode::NotInRoom,
             "target_replaced" => ErrorCode::SignalTargetNotFound,
             "valid_budget_spent" => ErrorCode::SignalRateLimited,
+            "route_lookup_failed" | "route_lookup_canceled" => ErrorCode::InternalError,
             _ => unreachable!(),
         })
     );
@@ -8504,6 +8525,18 @@ async fn replaced_signal_target_releases_room_before_reply_backpressure() {
 #[tokio::test(start_paused = true)]
 async fn spent_signal_budget_releases_room_before_reply_backpressure() {
     assert_signal_refusal_releases_room("valid_budget_spent").await;
+}
+
+/// #826: lookup failures release the room while retaining their reply.
+#[tokio::test(start_paused = true)]
+async fn failed_signal_route_lookup_keeps_other_peer_signaling_live() {
+    assert_signal_refusal_releases_room("route_lookup_failed").await;
+}
+
+/// #826: canceling the caller cannot discard a backpressured lookup failure.
+#[tokio::test(start_paused = true)]
+async fn canceled_signal_route_lookup_failure_retains_reply_and_source_order() {
+    assert_signal_refusal_releases_room("route_lookup_canceled").await;
 }
 
 /// A failed metadata write must not keep healthy offers behind the reply queue.
@@ -8770,4 +8803,39 @@ async fn room_setting_refusals_release_the_room_before_reply_backpressure() {
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
+}
+
+/// #826: a route lookup failure must leave an explicit retryable result.
+#[tokio::test(start_paused = true)]
+async fn signal_route_lookup_failure_replies_and_preserves_retry_budget() {
+    let server = create_test_server_with_signals(1).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    let room = uuid::Uuid::new_v4();
+    for player in [alice, bob] {
+        server.set_client_protocol(&player, v3_webrtc());
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room)
+            .await;
+    }
+    server
+        .message_coordinator
+        .fail_next_routed_player_pair_for_test();
+    server
+        .handle_signal(&alice, bob, json!({"Offer": "retry"}))
+        .await;
+    assert_eq!(
+        error_code(recv(&mut alice_rx).await.as_ref()),
+        Some(ErrorCode::InternalError)
+    );
+    assert_eq!(valid_signal_budget_used(&server, &alice).await, 0);
+    assert_silent(&mut bob_rx).await;
+    server
+        .handle_signal(&alice, bob, json!({"Offer": "retry"}))
+        .await;
+    assert!(
+        matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal { from, signal, .. } if *from == alice && *signal == json!({"Offer": "retry"}))
+    );
+    assert_eq!(valid_signal_budget_used(&server, &alice).await, 1);
 }

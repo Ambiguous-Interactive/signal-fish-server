@@ -963,9 +963,9 @@ fn scheduled_send_evidence(
     index: &SendIndex<'_>,
     reasons: &mut Vec<InvalidReason>,
 ) -> u64 {
-    let plans: BTreeMap<_, _> = plans
+    let mut plans: BTreeMap<_, _> = plans
         .iter()
-        .map(|plan| (plan.name.as_str(), plan))
+        .map(|plan| (plan.name.as_str(), (plan, plan.sends.iter())))
         .collect();
     // Send completion and churn share one clock in the same peer task.
     // Keep one interval per incarnation, never one entry per scheduled send.
@@ -1018,11 +1018,11 @@ fn scheduled_send_evidence(
                 .get(&(event.sender.as_str(), event.epoch))
                 .copied()
         };
-        let mismatch = match plans.get(event.sender.as_str()) {
+        let mismatch = match plans.get_mut(event.sender.as_str()) {
             None => Some(SendPlanMismatch::UnknownSender),
-            Some(plan) => match usize::try_from(event.seq)
+            Some((plan, schedule)) => match usize::try_from(event.seq)
                 .ok()
-                .and_then(|seq| plan.sends.get(seq))
+                .and_then(|seq| schedule.send_at(seq))
             {
                 None => Some(SendPlanMismatch::UnscheduledSequence),
                 Some(_) if event.room != plan.room => Some(SendPlanMismatch::Room),
@@ -6651,6 +6651,61 @@ mod coverage_tests {
             serde_json::json!({"count": count, "distribution": distribution, "maximum": stats.0, "p99": stats.1, "elapsed_us": elapsed.as_micros()})
         );
         std::hint::black_box(sent);
+    }
+
+    /// #636/#775: measure scheduled-send validation with a long churn shape.
+    #[test]
+    #[ignore = "isolated scheduled-send validation profile"]
+    fn generator_scheduled_send_validation_profile() {
+        use std::time::{Duration, Instant};
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.players_per_room = 2;
+        config.warmup = Duration::from_secs(120);
+        config.duration = Duration::from_secs(600);
+        config.send_rate_per_sender = 1_000.0;
+        config.churn = crate::config::ChurnSchedule::RoomReplacement {
+            fraction_percent: 100,
+            start: Duration::from_secs(20),
+            window: Duration::from_millis(100),
+            interval: Duration::from_secs(30),
+        };
+        let (plans, _) = crate::schedule::build_run_shape(&config).unwrap();
+        let template = crate::complete_records(&crate::unit_context().plans)
+            .sent
+            .remove(0);
+        let records = RunRecords {
+            sent: plans
+                .iter()
+                .flat_map(|plan| {
+                    let name = ReceiptName::from(plan.name.as_str());
+                    let template = template.clone();
+                    plan.sends.iter().map(move |send| SentEvent {
+                        sender: name.clone(),
+                        seq: send.seq,
+                        phase: send.phase,
+                        intended_us: send.intended_us,
+                        sent_us: send.intended_us,
+                        ..template.clone()
+                    })
+                })
+                .collect(),
+            ..RunRecords::default()
+        };
+        let index = SendIndex::new(&records.sent);
+        let mut result = None;
+        for attempt in 0..4 {
+            let started = Instant::now();
+            let mut reasons = Vec::new();
+            let completed = scheduled_send_evidence(&plans, &records, &index, &mut reasons);
+            assert!(reasons.is_empty(), "{reasons:?}");
+            assert_eq!(completed, count_u64(records.sent.len()));
+            let elapsed_us = started.elapsed().as_micros();
+            if let Some(previous) = result {
+                assert_eq!(completed, previous);
+            }
+            result = Some(completed);
+            println!("SCHEDULE_VALIDATION_PROFILE attempt={attempt} sends={} elapsed_us={elapsed_us} completed={completed} rss={:?}", records.sent.len(), crate::diagnostics::resident_memory_bytes(std::process::id()));
+        }
     }
 
     /// #636: recipient and sender ranges match a flat index for malformed names and epochs.

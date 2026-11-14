@@ -294,6 +294,14 @@ impl EnhancedGameServer {
             Ok(pair) => pair,
             Err(error) => {
                 tracing::warn!(%from_room, %from, %to, %error, "Failed to revalidate signal routing");
+                drop(signal_publication_guard);
+                self.send_signal_error(
+                    from,
+                    "Failed to check signal routing; retry the signal",
+                    ErrorCode::InternalError,
+                    lifecycle_guard,
+                )
+                .await;
                 return;
             }
         };

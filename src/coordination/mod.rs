@@ -2428,6 +2428,10 @@ pub trait MessageCoordinator: Send + Sync {
         after_first_phase: Box<dyn FnOnce(usize) -> bool + Send + 'a>,
     ) -> anyhow::Result<RoomMessageTransactionOutcome>;
 
+    /// Fail the next route-pair lookup in a signaling regression.
+    #[cfg(test)]
+    fn fail_next_routed_player_pair_for_test(&self) {}
+
     /// Inject persistent room-transaction failures in unit tests that verify
     /// fail-closed publication recovery. Production implementations never
     /// expose or consult this hook.

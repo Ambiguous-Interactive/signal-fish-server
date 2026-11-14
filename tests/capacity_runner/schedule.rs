@@ -142,6 +142,21 @@ pub struct ScheduleIter<'a> {
     #[cfg(test)]
     shift_checks: usize,
 }
+impl ScheduleIter<'_> {
+    /// Reuse churn progress for consecutive ledger keys and seek sparse replay keys directly.
+    pub fn send_at(&mut self, index: usize) -> Option<ScheduledSend> {
+        if index >= self.schedule.len() {
+            return None;
+        }
+        if self.next != index {
+            self.next = index;
+            self.next_shift = 0;
+            self.total_shift = 0;
+        }
+        self.next()
+    }
+}
+
 impl Iterator for ScheduleIter<'_> {
     type Item = ScheduledSend;
     fn next(&mut self) -> Option<Self::Item> {
@@ -869,6 +884,53 @@ mod tests {
                 assert!(iter.shift_checks <= schedule.len() + schedule.shifts.len());
             }
             assert_eq!(schedule.iter().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    /// #636/#775: sequential validation visits each boundary once without per-send storage.
+    #[test]
+    fn schedule_cursor_reuses_boundaries_and_preserves_sparse_duplicate_and_invalid_keys() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.duration = Duration::from_secs(2);
+        config.send_rate_per_sender = 100.0;
+        let mut plans = build_plans(&config).unwrap();
+        for shifts in [
+            vec![],
+            vec![
+                (0, 0),
+                (100_000, 250_000),
+                (100_000, 200_000),
+                (900_000, 800_000),
+                (u64::MAX, u64::MAX),
+            ],
+            vec![(900_000, 950_000), (100_000, 300_000)],
+        ] {
+            let schedule = &mut plans[0].sends;
+            schedule.shifts = shifts;
+            let mut cursor = schedule.iter();
+            for index in 0..schedule.len() {
+                assert_eq!(cursor.send_at(index), schedule.get(index));
+            }
+            if cursor.ordered_shifts {
+                assert!(cursor.shift_checks <= schedule.len() + schedule.shifts.len());
+            }
+            for index in [
+                0,
+                0,
+                1,
+                7,
+                7,
+                8,
+                schedule.len() - 1,
+                schedule.len(),
+                usize::MAX,
+                3,
+                4,
+                0,
+            ] {
+                assert_eq!(cursor.send_at(index), schedule.get(index), "index={index}");
+                assert_eq!(cursor.len(), schedule.len() - cursor.next);
+            }
         }
     }
 
