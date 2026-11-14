@@ -207,6 +207,23 @@ run_batch() {
     if [ "$manifest" = tools/repo-checks/Cargo.toml ] || [ "$manifest" = formal/source-linked/lean/Cargo.toml ]; then
         batch_features=()
     fi
+    # Separate package workspaces must inherit the root Cargo cache. In the
+    # devcontainer that target is a native volume; workspace-local defaults
+    # can sit on a filesystem that truncates Rust fingerprint timestamps.
+    # Presence checks preserve caller overrides, including explicit empties.
+    if [ "$DRY_RUN" -eq 0 ] &&
+        { [ "$manifest" = tools/repo-checks/Cargo.toml ] || [ "$manifest" = formal/source-linked/lean/Cargo.toml ]; } &&
+        [ "${CARGO_TARGET_DIR+x}" != x ] && [ "${CARGO_BUILD_TARGET_DIR+x}" != x ]; then
+        local configured_target
+        if ! configured_target=$(cargo metadata --locked --no-deps --format-version 1 --manifest-path Cargo.toml |
+            python3 -c 'import json,sys; target=json.load(sys.stdin)["target_directory"]; sys.exit("Cargo target_directory must be a nonempty string") if not isinstance(target,str) or not target else print(target)'); then
+            echo "dev-loop: root Cargo target directory lookup failed; package checks were not run" >&2
+            overall=1
+            return 0
+        fi
+        local CARGO_TARGET_DIR="$configured_target"
+        export CARGO_TARGET_DIR
+    fi
     [ -z "$manifest" ] || manifest_args+=(--manifest-path "$manifest")
     [ -z "$filter" ] || filter_args+=(-E "$filter")
     local execution_args=("${manifest_args[@]+"${manifest_args[@]}"}" "${batch_features[@]+"${batch_features[@]}"}" "$@")

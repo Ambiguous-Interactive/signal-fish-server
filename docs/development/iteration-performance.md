@@ -164,7 +164,7 @@ The initial matched raw-unit experiment also rejected the assumption that
 tooling isolation improves root unit compilation: eleven completed protocol
 pairs had medians 27.596 seconds baseline and 26.853 seconds candidate. These
 partial samples and interrupted attempts remain separate from final workflow
-measurements. The 10-second target was missed for raw root unit rebuilds.
+measurements. The 10-second target was missed for raw root unit rebuilds on the benchmark artifact filesystem.
 The next experiment reuses the existing proof-core test package for the same
 production decision modules and public integration contracts for server work.
 It introduces no production interface or new test framework.
@@ -184,3 +184,21 @@ An isolated project-filesystem worktree profile passed in 664 milliseconds;
 small staged body-only cases measured 225–234 milliseconds versus 291 before.
 These fixture observations do not erase the recorded 1.2–1.3-second broad
 commits. Normal source commits skip catalog work.
+
+Filesystem probes explained extra warm-up rebuilds: the Windows-backed 9p
+workspace truncated explicit nanosecond timestamp updates, while generated
+files retained fractional timestamps. Cargo reported generated `private.rs`
+newer than its fingerprint. The root target directory is already an ext4
+named volume; nested package defaults were still on the workspace mount.
+The runner now inherits the root Cargo target directory for tooling and proof
+batches, with a function-local export. Explicit target overrides remain intact.
+A real default-cache core check passed with a 3.35-second first build.
+
+The controlled paired benchmark deliberately retains the same explicit
+Windows-backed target override for both heads because native storage was
+nearly full. Its raw-unit figures must not be generalized to default native
+storage. Its measured routing comparison remains separate from default-cache
+validation. Only inactive Cargo CI-profile output was cleaned: 7,470 rebuildable
+files, 2.9 GiB. Session history, source files, user files, and other caches were
+preserved. Raw timestamp and Cargo fingerprint evidence remains in the local
+iteration-performance record.

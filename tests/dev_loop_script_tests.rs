@@ -1029,3 +1029,170 @@ fn test_dev_loop_resolves_checkout_from_nested_working_directory() {
         "nested Git pathspec must not falsely report a clean tree: {changed}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_dev_loop_package_cache_inherits_root_without_leaking_or_replacing_overrides() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_root = unique_temp_dir("dev-loop-native-package-cache");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    seed_core_ownership(temp_root.path());
+    let tooling = temp_root.path().join("tools/repo-checks/Cargo.toml");
+    let manifest = fs::read_to_string(&tooling).expect("tooling fixture manifest");
+    write_file(&tooling, &format!("{manifest}\n[[test]]\nname = \"bar\"\n"));
+    write_file(
+        &temp_root.path().join("clients/native/Cargo.toml"),
+        "[package]\nname = \"client\"\n",
+    );
+    write_file(
+        &temp_root.path().join("clients/native/src/lib.rs"),
+        "// baseline\n",
+    );
+    commit_fixture_repo(temp_root.path());
+    let bin = temp_root.path().join("bin");
+    let cargo = bin.join("cargo");
+    write_file(
+        &cargo,
+        r#"#!/bin/sh
+printf '%s|%s|%s\n' "${CARGO_TARGET_DIR-unset}" "${CARGO_BUILD_TARGET_DIR-unset}" "$*" >> "$DEV_LOOP_CARGO_LOG"
+if [ "$1" = metadata ]; then
+    case " $* " in
+        *' --no-deps '*)
+            if [ "$DEV_LOOP_FAIL_LOOKUP" = 1 ]; then exit 7; fi
+            printf '{"target_directory":"/native target/cache"}\n' ;;
+        *) printf '{}\n' ;;
+    esac
+elif [ "$1 $2" = 'nextest list' ]; then
+    printf '{"rust-suites":{"fixture":{"testcases":{"test":{"filter-match":{"status":"matches"},"ignored":false}}}}}\n'
+fi
+"#,
+    );
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make cargo fixture executable");
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let fixture_path = std::env::join_paths(paths).expect("fixture PATH");
+    let log = temp_root.path().join("commands");
+    let run = |args: &[&str], target: Option<&str>, build: Option<&str>, fail: bool| {
+        write_file(&log, "");
+        let mut command = bash_command();
+        command
+            .arg("scripts/dev-loop.sh")
+            .args(args)
+            .env("PATH", &fixture_path)
+            .env("DEV_LOOP_CARGO_LOG", &log)
+            .env("DEV_LOOP_FAIL_LOOKUP", if fail { "1" } else { "0" })
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .current_dir(temp_root.path());
+        if let Some(target) = target {
+            command.env("CARGO_TARGET_DIR", target);
+        }
+        if let Some(build) = build {
+            command.env("CARGO_BUILD_TARGET_DIR", build);
+        }
+        let output = command.output().expect("run package-cache fixture");
+        (
+            output,
+            fs::read_to_string(&log).expect("captured cargo commands"),
+        )
+    };
+    for (pattern, owner, target, build) in [
+        ("test_other", "tools/repo-checks/Cargo.toml", None, None),
+        (
+            "test_core_projection_runs",
+            "formal/source-linked/lean/Cargo.toml",
+            None,
+            None,
+        ),
+        (
+            "test_other",
+            "tools/repo-checks/Cargo.toml",
+            Some("/caller-target"),
+            None,
+        ),
+        (
+            "test_other",
+            "tools/repo-checks/Cargo.toml",
+            None,
+            Some("/caller-build"),
+        ),
+        (
+            "test_other",
+            "tools/repo-checks/Cargo.toml",
+            Some("/caller-target"),
+            Some("/caller-build"),
+        ),
+        ("test_other", "tools/repo-checks/Cargo.toml", Some(""), None),
+        ("test_other", "tools/repo-checks/Cargo.toml", None, Some("")),
+    ] {
+        let overridden = target.is_some() || build.is_some();
+        let (output, commands) = run(&["test_alpha_runs", pattern], target, build, overridden);
+        assert!(output.status.success(), "cache routing must succeed for {pattern}, {target:?}, {build:?}: {output:?}\n{commands}");
+        assert_eq!(
+            commands
+                .lines()
+                .filter(|line| line.contains("--no-deps"))
+                .count(),
+            usize::from(!overridden),
+            "only absent overrides need root metadata: {commands}"
+        );
+        let expected_target = target.unwrap_or(if overridden {
+            "unset"
+        } else {
+            "/native target/cache"
+        });
+        let expected_build = build.unwrap_or("unset");
+        assert!(
+            commands.lines().any(|line| line
+                .starts_with(&format!("{expected_target}|{expected_build}|"))
+                && line.contains(owner)),
+            "package build must use its selected cache: {commands}"
+        );
+        assert!(
+            commands.lines().any(|line| line
+                .starts_with(&format!("{}|{expected_build}|", target.unwrap_or("unset")))
+                && line.contains("--test foo")),
+            "root cache behavior must remain unchanged: {commands}"
+        );
+    }
+    let (output, commands) = run(&["test_other"], None, None, true);
+    assert!(
+        !output.status.success(),
+        "root lookup failure must fail closed: {output:?}"
+    );
+    assert!(
+        !commands.contains("nextest"),
+        "failed lookup must prevent package compilation or execution: {commands}"
+    );
+    write_file(
+        &temp_root.path().join("tests/bar.rs"),
+        "#[test]\nfn test_other_changed() {}\n",
+    );
+    write_file(
+        &temp_root.path().join("clients/native/src/lib.rs"),
+        "// changed\n",
+    );
+    let (output, commands) = run(&["--changed"], None, None, false);
+    assert!(
+        output.status.success(),
+        "changed tool and client batches must succeed: {output:?}\n{commands}"
+    );
+    assert!(
+        commands
+            .lines()
+            .any(|line| line.starts_with("/native target/cache|unset|")
+                && line.contains("tools/repo-checks/Cargo.toml")),
+        "tool batch inherits native cache: {commands}"
+    );
+    assert!(
+        commands
+            .lines()
+            .any(|line| line.starts_with("unset|unset|")
+                && line.contains("clients/native/Cargo.toml")),
+        "local exported cache must not leak to client batch: {commands}"
+    );
+}
