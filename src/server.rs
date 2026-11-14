@@ -2577,6 +2577,8 @@ pub struct InMemoryMessageCoordinator {
     #[cfg(test)]
     fail_room_transactions: AtomicBool,
     #[cfg(test)]
+    fail_next_routed_player_pair: AtomicBool,
+    #[cfg(test)]
     routing_changed_injections: AtomicU32,
     #[allow(dead_code)]
     instance_id: Uuid,
@@ -3110,6 +3112,8 @@ impl InMemoryMessageCoordinator {
             publication_drain: watch::Sender::new(false),
             #[cfg(test)]
             fail_room_transactions: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_routed_player_pair: AtomicBool::new(false),
             #[cfg(test)]
             routing_changed_injections: AtomicU32::new(0),
             instance_id: Uuid::new_v4(),
@@ -4720,6 +4724,12 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
     }
 
     #[cfg(test)]
+    fn fail_next_routed_player_pair_for_test(&self) {
+        self.fail_next_routed_player_pair
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
     fn fail_room_transactions_for_test(&self, fail: bool) {
         self.fail_room_transactions
             .store(fail, std::sync::atomic::Ordering::Release);
@@ -5016,6 +5026,13 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         first: &PlayerId,
         second: &PlayerId,
     ) -> anyhow::Result<Option<[bool; 2]>> {
+        #[cfg(test)]
+        if self
+            .fail_next_routed_player_pair
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            anyhow::bail!("injected route-pair lookup failure");
+        }
         let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;

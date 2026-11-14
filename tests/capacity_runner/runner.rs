@@ -984,7 +984,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         });
     }
     auxiliary_result?;
-    let interval_samples = samples.lock().expect("interval samples poisoned").clone();
+    let interval_samples = take_interval_samples(&samples);
 
     // The registry is complete only after every peer task is done: record
     // it once, before the snapshot the artifacts write.
@@ -1070,6 +1070,11 @@ fn completed_send_evidence(send: &SentEvent) -> serde_json::Value {
     json!({"seq": send.seq, "phase": send.phase,
         "intended_us": send.intended_us, "sent_us": send.sent_us,
         "lag_us": send.sent_us.saturating_sub(send.intended_us)})
+}
+
+/// Transfer stopped sampler evidence into artifact processing.
+fn take_interval_samples(samples: &std::sync::Mutex<Vec<IntervalSample>>) -> Vec<IntervalSample> {
+    std::mem::take(&mut *samples.lock().expect("interval samples poisoned"))
 }
 
 fn interval_evidence(sample: &IntervalSample) -> serde_json::Value {
@@ -2967,6 +2972,41 @@ mod session_poll_tests {
                 assert_eq!(marker["workload_started"], false);
             }
             assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
+        }
+    }
+
+    /// #775: finalization must retain one exact sample buffer through artifact output.
+    #[test]
+    fn stopped_sampler_transfers_exact_artifacts_without_copying_retained_samples() {
+        for count in [0, 1, 4096] {
+            let samples: Vec<IntervalSample> = (0..count)
+                .map(|index| {
+                    serde_json::from_value(json!({
+                    "t_us": index,
+                    "counters": {"relayed": index, "tag": "雪\u{0000}".repeat(32)},
+                    "generator_cpu_seconds": 1.25,
+                    "scrape_error": if index % 2 == 0 { Some("metrics unavailable") } else { None },
+                })).unwrap()
+                })
+                .collect();
+            let expected = serde_json::to_value(&samples).unwrap();
+            let pointer = samples.as_ptr();
+            let retained = std::sync::Mutex::new(samples);
+            let output = take_interval_samples(&retained);
+            assert_eq!(
+                output.as_ptr(),
+                pointer,
+                "{count} samples must keep their original storage"
+            );
+            assert!(retained.lock().unwrap().is_empty());
+            assert_eq!(serde_json::to_value(&output).unwrap(), expected);
+            let directory = tempfile::tempdir().unwrap();
+            artifacts::write_intervals(directory.path(), &output).unwrap();
+            assert_eq!(
+                serde_json::to_value(artifacts::read_intervals(directory.path()).unwrap()).unwrap(),
+                expected
+            );
+            assert!(take_interval_samples(&retained).is_empty());
         }
     }
 

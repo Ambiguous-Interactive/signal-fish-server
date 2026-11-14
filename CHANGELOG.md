@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report failed WebRTC routing checks so peers can retry signaling (#1640).
 - Preserve router refusal replies and command order when an embedding caller is canceled (#1637).
 - Keep native graceful shutdown registered until its final control replay is handed off (#1145).
 - Preserve relay refusal replies and command order when an embedding caller is canceled (#1635).
