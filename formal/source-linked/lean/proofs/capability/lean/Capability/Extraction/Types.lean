@@ -41,7 +41,7 @@ inductive session_capability.Transport where
 | WebRtc : session_capability.Transport
 
 /-- [signal_fish_proof_core::session_admission::ActiveSessionPlan]
-    Source: 'src/../../../../src/session_admission.rs', lines 43:0-47:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 44:0-48:1 -/
 structure session_admission.ActiveSessionPlan where
   topology : session_capability.Topology
   transport : session_capability.Transport
@@ -77,13 +77,13 @@ structure session_member.SessionMember where
   capabilities : session_capability.SessionCapabilities
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure]
-    Source: 'src/../../../../src/session_admission.rs', lines 59:38-63:13 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 60:38-64:13 -/
 def session_admission.ActiveSessionPlan.host_invalid.closure (T1 : Type)
   (Clause0_IntoIter : Type) :=
   T1 × session_admission.ActiveSessionPlan
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure]
-    Source: 'src/../../../../src/session_admission.rs', lines 62:25-62:87 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 63:25-63:87 -/
 def session_admission.ActiveSessionPlan.host_invalid.closure.closure (T1 :
   Type) (Clause0_IntoIter : Type) :=
   uuid.Uuid × session_admission.ActiveSessionPlan
@@ -129,7 +129,7 @@ def session_capability.all_support.closure (T : Type) (T1 : Type) :=
   T1 × session_capability.Topology × session_capability.Transport
 
 /-- [signal_fish_proof_core::session_admission::MembershipPlan]
-    Source: 'src/../../../../src/session_admission.rs', lines 104:0-109:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 105:0-110:1 -/
 structure session_admission.MembershipPlan where
   plan : session_admission.ActiveSessionPlan
   active_plan_update : core.option.Option (core.option.Option

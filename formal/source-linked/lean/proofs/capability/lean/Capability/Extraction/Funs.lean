@@ -153,7 +153,7 @@ def session_member.SessionMember.can_host
   else ok false
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::supported_by]:
-    Source: 'src/../../../../src/session_admission.rs', lines 69:4-71:5 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 70:4-72:5 -/
 def session_admission.ActiveSessionPlan.supported_by
   (self : session_admission.ActiveSessionPlan)
   (member : session_member.SessionMember) :
@@ -162,7 +162,7 @@ def session_admission.ActiveSessionPlan.supported_by
   session_member.SessionMember.can_host member self.topology self.transport
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}::call_mut]:
-    Source: 'src/../../../../src/session_admission.rs', lines 62:25-62:87 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 63:25-63:87 -/
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool.call_mut
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -184,7 +184,7 @@ def
   else ok (false, c)
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_admission.rs', lines 62:25-62:87 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 63:25-63:87 -/
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -202,7 +202,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnOnce<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_admission.rs', lines 62:25-62:87 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 63:25-63:87 -/
 @[reducible]
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnOnceTupleSharedSessionMemberBool
@@ -218,7 +218,7 @@ def
 }
 
 /-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::{impl core::ops::function::FnMut<(&'_ signal_fish_proof_core::session_member::SessionMember,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure::closure<'a, '_1, '_2, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_admission.rs', lines 62:25-62:87 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 63:25-63:87 -/
 @[reducible]
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.closure.Insts.CoreOpsFunctionFnMutTupleSharedSessionMemberBool
@@ -237,7 +237,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
-    Source: 'src/../../../../src/session_admission.rs', lines 59:38-63:13 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 60:38-64:13 -/
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
@@ -260,7 +260,7 @@ def
   ok b
 
 /-- Trait implementation: [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::{impl core::ops::function::FnOnce<(uuid::Uuid,), bool> for signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid::closure<'a, '_1, T1, Clause0_IntoIter>}]
-    Source: 'src/../../../../src/session_admission.rs', lines 59:38-63:13 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 60:38-64:13 -/
 @[reducible]
 def
   session_admission.ActiveSessionPlan.host_invalid.closure.Insts.CoreOpsFunctionFnOnceTupleUuidBool
@@ -276,7 +276,7 @@ def
 }
 
 /-- [signal_fish_proof_core::session_admission::{signal_fish_proof_core::session_admission::ActiveSessionPlan}::host_invalid]:
-    Source: 'src/../../../../src/session_admission.rs', lines 54:4-64:5 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 55:4-65:5 -/
 def session_admission.ActiveSessionPlan.host_invalid
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
@@ -905,7 +905,7 @@ def session_member.select_session_pair
   core.option.Option.unwrap_or o session_member.RELAY_FLOOR
 
 /-- [signal_fish_proof_core::session_admission::finalize_session_plan]:
-    Source: 'src/../../../../src/session_admission.rs', lines 77:0-100:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 78:0-101:1 -/
 def session_admission.finalize_session_plan
   {T1 : Type} {Clause1_IntoIter : Type}
   (coreconvertAsRefT1SliceSessionMemberInst : core.convert.AsRef T1 (Slice
@@ -933,7 +933,7 @@ def session_admission.finalize_session_plan
   else ok { topology, transport, host := core.option.Option.None }
 
 /-- [signal_fish_proof_core::session_admission::resolve_membership_plan]:
-    Source: 'src/../../../../src/session_admission.rs', lines 113:0-160:1 -/
+    Source: 'src/../../../../src/session_admission.rs', lines 114:0-161:1 -/
 def session_admission.resolve_membership_plan
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
