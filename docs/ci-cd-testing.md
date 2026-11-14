@@ -581,13 +581,13 @@ This is an informational tool — it always exits 0 and is not a CI gate.
 
 ```bash
 # Run all CI configuration tests
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
 # Run with verbose output
-cargo test --test ci_config_tests -- --nocapture
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests -- --nocapture
 
 # Run specific test
-cargo test --test ci_config_tests test_lychee_config_exists
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_lychee_config_exists
 ```
 
 ### Run Pre-commit Checks Manually
@@ -753,7 +753,7 @@ ls -la .githooks/pre-commit
 ./scripts/check-markdown.sh
 
 # Run tests locally
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
 # Check for syntax errors
 # For .lychee.toml

@@ -157,7 +157,8 @@ grep -rnE 'uses: .+@v[0-9]+$' .github/workflows/   # floating major tags
 
 ```bash
 ./scripts/check-workflow-hygiene.sh
-cargo test --test ci_config_tests test_github_actions_use_version_refs_not_commit_hashes
+cargo test --manifest-path tools/repo-checks/Cargo.toml \
+  --test ci_config_tests test_github_actions_use_version_refs_not_commit_hashes
 ```
 
 ## Pattern 23: Workflow Script References to Non-Existent Files

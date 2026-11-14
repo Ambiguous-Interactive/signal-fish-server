@@ -1,4 +1,5 @@
 # Formal Verification Workflow
+# all-jobs-run-on-schedule
 #
 # Complementary formal checks of the Protocol v3 session lifecycle and the
 # per-connection delivery contract:
@@ -45,9 +46,14 @@
 name: Formal Verification
 
 on:
+  schedule:
+    - cron: "30 2 * * *"
   pull_request:
     branches: [main]
     paths:
+      - "scripts/ci-cohort.py"
+      - "scripts/read-toml-string.sh"
+      - ".cargo/**"
       - "formal/**"
       - "rust-toolchain.toml"
       - "scripts/run-tla-model-check.sh"
@@ -73,10 +79,27 @@ permissions:
   contents: read
 
 jobs:
+  scope:
+    name: Select proof inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lean: ${{ steps.select.outputs.lean }}
+      proof_faults: ${{ steps.select.outputs.proof_faults }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Select affected proof work
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci-cohort.py --outputs >> "$GITHUB_OUTPUT"
+
   lean:
     name: Source-linked Lean Proofs
     runs-on: ubuntu-24.04
-    needs: lean-shards
+    needs: [scope, lean-positive, lean-shards]
     if: always()
     steps:
       - name: Checkout repository
@@ -85,18 +108,107 @@ jobs:
           persist-credentials: false
       - name: Require every proof worker
         env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          PROOFS: ${{ needs.scope.outputs.lean }}
+          FAULTS: ${{ needs.scope.outputs.proof_faults }}
+          POSITIVE_RESULT: ${{ needs.lean-positive.result }}
           SHARD_RESULT: ${{ needs.lean-shards.result }}
-        run: test "$SHARD_RESULT" = success
+        run: |
+          test "$SCOPE_RESULT" = success
+          if [ "$FAULTS" = true ]; then
+            test "$SHARD_RESULT" = success
+          elif [ "$PROOFS" = true ]; then
+            test "$POSITIVE_RESULT" = success
+          else
+            test "$PROOFS" = false
+          fi
       - name: Download Lean evidence
+        if: needs.scope.outputs.proof_faults == 'true'
         uses: actions/download-artifact@v8.0.2
         with:
           pattern: source-linked-lean-*
           path: lean-evidence
       - name: Require complete current-source fault coverage
+        if: needs.scope.outputs.proof_faults == 'true'
         run: python3 formal/source-linked/lean/verify.py --audit-shards lean-evidence --shard-count 4
+
+  lean-positive:
+    name: Lean affected positive proofs
+    needs: scope
+    if: needs.scope.outputs.lean == 'true' && needs.scope.outputs.proof_faults != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read production Rust toolchain
+        id: toolchain
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Install pinned hax
+        uses: taiki-e/install-action@v2.90.2
+        with:
+          tool: cargo-hax@0.4.2
+
+      - name: Install pinned elan
+        shell: bash
+        run: |
+          bash scripts/download-verified.sh \
+            https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz \
+            42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63 \
+            "$RUNNER_TEMP/elan.tar.gz"
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --default-toolchain none --no-modify-path
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache extraction tools and Lean dependencies
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cache/hax/tools
+            ~/.elan/toolchains
+            ~/.cache/mathlib
+            ~/.rustup/toolchains/nightly-2026-08-18-*
+            formal/source-linked/lean/proofs/negotiation/lean/.lake/packages
+          key: ${{ runner.os }}-${{ runner.arch }}-lean-${{ hashFiles('formal/source-linked/lean/hax.toml', 'formal/source-linked/lean/proofs/**/lean-toolchain', 'formal/source-linked/lean/proofs/**/lake-manifest.json') }}
+
+      - name: Check axiom report handling
+        run: python3 -m unittest discover -s formal/source-linked/lean -p 'test_*.py'
+
+      - name: Extract production source and check proofs and negative controls
+        run: python3 formal/source-linked/lean/verify.py --prepare --probe-capability
+
+      - name: Check generated proof files are current
+        shell: bash
+        run: |
+          git diff --exit-code -- formal/source-linked/lean/proofs
+          git ls-files --others --exclude-standard -- formal/source-linked/lean/proofs > "$RUNNER_TEMP/untracked-lean"
+          if [ -s "$RUNNER_TEMP/untracked-lean" ]; then
+            cat "$RUNNER_TEMP/untracked-lean"
+            exit 1
+          fi
+
+      - name: Upload Lean evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: source-linked-lean-positive
+          path: formal/source-linked/lean/target/verification-logs/
+          include-hidden-files: true
+          if-no-files-found: warn
 
   lean-shards:
     name: Lean source faults (${{ matrix.shard }}/4)
+    needs: scope
+    if: needs.scope.outputs.proof_faults == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

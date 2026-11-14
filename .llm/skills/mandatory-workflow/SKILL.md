@@ -39,30 +39,9 @@ description: >-
 
 ## Core Workflow (Every Change)
 
-```bash
-# 1. Before any change - read the code first
-# NEVER modify code you haven't read
-
-# 2. After Rust changes, run in order. This is the FULL local gate: run it
-#    once before publication. While iterating, use the scoped commands in
-#    "Local vs hosted-CI work split" below instead.
-cargo fmt
-cargo clippy --all-targets --all-features  # Zero warnings allowed
-cargo test --all-features
-
-# 3. Doc comments (clippy and cargo test never reach these lints)
-export RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links \
-  -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
-cargo doc --locked --no-deps --all-features
-cargo doc --locked --no-deps --no-default-features
-
-# 4. Supply chain checks (run before pushing)
-cargo deny --all-features check            # Advisories, licenses, bans, sources
-
-```
-
-A public doc comment must not link a private item: `private_intra_doc_links`
-rejects it, and only the `Rustdoc Validation` workflow catches that.
+Use the local and hosted split below as the authoritative command policy.
+Do not run full tests, docs, or dependency scans before every push. Explicit
+`--deep` runs reproduce hosted checks when investigation requires them.
 
 ### Local vs hosted-CI work split (Required)
 
@@ -73,8 +52,8 @@ Expensive verification belongs to hosted CI, not the local agent loop:
   stays fast (measured: a bare `-E 'test(<name>)'` filterset still rebuilds
   every test binary, ~20 s; a target-scoped run rebuilds one, ~6 s):
   `cargo nextest run --test <target> -E 'test(<name>)'` — use `--lib` for
-  unit tests under `src/`. Find the owning target with
-  `cargo nextest list`. While iterating, scope clippy the same way:
+  unit tests under `src/`. Avoid unscoped `cargo nextest list`, which builds
+  every target. While iterating, scope clippy the same way:
   `cargo clippy --test <target> --all-features`.
   `scripts/dev-loop.sh <test-name> [...]` (options: `--all-features`,
   `--clippy`, `--dry-run`) does the resolution and runs the scoped command,
@@ -86,10 +65,10 @@ Expensive verification belongs to hosted CI, not the local agent loop:
   and let hosted CI run them; a red hosted check is the RCA signal, and any
   local replication must be the narrowest reproduction that shows it.
 
-### Pre-Push Validation
+### Affected configuration validation
 
 ```bash
-# Always run before pushing
+# Run when the owning configuration changes
 scripts/check-ci-config.sh           # Catch CI configuration issues
 scripts/check-msrv-consistency.sh    # Verify MSRV consistency (if MSRV-related changes)
 scripts/check-doc-consistency.sh     # Version sync + changelog + docs accuracy guard
@@ -250,9 +229,9 @@ Any run above 1000ms must be investigated before handoff.
 
 - [ ] `cargo fmt` — no formatting issues
 - [ ] `cargo clippy --all-targets --all-features` — zero warnings
-- [ ] `cargo test --all-features` — all tests pass
-- [ ] `cargo doc --no-deps` under strict `RUSTDOCFLAGS` — no doc-link warnings
-- [ ] `cargo deny --all-features check` — supply chain checks pass
+- [ ] Scoped tests pass locally; required hosted tests pass on the current head
+- [ ] Affected hosted documentation checks pass
+- [ ] Applicable hosted dependency checks complete
 - [ ] `scripts/check-ci-config.sh` — CI config validated
 - [ ] `scripts/check-msrv-consistency.sh` — MSRV consistency verified (if MSRV changed)
 - [ ] `scripts/check-doc-consistency.sh` — version/changelog/docs consistency validated

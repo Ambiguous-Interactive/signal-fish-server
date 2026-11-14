@@ -124,8 +124,8 @@ fn test_dev_loop_resolves_the_owning_target_and_scopes_the_run() {
         "the integration owner must be scoped by target stem: {output}"
     );
     assert!(
-        output.contains("--no-tests warn"),
-        "a scoped owner without matching tests must fail open (warn), not red: {output}"
+        output.contains("--no-tests fail"),
+        "a scoped owner without matching tests must fail: {output}"
     );
     assert!(
         output.contains("test_alpha_runs"),
@@ -408,15 +408,15 @@ fn test_dev_loop_changed_mode_clean_tree_and_non_crate_deltas() {
         "a no-op must not schedule work: {output}"
     );
 
-    // A clients/ delta is advisory only: never a failure, never a root-suite run.
+    // A client delta without a manifest must report incomplete verification.
     write_file(
         &temp_root.path().join("clients/native/src/lib.rs"),
         "// changed\n",
     );
     let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
     assert_eq!(
-        code, 0,
-        "a client-crate delta must not fail the root loop: {output}"
+        code, 1,
+        "a client delta without an owning manifest must fail: {output}"
     );
     assert!(
         output.contains("belongs to a client crate"),
@@ -492,5 +492,237 @@ fn test_dev_loop_changed_mode_usage_and_base_ref_handling() {
     assert!(
         output.contains("nothing to run"),
         "a clean base ref is a no-op: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_batches_different_targets_in_one_build() {
+    let (code, output) = run_dev_loop(&["--dry-run", "--clippy", "test_alpha_runs", "test_other"]);
+    assert_eq!(code, 0, "resolution must succeed: {output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("cargo nextest run"))
+            .count(),
+        1,
+        "one package must pay for one build: {output}"
+    );
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("cargo clippy"))
+            .count(),
+        1,
+        "one package must pay for one lint pass: {output}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_dev_loop_propagates_empty_selection_from_real_cargo_process() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_root = unique_temp_dir("dev-loop-empty-selection");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    let bin = temp_root.path().join("bin");
+    let cargo = bin.join("cargo");
+    write_file(
+        &cargo,
+        "#!/bin/sh\ncase \" $* \" in *' --no-tests fail '*) exit 4;; *) exit 0;; esac\n",
+    );
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make cargo fixture executable");
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let output = bash_command()
+        .arg("scripts/dev-loop.sh")
+        .arg("test_alpha_runs")
+        .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
+        .current_dir(temp_root.path())
+        .output()
+        .expect("run real script with cargo fixture");
+    assert!(
+        !output.status.success(),
+        "empty selections must propagate as failures: {output:?}"
+    );
+}
+
+#[test]
+fn test_dev_loop_changed_client_routes_to_owning_package_once() {
+    let temp_root = unique_temp_dir("dev-loop-client-routing");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    write_file(
+        &temp_root.path().join("clients/native/Cargo.toml"),
+        "[package]\nname = \"native-client\"\n",
+    );
+    commit_fixture_repo(temp_root.path());
+    write_file(
+        &temp_root.path().join("clients/native/src/lib.rs"),
+        "// changed\n",
+    );
+    write_file(
+        &temp_root.path().join("clients/native/src/helper.rs"),
+        "// changed\n",
+    );
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "client package must be scheduled: {output}");
+    assert!(
+        output.contains("--manifest-path clients/native/Cargo.toml"),
+        "owning manifest required: {output}"
+    );
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.contains("cargo nextest run"))
+            .count(),
+        1,
+        "client changes share one build: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_tooling_owner_does_not_receive_server_features() {
+    let temp_root = unique_temp_dir("dev-loop-tooling-owner");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    write_file(
+        &temp_root.path().join("tools/repo-checks/Cargo.toml"),
+        "[package]\nname = \"repo-checks\"\n[[test]]\nname = \"bar\"\npath = \"../../tests/bar.rs\"\n",
+    );
+    let (code, output) = run_dev_loop_changed(
+        temp_root.path(),
+        &[
+            "--dry-run",
+            "--features",
+            "tls",
+            "test_alpha_runs",
+            "test_other",
+        ],
+    );
+    assert_eq!(code, 0, "both packages resolve: {output}");
+    let commands: Vec<_> = output
+        .lines()
+        .filter(|line| line.starts_with("DRY-RUN:"))
+        .collect();
+    assert_eq!(commands.len(), 2, "each package has one build: {output}");
+    assert!(
+        commands
+            .iter()
+            .any(|line| line.contains("--features tls") && line.contains("--test foo")),
+        "server receives its features: {output}"
+    );
+    assert!(
+        commands.iter().any(
+            |line| line.contains("--manifest-path tools/repo-checks/Cargo.toml")
+                && !line.contains("--features")
+        ),
+        "tooling must not receive server feature names: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_changed_mode_rejects_multiple_base_refs() {
+    let (code, output) = run_dev_loop(&["--dry-run", "--changed", "HEAD", "HEAD"]);
+    assert_eq!(code, 2, "multiple bases must be rejected: {output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_dev_loop_rejects_an_empty_pattern_beside_a_valid_pattern() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_root = unique_temp_dir("dev-loop-partial-empty-selection");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    write_file(
+        &temp_root.path().join("tests/foo.rs"),
+        "#[test]\nfn test_alpha_runs() {}\nfn non_runnable_helper() {}\n",
+    );
+    let bin = temp_root.path().join("bin");
+    let cargo = bin.join("cargo");
+    write_file(
+        &cargo,
+        r#"#!/bin/sh
+if [ "$1 $2" = 'nextest list' ]; then
+    case "$*" in
+        *'test(non_runnable_helper)'*) status=mismatch ;;
+        *) status=matches ;;
+    esac
+    printf '{"rust-suites":{"fixture":{"testcases":{"test_alpha_runs":{"filter-match":{"status":"%s"},"ignored":false}}}}}\n' "$status"
+else
+    echo executed > "$DEV_LOOP_CARGO_LOG"
+fi
+"#,
+    );
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make cargo fixture executable");
+    let log = temp_root.path().join("executed");
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let output = bash_command()
+        .arg("scripts/dev-loop.sh")
+        .args(["test_alpha_runs", "non_runnable_helper"])
+        .env("PATH", std::env::join_paths(paths).expect("fixture PATH"))
+        .env("DEV_LOOP_CARGO_LOG", &log)
+        .current_dir(temp_root.path())
+        .output()
+        .expect("run script with discovery fixture");
+    assert!(
+        !output.status.success(),
+        "a valid sibling must not hide an empty request: {output:?}"
+    );
+    assert!(
+        !log.exists(),
+        "reject incomplete selections before running any tests"
+    );
+}
+
+#[test]
+fn test_dev_loop_owns_tooling_sources_and_root_build_inputs() {
+    let temp_root = unique_temp_dir("dev-loop-tooling-sources");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    write_file(
+        &temp_root.path().join("tools/repo-checks/Cargo.toml"),
+        "[package]\nname = \"repo-checks\"\n[[test]]\nname = \"ownership\"\npath = \"tests/ownership.rs\"\n",
+    );
+    write_file(
+        &temp_root
+            .path()
+            .join("tools/repo-checks/tests/ownership.rs"),
+        "#[test]\nfn test_tooling_ownership() {}\n",
+    );
+    commit_fixture_repo(temp_root.path());
+    let (code, output) =
+        run_dev_loop_changed(temp_root.path(), &["--dry-run", "test_tooling_ownership"]);
+    assert_eq!(code, 0, "tooling test pattern must resolve: {output}");
+    assert!(
+        output.contains("--manifest-path tools/repo-checks/Cargo.toml")
+            && output.contains("--test ownership"),
+        "tooling pattern requires its own manifest: {output}"
+    );
+    write_file(
+        &temp_root
+            .path()
+            .join("tools/repo-checks/tests/ownership.rs"),
+        "#[test]\nfn test_tooling_ownership_changed() {}\n",
+    );
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "tooling source delta must resolve: {output}");
+    assert!(
+        output.contains("--manifest-path tools/repo-checks/Cargo.toml")
+            && output.contains("--tests"),
+        "tooling source delta validates its owning package: {output}"
+    );
+    write_file(&temp_root.path().join("build.rs"), "fn main() {}\n");
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "build input must resolve: {output}");
+    assert!(
+        output.contains("--lib"),
+        "build.rs affects the runtime compilation: {output}"
     );
 }

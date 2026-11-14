@@ -107,12 +107,17 @@ jobs:
   # lint/nextest cron lanes (issues #513 and #512) need the same fail-closed
   # gate, and the remaining schedule cost is minutes of Linux time per day.
   quick-check:
+    outputs:
+      packaging: ${{ steps.changes.outputs.packaging }}
+      fuzz: ${{ steps.changes.outputs.fuzz }}
     name: Quick Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
       - name: Read Rust toolchain
         id: toolchain
         shell: bash
@@ -137,21 +142,13 @@ jobs:
       # syntactic-corruption class that motivated this gate.
       - name: Check formatting
         run: cargo fmt --all -- --check
-      # Then a no-codegen type-check across ALL targets (tests/ and benches/
-      # included). This is what catches a compile error in the test tree before
-      # the expensive matrix spends minutes rediscovering it on every lane.
-      - name: Check compilation
-        run: cargo check --locked --all-targets --all-features
-      # The fuzz crate is a SEPARATE workspace (fuzz/, out-of-tree per ADR-0003),
-      # so the check above never sees it — which let an E1 `register_disconnection`
-      # signature change break `fuzz_reconnect_tokens` undetected (fuzz.yml only
-      # runs on narrow paths). Type-check every fuzz
-      # target here against current library code on every PR. This is a no-codegen
-      # `check` (no libFuzzer/sanitizer), so the pinned stable toolchain suffices;
-      # the nightly build/run stays in fuzz.yml. The standalone lockfile is
-      # committed, so dependency drift fails here instead of rewriting it.
-      - name: Check fuzz crate compiles
-        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+      - name: Select affected verification
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci-cohort.py --outputs >> "$GITHUB_OUTPUT"
+      - name: Check cohort selection controls
+        run: python3 -m unittest discover -s scripts -p test_ci_cohort.py
 
   # Event-dependent OS cohort for the lint/nextest matrices (issues #513 and
   # #512): macOS bills at 10x and Windows at 2x Linux per minute and the
@@ -370,18 +367,6 @@ jobs:
         uses: taiki-e/install-action@v2.90.2
         with:
           tool: cargo-nextest@0.9.149
-      - name: Install cargo-mutants (mutation inventory guard)
-        # Installs the mutation workflow's pinned cargo-mutants so
-        # test_mutation_total_mutants_constant_matches_list enforces the
-        # measured inventory on this per-PR lane instead of skipping
-        # (motivation and failure history:
-        # test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard).
-        # Cost: one prebuilt-binary download; no extra compile.
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.90.2
-        with:
-          tool: cargo-mutants@27.1.0
-
       - name: Install Node.js for browser installer fixtures
         uses: actions/setup-node@v7.1.0
         with:
@@ -394,7 +379,7 @@ jobs:
 
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml
-        run: cargo nextest run --profile ci --locked --all-features --cargo-profile ci
+        run: python3 scripts/ci-cohort.py --runtime
 
       - name: Upload room replacement attempts
         if: always()
@@ -574,7 +559,7 @@ jobs:
                 # Root npm files are lint tooling; client manifests remain dependency-maintenance inputs.
                 package.json|package-lock.json|clients/browser/package.json|clients/browser/package-lock.json) HAS_DEPENDENCY_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
-                scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*) ;;
+                scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*|tools/repo-checks/*) ;;
                 clients/browser/src/*.test.ts|clients/browser/scripts/test.mjs) ;;
                 clients/browser/tests/*|clients/native/tests/*|clients/fortress/tests/*|clients/fortress-wasm/tests/*) ;;
                 benches/encoding/*) ;;
@@ -751,6 +736,11 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
         run: cargo deny --log-level warn --manifest-path third_party/rtc-sctp/Cargo.toml --config clients/native/deny.toml --all-features check
+      - name: Run cargo-deny (repository checks)
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path tools/repo-checks/Cargo.toml --all-features check
       - name: Run cargo-deny (fuzz package)
         if: steps.dep-relevance.outputs.relevant == 'true'
         env:
@@ -855,6 +845,9 @@ jobs:
       - name: Run cargo-audit (patched SCTP library tests)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file third_party/rtc-sctp/Cargo.lock
+      - name: Run cargo-audit (repository checks)
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
+        run: cargo audit --file tools/repo-checks/Cargo.lock
       - name: Run cargo-audit (fuzz package)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file fuzz/Cargo.lock
@@ -1226,3 +1219,111 @@ jobs:
         if: always()
         shell: bash
         run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+
+  # runs-on-schedule: verify repository policy against current sources.
+  repository-checks:
+    name: Repository Checks (${{ matrix.os }})
+    needs: quick-check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Read pinned toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: tools/repo-checks
+      - uses: taiki-e/install-action@v2.90.2
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Install mutation inventory tool (deep verification)
+        if: github.event_name != 'pull_request'
+        uses: taiki-e/install-action@v2.90.2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Check repository tooling format
+        run: cargo fmt --manifest-path tools/repo-checks/Cargo.toml --all -- --check
+      - name: Lint repository tooling
+        run: cargo clippy --manifest-path tools/repo-checks/Cargo.toml --locked --all-targets --profile ci -- -D warnings
+      - name: Check iteration entrypoints
+        run: python3 -m unittest discover -s scripts -p test_iteration_entrypoints.py
+      - name: Run independent repository checks
+        run: >-
+          cargo nextest run --manifest-path tools/repo-checks/Cargo.toml --locked
+          --profile ci --cargo-profile ci
+
+  # runs-on-schedule: type-check the independent fuzz graph.
+  fuzz-check:
+    name: Fuzz Compilation
+    needs: quick-check
+    if: needs.quick-check.outputs.fuzz == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Read pinned toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: fuzz
+      - name: Check every fuzz target against current server APIs
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
+
+  package-validation:
+    name: Package and API Validation
+    needs: quick-check
+    if: github.event_name == 'pull_request' && needs.quick-check.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Read pinned toolchain
+        id: toolchain
+        shell: bash
+        run: echo "channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: taiki-e/install-action@v2.90.2
+        with:
+          tool: cargo-nextest@0.9.149
+      - name: Verify published crate and API boundaries once
+        run: >-
+          cargo nextest run --locked --all-features --profile ci --cargo-profile ci
+          --test package_contents_tests --test public_api_privacy_tests --no-tests fail
+      - name: Drop trybuild artifacts before cache save
+        if: always()
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+
+  required-result:
+    name: Required PR Result
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [quick-check, ci-matrix, lint, nextest, relay-allocations, deny, msrv, docker,
+            repository-checks, fuzz-check, package-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Reject failed, cancelled, or missing selected results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          FUZZ: ${{ needs.quick-check.outputs.fuzz }}
+          PACKAGING: ${{ needs.quick-check.outputs.packaging }}
+        run: python3 scripts/ci-cohort.py --required-result

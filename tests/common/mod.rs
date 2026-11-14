@@ -26,9 +26,19 @@ const NESTED_CARGO_ENV_VARS: &[&str] = &[
     "MIRIFLAGS",
 ];
 
-/// Return the repository root (Cargo manifest directory).
+/// Return the repository root for server and independent repository-check targets.
 pub fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest.ends_with("tools/repo-checks") {
+        manifest
+            .parent()
+            .expect("tools directory")
+            .parent()
+            .expect("repository root")
+            .to_path_buf()
+    } else {
+        manifest
+    }
 }
 
 /// Read a file to string, panicking with a descriptive message on failure.

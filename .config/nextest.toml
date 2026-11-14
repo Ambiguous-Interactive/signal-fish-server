@@ -57,20 +57,10 @@ threads-required = 4
 filter = 'binary(webrtc_mesh_budget_e2e)'
 slow-timeout = { period = "300s", terminate-after = 2 }
 
-# Per-test override: serialize the three heavy CPU/IO tests that otherwise starve
-# each other under a loaded runner — the trybuild / compile-fail UI test
-# (`tests/public_api_privacy_tests.rs`), whose "runtime" is a full crate
-# (re)compile in trybuild's own target dir (cold whenever source changed, several
-# minutes under load — legitimate compile time, not a hang), the package-content
-# verifier (`tests/package_contents_tests.rs`), which performs a verified package
-# build plus an extracted library-test compile, and the docs internal-link checker
-# (`ci_config_tests::test_docs_relative_links_*`), which shells out to a ~17s repo
-# script. Routing all three through the bounded
-# `process-spawning` group (max-threads = 1) guarantees they never co-schedule,
-# so their nested builds cannot starve each other; the generous slow-timeout
-# absorbs each compile itself.
+# Serialize nested package and API privacy builds to avoid CPU/IO starvation.
+# Repository documentation checks use the independent tooling profile.
 [[profile.default.overrides]]
-filter = 'binary(public_api_privacy_tests) or test(published_crate_contains_only_runtime_sources_and_metadata) or test(test_docs_relative_links_resolve_to_existing_files)'
+filter = 'binary(public_api_privacy_tests) or test(published_crate_contains_only_runtime_sources_and_metadata)'
 test-group = 'process-spawning'
 slow-timeout = { period = "300s", terminate-after = 3 }
 
@@ -79,11 +69,6 @@ slow-timeout = { period = "300s", terminate-after = 3 }
 # provides the equivalent guard for plain `cargo test` lanes.
 [[profile.default.overrides]]
 filter = 'test(/when_pwsh_available/)'
-test-group = 'powershell-subprocess'
-
-# The documentation checker now shares the PowerShell lexer with the hook.
-[[profile.default.overrides]]
-filter = 'binary(doc_consistency_script_tests)'
 test-group = 'powershell-subprocess'
 
 # Retain the cold and warm task-registry evidence for the allocation investigation.

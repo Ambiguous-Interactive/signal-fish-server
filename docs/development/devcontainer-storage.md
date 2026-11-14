@@ -196,7 +196,8 @@ python3 scripts/test_dev_storage.py
 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/test-dev-storage-host.ps1
 shellcheck --severity=warning .devcontainer/post-start.sh
 bash scripts/check-tooling-parity.sh
-cargo nextest run --test agent_tooling_guards -E 'test(scratch_cleanup_is_bounded_and_independent_of_agent_refresh)'
+cargo nextest run --manifest-path tools/repo-checks/Cargo.toml \
+  --test agent_tooling_guards -E 'test(scratch_cleanup_is_bounded_and_independent_of_agent_refresh)'
 ```
 
 The Python suite uses disposable fixtures. It checks dry-run immutability,

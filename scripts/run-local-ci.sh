@@ -6,9 +6,9 @@
 # This script mirrors the GitHub Actions CI workflow checks.
 #
 # Usage:
-#   ./scripts/run-local-ci.sh           # Run all checks
+#   ./scripts/run-local-ci.sh           # Run scoped checks (use --deep for all checks)
 #   ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests, clippy, nested policy scans)
-#   ./scripts/run-local-ci.sh --fix     # Auto-fix issues where possible
+#   ./scripts/run-local-ci.sh --deep --fix # Full validation with automatic fixes
 #
 # Exit codes:
 #   0 = All checks passed
@@ -16,6 +16,17 @@
 #   2 = Invalid usage
 
 set -euo pipefail
+
+# Normal development uses scoped verification. Keep the historical full suite
+# available explicitly for reproducing hosted failures.
+if [ "${1:-}" = "--deep" ]; then
+    shift
+elif [ "${1:-}" = "--fix" ]; then
+    echo "Use --deep --fix for broad automatic fixes" >&2
+    exit 2
+elif [ "$#" -eq 0 ]; then
+    exec bash "$(dirname "${BASH_SOURCE[0]}")/dev-loop.sh" --clippy --changed
+fi
 
 # Color output (disable if not a TTY)
 if [ -t 1 ]; then
@@ -321,7 +332,12 @@ fi
 # Check 19: Documentation consistency policy tests
 if [ "$FAST_MODE" = false ]; then
     run_check "doc-policy-tests" "Running docs/changelog policy tests" \
-        cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
+        cargo test --manifest-path tools/repo-checks/Cargo.toml --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
+fi
+
+if [ "$FAST_MODE" = false ]; then
+    run_check "repository-tests" "Running independent repository checks" \
+        cargo nextest run --manifest-path tools/repo-checks/Cargo.toml --locked
 fi
 
 # Summary

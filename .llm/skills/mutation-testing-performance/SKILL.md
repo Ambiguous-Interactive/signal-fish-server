@@ -214,7 +214,7 @@ When `test_mutation_total_mutants_constant_matches_list` fails with
    matrix list, the job `name:` denominator, the `Run mutation testing`
    step's name and `--shard` argument, and the policy test's pinned run-line
    literal (`test_mutation_workflow_uses_fast_linker_and_in_place`).
-4. **Full local check**: `cargo nextest run --test ci_config_tests -E
+4. **Full local check**: `cargo nextest run --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests -E
    'test(mutation)' --all-features` covers all nine guards.
 
 Do not chase the count by excluding code from the mutation scope — exclusions

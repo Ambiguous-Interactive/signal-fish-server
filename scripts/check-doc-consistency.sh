@@ -901,7 +901,7 @@ is_internal_path() {
         .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*)
             return 0
             ;;
-        scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*)
+        scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*|tools/repo-checks/*)
             return 0
             ;;
         clients/browser/src/*.test.ts|clients/browser/scripts/test.mjs)

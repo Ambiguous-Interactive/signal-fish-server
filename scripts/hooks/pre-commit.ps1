@@ -56,7 +56,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     # Dot-directories
     ".github/*", ".githooks/*", ".devcontainer/*", ".config/*", ".vscode/*", ".claude/*",
     # Dev/build/agent directories
-    "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*",
+    "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*", "tools/repo-checks/*",
     "clients/browser/src/*.test.ts", "clients/browser/scripts/test.mjs",
     "clients/browser/tests/*", "clients/native/tests/*", "clients/fortress/tests/*", "clients/fortress-wasm/tests/*",
     "benches/encoding/*",

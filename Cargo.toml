@@ -1,4 +1,6 @@
 [package]
+# Explicit ownership keeps repository checks out of the server build graph.
+autotests = false
 name = "signal-fish-server"
 version = "0.12.0"
 edition = "2021"
@@ -369,3 +371,299 @@ incremental = true
 lto = "thin"
 strip = true
 codegen-units = 1
+
+[[test]]
+name = "allocation_harness_contracts"
+path = "tests/allocation_harness_contracts.rs"
+
+[[test]]
+name = "asymmetric_bandwidth_flap_e2e"
+path = "tests/asymmetric_bandwidth_flap_e2e.rs"
+
+[[test]]
+name = "async_timeout_policy_scan"
+path = "tests/async_timeout_policy_scan.rs"
+
+[[test]]
+name = "auth_integration_tests"
+path = "tests/auth_integration_tests.rs"
+
+[[test]]
+name = "clock_source_scan"
+path = "tests/clock_source_scan.rs"
+
+[[test]]
+name = "close_code_semantics_e2e"
+path = "tests/close_code_semantics_e2e.rs"
+
+[[test]]
+name = "concurrency_tests"
+path = "tests/concurrency_tests.rs"
+
+[[test]]
+name = "config_and_endpoints_tests"
+path = "tests/config_and_endpoints_tests.rs"
+
+[[test]]
+name = "config_validation_coverage_scan"
+path = "tests/config_validation_coverage_scan.rs"
+
+[[test]]
+name = "cross_room_stall_fairness_e2e"
+path = "tests/cross_room_stall_fairness_e2e.rs"
+
+[[test]]
+name = "delivery_concurrency_stress"
+path = "tests/delivery_concurrency_stress.rs"
+
+[[test]]
+name = "delivery_trace_generator_tests"
+path = "tests/delivery_trace_generator_tests.rs"
+
+[[test]]
+name = "docs_site_consistency"
+path = "tests/docs_site_consistency.rs"
+
+[[test]]
+name = "e2e_tests"
+path = "tests/e2e_tests.rs"
+
+[[test]]
+name = "encoding_corpus_tests"
+path = "tests/encoding_corpus_tests.rs"
+
+[[test]]
+name = "http_header_timeout_e2e"
+path = "tests/http_header_timeout_e2e.rs"
+
+[[test]]
+name = "install_playwright_browser_script_tests"
+path = "tests/install_playwright_browser_script_tests.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[[test]]
+name = "library_usage_tests"
+path = "tests/library_usage_tests.rs"
+
+[[test]]
+name = "load_tests"
+path = "tests/load_tests.rs"
+
+[[test]]
+name = "lobby_integration_tests"
+path = "tests/lobby_integration_tests.rs"
+
+[[test]]
+name = "loud_test_failures_scan"
+path = "tests/loud_test_failures_scan.rs"
+
+[[test]]
+name = "mixed_encoding_relay_e2e"
+path = "tests/mixed_encoding_relay_e2e.rs"
+
+[[test]]
+name = "model_based_state_machines"
+path = "tests/model_based_state_machines.rs"
+
+[[test]]
+name = "msrv_docs_consistency_tests"
+path = "tests/msrv_docs_consistency_tests.rs"
+
+[[test]]
+name = "mtls_token_binding_e2e"
+path = "tests/mtls_token_binding_e2e.rs"
+
+[[test]]
+name = "multiprocess_delivery_e2e"
+path = "tests/multiprocess_delivery_e2e.rs"
+
+[[test]]
+name = "no_panic_policy_scan"
+path = "tests/no_panic_policy_scan.rs"
+
+[[test]]
+name = "package_contents_tests"
+path = "tests/package_contents_tests.rs"
+
+[[test]]
+name = "partition_scenarios_e2e"
+path = "tests/partition_scenarios_e2e.rs"
+
+[[test]]
+name = "protocol_fuzz_hardening"
+path = "tests/protocol_fuzz_hardening.rs"
+
+[[test]]
+name = "protocol_samples"
+path = "tests/protocol_samples.rs"
+
+[[test]]
+name = "protocol_spec_consistency"
+path = "tests/protocol_spec_consistency.rs"
+
+[[test]]
+name = "protocol_v3_negotiation"
+path = "tests/protocol_v3_negotiation.rs"
+
+[[test]]
+name = "public_api_privacy_tests"
+path = "tests/public_api_privacy_tests.rs"
+
+[[test]]
+name = "public_upgrade_probe_script_tests"
+path = "tests/public_upgrade_probe_script_tests.rs"
+
+[[test]]
+name = "reconnect_window_races_e2e"
+path = "tests/reconnect_window_races_e2e.rs"
+
+[[test]]
+name = "reconnection_replay_e2e"
+path = "tests/reconnection_replay_e2e.rs"
+
+[[test]]
+name = "relay_backpressure_e2e"
+path = "tests/relay_backpressure_e2e.rs"
+
+[[test]]
+name = "relay_chaos_e2e"
+path = "tests/relay_chaos_e2e.rs"
+
+[[test]]
+name = "relay_delivery_soak"
+path = "tests/relay_delivery_soak.rs"
+
+[[test]]
+name = "release_prepare_tests"
+path = "tests/release_prepare_tests.rs"
+
+[[test]]
+name = "room_operation_wire_golden"
+path = "tests/room_operation_wire_golden.rs"
+
+[[test]]
+name = "scenario_realworld_e2e"
+path = "tests/scenario_realworld_e2e.rs"
+
+[[test]]
+name = "server_ping_e2e"
+path = "tests/server_ping_e2e.rs"
+
+[[test]]
+name = "signal_budget_model"
+path = "tests/signal_budget_model.rs"
+
+[[test]]
+name = "sixteen_player_admission_e2e"
+path = "tests/sixteen_player_admission_e2e.rs"
+
+[[test]]
+name = "sixteen_player_matrix_e2e"
+path = "tests/sixteen_player_matrix_e2e.rs"
+
+[[test]]
+name = "slow_consumer_no_cascade_e2e"
+path = "tests/slow_consumer_no_cascade_e2e.rs"
+
+[[test]]
+name = "split_brain_two_instances_e2e"
+path = "tests/split_brain_two_instances_e2e.rs"
+
+[[test]]
+name = "test_helpers"
+path = "tests/test_helpers.rs"
+
+[[test]]
+name = "thread_safety_tests"
+path = "tests/thread_safety_tests.rs"
+
+[[test]]
+name = "tls_deployment_boundaries_e2e"
+path = "tests/tls_deployment_boundaries_e2e.rs"
+
+[[test]]
+name = "tls_provider_construction"
+path = "tests/tls_provider_construction.rs"
+
+[[test]]
+name = "transport_frame_limits_e2e"
+path = "tests/transport_frame_limits_e2e.rs"
+
+[[test]]
+name = "v2_wire_golden"
+path = "tests/v2_wire_golden.rs"
+
+[[test]]
+name = "v3_edge_cases_e2e"
+path = "tests/v3_edge_cases_e2e.rs"
+
+[[test]]
+name = "v3_game_data_sequencing_e2e"
+path = "tests/v3_game_data_sequencing_e2e.rs"
+
+[[test]]
+name = "v3_ice_pregather_e2e"
+path = "tests/v3_ice_pregather_e2e.rs"
+
+[[test]]
+name = "v3_interop_downgrade_e2e"
+path = "tests/v3_interop_downgrade_e2e.rs"
+
+[[test]]
+name = "v3_multipeer_e2e"
+path = "tests/v3_multipeer_e2e.rs"
+
+[[test]]
+name = "v3_multiprocess_e2e"
+path = "tests/v3_multiprocess_e2e.rs"
+
+[[test]]
+name = "v3_negotiation_e2e"
+path = "tests/v3_negotiation_e2e.rs"
+
+[[test]]
+name = "v3_relay_stats_e2e"
+path = "tests/v3_relay_stats_e2e.rs"
+
+[[test]]
+name = "v3_reliability_wire_golden"
+path = "tests/v3_reliability_wire_golden.rs"
+
+[[test]]
+name = "v3_replan_e2e"
+path = "tests/v3_replan_e2e.rs"
+
+[[test]]
+name = "v3_session_plan_e2e"
+path = "tests/v3_session_plan_e2e.rs"
+
+[[test]]
+name = "v3_signal_errors_e2e"
+path = "tests/v3_signal_errors_e2e.rs"
+
+[[test]]
+name = "v3_signaling_e2e"
+path = "tests/v3_signaling_e2e.rs"
+
+[[test]]
+name = "v3_transport_status_e2e"
+path = "tests/v3_transport_status_e2e.rs"
+
+[[test]]
+name = "v3_wire_properties"
+path = "tests/v3_wire_properties.rs"
+
+[[test]]
+name = "webrtc_loss_fixture_tests"
+path = "tests/webrtc_loss_fixture_tests.rs"
+
+[[test]]
+name = "webrtc_mesh_budget_e2e"
+path = "tests/webrtc_mesh_budget_e2e.rs"
+
+[[test]]
+name = "websocket_test_helpers_tests"
+path = "tests/websocket_test_helpers_tests.rs"

@@ -2170,17 +2170,13 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         "ci.yml must define a `quick-check` fail-fast gate job so a parse/compile \
          error is caught once, in seconds, before the expensive matrix fans out."
     );
-    for command in [
-        "cargo fmt --all -- --check",
-        "cargo check --locked --all-targets --all-features",
-    ] {
-        assert!(
-            workflow.contains(command),
-            "ci.yml `quick-check` gate must run `{command}`. Formatting catches the \
-             unparsable-file class in under a second; `cargo check --all-targets` \
-             catches the broader compile-error class across the test tree."
-        );
-    }
+    let quick = extract_workflow_job_block(&workflow, "quick-check").expect("quick gate");
+    assert!(quick.contains("cargo fmt --all -- --check"));
+    assert!(
+        !quick.contains("cargo check"),
+        "the prerequisite must not duplicate downstream compilation"
+    );
+    assert!(quick.contains("scripts/ci-cohort.py --outputs"));
 
     // Every expensive compile/test job must wait on the gate. `needs:` is declared
     // in the first few lines of a job block, so a bounded window after the header
@@ -2513,79 +2509,16 @@ fn test_ci_enforces_relay_allocation_ceilings() {
 
 #[test]
 fn test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard() {
-    // `test_mutation_total_mutants_constant_matches_list` silently skips in
-    // any lane without cargo-mutants, so a PR that drifted the measured
-    // mutant count used to land red only in the weekly scheduled Mutation
-    // Testing run: three consecutive red Mondays (runs #218/#219 failed on
-    // count drift, #220 then exposed a real missed mutant once the count was
-    // fixed). The `nextest` job's ubuntu leg installs the exact pinned
-    // cargo-mutants the mutation workflow uses, so the inventory guard
-    // enforces at the per-PR seam for the cost of one prebuilt-binary
-    // download (no extra compile: the suite already builds
-    // tests/ci_config_tests.rs).
-    let root = repo_root();
-    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
-    let job = extract_workflow_job_block(&workflow, "nextest")
-        .expect("ci.yml must define the nextest job");
-
-    let step_start = job
-        .find("- name: Install cargo-mutants (mutation inventory guard)")
-        .expect(
-            "ci.yml `nextest` must install cargo-mutants so the mutation \
-             inventory guard stops skipping on the per-PR ubuntu lane",
-        );
-    let step_end = step_start
-        + job[step_start..]
-            .find("\n      - name:")
-            .unwrap_or(job.len() - step_start);
-    let step = &job[step_start..step_end];
-
+    let workflow = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let job =
+        extract_workflow_job_block(&workflow, "repository-checks").expect("repository checks");
+    assert!(job.contains("cargo-mutants@27.1.0"));
+    assert!(job.contains("if: github.event_name != 'pull_request'"));
+    assert!(job.contains("--manifest-path tools/repo-checks/Cargo.toml"));
+    let runtime = extract_workflow_job_block(&workflow, "nextest").expect("runtime checks");
     assert!(
-        step.contains("if: matrix.os == 'ubuntu-latest'"),
-        "ci.yml `nextest` cargo-mutants install must stay ubuntu-only: the \
-         guard is platform-independent, and the scheduled macOS/Windows \
-         nextest legs plus the MSRV full-suite lane keep their no-tool skip \
-         path"
-    );
-    assert!(
-        step.contains("uses: taiki-e/install-action@"),
-        "ci.yml `nextest` must install cargo-mutants through \
-         taiki-e/install-action, mirroring the mutation workflow's pin"
-    );
-    let mutation_workflow = read_live_file(&root.join(".github/workflows/mutation.yml"));
-    let pinned_versions = |text: &str| -> Vec<String> {
-        text.lines()
-            .map(str::trim)
-            .filter_map(|line| line.strip_prefix("tool: cargo-mutants@"))
-            .map(str::to_string)
-            .collect()
-    };
-    let ci_versions = pinned_versions(step);
-    assert!(
-        !ci_versions.is_empty(),
-        "ci.yml nextest must pin cargo-mutants@<version>"
-    );
-    let ci_version = ci_versions[0].clone();
-    let mutation_versions = pinned_versions(&mutation_workflow);
-    assert!(
-        !mutation_versions.is_empty(),
-        "mutation.yml must pin cargo-mutants@<version>"
-    );
-    assert!(
-        mutation_versions
-            .iter()
-            .all(|version| *version == ci_version),
-        "every mutation.yml cargo-mutants pin must equal the per-PR guard's \
-         pin ({ci_version}): a version skew can change the generated mutant \
-         set and count. Found: {mutation_versions:?}"
-    );
-
-    assert!(
-        job.find("- name: Run nextest")
-            .expect("ci.yml `nextest` must run the suite")
-            > step_start,
-        "ci.yml `nextest` must install cargo-mutants before the suite runs so \
-         the inventory guard executes inside the standard nextest lane"
+        !runtime.contains("cargo-mutants@"),
+        "the inventory guard belongs to tooling"
     );
 }
 
@@ -2808,7 +2741,9 @@ fn test_ci_workflow_matrix_os_values_match_constant() {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with("os:") && line.starts_with("        ")
+            trimmed.starts_with("os:")
+                && line.starts_with("        ")
+                && !line.contains("github.event_name")
         })
         .collect();
     assert!(
@@ -7241,7 +7176,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "bash scripts/prepare-release.sh --bump \"$BUMP\"",
         "bash scripts/validate-release-file-scope.sh",
         "Validate prepared release state",
-        "cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency",
+        "cargo test --locked --test release_prepare_tests",
         "bash scripts/list-release-files.sh",
         "release_inventory=$(mktemp)",
         "bash scripts/list-release-files.sh --bump \"$BUMP\" > \"$release_inventory\"",
@@ -7374,8 +7309,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     let prepared_state_position = prepare
         .find("- name: Validate prepared release state")
         .expect("prepared release state must be tested");
-    let prepared_state_command =
-        "cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency";
+    let prepared_state_command = "cargo test --locked --test release_prepare_tests";
     assert_eq!(
         prepare.matches(prepared_state_command).count(),
         1,
@@ -10387,7 +10321,8 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
             "Documentation pages and rendered assets such as CSS, SVG, and fonts",
         ),
         ("**/*.md", "Markdown documentation files"),
-        ("**/*.rs", "Rust source files (contain doc-comments)"),
+        ("src/**", "Public library and binary doc-comments"),
+        ("examples/**", "Public examples"),
         ("Cargo.toml", "Dependency changes affect doc builds"),
         ("Cargo.lock", "Lockfile changes affect doc builds"),
         ("mkdocs.yml", "MkDocs site configuration"),
@@ -11145,6 +11080,55 @@ fn test_required_check_names_are_consistent() {
 
 /// Helper function to find all files with a given extension, excluding specified directories
 fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]) -> Vec<PathBuf> {
+    // Git enumerates reviewable files without descending into ignored build and
+    // session trees. Filtering only after traversal made eight Markdown guards
+    // spend minutes walking the same local artifacts.
+    if let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(paths) = String::from_utf8(output.stdout) {
+                let mut files: Vec<_> = paths
+                    .split('\0')
+                    .filter(|path| !path.is_empty())
+                    .map(|path| root.join(path))
+                    .filter(|path| {
+                        path.is_file() && path.extension().is_some_and(|ext| ext == extension)
+                    })
+                    .filter(|path| {
+                        !path
+                            .strip_prefix(root)
+                            .expect("listed path is under scan root")
+                            .parent()
+                            .is_some_and(|parent| {
+                                parent.components().any(|component| {
+                                    let name = component.as_os_str().to_string_lossy();
+                                    name == ".git"
+                                        || name == "node_modules"
+                                        || exclude_dirs.iter().any(|excluded| name == *excluded)
+                                })
+                            })
+                    })
+                    .collect();
+                files.sort();
+                files.dedup();
+                return files;
+            }
+        }
+    }
+    // A non-repository directory, unavailable Git, or non-UTF-8 inventory
+    // retains the existing exhaustive fallback instead of dropping coverage.
     let mut files = Vec::new();
 
     fn visit_dirs(dir: &Path, extension: &str, exclude_dirs: &[&str], files: &mut Vec<PathBuf>) {
@@ -11181,6 +11165,51 @@ fn find_files_with_extension(root: &Path, extension: &str, exclude_dirs: &[&str]
     // keep every discovered file so the checks stay fail-closed.
     filter_git_ignored(&mut files);
     files
+}
+
+#[test]
+fn file_inventory_keeps_reviewable_files_and_skips_ignored_artifacts() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let root = fixture.path();
+    std::fs::create_dir(root.join("ignored")).expect("ignored directory");
+    std::fs::write(root.join(".gitignore"), "ignored/\n").expect("ignore fixture artifacts");
+    std::fs::write(root.join("visible name.md"), "reviewable").expect("reviewable file");
+    std::fs::write(root.join("ignored/generated.md"), "artifact").expect("artifact file");
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    assert_eq!(
+        find_files_with_extension(root, "md", &[]),
+        vec![root.join("visible name.md")]
+    );
+    let status = Command::new("git")
+        .args(["add", "--force", "ignored/generated.md"])
+        .current_dir(root)
+        .status()
+        .expect("track intentional fixture");
+    assert!(status.success());
+    assert_eq!(
+        find_files_with_extension(root, "md", &[]).len(),
+        2,
+        "tracked files remain reviewable even under ignore patterns"
+    );
+    assert_eq!(
+        find_files_with_extension(root, "md", &["ignored"]),
+        vec![root.join("visible name.md")]
+    );
+}
+
+#[test]
+fn file_inventory_without_git_retains_exhaustive_fallback() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    std::fs::write(fixture.path().join("visible.md"), "reviewable").expect("fixture file");
+    assert_eq!(
+        find_files_with_extension(fixture.path(), "md", &[]),
+        vec![fixture.path().join("visible.md")]
+    );
 }
 
 /// Drop gitignored paths from `files` with ONE batched `git check-ignore`
@@ -22147,7 +22176,7 @@ fn test_root_build_script_triggers_specialized_root_compile_workflows() {
                 "{workflow_name} {event}.paths must include `build.rs`: the workflow compiles \
                  the root Cargo package, so a build-script-only change is a consumed input.\n\
                  Fix: add `build.rs` to `{event}.paths` in {workflow_name}.\n\
-                 Verify: cargo test --locked --test ci_config_tests \
+                 Verify: cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests \
                  test_root_build_script_triggers_specialized_root_compile_workflows -- --exact"
             );
         }
@@ -22192,7 +22221,6 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
     for required_path in [
         "Cargo.toml",
         "build.rs",
-        "src/**",
         ".llm/code-samples/protocol/**",
         ".github/scripts/run-fuzz-targets.sh",
     ] {
@@ -23516,7 +23544,7 @@ fn test_ci_safety_workflow_is_periodic_not_per_event() {
              Fix: keep ci-safety.yml on the schedule + workflow_dispatch triggers, \
              or update this test in the same change that deliberately re-baselines \
              the cohort decision.\n\
-             Verify: cargo test --locked --test ci_config_tests \
+             Verify: cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests \
              test_ci_safety_workflow_is_periodic_not_per_event -- --exact"
         );
     }
@@ -23708,6 +23736,13 @@ fn cargo_segment_runs_full_test_suite(segment: &str) -> bool {
 /// flags from one command cannot bleed into the classification of another
 /// (e.g. `cargo test && cargo build --lib`).
 fn run_step_executes_full_test_suite(run: &str) -> bool {
+    if run.contains("--manifest-path tools/repo-checks/Cargo.toml") {
+        return false;
+    }
+    if run.contains("python3 scripts/ci-cohort.py --runtime") {
+        return true;
+    }
+
     run.replace("\\\n", " ")
         .split(['\n', ';', '|', '&'])
         .any(cargo_segment_runs_full_test_suite)
@@ -24915,15 +24950,12 @@ fn test_nextest_config_exists_and_is_valid() {
     );
 
     let normalized = content.replace("\r\n", "\n");
+    let tooling =
+        read_live_file(&root.join("tools/repo-checks/.config/nextest.toml")).replace("\r\n", "\n");
     assert!(
-        normalized.contains("powershell-subprocess = { max-threads = 1 }")
-            && normalized.contains(
-                "filter = 'test(/when_pwsh_available/)'\n\
-test-group = 'powershell-subprocess'",
-            )
-            && normalized.contains("filter = 'binary(doc_consistency_script_tests)'\ntest-group = 'powershell-subprocess'"),
-        ".config/nextest.toml must serialize direct PowerShell integration tests across \
-         nextest's per-test processes. Keep those tests named `*_when_pwsh_available`."
+        tooling.contains("powershell-subprocess = { max-threads = 1 }")
+            && tooling.contains("filter = 'test(/when_pwsh_available/) or binary(doc_consistency_script_tests)'\ntest-group = 'powershell-subprocess'"),
+        "the owning tooling config must serialize PowerShell integration tests"
     );
     assert!(
         normalized.contains("binary(mtls_token_binding_e2e)")
@@ -24935,8 +24967,7 @@ test-group = 'powershell-subprocess'",
     assert!(
         normalized.contains(
             "filter = 'binary(public_api_privacy_tests) or \
-test(published_crate_contains_only_runtime_sources_and_metadata) or \
-test(test_docs_relative_links_resolve_to_existing_files)'\n\
+test(published_crate_contains_only_runtime_sources_and_metadata)'\n\
 test-group = 'process-spawning'\n\
 slow-timeout = { period = \"300s\", terminate-after = 3 }"
         ) && normalized.contains("process-spawning = { max-threads = 1 }"),
@@ -25017,8 +25048,8 @@ fn test_nextest_uses_the_cargo_ci_profile_for_every_build() {
         .collect();
     assert_eq!(
         commands.len(),
-        3,
-        "keep the full suite, non-TLS control, and H14 control"
+        2,
+        "keep non-TLS and H14 controls alongside the explicit runtime selector"
     );
     for command in commands {
         assert!(
@@ -32670,7 +32701,8 @@ fn test_doc_yaml_bootstrap_uses_pinned_verified_download() {
         &[
             "docs/**",
             "**/*.md",
-            "**/*.rs",
+            "src/**",
+            "examples/**",
             "Cargo.toml",
             "Cargo.lock",
             "mkdocs.yml",
@@ -32722,6 +32754,9 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
         "formal-verification.yml",
         &["pull_request"],
         &[
+            "scripts/ci-cohort.py",
+            "scripts/read-toml-string.sh",
+            ".cargo/**",
             "formal/**",
             "rust-toolchain.toml",
             "scripts/run-tla-model-check.sh",
@@ -32848,8 +32883,11 @@ fn source_linked_lean_shards_require_complete_evidence() {
         Some("Source-linked Lean Proofs")
     );
     assert_eq!(
-        aggregate.as_mapping_get("needs").and_then(Yaml::as_str),
-        Some("lean-shards")
+        aggregate
+            .as_mapping_get("needs")
+            .and_then(Yaml::as_sequence)
+            .map(|jobs| jobs.iter().filter_map(Yaml::as_str).collect::<Vec<_>>()),
+        Some(vec!["scope", "lean-positive", "lean-shards"])
     );
     assert_eq!(
         aggregate.as_mapping_get("if").and_then(Yaml::as_str),
@@ -32860,17 +32898,35 @@ fn source_linked_lean_shards_require_complete_evidence() {
         .as_mapping_get("steps")
         .and_then(Yaml::as_sequence)
         .expect("aggregate steps");
-    for command in [
+    let gate = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Require every proof worker")
+        })
+        .expect("required gate");
+    let command = gate
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("gate command");
+    for check in [
+        "test \"$SCOPE_RESULT\" = success",
         "test \"$SHARD_RESULT\" = success",
-        "python3 formal/source-linked/lean/verify.py --audit-shards lean-evidence --shard-count 4",
+        "test \"$POSITIVE_RESULT\" = success",
     ] {
-        let step = steps
-            .iter()
-            .find(|step| step.as_mapping_get("run").and_then(Yaml::as_str) == Some(command))
-            .expect("required aggregate gate");
-        assert!(step.as_mapping_get("if").is_none());
-        assert!(step.as_mapping_get("continue-on-error").is_none());
+        assert!(command.contains(check));
     }
+    let audit = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Require complete current-source fault coverage")
+        })
+        .expect("fault evidence audit");
+    assert_eq!(
+        audit.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("needs.scope.outputs.proof_faults == 'true'")
+    );
+    assert!(audit.as_mapping_get("continue-on-error").is_none());
     let workers = jobs.as_mapping_get("lean-shards").expect("fault workers");
     for job in [aggregate, workers] {
         let checkout = job
@@ -35707,7 +35763,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
     match &baseline_block {
         Some(block)
             if block.contains(
-                "cargo test --locked --test ci_config_tests \
+                "cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests \
                  test_mutation_total_mutants_constant_matches_list",
             ) => {}
         _ => violations.push(
@@ -36418,6 +36474,13 @@ fn test_full_suite_caching_jobs_drop_trybuild_artifacts() {
 /// `--lib`. A `cargo ... test --lib` / `miri test --lib` never builds the
 /// trybuild `<target>/tests` dir, so it is exempt.
 fn line_runs_full_test_suite(line: &str) -> bool {
+    if line.contains("--manifest-path tools/repo-checks/Cargo.toml") {
+        return false;
+    }
+    if line.contains("python3 scripts/ci-cohort.py --runtime") {
+        return true;
+    }
+
     // Work on the command portion after an optional `run:` prefix; this also
     // matches continued lines inside a `run: |` block (which have no prefix).
     let cmd = line.trim();

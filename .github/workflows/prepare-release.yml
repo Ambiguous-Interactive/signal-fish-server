@@ -138,7 +138,9 @@ jobs:
         run: bash scripts/validate-release-file-scope.sh --bump "$BUMP"
 
       - name: Validate prepared release state
-        run: cargo test --locked --test release_prepare_tests --test workspace_lockfile_consistency
+        run: |
+          cargo test --locked --test release_prepare_tests
+          cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test workspace_lockfile_consistency
 
       - name: Resolve prepared release identity
         id: release

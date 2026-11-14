@@ -52,12 +52,12 @@ Created `docs/ci-cd-testing.md` with:
 
 ```bash
 # Run full test suite
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
 # Run specific test category
-cargo test --test ci_config_tests test_lychee
-cargo test --test ci_config_tests test_markdown
-cargo test --test ci_config_tests test_workflows
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_lychee
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_markdown
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_workflows
 ```
 
 ### Install Pre-commit Hook

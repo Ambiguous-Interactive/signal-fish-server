@@ -6,11 +6,20 @@
 # Provides colored output and a pass/fail summary.
 #
 # Usage:
-#   ./scripts/test.sh                  # Run all checks and tests
+#   ./scripts/test.sh                  # Run scoped tests and lint (use --deep for full validation)
 #   ./scripts/test.sh --all-features   # Enable all cargo features
-#   ./scripts/test.sh --verbose        # Verbose test output
+#   ./scripts/test.sh --deep --verbose # Verbose full-suite output
 
 set -euo pipefail
+
+# Normal development uses scoped verification. Keep the historical full suite
+# available explicitly for reproducing hosted failures.
+if [ "${1:-}" = "--deep" ]; then
+    shift
+else
+    # Existing feature flags stay scoped. Legacy verbosity belongs to --deep.
+    exec bash "$(dirname "${BASH_SOURCE[0]}")/dev-loop.sh" --clippy --changed "$@"
+fi
 
 echo "Signal Fish Test Suite"
 echo "========================================"
@@ -85,7 +94,7 @@ while [[ $# -gt 0 ]]; do
 		echo "  --help, -h           Show this help message"
 		echo ""
 		echo "Examples:"
-		echo "  $0                    # Run all checks and tests"
+		echo "  $0                    # Run scoped tests and lint (use --deep for full validation)"
 		echo "  $0 --all-features     # Run tests with all features"
 		echo "  $0 --verbose          # Run tests with verbose output"
 		exit 0
@@ -144,6 +153,11 @@ if run_test "All tests" "cargo test $FEATURES $VERBOSE $NOCAPTURE"; then
 fi
 
 echo ""
+
+((++total_tests))
+if run_test "Repository checks" "cargo nextest run --manifest-path tools/repo-checks/Cargo.toml --locked"; then
+    ((++passed_tests))
+fi
 
 # Summary
 echo "Test Summary"

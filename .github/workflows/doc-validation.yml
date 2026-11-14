@@ -36,7 +36,8 @@ on:
     paths:
       - "docs/**"
       - "**/*.md"
-      - "**/*.rs"
+      - "src/**"
+      - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "mkdocs.yml"

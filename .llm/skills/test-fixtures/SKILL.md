@@ -254,13 +254,13 @@ mod markdown_tests {
 
 ```bash
 # Run all CI config tests
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
 # Run specific test module
-cargo test --test ci_config_tests msrv_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests msrv_tests
 
 # Run with verbose output
-cargo test --test ci_config_tests -- --nocapture
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests -- --nocapture
 ```
 
 ### CI Pipeline
@@ -279,7 +279,7 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
 
       - name: Run CI config tests
-        run: cargo test --test ci_config_tests
+        run: cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
         # These tests validate:
         # - MSRV consistency across all config files
         # - Required workflows exist

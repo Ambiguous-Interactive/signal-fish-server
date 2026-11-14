@@ -31,6 +31,26 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: "cargo"
+    directory: "/tools/repo-checks"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(repo-checks)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-repo-checks-updates:
+        patterns:
+          - "*"
+
   # Proof harness graphs currently have no external Rust dependencies.
   - package-ecosystem: "cargo"
     directory: "/formal/source-linked/kani"

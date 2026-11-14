@@ -27,11 +27,8 @@
         },
         {
             "label": "Test",
-            "type": "cargo",
-            "command": "test",
-            "args": [
-                "--all-features"
-            ],
+            "type": "shell",
+            "command": "bash scripts/dev-loop.sh --changed",
             "problemMatcher": [
                 "$rustc"
             ],
@@ -81,10 +78,10 @@
             "group": "build"
         },
         {
-            "label": "Full Check",
-            "detail": "cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features",
+            "label": "Pre-publication Check",
+            "detail": "Scoped tests, then one full strict root lint gate",
             "type": "shell",
-            "command": "cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features",
+            "command": "bash scripts/dev-loop.sh --clippy --changed && cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings",
             "problemMatcher": [
                 "$rustc"
             ],
@@ -101,7 +98,7 @@
         {
             "label": "Watch Tests",
             "type": "shell",
-            "command": "cargo watch -x 'test --all-features'",
+            "command": "cargo watch -s \"bash scripts/dev-loop.sh --changed\"",
             "problemMatcher": [],
             "group": "test",
             "isBackground": true

@@ -1,11 +1,16 @@
 {
-  "base": "3e7b16df0197b72db231d2b97e5b0bd0a7cbb8d4",
-  "reason": "Update documentation for the internal Godot compatibility fixture. The declared README changes no shipped server behavior, SDK API, wire format, or default. Fixture source paths are already internal. The separate relay improvement keeps its user-facing changelog entry.",
+  "base": "ce9df99685139d2544bd62588006ea8c4af316db",
+  "reason": "Separate repository verification from runtime builds and update contributor command paths. Package metadata, shipped features, runtime code, public APIs, wire behavior, and defaults do not change.",
   "files": [
     {
-      "path": "clients/fortress-wasm/README.md",
-      "before": "c4b066756c136bea721bc02d2c03337a7df01066",
-      "after": "5bad6d1e1556f8fe26dec9290c1f1569675afd88"
+      "path": "Cargo.toml",
+      "before": "09a62be7c0bdfe413d66d87788f9642aaced7b87",
+      "after": "704bf80007ef4a83db1a4ab9bbd354a7b164fcb5"
+    },
+    {
+      "path": "docs/adr/ci-cd-preventative-measures.md",
+      "before": "86e2cefcada605c7cdbf6f42e562079d47772501",
+      "after": "25c9cb5279c1ef333e32571e7e95cfce458e7c58"
     }
   ]
 }
