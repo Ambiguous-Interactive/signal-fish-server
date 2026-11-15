@@ -77,7 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Exclude multicast and limited broadcast destinations when selecting or replacing a Direct host (#1663).
+- Exclude multicast and limited broadcast IP destinations from Direct host selection, while preserving DNS labels
+  (#1663).
 - Exclude numeric zero-address aliases from Direct host election and use a usable peer or relay fallback (#1658).
 - Return an error when an admitted WebRTC signal cannot reach its target (#1645).
 - Keep P2P host selection stable for players with no stored join time (#1642).

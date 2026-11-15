@@ -17903,6 +17903,13 @@ Valid numeric spellings and ordinary DNS names retain their exact wire value.
 DNS resolution remains a client responsibility.
 Rust #301, .NET #154 and Godot #579 retain separate SDK assessments.
 
+The first hosted head `42f73e4a` rejects the pre-existing bare `0x` DNS control
+in `protocol::types::tests::direct_endpoint_accepts_only_usable_direct_targets`.
+The correction requires at least one hex digit in a numeric component. Bare
+`0x`/`0X` labels retain their existing DNS classification; group numeric aliases
+with actual digits remain excluded. The existing control reproduces the regression
+locally before repair and passes with the additional DNS spelling controls.
+
 ### F373 — WebRTC starts retained unused Direct hostnames
 
 Existing campaign #636 found an unmeasured capability combination: players that

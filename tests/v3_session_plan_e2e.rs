@@ -494,6 +494,11 @@ fn direct_endpoints_reject_group_address_literals() {
         "2001:db8::1",
         "::ffff:192.0.2.1",
         "host.example",
+        "0x",
+        "0X",
+        "0x.0",
+        "0XHost",
+        "123abc",
     ] {
         assert_eq!(
             DirectEndpoint::from_connection_info(&ConnectionInfo::Direct {

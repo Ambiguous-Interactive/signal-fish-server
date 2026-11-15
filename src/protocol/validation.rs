@@ -84,7 +84,7 @@ fn is_unusable_ipv4_alias(hostname: &str) -> bool {
                 .strip_prefix("0x")
                 .or_else(|| component.strip_prefix("0X"))
             {
-                digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
             } else {
                 !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
             }
