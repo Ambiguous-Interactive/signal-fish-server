@@ -17862,3 +17862,21 @@ It fails before repair and passes afterward. An unavailable remote must
 still fail with no selection outputs. Both formal selection and the CI
 quick gate use this same script. No full-history fetch or skipped proof is
 introduced. The sixteen Python selection controls pass.
+
+### A25 — The remaining server interpreter lane exhausted its budget
+
+Main `9cf03f39` run `43666622174` has eleven successful jobs and a cancelled
+server Miri job `132667350335`. The job selects 499 of 1,830 compiled tests,
+keeps completing tests through 02:56:55 UTC, and is cancelled at its existing
+45-minute limit. GitHub's check annotation confirms that execution exceeded
+45m0s. No analyzer failure is observed in the retained log. The cancellation
+is not a passing analyzer result (#1662).
+
+Serial completion windows include about 17.4 minutes for maintenance and
+moderation and 15.1 minutes for gameplay and message-coordinator controls.
+The workflow now gives these four complete module families two dedicated
+lanes and excludes them from residual server. The exact-name runner, compiled
+union, pinned toolchain, flags, assertions and 45-minute limit remain intact.
+Nested and near-prefix controls and the live workflow guard require complete,
+disjoint ownership. Thirteen Python partition controls pass. Hosted
+failure-reproduction qualification remains required before closing #1662.
