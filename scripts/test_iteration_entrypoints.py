@@ -1,11 +1,13 @@
 """Local wrappers must use scoped verification unless deep work is explicit."""
 
+import io
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -16,10 +18,11 @@ class IterationEntrypoints(unittest.TestCase):
             scripts = Path(directory) / "scripts"
             scripts.mkdir()
             shutil.copyfile(ROOT / "scripts" / script, scripts / script)
-            (scripts / "dev-loop.sh").write_text(
+            stub = (
                 '#!/usr/bin/env bash\n[ \"$PWD\" -ef \"$EXPECTED_ROOT\" ] || exit 8\nprintf "ARG:%s\\n" "$@"\n'
                 f"exit {exit_code}\n"
             )
+            (scripts / "dev-loop.sh").write_bytes(stub.encode("utf-8"))
             expected_root = str(Path(directory).resolve())
             if expected_alias == "same":
                 expected_root += os.sep + "."
@@ -47,6 +50,21 @@ class IterationEntrypoints(unittest.TestCase):
             with self.subTest(script=script):
                 result = self.run_wrapper(script, nested=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_shell_fixture_works_with_windows_text_defaults(self):
+        original_open = io.open
+
+        def windows_open(file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, **kwargs):
+            if "w" in mode and "b" not in mode and newline is None:
+                newline = "\r\n"
+            return original_open(file, mode, buffering, encoding, errors, newline, **kwargs)
+
+        with patch("io.open", windows_open):
+            for script in ("test.sh", "run-local-ci.sh"):
+                with self.subTest(script=script):
+                    result = self.run_wrapper(script, exit_code=7)
+                    self.assertEqual(result.returncode, 7, result.stderr)
+                    self.assertEqual(result.stdout.splitlines(), ["ARG:--clippy", "ARG:--changed"])
 
     def test_fix_requires_deep_in_every_argument_order(self):
         for args in (["--fix"], ["--fast", "--fix"], ["--help", "--fix"]):
