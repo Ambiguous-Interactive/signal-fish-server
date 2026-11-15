@@ -259,3 +259,41 @@ requirement. Inspect `received` in both phase lists: each direction and physical
 generation must contain both `reliable` and `unreliable`. Keep missing-initial
 results failed even when the driver accepts finite loss. Preserve the original
 assessment beside any independent verdict.
+
+## Trial slot 1 Godot 4.3 prefix comparison
+
+On 2026-11-15, server source `1f8638fd` ran four native Godot 4.3 controls for existing #1244.
+Use the clean Godot driver at `f3d3f8611e2c85290f222074da6d40807099e4ec` and the probe build above.
+Run the command below first without added CPU workers, then with four CPU workers.
+Use a new output path for each condition. Stop those workers after the loaded condition.
+The original host exposed 12 CPUs. This is a shared-host control, not proof of isolation.
+
+```bash
+python scripts/check-webrtc-reference.py \
+  --godot /path/to/Godot_v4.3-stable_linux.arm64 \
+  --native-extension /path/to/addons/webrtc_native \
+  --native-reference-probe /path/to/current-probe \
+  --reference-revision 1f8638fdf6d28b51bf3da4ed6027389d76c39d27 \
+  --runtime native --offerer both --safe-receive --mixed-traffic \
+  --startup-burst --credit-transport webrtc --chromium /path/to/chrome-headless-shell \
+  --require-gameplay --output /path/to/new-output
+```
+
+Both offer roles pass both generations in both conditions. All 2,048 reliable snapshot receipts
+and 512 startup receipts pass. Raw native JSONL independently preserves the exact 1,024 incoming
+snapshot callbacks: each generation has sequences 0–127, reliable label, matching generation,
+and the exact 1,024-byte body. The Godot-side direction retains the driver's exact receipt checks.
+Every required-channel close and selected-packet retirement check passes.
+Removing sequence zero or reversing the first two raw callbacks makes the artifact audit fail.
+These in-memory negative controls do not modify the original attempts or production source.
+
+The two driver invocations took 52.942 and 55.010 seconds. These are single observations,
+including project import, not a performance comparison. No case was retried.
+Godot is `4.3.stable.official.77dcf97d8`; the extension is the retained 1.2.2-stable fixture.
+Chromium is `156.0.8078.4`, which differs from the historical Chromium 154.
+No packet lifetime, receipt requirement, timeout, or production behavior changed.
+This does not reproduce the historical failure, prove its cause, or qualify Web Godot or remote networks.
+The issue remains open. The next experiment needs pinned historical inputs or a correlated failing history.
+
+Issue #1244 retains the binary and assessment hashes. Raw attempts, manifest, and audit remain locally
+under `progress/backlog-trial/slot-1/`. The trial roadmap links this bounded result separately from closure.
