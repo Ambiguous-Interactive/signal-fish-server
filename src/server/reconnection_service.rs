@@ -1862,11 +1862,21 @@ impl EnhancedGameServer {
                             .room = Some(Arc::clone(&current_room));
 
                         if server.should_retain_room_publication_snapshot() {
+                            let include_direct = server
+                                .active_session_plan(&response_room_id)
+                                .is_some_and(|plan| {
+                                    plan.transport == crate::protocol::Transport::Direct
+                                });
                             let snapshot = ReconnectPublicationSnapshot {
                                 room: Arc::clone(&current_room),
                                 session_players: response_players
                                     .iter()
-                                    .map(crate::database::SessionPlayer::from)
+                                    .map(|player| {
+                                        crate::database::SessionPlayer::for_transport(
+                                            player,
+                                            include_direct,
+                                        )
+                                    })
                                     .collect(),
                                 actor: response_players
                                     .iter()

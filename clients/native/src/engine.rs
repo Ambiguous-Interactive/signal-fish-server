@@ -589,6 +589,7 @@ struct PeerLink {
     channel_tasks: Vec<Box<dyn JoinHandle>>,
     /// At most one nominated-pair query belongs to this physical link.
     selected_pair_probe: Option<SelectedPairProbe>,
+    exchange_diagnostic: Option<Box<dyn JoinHandle>>,
     readiness_check: Option<ReadinessCheck>,
     /// At most one application send per required exchange label.
     channel_sends: ChannelSends,
@@ -616,6 +617,9 @@ impl PeerLink {
             task.abort();
         }
         self.selected_pair_probe = None;
+        if let Some(task) = self.exchange_diagnostic.take() {
+            task.abort();
+        }
         self.readiness_check = None;
     }
 }
@@ -1344,6 +1348,7 @@ impl Engine {
             pair_connected: false,
             channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
             selected_pair_probe: None,
+            exchange_diagnostic: None,
             readiness_check: None,
             channel_sends: ChannelSends::default(),
             candidate_task: None,
@@ -2071,52 +2076,13 @@ impl Engine {
         registered: &HashMap<String, Arc<dyn DataChannel>>,
         open_labels: &BTreeSet<String>,
     ) -> serde_json::Map<String, serde_json::Value> {
-        let channels: serde_json::Map<String, serde_json::Value> = self.settings.channel_profile.labels()
-            .iter().copied().map(|label| (
-                label.to_string(),
-                serde_json::json!({
-                    "registered": registered.contains_key(label),
-                    "open_observed": open_labels.contains(label),
-                    "receipts": admission.receipts(label).map(|receipts| receipts.snapshot()),
-                    "pending_application": admission.receipts(label).map(|receipts| serde_json::json!({
-                        "messages": receipts.pending_messages.load(Ordering::Relaxed),
-                        "bytes": receipts.pending_bytes.load(Ordering::Relaxed),
-                    })),
-                }),
-            )).collect();
-        serde_json::Map::from_iter([
-            (
-                "receive_rejection".into(),
-                serde_json::json!(admission
-                    .failure
-                    .get()
-                    .map(|failure| failure.reason.as_str())),
-            ),
-            (
-                "receive_failure".into(),
-                serde_json::json!(admission.failure.get()),
-            ),
-            (
-                "channel_closure".into(),
-                serde_json::json!(admission.closure.get()),
-            ),
-            (
-                "connection_terminal".into(),
-                serde_json::json!(admission.connection_terminal.get().map(ToString::to_string)),
-            ),
-            (
-                "receive_budget".into(),
-                serde_json::json!({
-                    "scope": "engine",
-                    "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(self.message_budget.messages.available_permits()),
-                    "pending_bytes": MAX_PENDING_CHANNEL_BYTES.saturating_sub(self.message_budget.bytes.available_permits()),
-                    "max_pending_messages": MAX_PENDING_CHANNEL_MESSAGES,
-                    "max_pending_bytes": MAX_PENDING_CHANNEL_BYTES,
-                    "max_message_bytes": MAX_CHANNEL_MESSAGE_BYTES,
-                }),
-            ),
-            ("channels".into(), serde_json::Value::Object(channels)),
-        ])
+        receive_diagnostic_snapshot(
+            self.settings.channel_profile,
+            &self.message_budget,
+            admission,
+            registered,
+            open_labels,
+        )
     }
 
     /// Add SCTP, RTC packet, and channel counters to callback observations for one
@@ -2151,6 +2117,18 @@ impl Engine {
     /// The timeout cancels queries; it does not close or retire the link.
     /// A synchronous driver operation can still delay executor scheduling.
     pub async fn transport_diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
+        self.transport_diagnostic_snapshot_until(
+            peer,
+            Deadline::after(tokio::time::Instant::now(), Duration::from_millis(250)),
+        )
+        .await
+    }
+
+    pub(crate) async fn transport_diagnostic_snapshot_until(
+        &self,
+        peer: PlayerId,
+        deadline: Deadline,
+    ) -> serde_json::Value {
         let (pc, registered_channels) = if let Some(link) = self.peers.get(&peer) {
             (&link.pc, &link.channels)
         } else if let Some(pending) = self.pending_negotiations.get(&peer) {
@@ -2168,12 +2146,197 @@ impl Engine {
         } else {
             return serde_json::Value::Null;
         };
-        let mut transport_fields = serde_json::Map::new();
-        let mut channel_properties = serde_json::Map::new();
-        let mut send_channels = serde_json::Map::new();
-        let mut stage = "rtc_stats";
-        let mut stage_channel = None;
-        let sampled = crate::deadline::timeout(Duration::from_millis(250), async {
+        let transport_fields =
+            sample_transport_fields(pc.as_ref(), registered_channels, deadline).await;
+        let mut snapshot = self.diagnostic_snapshot(peer);
+        if let Some(fields) = snapshot.as_object_mut() {
+            fields.extend(transport_fields);
+        }
+        snapshot
+    }
+
+    /// Retain one delayed post-send transport observation per physical link.
+    /// The query runs outside the owner loop and retirement cancels it.
+    /// Callback counts are read after transport sampling; registration and setup
+    /// fields describe the link when the query was requested. Layers are not atomic.
+    pub(crate) fn start_exchange_diagnostic(&mut self, peer: PlayerId, delay: Duration) -> bool {
+        self.start_exchange_diagnostic_with(peer, delay, move |snapshot| {
+            report_transport_diagnostic(peer, "post_send", &snapshot);
+        })
+    }
+
+    fn start_exchange_diagnostic_with(
+        &mut self,
+        peer: PlayerId,
+        delay: Duration,
+        publish: impl FnOnce(serde_json::Value) + Send + 'static,
+    ) -> bool {
+        let mut snapshot = self.diagnostic_snapshot(peer);
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        if link.exchange_diagnostic.is_some() {
+            return false;
+        }
+        let pc = link.pc.clone();
+        let channels = link.channels.clone();
+        let open_labels = link.open_labels.clone();
+        let admission = link.receive_admission.clone();
+        let budget = self.message_budget.clone();
+        let profile = self.settings.channel_profile;
+        link.exchange_diagnostic = Some(self.runtime.spawn(Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            let fields = sample_transport_fields(
+                pc.as_ref(),
+                &channels,
+                Deadline::after(tokio::time::Instant::now(), Duration::from_millis(250)),
+            )
+            .await;
+            if admission.terminal.load(Ordering::Relaxed) {
+                return;
+            }
+            if let Some(snapshot) = snapshot.as_object_mut() {
+                snapshot.extend(receive_diagnostic_snapshot(
+                    profile,
+                    &budget,
+                    &admission,
+                    &channels,
+                    &open_labels,
+                ));
+                snapshot.extend(fields);
+            }
+            publish(snapshot);
+        })));
+        true
+    }
+
+    /// Start a nominated-pair probe owned by the current physical link.
+    /// Repeated calls share a running query and its first result sender.
+    /// Retirement cancels the query.
+    /// Results use a dedicated channel so the orchestrator can arbitrate
+    /// already-completed evidence at its soft deadline without consuming or
+    /// reordering ordinary engine callbacks.
+    pub fn start_selected_candidate_pair_probe(
+        &mut self,
+        peer: PlayerId,
+        results: mpsc::UnboundedSender<SelectedPairProbeResult>,
+    ) -> bool {
+        let Some(link) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        if link.selected_pair_probe.as_ref().is_some_and(|probe| {
+            !*probe
+                .completed
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                && !probe.task.is_finished()
+        }) {
+            return true;
+        }
+        let pc = link.pc.clone();
+        let generation = link.generation;
+        link.selected_pair_probe = Some(spawn_selected_pair_probe(
+            self.runtime.clone(),
+            results,
+            peer,
+            generation,
+            async move {
+                let nominated = pc
+                    .sctp()
+                    .await?
+                    .transport()
+                    .ice_transport()
+                    .get_selected_candidate_pair()
+                    .await
+                    .ok()
+                    .flatten();
+                selected_candidate_pair_details(nominated.as_ref())
+            },
+        ));
+        true
+    }
+}
+
+/// Keep transport sections below the diagnostic record cap and retain their generation.
+pub(crate) fn report_transport_diagnostic(
+    peer: PlayerId,
+    phase: &'static str,
+    snapshot: &serde_json::Value,
+) {
+    let generation = &snapshot["generation"];
+    if let Some(fields) = snapshot.as_object() {
+        for (section, value) in fields {
+            tracing::info!(%peer, %generation, phase, %section, %value, "Exchange transport observation");
+        }
+    }
+}
+
+fn receive_diagnostic_snapshot(
+    profile: ChannelProfile,
+    message_budget: &MessageQueueBudget,
+    admission: &ChannelReceiveAdmission,
+    registered: &HashMap<String, Arc<dyn DataChannel>>,
+    open_labels: &BTreeSet<String>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let channels: serde_json::Map<String, serde_json::Value> = profile.labels()
+            .iter().copied().map(|label| (
+                label.to_string(),
+                serde_json::json!({
+                    "registered": registered.contains_key(label),
+                    "open_observed": open_labels.contains(label),
+                    "receipts": admission.receipts(label).map(|receipts| receipts.snapshot()),
+                    "pending_application": admission.receipts(label).map(|receipts| serde_json::json!({
+                        "messages": receipts.pending_messages.load(Ordering::Relaxed),
+                        "bytes": receipts.pending_bytes.load(Ordering::Relaxed),
+                    })),
+                }),
+            )).collect();
+    serde_json::Map::from_iter([
+        (
+            "receive_rejection".into(),
+            serde_json::json!(admission
+                .failure
+                .get()
+                .map(|failure| failure.reason.as_str())),
+        ),
+        (
+            "receive_failure".into(),
+            serde_json::json!(admission.failure.get()),
+        ),
+        (
+            "channel_closure".into(),
+            serde_json::json!(admission.closure.get()),
+        ),
+        (
+            "connection_terminal".into(),
+            serde_json::json!(admission.connection_terminal.get().map(ToString::to_string)),
+        ),
+        (
+            "receive_budget".into(),
+            serde_json::json!({
+                "scope": "engine",
+                "pending_messages": MAX_PENDING_CHANNEL_MESSAGES.saturating_sub(message_budget.messages.available_permits()),
+                "pending_bytes": MAX_PENDING_CHANNEL_BYTES.saturating_sub(message_budget.bytes.available_permits()),
+                "max_pending_messages": MAX_PENDING_CHANNEL_MESSAGES,
+                "max_pending_bytes": MAX_PENDING_CHANNEL_BYTES,
+                "max_message_bytes": MAX_CHANNEL_MESSAGE_BYTES,
+            }),
+        ),
+        ("channels".into(), serde_json::Value::Object(channels)),
+    ])
+}
+async fn sample_transport_fields(
+    pc: &dyn PeerConnection,
+    registered_channels: &HashMap<String, Arc<dyn DataChannel>>,
+    deadline: Deadline,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut transport_fields = serde_json::Map::new();
+    let mut channel_properties = serde_json::Map::new();
+    let mut send_channels = serde_json::Map::new();
+    let mut stage = "rtc_stats";
+    let mut stage_channel = None;
+    let sampled = deadline
+        .timeout(async {
             let reports = pc
                 .get_stats(std::time::Instant::now(), StatsSelector::None)
                 .await;
@@ -2246,74 +2409,23 @@ impl Engine {
             }
         })
         .await;
-        if sampled.is_ok() || !channel_properties.is_empty() {
-            transport_fields.insert("channel_properties".to_string(), channel_properties.into());
-        }
-        if sampled.is_ok() || !send_channels.is_empty() {
-            transport_fields.insert("send_channels".to_string(), send_channels.into());
-        }
-        if sampled.is_err() {
-            transport_fields.insert(
-                "transport_snapshot_error".to_string(),
-                "deadline_elapsed".into(),
-            );
-            transport_fields.insert("transport_snapshot_stage".to_string(), stage.into());
-            if let Some(label) = stage_channel {
-                transport_fields.insert("transport_snapshot_channel".to_string(), label.into());
-            }
-        }
-        let mut snapshot = self.diagnostic_snapshot(peer);
-        if let Some(fields) = snapshot.as_object_mut() {
-            fields.extend(transport_fields);
-        }
-        snapshot
+    if sampled.is_ok() || !channel_properties.is_empty() {
+        transport_fields.insert("channel_properties".to_string(), channel_properties.into());
     }
-
-    /// Start a nominated-pair probe owned by the current physical link.
-    /// Repeated calls share a running query and its first result sender.
-    /// Retirement cancels the query.
-    /// Results use a dedicated channel so the orchestrator can arbitrate
-    /// already-completed evidence at its soft deadline without consuming or
-    /// reordering ordinary engine callbacks.
-    pub fn start_selected_candidate_pair_probe(
-        &mut self,
-        peer: PlayerId,
-        results: mpsc::UnboundedSender<SelectedPairProbeResult>,
-    ) -> bool {
-        let Some(link) = self.peers.get_mut(&peer) else {
-            return false;
-        };
-        if link.selected_pair_probe.as_ref().is_some_and(|probe| {
-            !*probe
-                .completed
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                && !probe.task.is_finished()
-        }) {
-            return true;
-        }
-        let pc = link.pc.clone();
-        let generation = link.generation;
-        link.selected_pair_probe = Some(spawn_selected_pair_probe(
-            self.runtime.clone(),
-            results,
-            peer,
-            generation,
-            async move {
-                let nominated = pc
-                    .sctp()
-                    .await?
-                    .transport()
-                    .ice_transport()
-                    .get_selected_candidate_pair()
-                    .await
-                    .ok()
-                    .flatten();
-                selected_candidate_pair_details(nominated.as_ref())
-            },
-        ));
-        true
+    if sampled.is_ok() || !send_channels.is_empty() {
+        transport_fields.insert("send_channels".to_string(), send_channels.into());
     }
+    if sampled.is_err() {
+        transport_fields.insert(
+            "transport_snapshot_error".to_string(),
+            "deadline_elapsed".into(),
+        );
+        transport_fields.insert("transport_snapshot_stage".to_string(), stage.into());
+        if let Some(label) = stage_channel {
+            transport_fields.insert("transport_snapshot_channel".to_string(), label.into());
+        }
+    }
+    transport_fields
 }
 
 /// A single cancellable query and its serialized result-publication state.

@@ -1109,3 +1109,128 @@ async fn pending_setup_transport_snapshot_keeps_the_live_generation_visible() {
         pair.cleanup().await;
     }
 }
+
+/// #1639/#889: the successful sender also keeps bounded transport evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exchange_diagnostic_is_nonblocking_once_per_generation_and_cancelled_on_retirement() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for receiver_offers in [false, true] {
+            let (mut pair, clock) = unconnected_pair(profile);
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            let peer = pair.sender_id;
+            let generation = pair.receiver.diagnostic_snapshot(peer)["generation"].clone();
+            let held =
+                HeldCoreSend::start(&clock, pair.receiver.channel(peer, RELIABLE_LABEL).unwrap())
+                    .await;
+            let (samples, mut received) = mpsc::unbounded_channel();
+            assert!(pair.receiver.start_exchange_diagnostic_with(
+                peer,
+                Duration::ZERO,
+                move |snapshot| {
+                    samples.send(snapshot).unwrap();
+                }
+            ));
+            assert!(!pair
+                .receiver
+                .start_exchange_diagnostic_with(peer, Duration::ZERO, |_| {
+                    panic!("duplicate query must not run");
+                }));
+            assert!(
+                pair.receiver
+                    .is_current_generation(peer, generation.as_u64().unwrap()),
+                "owner remains available while transport access is blocked"
+            );
+            let sample = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample["generation"], generation);
+            assert_eq!(sample["transport_snapshot_error"], "deadline_elapsed");
+            assert_eq!(sample["transport_snapshot_stage"], "rtc_stats");
+            held.finish().await;
+            let outgoing = b"gameplay-after-diagnostic";
+            pair.receiver
+                .channel(peer, RELIABLE_LABEL)
+                .unwrap()
+                .send(outgoing.as_slice().into())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.sender_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage { text, .. } if text.as_bytes() == outgoing => {
+                            break
+                        }
+                        EngineEvent::ChannelMessage { text, .. } => {
+                            assert_eq!(text, "held-readiness")
+                        }
+                        EngineEvent::ChannelBinaryMessage { data, .. } => {
+                            assert_eq!(data, outgoing);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.negotiate().await;
+            let fresh = pair.receiver.diagnostic_snapshot(peer)["generation"].clone();
+            assert_ne!(fresh, generation);
+            let (samples, mut received) = mpsc::unbounded_channel();
+            assert!(pair.receiver.start_exchange_diagnostic_with(
+                peer,
+                Duration::ZERO,
+                move |snapshot| {
+                    samples.send(snapshot).unwrap();
+                }
+            ));
+            let sample = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample["generation"], fresh);
+            assert!(sample.get("transport_snapshot_error").is_none());
+            assert!(sample["sctp"].is_object());
+            for (section, value) in sample.as_object().unwrap() {
+                assert!(value.to_string().len() < 3000, "{section} must fit the bounded diagnostic record with its peer/generation envelope");
+            }
+            assert_eq!(
+                sample["channel_properties"].as_object().unwrap().len(),
+                profile.labels().len()
+            );
+            pair.receiver.remove_peer(peer).await.unwrap();
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.negotiate().await;
+            let (samples, mut received) = mpsc::unbounded_channel();
+            assert!(pair.receiver.start_exchange_diagnostic_with(
+                peer,
+                Duration::from_secs(30),
+                move |snapshot| {
+                    samples.send(snapshot).unwrap();
+                }
+            ));
+            pair.receiver.remove_peer(peer).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), received.recv())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "retirement cancels the sleeping query and releases its publisher"
+            );
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+        }
+    }
+}

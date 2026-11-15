@@ -2059,25 +2059,7 @@ impl Orchestrator<'_> {
                 return Ok(Some(EXIT_SUCCESS));
             }
             if self.cli.exchange {
-                for peer in &self.exchange_ledger.obligations {
-                    let missing_sent =
-                        ExchangeLedger::missing_labels(self.exchange_ledger.sent.get(peer));
-                    let missing_received =
-                        ExchangeLedger::missing_labels(self.exchange_ledger.received.get(peer));
-                    if missing_sent.is_empty() && missing_received.is_empty() {
-                        continue;
-                    }
-                    tracing::warn!(
-                        %peer,
-                        snapshot = %json!({
-                            "missing_sent": missing_sent,
-                            "missing_received": missing_received,
-                            "connected": self.connected_pairs.contains(peer),
-                            "link": self.engine.diagnostic_snapshot(*peer),
-                        }),
-                        "Exchange timed out"
-                    );
-                }
+                self.report_exchange_timeout().await;
             }
             emit(&Event::Error {
                 message: format!(
@@ -2088,6 +2070,36 @@ impl Orchestrator<'_> {
             return Ok(Some(EXIT_CRITERIA_UNMET));
         }
         Ok(None)
+    }
+
+    /// The failed verdict is fixed before concurrent diagnostic queries begin.
+    /// Sampling cannot pay exchange debt or extend the gameplay window.
+    async fn report_exchange_timeout(&self) {
+        let deadline = Deadline::after(Instant::now(), Duration::from_millis(250));
+        let snapshots =
+            futures_util::future::join_all(self.exchange_ledger.obligations.iter().map(
+                |peer| async move {
+                    (
+                        *peer,
+                        self.engine
+                            .transport_diagnostic_snapshot_until(*peer, deadline)
+                            .await,
+                    )
+                },
+            ))
+            .await;
+        for (peer, snapshot) in snapshots {
+            let missing_sent = ExchangeLedger::missing_labels(self.exchange_ledger.sent.get(&peer));
+            let missing_received =
+                ExchangeLedger::missing_labels(self.exchange_ledger.received.get(&peer));
+            if !missing_sent.is_empty() || !missing_received.is_empty() {
+                tracing::warn!(%peer,
+                    ?missing_sent, ?missing_received,
+                    connected = self.connected_pairs.contains(&peer),
+                    "Exchange timed out");
+            }
+            crate::engine::report_transport_diagnostic(peer, "failed_cutoff", &snapshot);
+        }
     }
 
     async fn drain_queued_engine_events(&mut self) -> Result<(), FatalError> {
@@ -2494,6 +2506,11 @@ impl Orchestrator<'_> {
                 .await;
         }
         self.exchange_ledger.note_sent(peer, label);
+        if ExchangeLedger::missing_labels(self.exchange_ledger.sent_on_current_link.get(&peer))
+            .is_empty()
+        {
+            self.engine.start_exchange_diagnostic(peer, EXIT_LINGER);
+        }
         emit(&Event::ChannelMessageSent {
             peer,
             label: label.to_string(),
