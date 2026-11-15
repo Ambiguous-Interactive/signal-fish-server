@@ -347,6 +347,17 @@ pub struct RoomSessionHostSnapshot {
     pub host: Option<SessionPlayer>,
 }
 
+/// Host execution readiness and lifecycle from one storage read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomSessionHostReadinessSnapshot {
+    /// Current lobby lifecycle, including pending rooms.
+    pub lobby_state: crate::protocol::LobbyState,
+    /// Whether the named host remains seated.
+    pub host_present: bool,
+    /// Whether the requested Direct endpoint is syntactically usable.
+    pub direct_endpoint_ready: bool,
+}
+
 /// Lifecycle and stored occupancy read atomically without player details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomSessionLifecycleSnapshot {
@@ -807,6 +818,27 @@ pub trait GameDatabase: Send + Sync {
             }
         }
         Ok(snapshot)
+    }
+
+    /// Read host readiness without requiring owned player metadata.
+    /// The default preserves the adapter's atomic host snapshot and read errors.
+    async fn get_room_session_host_readiness_snapshot(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionHostReadinessSnapshot>> {
+        Ok(self
+            .get_room_session_host_snapshot_for_transport(room_id, host_id, include_direct)
+            .await?
+            .map(|snapshot| RoomSessionHostReadinessSnapshot {
+                lobby_state: snapshot.lobby_state,
+                host_present: snapshot.host.is_some(),
+                direct_endpoint_ready: include_direct
+                    && snapshot
+                        .host
+                        .is_some_and(|host| host.direct_endpoint.is_some()),
+            }))
     }
 
     /// Read one member's validated Direct endpoint, including pending rooms.
@@ -3010,6 +3042,31 @@ impl GameDatabase for InMemoryDatabase {
     ) -> Result<Option<RoomSessionHostSnapshot>> {
         self.read_session_host_snapshot(room_id, host_id, include_direct)
             .await
+    }
+
+    async fn get_room_session_host_readiness_snapshot(
+        &self,
+        room_id: &RoomId,
+        host_id: &PlayerId,
+        include_direct: bool,
+    ) -> Result<Option<RoomSessionHostReadinessSnapshot>> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        #[cfg(test)]
+        self.session_host_snapshot_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self.rooms.read().await.get(room_id).map(|room| {
+            let host = room.players.get(host_id);
+            RoomSessionHostReadinessSnapshot {
+                lobby_state: room.lobby_state.clone(),
+                host_present: host.is_some(),
+                direct_endpoint_ready: include_direct
+                    && host
+                        .and_then(|host| host.connection_info.as_ref())
+                        .and_then(crate::protocol::DirectEndpoint::validated_parts)
+                        .is_some(),
+            }
+        }))
     }
 
     async fn get_player_direct_endpoint(

@@ -72,7 +72,7 @@ for broken_flag in ['--re', '--exclude-re']:
             raise AssertionError(f'ignored {broken_flag} was accepted')
 
 with tempfile.TemporaryDirectory() as directory:
-    root = Path(directory)
+    root = Path(directory).resolve()
     (root / '.crates2.json').write_text(json.dumps({'installs': {narrow.INSTALL_KEY: {}}}))
     assert narrow.installed_tool(root) == root / 'bin/cargo-mutants'
     (root / '.crates2.json').write_text(json.dumps({'installs': {'wrong source': {}}}))
@@ -84,8 +84,10 @@ with tempfile.TemporaryDirectory() as directory:
         raise AssertionError('wrong source was accepted')
 
 with tempfile.TemporaryDirectory() as directory:
-    root = Path(directory)
+    root = Path(directory).resolve()
     (root / '.crates2.json').write_text(json.dumps({'installs': {}}))
+    alias = root / 'tool-root-alias'
+    alias.symlink_to(root, target_is_directory=True)
     def install(command, check):
         assert check
         assert command[:2] == ['cargo', 'install'], command
@@ -93,7 +95,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert command[command.index('--root') + 1] == str(root)
         (root / '.crates2.json').write_text(json.dumps({'installs': {narrow.INSTALL_KEY: {}}}))
         return subprocess.CompletedProcess(command, 0)
-    with patch.object(narrow.sys, 'argv', ['run-narrow-mutants.py', '--install', '--tool-root', str(root)]):
+    with patch.object(narrow.sys, 'argv', ['run-narrow-mutants.py', '--install', '--tool-root', str(alias)]):
         with patch.object(narrow.subprocess, 'run', side_effect=install) as execute, patch.object(narrow, 'selector_preflight') as preflight:
             assert narrow.main() == 0
             execute.assert_called_once()

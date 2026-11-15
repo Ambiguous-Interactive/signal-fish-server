@@ -635,3 +635,25 @@ cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
 Both commands must report `PASS`, new SSN 0, forward SSN 0, reliable SSN 1,
 and exactly two application receipts. Assertions must remain enabled.
 The probe adds no server or client runtime dependency.
+
+## Crossed successful reset qualification (#1184)
+
+`crossed_successful_resets_preserve_future_sequence_during_shutdown` supplies an
+alternative standards-compatible packet trigger for the retained reset-marker
+repair. Both outgoing requests are generated before either incoming request, and
+both carry the prior response sequence. Both final old TSNs are cumulative and
+old gameplay has already been read. Both reset successes are genuine isolated
+RE-CONFIG responses. The peer receives success before emitting new SSN 0, whose
+real expiry emits FORWARD TSN. The receiver enters ShutdownSent before receiving
+the delayed outgoing success, then accepts reliable SSN 1 sent before the peer
+receives SHUTDOWN. Exact terminal bytes, refused writes, marker cleanup and both
+endpoint drains are checked.
+
+The Established-only source ablation makes accepted SSN 1 unreadable. The restored
+repair passes. This resolves strict-peer reachability of the repaired branch
+without relying on A20's unread-application fence or implicit-ack interpretation.
+The control starts at constructed valid Established state and naturally reaches
+ShutdownSent. It does not qualify a full handshake, independent implementation,
+public wrapper or historical #1120. Existing tests retain all live shutdown
+states. See [RFC 6525](https://www.rfc-editor.org/rfc/rfc6525.html#section-5.2.2)
+and [RFC 9260 section 9.2](https://www.rfc-editor.org/rfc/rfc9260.html#section-9.2).

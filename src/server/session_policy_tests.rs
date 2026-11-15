@@ -7636,8 +7636,8 @@ async fn departure_projection_observes_host_lifecycle_and_transport() {
                 // #1550: the selected plan cannot reveal redundant reads or
                 // copied-but-unused endpoints. A valid host needs one narrow
                 // read; a changed lifecycle needs a second selection read.
-                // WebRTC must request no Direct projection; Direct needs one
-                // per snapshot. Revisit these costs if the read strategy changes.
+                // Only host election needs owned Direct endpoints; the
+                // readiness shortcut validates the borrowed endpoint.
                 let expected_reads = if !host_departed && !finalized { 2 } else { 1 };
                 assert_eq!(
                     database.get_room_by_id_calls_for_test(),
@@ -7647,7 +7647,7 @@ async fn departure_projection_observes_host_lifecycle_and_transport() {
                 assert_eq!(
                     database.session_direct_projection_reads_for_test() - before,
                     if transport == Transport::Direct {
-                        expected_reads
+                        expected_reads - u32::from(!host_departed)
                     } else {
                         0
                     }
