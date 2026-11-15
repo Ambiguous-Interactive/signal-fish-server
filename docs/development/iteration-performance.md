@@ -202,3 +202,31 @@ validation. Only inactive Cargo CI-profile output was cleaned: 7,470 rebuildable
 files, 2.9 GiB. Session history, source files, user files, and other caches were
 preserved. Raw timestamp and Cargo fingerprint evidence remains in the local
 iteration-performance record.
+
+## Controlled runner results
+
+Twenty alternating matched edit pairs per case completed with all 160 selected
+regressions passing. Baseline: `ce9df996`; runner candidate: `dcd182d0`.
+Sources used isolated native temporary worktrees; both artifact caches used the
+same explicit Windows-backed 9p override. Later default-cache and native-client
+fixes do not run on these selected, explicitly overridden paths. Do not pool
+these results with the earlier raw-unit experiment or claim a default-native
+storage percentile from them.
+
+| Existing regression scope | Baseline p95 | Candidate p95 | Change |
+| --- | ---: | ---: | ---: |
+| Pure protocol decision | 27.072 s | 1.766 s | 93.48% faster |
+| Public server contract | 18.800 s | 19.395 s | 3.16% slower |
+| Protocol integration | 8.088 s | 8.501 s | 5.12% slower |
+| TOML tooling check | 6.437 s | 2.133 s | 66.87% faster |
+
+These are actual runner invocations, including selection, compilation, metadata
+validation, and execution. Core and tooling isolation improve those loops.
+The server compilation bottleneck remains, and the local 10-second target is
+not universal. Retain that finding under the existing crate-boundary and CI
+measurement work, issues #642 and #953.
+
+Raw local commands, outputs, source hashes, invalid prewarm attempts, filesystem
+probes, and summaries remain under `progress/iteration-performance/`.
+The completed raw report is `matched-wrapper-20.json`; its SHA-256 is
+`cba3d25b3e1ec4041023250601c490c1520080722142aa0dfc2d84a0b65b934a`.
