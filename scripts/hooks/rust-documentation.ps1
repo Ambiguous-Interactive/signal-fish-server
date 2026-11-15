@@ -110,23 +110,21 @@ function Remove-RustDocumentationComments {
 | (?<comment>/\*(?>[^*/]+|/(?!\*)|\*(?!/)|(?<depth>/\*)|(?<-depth>\*/))*(?(depth)(?!))\*/
 | //[^\r\n]*)
 | (?<invalid>(?:br|cr|r)\#*"|/\*|")
-| (?:(?!(?:br|cr|r)\#*")[^/"'])+
-| .
 '@, [System.Text.RegularExpressions.RegexOptions]::Singleline,
         [System.TimeSpan]::FromMilliseconds(100))
     $mask = [System.Text.StringBuilder]::new($Content.Length)
     $documentationTokens = [System.Collections.Generic.List[System.Text.RegularExpressions.Match]]::new()
+    $codePosition = 0
     foreach ($token in $tokens.Matches($Content)) {
         if ($token.Groups['invalid'].Success) { throw 'Incomplete Rust literal or comment' }
-        if ($token.Groups['literal'].Success -or $token.Groups['comment'].Success) {
-            if ($token.Value.Contains("`n") -or $token.Value.Contains("`r")) {
-                [void]$mask.Append([regex]::Replace($token.Value, '[^\r\n]', ' '))
-            } else {
-                [void]$mask.Append([char]' ', $token.Length)
-            }
+        # Copy unchanged code in one span; only literals and comments need masking.
+        [void]$mask.Append($Content, $codePosition, $token.Index - $codePosition)
+        if ($token.Value.Contains("`n") -or $token.Value.Contains("`r")) {
+            [void]$mask.Append([regex]::Replace($token.Value, '[^\r\n]', ' '))
         } else {
-            [void]$mask.Append($token.Value)
+            [void]$mask.Append([char]' ', $token.Length)
         }
+        $codePosition = $token.Index + $token.Length
         if (-not $token.Groups['comment'].Success) { continue }
         if ($token.Index -gt $ChangedEnd -or $token.Index + $token.Length -lt $ChangedStart) { continue }
         $documentation = $token.Value.StartsWith('///', [System.StringComparison]::Ordinal) -and -not $token.Value.StartsWith('////', [System.StringComparison]::Ordinal)
@@ -135,6 +133,7 @@ function Remove-RustDocumentationComments {
         $documentation = $documentation -or $token.Value.StartsWith('/*!', [System.StringComparison]::Ordinal)
         if ($documentation) { $documentationTokens.Add($token) }
     }
+    [void]$mask.Append($Content, $codePosition, $Content.Length - $codePosition)
     if ($documentationTokens.Count -eq 0) { return $Content }
     $code = $mask.ToString()
     $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
