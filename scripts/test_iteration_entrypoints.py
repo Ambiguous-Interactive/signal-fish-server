@@ -31,7 +31,7 @@ class IterationEntrypoints(unittest.TestCase):
             cwd = Path(directory) / "nested" if nested else Path(directory)
             cwd.mkdir(exist_ok=True)
             return subprocess.run(
-                ["bash", str(scripts / script), *args],
+                ["bash", (scripts / script).as_posix(), *args],
                 cwd=cwd, env=env, capture_output=True, text=True, check=False,
             )
 
