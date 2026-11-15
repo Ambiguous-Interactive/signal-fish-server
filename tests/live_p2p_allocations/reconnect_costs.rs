@@ -219,7 +219,7 @@ pub(crate) fn webrtc_reconnect_skips_unused_direct_endpoints() {
                 .handle_join_room(
                     &player,
                     "reconnect-endpoints".into(),
-                    Some("RECEND".into()),
+                    Some("RECON1".into()),
                     name.into(),
                     Some(2),
                     Some(true),
