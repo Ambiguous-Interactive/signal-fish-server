@@ -1017,7 +1017,7 @@ impl EnhancedGameServer {
         if let Some(host_id) = stored.host.filter(|host| host != departed) {
             match self
                 .database
-                .get_room_session_host_snapshot_for_transport(
+                .get_room_session_host_readiness_snapshot(
                     room_id,
                     &host_id,
                     stored.transport == Transport::Direct,
@@ -1025,23 +1025,24 @@ impl EnhancedGameServer {
                 .await
             {
                 Ok(Some(snapshot)) if snapshot.lobby_state == LobbyState::Finalized => {
-                    if let Some(host) = snapshot.host {
-                        let host = SessionMember::from_session_player(
-                            host,
+                    if snapshot.host_present
+                        && crate::session_capability::supports_session(
                             self.session_capabilities(&host_id),
-                        );
-                        if stored.supported_by(&host) {
-                            match self
-                                .message_coordinator
-                                .routed_player_pair(room_id, &host_id, &host_id)
-                                .await
-                            {
-                                Ok(None | Some([true, true])) => return true,
-                                Ok(Some(_)) => {}
-                                Err(error) => {
-                                    tracing::warn!(%room_id, %departed, %error, "Failed to resolve host routing for departure re-planning");
-                                    return false;
-                                }
+                            stored.topology,
+                            stored.transport,
+                        )
+                        && (stored.transport != Transport::Direct || snapshot.direct_endpoint_ready)
+                    {
+                        match self
+                            .message_coordinator
+                            .routed_player_pair(room_id, &host_id, &host_id)
+                            .await
+                        {
+                            Ok(None | Some([true, true])) => return true,
+                            Ok(Some(_)) => {}
+                            Err(error) => {
+                                tracing::warn!(%room_id, %departed, %error, "Failed to resolve host routing for departure re-planning");
+                                return false;
                             }
                         }
                     }

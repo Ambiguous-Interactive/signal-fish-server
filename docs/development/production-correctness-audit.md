@@ -18065,3 +18065,63 @@ This fresh qualification does not explain the two historical #1009 stalls,
 attribute them to the name-copy repair, prove the 999-room upper shape feasible,
 or bound all generator memory. Keep #775/#1009 open for those remaining
 requirements. Full local artifacts remain under `progress/session-707/long-cell`.
+
+### F375 — Guest departures copied unused host metadata
+
+Existing #636 and #826: the non-host departure shortcut needs only the room
+lifecycle, host membership, negotiated capabilities and Direct endpoint validity.
+At baseline `7e2b8725`, its host snapshot also owns the host name and validated
+address. A source-matched allocation control fails when the stored Direct
+address grows: 624, 678 and 868 bytes, with six allocations in each history.
+
+The new readiness snapshot reads lifecycle and both readiness flags under one
+storage lock. It validates a borrowed Direct address only when requested.
+The additive storage trait method defaults to the existing atomic host snapshot,
+so custom adapters preserve their read and error behavior. Host election still
+uses the full selection snapshot after an invalid host or changed lifecycle.
+
+The repaired production departure hook uses four allocations and 560 bytes for
+both host transports at 2, 16 and 64 members. The final control varies host names
+and valid address lengths and requires exact byte equality. It retains the
+sticky plan and empty recipient queues. Storage controls retain pending-room
+visibility, all three lifecycle states, missing hosts and rooms, valid and
+invalid endpoints, lock cancellation and read errors. This is a scoped allocation
+result, not a server throughput claim. Rust, .NET and Godot SDKs need no change:
+all wire fields, publication order, host eligibility and recovery behavior stay
+the same.
+
+### A29 — Crossed successful resets reach the shutdown sequence defect
+
+Existing #1184 now has a new packet history that avoids the unresolved
+implicit-ack interpretation in A20. Two valid Established associations generate
+their outgoing reset requests before receiving either peer's request. Each
+request names the prior remote request sequence, so neither request implicitly
+acknowledges the other. Old gameplay has been read and both final old TSNs are
+already cumulative when the crossed requests arrive. Both receivers emit genuine
+SuccessPerformed responses. The delayed response contains only that response,
+with no bundled SACK, DATA or second parameter.
+
+The sender receives its success, emits new SSN 0 and abandons it on its actual
+partial-reliability timer. Its generated FORWARD TSN advances SSN 0 at the
+receiver while the receiver's outgoing reset success remains delayed. The
+receiver enters ShutdownSent through its normal shutdown API. Delivery of the
+genuine delayed success removes the old stream. Before receiving SHUTDOWN, the
+sender emits reliable SSN 1. The receiver cumulatively accepts that DATA and
+retains its exact bytes through terminal application read. Both associations
+close, refuse new writes, release sequence markers and emit exactly one drain.
+
+This schedule follows [RFC 6525 sections 5.1.2, 5.2.2 and 5.2.7](https://www.rfc-editor.org/rfc/rfc6525.html#section-5.2.2)
+and [RFC 9260 section 9.2](https://www.rfc-editor.org/rfc/rfc9260.html#section-9.2).
+The peer's new-DATA refusal starts when it receives SHUTDOWN; the local
+ShutdownSent state still accepts late DATA. Restoring the pre-repair
+Established-only marker predicate fails the accepted-SSN-1 readability assertion.
+Restoring the repair passes both conformance histories and 18 shutdown controls.
+
+This resolves #1184's remaining question with an alternative standards-compatible
+trigger of the repaired branch. It does not establish strict conformance of the
+original unread-application-fence history. The new control starts from valid
+constructed Established state and naturally reaches only ShutdownSent; existing
+low-level controls retain all four live shutdown states. It does not exercise
+a full handshake, run this new schedule against an independent implementation,
+prove public-wrapper exposure or attribute #1120. No production SCTP source
+changes in this session. The earlier A20 evidence and its limits remain intact.

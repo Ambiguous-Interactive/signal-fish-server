@@ -202,6 +202,211 @@ fn scripted_peer_preserves_future_sequence_through_graceful_shutdown() -> Result
     Ok(())
 }
 
+/// #1184: crossed resets need no implicit success or application-drain extension.
+#[test]
+fn crossed_successful_resets_preserve_future_sequence_during_shutdown() -> Result<()> {
+    let mut sender = timed_test_association();
+    let mut receiver = timed_test_association();
+    sender.source_port = 5000;
+    sender.destination_port = 5001;
+    receiver.source_port = 5001;
+    receiver.destination_port = 5000;
+    sender.my_verification_tag = 0x1020_3040;
+    receiver.my_verification_tag = 0x5060_7080;
+    sender.peer_verification_tag = receiver.my_verification_tag;
+    receiver.peer_verification_tag = sender.my_verification_tag;
+    sender.peer_last_tsn = receiver.my_next_tsn.wrapping_sub(1);
+    receiver.peer_last_tsn = sender.my_next_tsn.wrapping_sub(1);
+    sender.peer_next_rsn = Some(receiver.my_next_rsn);
+    receiver.peer_next_rsn = Some(sender.my_next_rsn);
+    sender.handshake_completed = true;
+    receiver.handshake_completed = true;
+    sender.ack_mode = AckMode::NoDelay;
+    receiver.ack_mode = AckMode::NoDelay;
+    let now = Instant::now();
+    let ppi = PayloadProtocolIdentifier::Binary;
+    sender.open_stream(1, ppi)?;
+    receiver.open_stream(1, ppi)?;
+
+    let old = Bytes::from_static(b"old gameplay read before crossed resets");
+    sender.stream(1)?.write_sctp(now, &old, ppi)?;
+    deliver_packets(&mut receiver, sender.gather_outbound(now).0, now)?;
+    assert_eq!(
+        receiver
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(100)?
+            .freeze(),
+        old
+    );
+    deliver_packets(&mut sender, receiver.gather_outbound(now).0, now)?;
+    assert!(sender.inflight_queue.is_empty());
+
+    sender.send_reset_request(now, 1)?;
+    receiver.send_reset_request(now, 1)?;
+    let sender_request_packets = sender.gather_outbound(now).0;
+    let receiver_request_packets = receiver.gather_outbound(now).0;
+    let sender_request = outgoing_request(&sender_request_packets);
+    let receiver_request = outgoing_request(&receiver_request_packets);
+    assert_eq!(sender_request.stream_identifiers, [1]);
+    assert_eq!(receiver_request.stream_identifiers, [1]);
+    assert_eq!(
+        sender_request.reconfig_response_sequence_number,
+        receiver_request
+            .reconfig_request_sequence_number
+            .wrapping_sub(1)
+    );
+    assert_eq!(
+        receiver_request.reconfig_response_sequence_number,
+        sender_request
+            .reconfig_request_sequence_number
+            .wrapping_sub(1)
+    );
+    assert_eq!(sender_request.sender_last_tsn, receiver.peer_last_tsn);
+    assert_eq!(receiver_request.sender_last_tsn, sender.peer_last_tsn);
+
+    deliver_packets(&mut receiver, sender_request_packets, now)?;
+    deliver_packets(&mut sender, receiver_request_packets, now)?;
+    let sender_success_packets = sender.gather_outbound(now).0;
+    let receiver_success_packets = receiver.gather_outbound(now).0;
+    for packets in [&sender_success_packets, &receiver_success_packets] {
+        assert_eq!(packets.len(), 1);
+        let packet = Packet::unmarshal(&packets[0])?;
+        assert_eq!(packet.chunks.len(), 1);
+        let reconfig = packet.chunks[0]
+            .as_any()
+            .downcast_ref::<ChunkReconfig>()
+            .expect("a genuine success contains only its RE-CONFIG response");
+        assert!(reconfig.param_b.is_none());
+        let response = reconfig
+            .param_a
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ParamReconfigResponse>()
+            .unwrap();
+        assert_eq!(response.result, ReconfigResult::SuccessPerformed);
+    }
+    assert_eq!(
+        reset_result(
+            &sender_success_packets,
+            receiver_request.reconfig_request_sequence_number
+        ),
+        Some(ReconfigResult::SuccessPerformed)
+    );
+    assert_eq!(
+        reset_result(
+            &receiver_success_packets,
+            sender_request.reconfig_request_sequence_number
+        ),
+        Some(ReconfigResult::SuccessPerformed)
+    );
+    for association in [&sender, &receiver] {
+        let stream = &association.streams[&1];
+        assert!(stream.incoming_reset_complete);
+        assert!(!stream.outgoing_reset_complete);
+        assert!(association.reconfig_requests.is_empty());
+        assert_eq!(association.reconfigs.len(), 1);
+    }
+
+    /* Delay only the genuine successful response to the receiver's reset. */
+    deliver_packets(&mut sender, receiver_success_packets, now)?;
+    assert!(!sender.streams.contains_key(&1));
+    sender
+        .open_stream(1, ppi)?
+        .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+    sender
+        .stream(1)?
+        .write_sctp(now, &Bytes::from_static(b"expired future zero"), ppi)?;
+    let lost_packets = sender.gather_outbound(now).0;
+    let lost = transmitted_data(&lost_packets);
+    assert_eq!(lost.len(), 1);
+    assert_eq!(lost[0].stream_sequence_number, 0);
+    let later = now + Duration::from_secs(2);
+    sender.handle_timeout(later);
+    let forwarded_packets = sender.gather_outbound(later).0;
+    let forward: Vec<_> = forwarded_packets
+        .iter()
+        .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+        .filter_map(|chunk| chunk.as_any().downcast_ref::<ChunkForwardTsn>().cloned())
+        .collect();
+    assert_eq!(forward.len(), 1);
+    assert_eq!(forward[0].new_cumulative_tsn, lost[0].tsn);
+    assert_eq!(forward[0].streams.len(), 1);
+    assert_eq!(forward[0].streams[0].identifier, 1);
+    assert_eq!(forward[0].streams[0].sequence, 0);
+    deliver_packets(&mut receiver, forwarded_packets, later)?;
+    assert_eq!(receiver.streams[&1].deferred_reset_next_ssn, Some(1));
+    assert!(receiver.streams[&1].incoming_reset_complete);
+    assert!(!receiver.streams[&1].outgoing_reset_complete);
+
+    receiver.shutdown()?;
+    assert_eq!(receiver.state(), AssociationState::ShutdownSent);
+    assert_eq!(sender.state(), AssociationState::Established);
+    deliver_packets(&mut receiver, sender_success_packets, later)?;
+    assert!(!receiver.streams.contains_key(&1));
+
+    let next = Bytes::from_static(b"reliable one after crossed reset and shutdown");
+    /* The sender has not received SHUTDOWN; its new DATA crosses that packet. */
+    sender
+        .stream(1)?
+        .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+    sender.stream(1)?.write_sctp(later, &next, ppi)?;
+    let successor_packets = sender.gather_outbound(later).0;
+    let successor = transmitted_data(&successor_packets);
+    assert_eq!(successor.len(), 1);
+    assert_eq!(successor[0].stream_sequence_number, 1);
+    deliver_packets(&mut receiver, successor_packets, later)?;
+    assert_eq!(receiver.peer_last_tsn, successor[0].tsn);
+    assert!(
+        receiver.streams[&1].has_readable_data(),
+        "accepted future SSN 1 must remain readable after genuine crossed reset success during ShutdownSent"
+    );
+
+    for _ in 0..8 {
+        deliver_packets(&mut sender, receiver.gather_outbound(later).0, later)?;
+        deliver_packets(&mut receiver, sender.gather_outbound(later).0, later)?;
+    }
+    assert_eq!(receiver.state(), AssociationState::Closed);
+    assert_eq!(sender.state(), AssociationState::Closed);
+    assert!(receiver.poll_endpoint_event().is_none());
+    assert!(!receiver.stream(1)?.is_writable());
+    assert_eq!(
+        receiver.stream(1)?.write_sctp(later, &next, ppi),
+        Err(Error::ErrStreamClosed)
+    );
+    assert_eq!(
+        receiver
+            .stream(1)?
+            .read_sctp()?
+            .unwrap()
+            .to_payload(100)?
+            .freeze(),
+        next
+    );
+    for endpoint in [&mut sender, &mut receiver] {
+        assert!(endpoint.streams.is_empty());
+        assert!(endpoint.reset_ssn_markers.is_empty());
+        assert!(endpoint.poll_timeout().is_none());
+        assert!(endpoint.gather_outbound(later).0.is_empty());
+        assert!(endpoint.poll_endpoint_event().unwrap().is_drained());
+        assert!(endpoint.poll_endpoint_event().is_none());
+        assert!(endpoint.open_stream(1, ppi).is_err());
+    }
+    println!(
+        "CROSSED_RESET shutdown=ShutdownSent receiver_success=SuccessPerformed sender_success=SuccessPerformed old_read=exact expired_ssn=0 forwarded_ssn=0 accepted_ssn=1 terminal_read=exact endpoint_drains=2"
+    );
+    Ok(())
+}
+
+fn deliver_packets(receiver: &mut Association, packets: Vec<Bytes>, now: Instant) -> Result<()> {
+    for raw in packets {
+        receiver.handle_inbound(Packet::unmarshal(&raw)?, now)?;
+    }
+    Ok(())
+}
+
 fn outgoing_request(raws: &[Bytes]) -> ParamOutgoingResetRequest {
     let requests: Vec<_> = raws
         .iter()

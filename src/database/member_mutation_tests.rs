@@ -1133,3 +1133,115 @@ async fn member_snapshot_preserves_room_visibility_and_storage_errors() {
         }
     );
 }
+
+/// Host readiness preserves lifecycle, membership, endpoint validation and storage errors.
+#[tokio::test]
+async fn host_readiness_snapshot_preserves_atomic_storage_contract() {
+    let database = InMemoryDatabase::new();
+    let host_id = PlayerId::from_u128(1);
+    let room = database
+        .create_pending_room_classified(
+            "host-readiness".into(),
+            Some("HRDY01".into()),
+            4,
+            true,
+            host_id,
+            "relay".into(),
+            "region".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    for state in [
+        crate::protocol::LobbyState::Waiting,
+        crate::protocol::LobbyState::Lobby,
+        crate::protocol::LobbyState::Finalized,
+    ] {
+        database
+            .rooms
+            .write()
+            .await
+            .get_mut(&room.id)
+            .unwrap()
+            .lobby_state = state.clone();
+        for info in [
+            None,
+            Some(crate::protocol::ConnectionInfo::Direct {
+                host: "192.0.2.1".into(),
+                port: 7777,
+            }),
+            Some(crate::protocol::ConnectionInfo::Direct {
+                host: "".into(),
+                port: 7777,
+            }),
+            Some(crate::protocol::ConnectionInfo::Direct {
+                host: "192.0.2.1".into(),
+                port: 0,
+            }),
+            Some(crate::protocol::ConnectionInfo::Custom {
+                data: serde_json::json!({"test":true}),
+            }),
+        ] {
+            database
+                .rooms
+                .write()
+                .await
+                .get_mut(&room.id)
+                .unwrap()
+                .players
+                .get_mut(&host_id)
+                .unwrap()
+                .connection_info = info;
+            for include_direct in [false, true] {
+                for player in [host_id, PlayerId::nil()] {
+                    let expected = database
+                        .get_room_session_host_snapshot_for_transport(
+                            &room.id,
+                            &player,
+                            include_direct,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let actual = database
+                        .get_room_session_host_readiness_snapshot(&room.id, &player, include_direct)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(actual.lobby_state, state);
+                    assert_eq!(actual.host_present, expected.host.is_some());
+                    assert_eq!(
+                        actual.direct_endpoint_ready,
+                        expected
+                            .host
+                            .is_some_and(|host| host.direct_endpoint.is_some())
+                    );
+                }
+            }
+        }
+    }
+    assert!(!database.is_room_published(&room.id).await.unwrap());
+    let held = database.rooms.write().await;
+    let mut read =
+        Box::pin(database.get_room_session_host_readiness_snapshot(&room.id, &host_id, true));
+    assert!(futures_util::poll!(&mut read).is_pending());
+    drop(read);
+    drop(held);
+    database
+        .fail_get_room_by_id
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(database
+        .get_room_session_host_readiness_snapshot(&room.id, &host_id, true)
+        .await
+        .is_err());
+    database
+        .fail_get_room_by_id
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(database.delete_room(&room.id).await.unwrap());
+    assert!(database
+        .get_room_session_host_readiness_snapshot(&room.id, &host_id, true)
+        .await
+        .unwrap()
+        .is_none());
+}

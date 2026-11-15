@@ -56,7 +56,10 @@ fn departure_skips_survivor_selection(topology: Topology, direct: bool) {
                         &id,
                         "departure-cost".into(),
                         Some("LEAVE1".into()),
-                        format!("Player{index}"),
+                        format!(
+                            "P{index:02}{}",
+                            "n".repeat(usize::try_from(count.min(28)).unwrap())
+                        ),
                         Some(64),
                         Some(true),
                         None,
@@ -110,7 +113,7 @@ fn departure_skips_survivor_selection(topology: Topology, direct: bool) {
                 generation = Some(plan.generation);
                 assert_membership_queue_empty(receiver);
             }
-            if topology == Topology::Host && !direct {
+            if topology == Topology::Host {
                 let host = match count {
                     2 => "127.0.0.1".to_string(),
                     16 => "a".repeat(63),
@@ -162,6 +165,14 @@ fn departure_skips_survivor_selection(topology: Topology, direct: bool) {
                 usize::try_from(count - 1).unwrap()
             );
         });
+    }
+    if topology == Topology::Host {
+        assert!(
+            profiles
+                .iter()
+                .all(|stats| stats.bytes_allocated == profiles[0].bytes_allocated),
+            "host validity copied an unused endpoint: direct={direct} profiles={profiles:?}"
+        );
     }
     assert!(
         profiles
