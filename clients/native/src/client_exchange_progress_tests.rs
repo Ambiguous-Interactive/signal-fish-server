@@ -635,3 +635,71 @@ async fn pending_exchange_send_is_cancelled_by_retirement_and_keeps_its_deadline
         }
     }
 }
+
+/// #1639: successful endpoints sample after their current-link sends; failure evidence cannot pay debt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exchange_transport_evidence_preserves_current_link_and_cutoff_debt() {
+    let cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        "ws://unused.invalid",
+        "--create-room",
+        "--exchange",
+    ]);
+    let (mut state, mut pair, clock) = exchange_fixture(&cli, ChannelProfile::Godot, false).await;
+    let peer = pair.sender_id;
+    // A previous physical link paid logical send debt, but this link still owes both probes.
+    state.exchange_ledger.note_sent(peer, RELIABLE_LABEL);
+    state.exchange_ledger.note_sent(peer, UNRELIABLE_LABEL);
+    state.exchange_ledger.note_link_open(peer);
+    let observed = clock.observe_next_task();
+    state
+        .complete_exchange_send(peer, RELIABLE_LABEL, "reliable".into(), Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        0,
+        "historical sends must not start a current-link sample"
+    );
+    state
+        .complete_exchange_send(peer, UNRELIABLE_LABEL, "unreliable".into(), Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        1,
+        "completing both current-link sends starts one independent query"
+    );
+    state
+        .complete_exchange_send(peer, UNRELIABLE_LABEL, "duplicate".into(), Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+    let held =
+        HeldCoreSend::start(&clock, state.engine.channel(peer, RELIABLE_LABEL).unwrap()).await;
+    let generation = state.engine.diagnostic_snapshot(peer)["generation"].clone();
+    let before = ExchangeLedger::missing_labels(state.exchange_ledger.received.get(&peer));
+    let started = Instant::now();
+    state.report_exchange_timeout().await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "the terminal observation must actually query the held RTC core"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "terminal evidence shares one bounded diagnostic budget"
+    );
+    assert_eq!(
+        ExchangeLedger::missing_labels(state.exchange_ledger.received.get(&peer)),
+        before,
+        "diagnostic waits cannot consume or satisfy gameplay receipts after cutoff"
+    );
+    assert_eq!(
+        state.engine.diagnostic_snapshot(peer)["generation"],
+        generation
+    );
+    held.finish().await;
+    state.engine.remove_peer(peer).await.unwrap();
+    pair.sender.remove_peer(state.my_id).await.unwrap();
+}

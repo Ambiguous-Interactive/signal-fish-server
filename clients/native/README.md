@@ -829,12 +829,27 @@ Snapshots read counters separately without waiting. A raw message can still
 be waiting for admission, or its poller can be cancelled during admission.
 A difference between raw and classified counts does not prove network loss.
 
-At run timeout, stderr also reports a snapshot for each peer with missing
-exchange sends or receipts, including connected peers and departed peers with
-unpaid exchange debt. Each report names missing sends, missing receipts, and
-logical connection state. A `link: null` field means the physical link was removed.
-Compare the reports with both endpoints' `channel_message_sent` and
-`channel_message` events. A report does not prove the cause of a missing receipt.
+After both exchange sends complete on a physical link, the CLI starts one
+background transport sample after 250 ms. This also records the successful
+sender while its peer waits for a missing receipt. The owner keeps processing
+WebSocket frames and callbacks. Link retirement cancels pending sampling.
+Registration and setup fields describe the request time. Receipt counters are
+read after the transport queries. The layers are not one atomic observation.
+
+At failed run cutoff, the CLI samples every exchange peer concurrently under
+one shared 250 ms diagnostic budget. The failed verdict is fixed first;
+sampling cannot pay exchange debt or extend the gameplay window. Stalled
+queries retain local evidence and name the incomplete stage. A report does
+not prove the cause of a missing receipt.
+
+Stderr uses separate `Exchange transport observation` records for each
+snapshot section, so normal SCTP counters fit the bounded diagnostic output.
+Match `peer`, `generation`, and `phase` (`post_send` or `failed_cutoff`) before
+combining sections. Each `Exchange timed out` record names missing sends,
+missing receipts and logical connection state. Removed peers have no transport
+sections. Compare both endpoints with their `channel_message_sent` and
+`channel_message` events. Diagnostics can still be dropped when stderr is
+blocked or the process exits before sampling completes.
 
 - **`SIGNAL_FISH_SERVER_BIN is not set` panic:** the interop tests drive the real server binary. Run
   `cargo build --bin signal-fish-server` at the repository root and export

@@ -18166,3 +18166,95 @@ host, address, peer set and message order. The reviewed SDK surfaces consume
 `SessionPlan.direct_endpoint`; they never observe discarded selection candidates.
 The allocation and caller controls complement the real WebSocket Direct
 finalization contracts. They do not qualify Direct socket reachability.
+
+### F377 — WebRTC reconnect copied unused Direct addresses
+
+Existing #636 and #826: at baseline `9e81fb18`, the reconnect baseline builder
+converted every retained player with `SessionPlayer::from`. That conversion
+validated and copied Direct endpoints even when the sticky session used WebRTC.
+The authoritative reconnect response already removes legacy connection metadata;
+its owned recovery snapshots still retain the original metadata as required.
+The extra selection copy cannot affect a WebRTC plan.
+
+A new complete reconnect control varies one incumbent's valid Direct address
+through absent, 63-byte and 253-byte values. The old server allocates four address
+lengths. The repaired server needs three, all in existing baseline snapshots.
+The initial 253-byte profile falls from 115 allocations / 27,315 bytes to
+114 / 27,062. This is one scoped reconnect measurement, not a throughput claim.
+The exact 63-to-253-byte slope requires three copies, without a tolerance.
+The final strict comparison reuses one warmed runtime, server, room and actor.
+It retains absent, short and long setup histories, then checks two short/long
+pairs against the same 570-byte requirement. Fresh-instance setup allocations
+cannot become endpoint-size evidence. This avoids the confounded comparison
+class in #1650; it does not attribute that historical allocation site.
+
+The baseline builder now uses the existing transport-aware player projection.
+It includes endpoints only for a sticky Direct plan. The reconnect owns the
+room mutation guard through capture and publication, so that decision and the
+consumed selection roster share the same transport. No public API, schema,
+legacy metadata, capability, publication order or host-selection rule changes.
+
+The positive Direct reconnect control retains the exact incumbent endpoint,
+host, peer identity, offer direction, shared fresh generation, lifecycle opening
+and stored metadata at three valid address lengths. Its measured growth has
+six copies: three legacy snapshots, one selection candidate and two
+recipient plans. A compiled source fault that restores WebRTC endpoint selection
+fails the three-copy assertion. A second fault that omits Direct selection fails
+the required Host topology assertion by incorrectly resetting the room to Relay.
+Restored source passes both controls and the existing join and custom-metadata
+reconnect controls.
+
+The active Rust, .NET and Godot clients need no change. Their reviewed session
+surfaces consume `SessionPlan.direct_endpoint`; it remains absent for WebRTC and
+present for the same Direct host. They cannot observe discarded server selection
+copies. This repair advances the existing campaigns; it does not complete them.
+
+### A30 — Retain transport evidence at native exchange boundaries
+
+Existing #1639 and #889: the CLI's failed exchange report contained local
+callback counts but never called the existing bounded transport sampler.
+A connected sender that had paid its own exchange debt also retained no sample.
+Those omissions prevented the next failed service history from comparing SCTP
+send admission, emission and abandonment with transport and callback receipts.
+They do not establish the cause of either historical missing receipt.
+
+After both sends complete on the current physical link, the CLI now starts one
+background sample after its existing 250 ms linger interval. The link owns that
+query and cancels it on retirement. Established SDP work shares the same task
+owner, so completed sends still start evidence while setup holds the physical
+link. Restoration retains that owner and cannot start a duplicate. The owner can
+keep processing callbacks and WebSocket traffic. Samples retain physical generation
+and phase. Setup fields
+come from request time; shared receipt counters are read after transport access.
+The layers are not atomic. A normal successful process can exit before this
+best-effort sample finishes; held successful peers remain observable.
+
+At failed run cutoff, the verdict is fixed before sampling all obligated peers
+concurrently under one shared 250 ms diagnostic deadline. No callback is consumed
+and no send or receipt debt can be paid by this wait. The failure warning retains
+its existing local `snapshot` JSON envelope.
+Each larger transport section has its own bounded stderr record, so normal SCTP
+evidence is not lost behind a truncated full snapshot. Existing stderr admission
+can still drop records when
+output is blocked. There is no periodic log or change to stdout event schemas.
+
+The new controls hold the actual RTC core and require a bounded timed-out sample,
+then retain exact subsequent reliable gameplay. Reference and Godot profiles run
+in both offer roles, retire pending queries, and repeat on fresh physical links.
+The owner control requires both current-link sends before starting exactly one
+query; historical sends cannot start it. Failed-cutoff sampling leaves receipt
+debt and physical generation unchanged. Held-offer and held-answer controls keep
+completed-send evidence during SDP, reject duplicate requests after restoration,
+and cancel requests when pending setup retires. Compiled faults that suppress the
+background query or remove terminal transport access fail their intended
+assertions. The existing timeout-envelope consumer rejects the removed JSON key
+and passes after the original envelope returns. Restored controls and the prior
+bounded-snapshot gameplay history
+pass. None of these controls reproduces the historical service failure.
+
+The one-millisecond Godot unreliable lifetime, exact reliable and unreliable
+receipts, retry limits and gameplay deadlines stay unchanged. #1639 and #889
+remain open for source attribution. #1244's actual Godot runtime probe is outside
+this change. Rust, .NET and Godot SDKs are unaffected: the changes are local
+reference-client stderr diagnostics and server allocation work, with unchanged
+wire messages and session behavior.

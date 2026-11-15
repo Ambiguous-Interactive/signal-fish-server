@@ -174,10 +174,17 @@ fn finalized_membership_reuses_owned_room_snapshots(
     reconnect: bool,
     actor_name: bool,
     direct_endpoint: bool,
+    transport: Transport,
 ) {
+    let direct_session = transport == Transport::Direct;
+    let topology = if direct_session {
+        Topology::Host
+    } else {
+        Topology::Mesh
+    };
     let mut profiles = Vec::new();
     let sizes = if direct_endpoint {
-        [0, 63, 253]
+        [if direct_session { 9 } else { 0 }, 63, 253]
     } else {
         [0, 1024, 64 * 1024]
     };
@@ -195,8 +202,9 @@ fn finalized_membership_reuses_owned_room_snapshots(
                 },
                 RelayTypeConfig::default(),
                 SessionConfig {
-                    default_topology: Topology::Mesh,
-                    enable_webrtc: true,
+                    default_topology: topology,
+                    enable_webrtc: !direct_session,
+                    enable_direct: direct_session,
                     ..Default::default()
                 },
                 TurnConfig::default(),
@@ -216,7 +224,11 @@ fn finalized_membership_reuses_owned_room_snapshots(
             server.connect_client(host, host_tx).await;
             server.connect_client(guest, guest_tx).await;
             for (player, name) in [(host, "Host"), (guest, "Guest")] {
-                negotiate_webrtc_for_measurement(&server, &player);
+                if direct_session {
+                    signal_fish_server::server::allocation_benchmark::negotiate_direct_for_measurement(&server, &player);
+                } else {
+                    negotiate_webrtc_for_measurement(&server, &player);
+                }
                 server
                     .handle_join_room(
                         &player,
@@ -237,8 +249,22 @@ fn finalized_membership_reuses_owned_room_snapshots(
                 server.handle_player_ready(&player).await;
             }
             let token = drain_membership_setup(&mut guest_rx, false);
-            server.handle_start_game(&host).await;
             let room_id = server.get_client_room(&host).await.unwrap();
+            if direct_session {
+                assert!(server
+                    .database()
+                    .update_player_connection_info(
+                        &room_id,
+                        &host,
+                        ConnectionInfo::Direct {
+                            host: "127.0.0.1".into(),
+                            port: 7777
+                        }
+                    )
+                    .await
+                    .unwrap());
+            }
+            server.handle_start_game(&host).await;
             let metadata =
                 serde_json::json!({"nested": ["x".repeat(if actor_name { 0 } else { bytes })]});
             // Vary one owned field so each byte slope counts its copies.
@@ -278,7 +304,14 @@ fn finalized_membership_reuses_owned_room_snapshots(
             let connection = if reconnect { temporary } else { actor };
             let (actor_tx, mut actor_rx) = tokio::sync::mpsc::channel(64);
             server.connect_client(connection, actor_tx).await;
-            negotiate_webrtc_for_measurement(&server, &connection);
+            if direct_session {
+                signal_fish_server::server::allocation_benchmark::negotiate_direct_for_measurement(
+                    &server,
+                    &connection,
+                );
+            } else {
+                negotiate_webrtc_for_measurement(&server, &connection);
+            }
             let region = stats_alloc::Region::new(ALLOCATOR);
             if reconnect {
                 assert!(
@@ -343,13 +376,11 @@ fn finalized_membership_reuses_owned_room_snapshots(
             let ServerMessage::SessionPlan(actor_plan) = actor_plan.as_ref() else {
                 panic!("{actor_plan:?}");
             };
-            assert_eq!(actor_plan.topology, Topology::Mesh);
-            assert_eq!(actor_plan.transport, Transport::WebRtc);
+            assert_eq!(actor_plan.topology, topology);
+            assert_eq!(actor_plan.transport, transport);
             assert_eq!(actor_plan.peers.len(), if reconnect { 1 } else { 2 });
-            assert!(actor_plan
-                .peers
-                .iter()
-                .all(|peer| peer.player_id != actor && peer.initiate == (actor < peer.player_id)));
+            assert!(actor_plan.peers.iter().all(|peer| peer.player_id != actor
+                && peer.initiate == (direct_session || actor < peer.player_id)));
             let lifecycle = host_rx.try_recv().unwrap();
             let lifecycle_actor = match lifecycle.as_ref() {
                 ServerMessage::PlayerJoined { player } => player,
@@ -391,13 +422,24 @@ fn finalized_membership_reuses_owned_room_snapshots(
                     .filter(|peer| *peer != recipient)
                     .collect();
                 assert_eq!(actual, expected);
-                assert_eq!(plan.host, None);
-                assert_eq!(plan.direct_endpoint, None);
+                assert_eq!(plan.host, direct_session.then_some(host));
+                assert_eq!(
+                    plan.direct_endpoint,
+                    if direct_session {
+                        host_info.as_ref().and_then(
+                            signal_fish_server::protocol::DirectEndpoint::from_connection_info,
+                        )
+                    } else {
+                        None
+                    }
+                );
                 assert_eq!(plan.fallback, Transport::Relay);
-                assert!(plan
-                    .peers
-                    .iter()
-                    .all(|peer| peer.initiate == (recipient < peer.player_id)));
+                assert!(plan.peers.iter().all(|peer| peer.initiate
+                    == (if direct_session {
+                        recipient != host
+                    } else {
+                        recipient < peer.player_id
+                    })));
             }
             if !reconnect {
                 let lifecycle = guest_rx.try_recv().unwrap();
@@ -438,9 +480,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
     let allowed_copies = match (actor_name, reconnect) {
         (true, true) => 8,
         (true, false) => 9,
+        (false, _) if direct_session => 6,
         (false, _) => 3,
     };
-    // The join baseline needs three legacy endpoint copies; selection needs none.
+    // Direct plans additionally retain one candidate and one endpoint per recipient.
     let fixed_allowance = if direct_endpoint { 64 } else { 1024 };
     for (bytes, stats) in sizes.into_iter().zip(profiles) {
         assert!(stats.bytes_allocated <= baseline + allowed_copies * bytes + fixed_allowance,
@@ -621,10 +664,10 @@ fn main() {
             live_p2p_allocations::game_start_shares_configuration,
         ),
         allocation_harness::trial("finalized_join_shares_recovery_player_name", || {
-            finalized_membership_reuses_owned_room_snapshots(false, true, false)
+            finalized_membership_reuses_owned_room_snapshots(false, true, false, Transport::WebRtc)
         }),
         allocation_harness::trial("reconnect_claim_shares_retained_player_name", || {
-            finalized_membership_reuses_owned_room_snapshots(true, true, false)
+            finalized_membership_reuses_owned_room_snapshots(true, true, false, Transport::WebRtc)
         }),
         allocation_harness::trial("host_departure_skips_legacy_player_metadata", || {
             live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false, false)
@@ -640,13 +683,20 @@ fn main() {
             session_plans_do_not_copy_custom_connection_metadata,
         ),
         allocation_harness::trial("finalized_join_skips_unused_direct_endpoints", || {
-            finalized_membership_reuses_owned_room_snapshots(false, false, true)
+            finalized_membership_reuses_owned_room_snapshots(false, false, true, Transport::WebRtc)
+        }),
+        allocation_harness::trial(
+            "finalized_reconnect_skips_unused_direct_endpoints",
+            reconnect_costs::webrtc_reconnect_skips_unused_direct_endpoints,
+        ),
+        allocation_harness::trial("finalized_direct_reconnect_retains_host_endpoint", || {
+            finalized_membership_reuses_owned_room_snapshots(true, false, true, Transport::Direct)
         }),
         allocation_harness::trial("finalized_join_reuses_owned_room_snapshots", || {
-            finalized_membership_reuses_owned_room_snapshots(false, false, false)
+            finalized_membership_reuses_owned_room_snapshots(false, false, false, Transport::WebRtc)
         }),
         allocation_harness::trial("finalized_reconnect_reuses_owned_room_snapshot", || {
-            finalized_membership_reuses_owned_room_snapshots(true, false, false)
+            finalized_membership_reuses_owned_room_snapshots(true, false, false, Transport::WebRtc)
         }),
     ]);
 }

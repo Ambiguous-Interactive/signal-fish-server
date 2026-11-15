@@ -320,7 +320,7 @@ impl From<&PlayerInfo> for SessionPlayer {
 
 impl SessionPlayer {
     /// Copy selection fields and validate an owned endpoint only when Direct is requested.
-    fn for_transport(player: &PlayerInfo, include_direct: bool) -> Self {
+    pub(crate) fn for_transport(player: &PlayerInfo, include_direct: bool) -> Self {
         Self {
             id: player.id,
             name: player.name.clone(),

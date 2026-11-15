@@ -1109,3 +1109,244 @@ async fn pending_setup_transport_snapshot_keeps_the_live_generation_visible() {
         pair.cleanup().await;
     }
 }
+
+/// #1639/#889: the successful sender also keeps bounded transport evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exchange_diagnostic_is_nonblocking_once_per_generation_and_cancelled_on_retirement() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for receiver_offers in [false, true] {
+            let (mut pair, clock) = unconnected_pair(profile);
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            pair.negotiate().await;
+            if receiver_offers {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            }
+            let peer = pair.sender_id;
+            let generation = pair.receiver.diagnostic_snapshot(peer)["generation"].clone();
+            let held =
+                HeldCoreSend::start(&clock, pair.receiver.channel(peer, RELIABLE_LABEL).unwrap())
+                    .await;
+            let (samples, mut received) = mpsc::unbounded_channel();
+            assert!(pair.receiver.start_exchange_diagnostic_with(
+                peer,
+                Duration::ZERO,
+                move |snapshot| {
+                    samples.send(snapshot).unwrap();
+                }
+            ));
+            assert!(!pair
+                .receiver
+                .start_exchange_diagnostic_with(peer, Duration::ZERO, |_| {
+                    panic!("duplicate query must not run");
+                }));
+            assert!(
+                pair.receiver
+                    .is_current_generation(peer, generation.as_u64().unwrap()),
+                "owner remains available while transport access is blocked"
+            );
+            let sample = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample["generation"], generation);
+            assert_eq!(sample["transport_snapshot_error"], "deadline_elapsed");
+            assert_eq!(sample["transport_snapshot_stage"], "rtc_stats");
+            held.finish().await;
+            let outgoing = b"gameplay-after-diagnostic";
+            pair.receiver
+                .channel(peer, RELIABLE_LABEL)
+                .unwrap()
+                .send(outgoing.as_slice().into())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.sender_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage { text, .. } if text.as_bytes() == outgoing => {
+                            break
+                        }
+                        EngineEvent::ChannelMessage { text, .. } => {
+                            assert_eq!(text, "held-readiness")
+                        }
+                        EngineEvent::ChannelBinaryMessage { data, .. } => {
+                            assert_eq!(data, outgoing);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            pair.receiver.remove_peer(peer).await.unwrap();
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.negotiate().await;
+            let fresh = pair.receiver.diagnostic_snapshot(peer)["generation"].clone();
+            assert_ne!(fresh, generation);
+            let (samples, mut received) = mpsc::unbounded_channel();
+            assert!(pair.receiver.start_exchange_diagnostic_with(
+                peer,
+                Duration::ZERO,
+                move |snapshot| {
+                    samples.send(snapshot).unwrap();
+                }
+            ));
+            let sample = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample["generation"], fresh);
+            assert!(sample.get("transport_snapshot_error").is_none());
+            assert!(sample["sctp"].is_object());
+            for (section, value) in sample.as_object().unwrap() {
+                assert!(value.to_string().len() < 3000, "{section} must fit the bounded diagnostic record with its peer/generation envelope");
+            }
+            assert_eq!(
+                sample["channel_properties"].as_object().unwrap().len(),
+                profile.labels().len()
+            );
+            pair.receiver.remove_peer(peer).await.unwrap();
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.negotiate().await;
+            let (samples, mut received) = mpsc::unbounded_channel();
+            assert!(pair.receiver.start_exchange_diagnostic_with(
+                peer,
+                Duration::from_secs(30),
+                move |snapshot| {
+                    samples.send(snapshot).unwrap();
+                }
+            ));
+            pair.receiver.remove_peer(peer).await.unwrap();
+            let retired_sample = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("retirement releases the publisher within the original deadline");
+            assert!(
+                retired_sample.is_none(),
+                "retirement cancels the sleeping query and releases its publisher"
+            );
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+        }
+    }
+}
+
+/// #1639: completed sends can request evidence while an established SDP worker owns the link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exchange_diagnostic_survives_established_sdp_ownership_and_cancels_with_it() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for holds_offer in [false, true] {
+            for retire_pending in [false, true] {
+                let (mut pair, _) = unconnected_pair(profile);
+                pair.negotiate().await;
+                let offer = pair.sender.peers[&pair.receiver_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp;
+                let answer = pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp;
+                let (engine, peer, operation, step) = if holds_offer {
+                    (
+                        &mut pair.receiver,
+                        pair.sender_id,
+                        Negotiation::Offer(offer),
+                        "remote_offer",
+                    )
+                } else {
+                    (
+                        &mut pair.sender,
+                        pair.receiver_id,
+                        Negotiation::Answer(answer),
+                        "remote_answer",
+                    )
+                };
+                let generation = engine.diagnostic_snapshot(peer)["generation"].clone();
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                engine.negotiation_hold = Some(NegotiationHold {
+                    step,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                });
+                engine
+                    .start_negotiation(
+                        peer,
+                        operation,
+                        Deadline::after(tokio::time::Instant::now(), Duration::from_secs(10)),
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                    .await
+                    .unwrap();
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    engine
+                        .send_channel(peer, label)
+                        .await
+                        .unwrap()
+                        .send_text(label)
+                        .await
+                        .unwrap();
+                }
+                let (samples, mut received) = mpsc::unbounded_channel();
+                let delay = if retire_pending {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::ZERO
+                };
+                assert!(engine.start_exchange_diagnostic_with(peer, delay, move |snapshot| { samples.send(snapshot).unwrap(); }),
+                    "completed current-link sends must keep their sample request while SDP owns the link");
+                assert!(
+                    !engine.start_exchange_diagnostic_with(peer, delay, |_| panic!(
+                        "one query per physical generation"
+                    ))
+                );
+                if retire_pending {
+                    engine.remove_peer(peer).await.unwrap();
+                    let retired_sample =
+                        tokio::time::timeout(Duration::from_secs(1), received.recv())
+                            .await
+                            .unwrap();
+                    assert!(
+                        retired_sample.is_none(),
+                        "retiring held SDP must cancel the query and release its publisher"
+                    );
+                    release.notify_one();
+                    assert!(engine.take_ready_negotiation().is_none());
+                } else {
+                    let snapshot = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(snapshot["generation"], generation);
+                    assert_eq!(snapshot["negotiation_pending"], true);
+                    assert!(snapshot["sctp"].is_object());
+                    assert!(engine.negotiation_pending(peer));
+                    release.notify_one();
+                    tokio::time::timeout(Duration::from_secs(5), engine.next_negotiation())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(!engine.negotiation_pending(peer));
+                    assert_eq!(engine.diagnostic_snapshot(peer)["generation"], generation);
+                    assert!(!engine.start_exchange_diagnostic_with(
+                        peer,
+                        Duration::ZERO,
+                        |_| panic!("worker restoration must preserve the same query owner")
+                    ));
+                }
+                pair.cleanup().await;
+            }
+        }
+    }
+}
