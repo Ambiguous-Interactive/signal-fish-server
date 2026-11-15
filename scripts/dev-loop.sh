@@ -308,6 +308,7 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
 
     lib_owner=0
     core_owner=0
+    native_changed=0
     main_owner=0
     client_manifests=()
     tooling_manifest_changed=0
@@ -373,6 +374,9 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
                     client_dir="${client_dir%/*}"
                 done
                 if [ -f "$client_dir/Cargo.toml" ]; then
+                    case "$file" in
+                        clients/native/src/* | clients/native/tests/*) native_changed=1 ;;
+                    esac
                     found=0
                     for manifest in ${client_manifests[@]+"${client_manifests[@]}"}; do
                         [ "$manifest" != "$client_dir/Cargo.toml" ] || found=1
@@ -404,7 +408,7 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
     for target in ${owners[@]+"${owners[@]}"}; do
         route_target "${target%.rs}"
     done
-    if [ "$lib_owner" -eq 1 ] || [ "$core_owner" -eq 1 ] || [ "${#owners[@]}" -gt 0 ]; then
+    if [ "$lib_owner" -eq 1 ] || [ "$core_owner" -eq 1 ] || [ "$native_changed" -eq 1 ] || [ "${#owners[@]}" -gt 0 ]; then
         route_target async_timeout_policy_scan
         route_target loud_test_failures_scan
     fi

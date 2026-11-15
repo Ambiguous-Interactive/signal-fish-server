@@ -11,16 +11,23 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class IterationEntrypoints(unittest.TestCase):
-    def run_wrapper(self, script, args=(), exit_code=0, nested=False):
+    def run_wrapper(self, script, args=(), exit_code=0, nested=False, expected_alias=None):
         with tempfile.TemporaryDirectory() as directory:
             scripts = Path(directory) / "scripts"
             scripts.mkdir()
             shutil.copyfile(ROOT / "scripts" / script, scripts / script)
             (scripts / "dev-loop.sh").write_text(
-                '#!/usr/bin/env bash\n[ \"$PWD\" = \"$EXPECTED_ROOT\" ] || exit 8\nprintf "ARG:%s\\n" "$@"\n'
+                '#!/usr/bin/env bash\n[ \"$PWD\" -ef \"$EXPECTED_ROOT\" ] || exit 8\nprintf "ARG:%s\\n" "$@"\n'
                 f"exit {exit_code}\n"
             )
-            env = dict(os.environ, LC_ALL="C", EXPECTED_ROOT=str(Path(directory).resolve()))
+            expected_root = str(Path(directory).resolve())
+            if expected_alias == "same":
+                expected_root += os.sep + "."
+            elif expected_alias == "different":
+                different = Path(directory) / "different"
+                different.mkdir()
+                expected_root = str(different.resolve())
+            env = dict(os.environ, LC_ALL="C", EXPECTED_ROOT=expected_root)
             cwd = Path(directory) / "nested" if nested else Path(directory)
             cwd.mkdir(exist_ok=True)
             return subprocess.run(
@@ -52,6 +59,15 @@ class IterationEntrypoints(unittest.TestCase):
                 result = self.run_wrapper("run-local-ci.sh", args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn("ARG:", result.stdout)
+
+    def test_directory_identity_accepts_aliases_and_rejects_other_directories(self):
+        for script in ("test.sh", "run-local-ci.sh"):
+            with self.subTest(script=script):
+                same = self.run_wrapper(script, expected_alias="same")
+                self.assertEqual(same.returncode, 0, same.stderr)
+                other = self.run_wrapper(script, expected_alias="different")
+                self.assertEqual(other.returncode, 8, other.stderr)
+                self.assertNotIn("ARG:", other.stdout)
 
     def test_feature_flags_remain_scoped(self):
         result = self.run_wrapper("test.sh", ["--all-features"])

@@ -623,7 +623,10 @@ function Read-AsciiLineFromBytes {
 }
 
 function Get-IndexBlobTexts {
-    param([Parameter(Mandatory = $true)][string[]]$ObjectIds)
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ObjectIds,
+        [switch]$AllowBudgetMiss
+    )
 
     $textsByObjectId = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $orderedObjectIds = [System.Collections.Generic.List[string]]::new()
@@ -658,6 +661,7 @@ function Get-IndexBlobTexts {
 
         $totalByteCount += [int64]::Parse($fields[2], [System.Globalization.CultureInfo]::InvariantCulture)
         if ($totalByteCount -gt $script:MaxBatchedBlobBytes) {
+            if ($AllowBudgetMiss) { return $null }
             throw "Staged blob batch is $totalByteCount bytes, above the $script:MaxBatchedBlobBytes byte pre-commit limit. Split oversized .llm files and run ./scripts/generate-skills-index.sh."
         }
     }
@@ -1170,7 +1174,8 @@ function Test-SkillsIndexMetadataUnchanged {
     # Missing entries include untracked files and inconsistent tree views.
     # Added/deleted/renamed skills and index/generator edits use full generation.
     if ($entries.Count -ne $ChangedSkillFiles.Count) { return $false }
-    $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray()
+    $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray() -AllowBudgetMiss
+    if ($null -eq $texts) { return $false }
     $worktreeBytes = [long]0
     foreach ($entry in $entries.Values) {
         $oldText = $texts[$entry.Old]

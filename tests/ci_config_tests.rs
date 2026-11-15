@@ -36730,6 +36730,24 @@ fn test_pre_commit_skill_body_fast_path_preserves_metadata_when_pwsh_available()
         "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", r#"
         . ./scripts/hooks/pre-commit.ps1 -SourceOnly
         function Assert($condition, $message) { if (-not $condition) { throw $message } }
+        $script:OriginalBlobReader = ${function:Get-IndexBlobTexts}
+        $script:FixtureBudgetMiss = $false
+        $script:FixtureBlobError = $false
+        function Invoke-NativeWithInput {
+            param($FileName, $Arguments, $InputText)
+            if ($script:FixtureBlobError) { return [pscustomobject]@{ ExitCode=1; Output='fixture blob read failure'; Stdout='' } }
+            return [pscustomobject]@{ ExitCode=0; Output=''; Stdout='old blob 65' }
+        }
+        $savedBudget = $script:MaxBatchedBlobBytes
+        $script:MaxBatchedBlobBytes = 64
+        Assert ($null -eq (& $script:OriginalBlobReader -ObjectIds @('old') -AllowBudgetMiss)) 'optional combined batch can miss its budget'
+        try { [void](& $script:OriginalBlobReader -ObjectIds @('old')); throw 'mandatory reader did not enforce budget' }
+        catch { Assert ($_.Exception.Message -like 'Staged blob batch is *') 'mandatory reader retains hard byte limit' }
+        $script:FixtureBlobError = $true
+        try { [void](& $script:OriginalBlobReader -ObjectIds @('old') -AllowBudgetMiss); throw 'unrelated reader error was swallowed' }
+        catch { Assert ($_.Exception.Message -like '*fixture blob read failure*') 'optional mode must propagate unrelated read errors' }
+        $script:FixtureBlobError = $false
+        $script:MaxBatchedBlobBytes = $savedBudget
         $script:FixturePath = '.llm/skills/example/SKILL.md'
         $script:FixtureStatus = 'M'
         $script:FixtureOld = @'
@@ -36752,7 +36770,12 @@ Old body.
             return [pscustomobject]@{ ExitCode=$(if ($Arguments -contains 'grep') { 1 } else { 0 }); Output=''; Stdout='' }
         }
         function Get-IndexBlobTexts {
-            param([string[]]$ObjectIds)
+            param([string[]]$ObjectIds, [switch]$AllowBudgetMiss)
+            if ($script:FixtureBudgetMiss) {
+                Assert $AllowBudgetMiss 'metadata comparison alone opts into budget fallback'
+                return $null
+            }
+            if ($script:FixtureBlobError) { throw 'fixture blob read failure' }
             $result = [Collections.Generic.Dictionary[string,string]]::new()
             $result['old'] = $script:FixtureOld
             $result['new'] = $script:FixtureNew
@@ -36760,6 +36783,13 @@ Old body.
         }
         $paths = [string[]]@($script:FixturePath)
         Assert (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths) 'frontmatter body-only edit must use the fast path'
+        $script:FixtureBudgetMiss = $true
+        Assert (-not (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths)) 'combined old/new budget misses must fall back to full generation'
+        $script:FixtureBudgetMiss = $false
+        $script:FixtureBlobError = $true
+        try { [void](Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths); throw 'metadata comparison swallowed unrelated error' }
+        catch { Assert ($_.Exception.Message -eq 'fixture blob read failure') 'metadata comparison must propagate unrelated errors' }
+        $script:FixtureBlobError = $false
         foreach ($pair in @(@('name: example', 'name: renamed'), @('# Example skill', '# Changed title'), @('Example description.', 'Changed description.'))) {
             $script:FixtureNew = $script:FixtureOld.Replace($pair[0], $pair[1])
             Assert (-not (Test-StagedSkillsIndexDefinitelyFresh -ChangedSkillFiles $paths)) 'changed metadata must require full catalog verification'

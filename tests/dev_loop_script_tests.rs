@@ -571,6 +571,10 @@ fn test_dev_loop_changed_client_routes_to_owning_package_once() {
         &temp_root.path().join("clients/native/Cargo.toml"),
         "[package]\nname = \"native-client\"\n",
     );
+    write_file(
+        &temp_root.path().join("tools/repo-checks/Cargo.toml"),
+        "[package]\nname = \"repo-checks\"\n[[test]]\nname = \"async_timeout_policy_scan\"\n[[test]]\nname = \"loud_test_failures_scan\"\n",
+    );
     commit_fixture_repo(temp_root.path());
     write_file(
         &temp_root.path().join("clients/native/src/lib.rs"),
@@ -591,8 +595,20 @@ fn test_dev_loop_changed_client_routes_to_owning_package_once() {
             .lines()
             .filter(|line| line.contains("cargo nextest run"))
             .count(),
-        1,
-        "client changes share one build: {output}"
+        2,
+        "client changes share one client build plus the tooling scanner batch: {output}"
+    );
+    assert!(
+        output.contains("--test async_timeout_policy_scan")
+            && output.contains("--test loud_test_failures_scan"),
+        "native-only changes retain both source scanners: {output}"
+    );
+    assert!(
+        output
+            .lines()
+            .filter(|line| line.starts_with("DRY-RUN:"))
+            .all(|line| line.contains("--manifest-path")),
+        "native-only changes must not compile root targets: {output}"
     );
 }
 
