@@ -92,7 +92,7 @@ production.
 The following paths are classified as internal (no CHANGELOG entry required):
 
 - **Dot-directories:** `.github/`, `.githooks/`, `.devcontainer/`, `.config/`, `.vscode/`, `.claude/`, `.llm/`
-- **Dev/build directories:** `scripts/`, `tests/`, `test-fixtures/`, `target/`, `progress/`
+- **Dev/build directories:** `scripts/`, `tests/`, `test-fixtures/`, `target/`, `progress/`, `tools/repo-checks/`
 - **Extracted Rust tests:** `*_tests.rs`, `*_test.rs`, and nested `tests.rs`
   under `src/` or `clients/native/src/`; these files contain test code only.
 - **Standalone files:** `Cargo.lock`, root tooling `package.json`/`package-lock.json`,

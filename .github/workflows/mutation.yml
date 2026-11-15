@@ -135,7 +135,7 @@ jobs:
       - name: Verify measured mutation inventory
         # This integration test can only enforce the count when cargo-mutants is
         # installed; running it here prevents the guard from skipping in CI.
-        run: cargo test --locked --test ci_config_tests test_mutation_total_mutants_constant_matches_list
+        run: cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_mutation_total_mutants_constant_matches_list
 
       - name: Warm build + green-gate (exact unmutated nextest oracle)
         run: bash scripts/run-mutants.sh --warm

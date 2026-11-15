@@ -174,6 +174,9 @@ fn test_ci_dependency_detection_classifies_cargo_npm_and_mixed_changes() {
     let script = dependency_detection_script(&extract_ci_dep_detect_step_block(&workflow));
     let cases = [
         ("cargo-root", "Cargo.toml\nCargo.lock\n", true),
+        ("repo-checks-internal", "Cargo.lock\ntools/repo-checks/tests/ownership.rs\n", true),
+        ("repo-checks-near-prefix", "Cargo.lock\ntools/repo-checks-extra/runtime.rs\n", false),
+        ("repo-checks-plus-runtime", "Cargo.lock\ntools/repo-checks/tests/ownership.rs\nsrc/server.rs\n", false),
         ("encoding-graph", "benches/encoding/Cargo.toml\nbenches/encoding/Cargo.lock\n", true),
         ("encoding-internal", "Cargo.lock\nbenches/encoding/support/flat.rs\n", true),
         ("encoding-plus-server", "Cargo.lock\nbenches/encoding/support/model.rs\nsrc/server.rs\n", false),
@@ -280,6 +283,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         "scripts/*",
         "tests/*",
         "benches/encoding/*",
+        "tools/repo-checks/*",
         "clients/browser/tests/*",
         "clients/browser/src/*.test.ts",
         "clients/browser/scripts/test.mjs",

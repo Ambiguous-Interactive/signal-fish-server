@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +10,7 @@ use syn::{Block, Expr, Macro, Pat, Stmt, Token};
 
 #[test]
 fn test_timeout_await_results_are_not_discarded() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = common::repo_root();
     let mut violations = Vec::new();
 
     // The native reference client (clients/native/) is a standalone package
@@ -45,7 +47,7 @@ and frame result when draining expected messages:\n{}",
 
 #[test]
 fn test_try_recv_results_are_not_discarded_in_tests() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = common::repo_root();
     let mut violations = Vec::new();
 
     // Same scan roots as the timeout rule above: the reference client's

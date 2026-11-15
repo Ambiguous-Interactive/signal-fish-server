@@ -36,9 +36,11 @@ on:
     paths:
       - "docs/**"
       - "**/*.md"
-      - "**/*.rs"
+      - "src/**"
+      - "examples/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "build.rs"
       - "mkdocs.yml"
       - "requirements-docs.txt"
       - "rust-toolchain.toml"

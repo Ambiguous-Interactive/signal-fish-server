@@ -197,7 +197,7 @@ block is valid in that language.
 ### Symptom
 
 ```text
-cargo test --test ci_config_tests test_foo test_bar
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_foo test_bar
 # Second test name causes 'unexpected argument' error
 ```
 
@@ -211,7 +211,7 @@ before `--`. A second positional arg is not a second filter — it is rejected a
 Pass multiple test names after the `--` separator. Always include `--locked`.
 
 ```bash
-cargo test --locked --test ci_config_tests -- test_foo test_bar
+cargo test --manifest-path tools/repo-checks/Cargo.toml --locked --test ci_config_tests -- test_foo test_bar
 ```
 
 ---

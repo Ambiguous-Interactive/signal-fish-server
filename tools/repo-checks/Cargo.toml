@@ -1,0 +1,150 @@
+[package]
+name = "signal-fish-repo-checks"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94.0"
+authors = ["Ambiguous Interactive"]
+publish = false
+license = "MIT"
+autotests = false
+
+# Keep repository policy independent of the server and its runtime dependencies.
+[workspace]
+
+[dev-dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+tempfile = "3.27.0"
+regex = "1.13.1"
+serde_json = "1.0.154"
+serial_test = "4.0.1"
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+syn = { version = "3.0.9", features = ["full", "visit"] }
+saphyr = { version = "0.3.3", default-features = false }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.dev.package.syn]
+opt-level = 2
+
+[profile.dev.package.proc-macro2]
+opt-level = 2
+
+[profile.ci]
+inherits = "dev"
+debug = 0
+incremental = false
+
+[[test]]
+name = "agent_tooling_guards"
+path = "../../tests/agent_tooling_guards.rs"
+
+[[test]]
+name = "ci_config_script_tests"
+path = "../../tests/ci_config_script_tests.rs"
+
+[[test]]
+name = "ci_config_tests"
+path = "../../tests/ci_config_tests.rs"
+
+[[test]]
+name = "dev_loop_script_tests"
+path = "../../tests/dev_loop_script_tests.rs"
+
+[[test]]
+name = "doc_consistency_policy_tests"
+path = "../../tests/doc_consistency_policy_tests.rs"
+
+[[test]]
+name = "doc_consistency_script_tests"
+path = "../../tests/doc_consistency_script_tests.rs"
+
+[[test]]
+name = "drift_guard_hygiene"
+path = "../../tests/drift_guard_hygiene.rs"
+
+[[test]]
+name = "generate_skills_index_script_tests"
+path = "../../tests/generate_skills_index_script_tests.rs"
+
+[[test]]
+name = "internal_refactor_gate_tests"
+path = "../../tests/internal_refactor_gate_tests.rs"
+
+[[test]]
+name = "llm_example_file_policy_tests"
+path = "../../tests/llm_example_file_policy_tests.rs"
+
+[[test]]
+name = "llm_file_size_script_tests"
+path = "../../tests/llm_file_size_script_tests.rs"
+
+[[test]]
+name = "markdown_link_text_script_tests"
+path = "../../tests/markdown_link_text_script_tests.rs"
+
+[[test]]
+name = "msrv_consistency_script_tests"
+path = "../../tests/msrv_consistency_script_tests.rs"
+
+[[test]]
+name = "read_toml_string_script_tests"
+path = "../../tests/read_toml_string_script_tests.rs"
+
+[[test]]
+name = "release_publish_tests"
+path = "../../tests/release_publish_tests.rs"
+
+[[test]]
+name = "run_mutants_script_tests"
+path = "../../tests/run_mutants_script_tests.rs"
+
+[[test]]
+name = "rust_markdown_validation_script_tests"
+path = "../../tests/rust_markdown_validation_script_tests.rs"
+
+[[test]]
+name = "skill_layout_tests"
+path = "../../tests/skill_layout_tests.rs"
+
+[[test]]
+name = "skip_if_verified_action_tests"
+path = "../../tests/skip_if_verified_action_tests.rs"
+
+[[test]]
+name = "source_hygiene_guards"
+path = "../../tests/source_hygiene_guards.rs"
+
+[[test]]
+name = "validate_lychee_config_script_tests"
+path = "../../tests/validate_lychee_config_script_tests.rs"
+
+[[test]]
+name = "workflow_awk_validator_script_tests"
+path = "../../tests/workflow_awk_validator_script_tests.rs"
+
+[[test]]
+name = "workflow_hygiene_script_tests"
+path = "../../tests/workflow_hygiene_script_tests.rs"
+
+[[test]]
+name = "workspace_lockfile_consistency"
+path = "../../tests/workspace_lockfile_consistency.rs"
+
+[[test]]
+name = "ownership"
+path = "tests/ownership.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[[test]]
+name = "async_timeout_policy_scan"
+path = "../../tests/async_timeout_policy_scan.rs"
+
+[[test]]
+name = "loud_test_failures_scan"
+path = "../../tests/loud_test_failures_scan.rs"

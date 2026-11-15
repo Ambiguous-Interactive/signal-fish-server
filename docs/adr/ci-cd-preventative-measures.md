@@ -340,7 +340,7 @@ fn test_msrv_consistency_across_config_files() {
 # Result: PASS (4 warnings, 0 errors)
 
 # Validate CI config tests (including new markdown and typos tests)
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 # Result: 9 passed; 0 failed
 
 # Validate markdown linting script

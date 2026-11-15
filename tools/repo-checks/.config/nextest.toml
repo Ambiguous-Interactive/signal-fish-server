@@ -1,0 +1,22 @@
+# Tooling has its own target inventory; runtime binary selectors do not apply.
+[test-groups]
+powershell-subprocess = { max-threads = 1 }
+heavy-checks = { max-threads = 1 }
+
+[profile.default]
+fail-fast = true
+failure-output = "immediate-final"
+success-output = "never"
+
+[[profile.default.overrides]]
+filter = 'test(/when_pwsh_available/) or binary(doc_consistency_script_tests)'
+test-group = 'powershell-subprocess'
+
+[[profile.default.overrides]]
+filter = 'test(test_docs_relative_links_resolve_to_existing_files)'
+test-group = 'heavy-checks'
+slow-timeout = { period = "300s", terminate-after = 3 }
+
+[profile.ci]
+inherits = "default"
+slow-timeout = { period = "120s", terminate-after = 3 }

@@ -260,17 +260,18 @@ tests.
 ## 5. Running Configuration Tests
 
 ```bash
-# Run only configuration tests (fast — no compilation)
-cargo test --test ci_config_tests
+# Build and run only the configuration test target
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
-# Run as part of full test suite
-cargo test --all-features  # Includes ci_config_tests
+# Explicit deep validation covers both independent packages
+cargo test --all-features
+cargo test --manifest-path tools/repo-checks/Cargo.toml
 
 # Run a specific test
-cargo test --test ci_config_tests test_msrv_consistency_across_config_files
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests test_msrv_consistency_across_config_files
 ```
 
-**Fast execution:** No external dependencies, no network calls, parallel test execution.
+**Scoped execution:** This target builds independently of the server. Some checks use installed tools.
 Total time for all configuration tests: < 1 second.
 
 ---

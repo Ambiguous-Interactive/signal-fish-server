@@ -101,8 +101,9 @@ passes every scoped, edit-test-loop check and still fails hosted CI:
 
 **Rule**: any change that adds a `src/` module, a production clock read, or panic-capable
 code runs the scanners' owning targets locally in the same change
-(`cargo nextest run --test ci_config_tests --test clock_source_scan` plus
-`bash scripts/check-no-panics.sh`), or treats the hosted Lint/Nextest red as the
+(`cargo nextest run --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests`,
+`cargo nextest run --test clock_source_scan`, and `bash scripts/check-no-panics.sh`),
+or treats the hosted Lint/Nextest red as the
 first signal. A scoped `-E 'test(<name>)'` loop on the changed feature's own target never
 runs these guards.
 

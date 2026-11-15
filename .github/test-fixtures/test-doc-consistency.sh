@@ -125,6 +125,9 @@ INTERNAL_PATHS=(
     # Source-adjacent directories
     "scripts/check-foo.sh"
     "tests/unit_test.rs"
+    "tools/repo-checks/Cargo.toml"
+    "tools/repo-checks/Cargo.lock"
+    "tools/repo-checks/tests/ownership.rs"
     "benches/encoding/Cargo.toml"
     "benches/encoding/support/flat.rs"
     "benches/encoding/results/baseline/summary.csv"
@@ -231,6 +234,8 @@ echo -e "${YELLOW}--- Non-internal path classification ---${NC}"
 # Data-driven table: each entry is a non-internal path that should
 # trigger a changelog gate failure when CHANGELOG.md is absent.
 NON_INTERNAL_PATHS=(
+    "tools/repo-checks-extra/runtime.rs"
+    "tools/production/runtime.rs"
     "clients/fortress-wasm/project/other.gd"
     "clients/fortress-wasm/harness.mjs.bak"
     "clients/fortress-wasm/project/main.gd.bak"

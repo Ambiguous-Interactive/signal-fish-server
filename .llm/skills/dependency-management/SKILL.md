@@ -96,7 +96,7 @@ any of the following criteria are met:
    tuple `("crate_name", "reason_substring")` so the test enforces the
    ban is present.
 3. Verify — run `cargo deny check bans` to confirm the ban is active.
-4. Run the full test suite — `cargo test --all-features --test ci_config_tests`
+4. Run the full test suite — `cargo test --manifest-path tools/repo-checks/Cargo.toml --all-features --test ci_config_tests`
    to confirm the new test entry passes.
 
 ---

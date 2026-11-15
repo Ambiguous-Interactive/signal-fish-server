@@ -6,9 +6,9 @@
 # This script mirrors the GitHub Actions CI workflow checks.
 #
 # Usage:
-#   ./scripts/run-local-ci.sh           # Run all checks
+#   ./scripts/run-local-ci.sh           # Run scoped checks (use --deep for all checks)
 #   ./scripts/run-local-ci.sh --fast    # Skip slow checks (tests, clippy, nested policy scans)
-#   ./scripts/run-local-ci.sh --fix     # Auto-fix issues where possible
+#   ./scripts/run-local-ci.sh --deep --fix # Full validation with automatic fixes
 #
 # Exit codes:
 #   0 = All checks passed
@@ -16,6 +16,28 @@
 #   2 = Invalid usage
 
 set -euo pipefail
+
+# Resolve the checkout before forwarding relative Git paths to the scoped loop.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "$SCRIPT_DIR/.."
+DEEP_MODE=false
+FIX_REQUESTED=false
+LOCAL_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --deep) DEEP_MODE=true ;;
+        --fix) FIX_REQUESTED=true; LOCAL_ARGS+=("$arg") ;;
+        *) LOCAL_ARGS+=("$arg") ;;
+    esac
+done
+set -- ${LOCAL_ARGS[@]+"${LOCAL_ARGS[@]}"}
+if [ "$FIX_REQUESTED" = true ] && [ "$DEEP_MODE" = false ]; then
+    echo "Use --deep --fix for broad automatic fixes" >&2
+    exit 2
+fi
+if [ "$DEEP_MODE" = false ] && [ "$#" -eq 0 ]; then
+    exec bash "$SCRIPT_DIR/dev-loop.sh" --clippy --changed
+fi
 
 # Color output (disable if not a TTY)
 if [ -t 1 ]; then
@@ -49,7 +71,7 @@ for arg in "$@"; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--fast] [--fix]"
+            echo "Usage: $0 [--fast] [--deep [--fix]]"
             echo ""
             echo "Options:"
             echo "  --fast    Skip slow checks (tests, clippy, nested policy scans)"
@@ -321,7 +343,12 @@ fi
 # Check 19: Documentation consistency policy tests
 if [ "$FAST_MODE" = false ]; then
     run_check "doc-policy-tests" "Running docs/changelog policy tests" \
-        cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
+        cargo test --manifest-path tools/repo-checks/Cargo.toml --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
+fi
+
+if [ "$FAST_MODE" = false ]; then
+    run_check "repository-tests" "Running independent repository checks" \
+        cargo nextest run --manifest-path tools/repo-checks/Cargo.toml --locked
 fi
 
 # Summary

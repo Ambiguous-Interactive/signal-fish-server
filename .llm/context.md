@@ -56,7 +56,7 @@ Start here:
 ### Should I Add a Test?
 
 ```text
-YES - ALWAYS. Every change requires comprehensive tests.
+Test changed behavior and recurring failure modes. Avoid tests that only mirror prose.
   +-- Happy path + positive variations
   +-- Negative cases + error conditions
   +-- Edge cases (empty, null, max, unicode, concurrent)
@@ -111,27 +111,25 @@ and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
 
 ### Local vs hosted-CI work split (Required)
 
-- Locally, agents run `cargo fmt`, plus narrowly targeted red-green checks
-  for the changed seams, scoped to the owning test target so the edit-test
-  loop stays fast (measured: a bare `-E 'test(<name>)'` filterset still
-  rebuilds every test binary, ~20 s; a target-scoped run rebuilds one,
-  ~6 s): `cargo nextest run --test <target> -E 'test(<name>)'` — use
-  `--lib` for unit tests under `src/`. Find the owning target with
-  `cargo nextest list`. While iterating, scope clippy the same way:
-  `cargo clippy --test <target> --all-features`.
-  Prefer `scripts/dev-loop.sh <test-name> [...]` (add `--all-features` /
-  `--clippy` when needed): it resolves each pattern to its owning target
-  with grep and runs the scoped command, so the fast path is one command.
-  `scripts/dev-loop.sh --changed [base-ref]` runs the whole edit-test loop
-  in one command: Rust deltas map onto owning targets (src/ runs the unit
-  tests; helper modules run every including target), root-crate deltas add
-  the source-policy scanners, a dev-loop.sh delta adds its contract suite.
-- Run the full local gate once before publication, not every loop:
-  `cargo fmt` + `cargo clippy --all-targets --all-features`, zero warnings.
-- Do NOT run expensive suites locally: full `cargo test`/nextest sweeps,
-  `cargo doc`, `cargo deny`, mutation testing, or whole integration binaries.
-  Those belong to hosted CI; replicate them only when RCA-ing an actual red
-  hosted check, and then prefer the narrowest reproduction that shows it.
+- Iterate with `bash scripts/dev-loop.sh <test-name>`; scope builds to owning targets.
+- Validate changes with `bash scripts/dev-loop.sh --clippy --changed [base-ref]`.
+- Prefer named public integration contracts for server iteration. A root unit-test
+  filter still compiles the entire large unit-test binary. The runner reuses the
+  existing proof-core package for feature-independent decision-module tests and
+  the independent tooling package for source-policy scans; full CI checks composition.
+- Run `cargo fmt` and the full root lint gate once before publication, not each loop.
+- Do not run full test sweeps, docs, dependency scans, or mutation campaigns locally
+  except to reproduce a hosted failure. Broad local scripts require `--deep`.
+- Use PR CI for ordinary delivery. Do not dispatch full manual verification as
+  a routine completion requirement. Nightly and explicit deep runs own broad coverage.
+- Use one task owner, up to two independent workers, and one independent review.
+  Revisit concrete unresolved findings; do not repeat reviews for unanimous consensus.
+- One process owns a shared Cargo build directory. Concurrent implementation uses
+  separate worktrees and build directories.
+- The [iteration RCA](../docs/development/iteration-performance.md) records evidence,
+  cohort policy, the task protocol, and measurement acceptance. Targets are p95
+  10 seconds for warm scoped edit-test and 10 minutes for routine required PR CI;
+  report measurements before claiming success.
 
 ### GitHub Access (Required for All Agents)
 

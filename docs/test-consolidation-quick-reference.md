@@ -178,13 +178,13 @@ for (workflow, actions) in REQUIRED_ACTIONS {
 cargo test test_name -- --nocapture
 
 # Run all CI config tests
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
 # Run with verbose output
-cargo test --test ci_config_tests -- --nocapture --test-threads=1
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests -- --nocapture --test-threads=1
 
 # Check for warnings
-cargo test --test ci_config_tests 2>&1 | grep -i "warning"
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests 2>&1 | grep -i "warning"
 ```
 
 ## Common Pitfalls

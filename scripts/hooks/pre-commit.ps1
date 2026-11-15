@@ -56,7 +56,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     # Dot-directories
     ".github/*", ".githooks/*", ".devcontainer/*", ".config/*", ".vscode/*", ".claude/*",
     # Dev/build/agent directories
-    "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*",
+    "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*", "tools/repo-checks/*",
     "clients/browser/src/*.test.ts", "clients/browser/scripts/test.mjs",
     "clients/browser/tests/*", "clients/native/tests/*", "clients/fortress/tests/*", "clients/fortress-wasm/tests/*",
     "benches/encoding/*",
@@ -623,7 +623,10 @@ function Read-AsciiLineFromBytes {
 }
 
 function Get-IndexBlobTexts {
-    param([Parameter(Mandatory = $true)][string[]]$ObjectIds)
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ObjectIds,
+        [switch]$AllowBudgetMiss
+    )
 
     $textsByObjectId = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $orderedObjectIds = [System.Collections.Generic.List[string]]::new()
@@ -658,6 +661,7 @@ function Get-IndexBlobTexts {
 
         $totalByteCount += [int64]::Parse($fields[2], [System.Globalization.CultureInfo]::InvariantCulture)
         if ($totalByteCount -gt $script:MaxBatchedBlobBytes) {
+            if ($AllowBudgetMiss) { return $null }
             throw "Staged blob batch is $totalByteCount bytes, above the $script:MaxBatchedBlobBytes byte pre-commit limit. Split oversized .llm files and run ./scripts/generate-skills-index.sh."
         }
     }
@@ -1137,143 +1141,73 @@ function New-WorktreeSkillsIndexContent {
     ($lines -join "`n") + "`n"
 }
 
+# Body-only edits cannot change the catalog. Compare all catalog metadata
+# using the same parser as generation; batch both tree sides in one blob read.
+function Test-SkillsIndexMetadataUnchanged {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedSkillFiles,
+        [switch]$UseWorktree
+    )
+    if ($ChangedSkillFiles.Count -eq 0 -or $ChangedSkillFiles -ccontains ".llm/skills/index.md") {
+        return $false
+    }
+    $diffArgs = if ($UseWorktree) { @() } else { @("--cached") }
+    $raw = Invoke-Native -FileName "git" -Arguments (@("diff", "--raw", "--no-abbrev", "--no-renames", "-z") + $diffArgs + @("HEAD", "--") + $ChangedSkillFiles)
+    if ($raw.ExitCode -ne 0) {
+        if ($raw.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") { return $false }
+        throw "git diff skill metadata check failed:`n$($raw.Output)"
+    }
+    $records = $raw.Stdout.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries)
+    if ($records.Length % 2 -ne 0) { return $false }
+    $entries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $objects = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $records.Length; $index += 2) {
+        $fields = $records[$index].TrimStart(':').Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+        $path = $records[$index + 1]
+        if ($fields.Length -ne 5 -or $fields[4] -cne 'M' -or $fields[0] -cne $fields[1] -or $fields[0] -cnotin @('100644', '100755') -or $ChangedSkillFiles -cnotcontains $path) {
+            return $false
+        }
+        $entries[$path] = @{ Path = $path; Old = $fields[2]; New = $fields[3] }
+        $objects.Add($fields[2])
+        if (-not $UseWorktree) { $objects.Add($fields[3]) }
+    }
+    # Missing entries include untracked files and inconsistent tree views.
+    # Added/deleted/renamed skills and index/generator edits use full generation.
+    if ($entries.Count -ne $ChangedSkillFiles.Count) { return $false }
+    $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray() -AllowBudgetMiss
+    if ($null -eq $texts) { return $false }
+    $worktreeBytes = [long]0
+    foreach ($entry in $entries.Values) {
+        $oldText = $texts[$entry.Old]
+        $newText = if ($UseWorktree) {
+            $file = [IO.Path]::GetFullPath($entry.Path, $script:RepoRoot)
+            $worktreeBytes += [IO.FileInfo]::new($file).Length
+            if ($worktreeBytes -gt $script:MaxBatchedBlobBytes) { return $false }
+            [IO.File]::ReadAllText($file)
+        } else { $texts[$entry.New] }
+        $oldMetadata = Get-SkillMetadataFromText -Content $oldText
+        $newMetadata = Get-SkillMetadataFromText -Content $newText
+        if ($null -eq $oldMetadata -or $null -eq $newMetadata) { return $false }
+        foreach ($field in @('Name', 'Title', 'Description')) {
+            if (-not [StringComparer]::Ordinal.Equals($oldMetadata.$field, $newMetadata.$field)) { return $false }
+        }
+        if ($UseWorktree) {
+            $script:WorktreeTextCache[$entry.Path] = $newText
+        } else {
+            $script:IndexTextCache[$entry.Path] = $newText
+        }
+    }
+    return $true
+}
+
 function Test-WorktreeSkillsIndexDefinitelyFresh {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedSkillFiles)
-
-    if ($ChangedSkillFiles.Count -eq 0) {
-        return $false
-    }
-
-    if ($ChangedSkillFiles -contains ".llm/skills/index.md") {
-        return $false
-    }
-
-    $trackedFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($file in (Get-IndexFiles -Pathspecs $ChangedSkillFiles)) {
-        [void]$trackedFiles.Add($file)
-    }
-    foreach ($file in $ChangedSkillFiles) {
-        if (-not $trackedFiles.Contains($file)) {
-            return $false
-        }
-    }
-
-    $fileListChanges = Invoke-Native -FileName "git" -Arguments (@("diff", "--name-only", "--diff-filter=ACDRTUXB", "HEAD", "--") + $ChangedSkillFiles)
-    if ($fileListChanges.ExitCode -ne 0) {
-        if ($fileListChanges.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
-            return $false
-        }
-        throw "git diff skill file-list check failed:`n$($fileListChanges.Output)"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($fileListChanges.Stdout)) {
-        return $false
-    }
-
-    $headTitles = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-    $headTitleResult = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", "^# Skill:", "HEAD", "--") + $ChangedSkillFiles)
-    if ($headTitleResult.ExitCode -eq 1) {
-        return $false
-    }
-    if ($headTitleResult.ExitCode -ne 0) {
-        if ($headTitleResult.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
-            return $false
-        }
-        throw "git grep skill title check failed:`n$($headTitleResult.Output)"
-    }
-
-    foreach ($rawLine in $headTitleResult.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-        $line = $rawLine.TrimEnd("`r")
-        $match = [regex]::Match($line, "^HEAD:(?<file>.+?):\d+:# Skill:\s*(?<title>.*)$")
-        if ($match.Success) {
-            $headTitles[$match.Groups["file"].Value] = $match.Groups["title"].Value.Trim()
-        }
-    }
-
-    foreach ($file in $ChangedSkillFiles) {
-        if (-not $headTitles.ContainsKey($file)) {
-            return $false
-        }
-
-        $worktreeTitle = ""
-        $absolutePath = Join-Path $script:RepoRoot $file
-        foreach ($line in [System.IO.File]::ReadLines($absolutePath)) {
-            if ($line.StartsWith("# Skill:")) {
-                $worktreeTitle = $line.Substring("# Skill:".Length).Trim()
-                break
-            }
-        }
-        if (-not [System.StringComparer]::Ordinal.Equals($headTitles[$file], $worktreeTitle)) {
-            return $false
-        }
-    }
-
-    $true
+    Test-SkillsIndexMetadataUnchanged -ChangedSkillFiles $ChangedSkillFiles -UseWorktree
 }
 
 function Test-StagedSkillsIndexDefinitelyFresh {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedSkillFiles)
-
-    if ($ChangedSkillFiles.Count -eq 0) {
-        return $false
-    }
-
-    if ($ChangedSkillFiles -contains ".llm/skills/index.md") {
-        return $false
-    }
-
-    $fileListChanges = Invoke-Native -FileName "git" -Arguments (@("diff", "--cached", "--name-only", "--diff-filter=ACDRTUXB", "HEAD", "--") + $ChangedSkillFiles)
-    if ($fileListChanges.ExitCode -ne 0) {
-        if ($fileListChanges.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
-            return $false
-        }
-        throw "git diff staged skill file-list check failed:`n$($fileListChanges.Output)"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($fileListChanges.Stdout)) {
-        return $false
-    }
-
-    $headTitles = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-    $headTitleResult = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", "^# Skill:", "HEAD", "--") + $ChangedSkillFiles)
-    if ($headTitleResult.ExitCode -eq 1) {
-        return $false
-    }
-    if ($headTitleResult.ExitCode -ne 0) {
-        if ($headTitleResult.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
-            return $false
-        }
-        throw "git grep staged skill title check failed:`n$($headTitleResult.Output)"
-    }
-
-    foreach ($rawLine in $headTitleResult.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-        $line = $rawLine.TrimEnd("`r")
-        $match = [regex]::Match($line, "^HEAD:(?<file>.+?):\d+:# Skill:\s*(?<title>.*)$")
-        if ($match.Success) {
-            $headTitles[$match.Groups["file"].Value] = $match.Groups["title"].Value.Trim()
-        }
-    }
-
-    foreach ($file in $ChangedSkillFiles) {
-        if (-not $headTitles.ContainsKey($file)) {
-            return $false
-        }
-
-        $stagedTitle = ""
-        $stagedText = Get-IndexText -Path $file
-        if ($null -eq $stagedText) {
-            return $false
-        }
-        foreach ($line in $stagedText -split "`r?`n") {
-            if ($line.StartsWith("# Skill:")) {
-                $stagedTitle = $line.Substring("# Skill:".Length).Trim()
-                break
-            }
-        }
-        if (-not [System.StringComparer]::Ordinal.Equals($headTitles[$file], $stagedTitle)) {
-            return $false
-        }
-    }
-
-    $true
+    Test-SkillsIndexMetadataUnchanged -ChangedSkillFiles $ChangedSkillFiles
 }
 
 function Get-SkillTitleFromText {

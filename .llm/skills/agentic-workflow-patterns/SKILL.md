@@ -47,7 +47,7 @@ takes precedence over the user-commit-only advice below and in linked references
 
 - Implement → Verify → Review → Fix → Commit cycle for every change
 - Use subagents for isolated tasks to keep context clean
-- Verification beats inspection — always run cargo check/clippy/test
+- Verify changed behavior with scoped tests and lint
 - Two-Strike Rule: new approach after 2 failed fixes
 - Load context progressively, not all at once
 - Write all user-facing text in Simplified Technical English — canonical scope
@@ -57,71 +57,26 @@ takes precedence over the user-commit-only advice below and in linked references
 
 ---
 
-## Core Workflow: Implement → Verify → Review → Fix → Present
+## Bounded task workflow
 
-Every significant code change follows this cycle:
+1. Select one task with a failing reproduction or measured baseline and acceptance.
+2. Assign one owner. Use up to two workers only for independent work.
+3. Give workers owned files, exclusions, commands, and expected evidence.
+4. Implement one logical change and run its scoped red-green checks.
+5. Use one independent review. Revisit concrete unresolved findings only.
+6. Accept when the task's checks and review findings are resolved. Escalate
+   unresolved correctness findings; do not seek indefinite unanimous approval.
+7. Publish only when authorized, using the mandatory workflow completion gate.
 
-```text
-1. IMPLEMENT — Make the change (one logical change at a time)
-2. VERIFY   — Run cargo check, clippy, test
-3. REVIEW   — Check against code-review-checklist
-4. FIX      — Address any issues found
-5. VERIFY   — Run cargo check, clippy, test again
-6. PRESENT  — Provide commit instructions to user (NEVER commit yourself)
-```
+Use a coordination session for cross-component dependencies and ownership.
+Use a focused implementation session for ordinary tasks. Keep handoffs to the
+revision, next action, reproduction, results, and blockers. Avoid rescanning the
+backlog during implementation. Compare accepted-task time, rework, and compute
+before increasing team size.
 
-**Never skip verification.** Running `cargo clippy` and `cargo test` catches more issues than visual inspection.
-
-**CRITICAL:** Step 6 is "PRESENT" not "COMMIT" — you provide instructions, user commits.
-See [Git Safety Forbidden Operations](../git-safety/references/forbidden-operations.md).
-
----
-
-## Subagent Dispatch Patterns
-
-### When to Use Subagents
-
-- Tasks affecting different files/subsystems (parallel-safe)
-- Code review of your own changes (fresh context)
-- Research tasks that require reading many files
-- Tasks that might fill the context window
-
-### Subagent Prompt Structure
-
-Effective subagent prompts are **specific**, **constrained**, and **self-contained**:
-
-```markdown
-Fix the error handling in src/server/room_manager.rs:
-
-1. Read the file and find all `.unwrap()` calls on user input
-2. Replace each with proper `?` propagation using the existing error types
-3. Run `cargo check` to verify compilation
-4. Run `cargo test --lib` to verify no regressions
-
-Do NOT:
-- Change function signatures that are part of the public API
-- Modify error types (use existing ones)
-- Touch files other than room_manager.rs
-
-Return: List of changes made with before/after snippets.
-```
-
-### Sequential vs Parallel Dispatch
-
-**Sequential** — when tasks depend on each other: Refactor struct → Update usages → Add tests
-
-**Parallel** — when tasks are independent: Fix auth module + Fix relay module + Update docs.
-Default batch: 2-3 independent tasks.
-
-### Multi-Agent Coordination
-
-1. **Dispatcher** (you) — Plans subtasks, assigns to subagents, integrates results
-2. **Workers** (subagents) — Execute isolated tasks with constrained context
-3. **Reviewer** (subagent) — Reviews integrated result with fresh context
-
-Handoff protocol: Include exact files and expected output. Exclude exploration history. Constrain what NOT to change.
-
----
+Workers must not run competing Cargo builds in one target directory. The owner
+runs integrated verification; use separate worktrees and target directories for
+concurrent implementation. Research and review can proceed while it builds.
 
 ## Context Management
 
@@ -147,7 +102,7 @@ Load context in layers:
 | Single-file fix | 1-3 files | Direct work, no subagent |
 | Cross-file refactor | 5-15 files | Read interfaces first, then implementations |
 | New feature | 10-30 files | Use subagent for research phase |
-| Architecture change | 20+ files | MUST use subagents; split into phases |
+| Architecture change | 20+ files | Split into bounded independent tasks |
 
 If estimated tokens > 30K, use subagents for research.
 
@@ -157,7 +112,7 @@ If estimated tokens > 30K, use subagents for research.
 
 Run verification after EVERY logical change, not just at the end.
 If verification fails, fix before proceeding — don't accumulate errors.
-Never delete a failing test to make the build green.
+Remove or rewrite a fragile check only after proving the intended behavior remains covered.
 
 For the complete verification command sequence, see [Agent Self Review Checklist](../agent-self-review-checklist/SKILL.md).
 
@@ -178,7 +133,7 @@ If you've attempted to fix an issue twice and it's still broken:
 
 | Mistake | Fix |
 |---------|-----|
-| **Creating git commits or modifying git config** | **NEVER commit or configure git** |
+| **Publishing without authorization** | **Publish only within the authorized workflow** |
 | Fixing symptoms, not root cause | Read the full error trace, find the origin |
 | Over-reading files (context overflow) | Use targeted grep, read specific line ranges |
 | Making multiple changes without verifying | One change → verify → next change |
@@ -226,7 +181,7 @@ Fix: Suggested improvement
 ## Agent Checklist
 
 - [ ] One logical change at a time
-- [ ] Verify (check, clippy, test) after each change
+- [ ] Verify each change with owning-target tests and lint
 - [ ] Use subagents for isolated review and research
 - [ ] Subagent prompts are specific, constrained, self-contained
 - [ ] Load context progressively, not all at once

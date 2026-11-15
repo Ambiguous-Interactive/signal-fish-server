@@ -973,13 +973,14 @@ fn format_violations(violations: &[Violation]) -> String {
 
 ```bash
 # Run specific test
-cargo test test_msrv_consistency -- --nocapture
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests \
+  test_msrv_consistency -- --nocapture
 
 # Run all CI config tests
-cargo test --test ci_config_tests
+cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 
 # Check coverage (optional)
-cargo tarpaulin --test ci_config_tests
+cargo tarpaulin --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 ```
 
 ---
