@@ -17958,3 +17958,40 @@ All policy verdicts pass, but these timings invalidate a current-head sub-second
 claim. The 14-second attempt includes 3,654 ms in Git discovery and 2,871 ms in
 the changelog gate. This locates slow work but does not establish its cause.
 Keep #1441 open until matched current-head attribution and qualification complete.
+
+### F374 — Relay game starts copied unused peer names
+
+Existing campaign #636 found another unused game-start selection field on
+`3bbccd65`. Preparation copied every player name before selecting the session
+pair. Relay decisions publish no peers, so those copies never reached a plan.
+The same work occurred for all-v2 starts that publish no v3 plan.
+
+`relay_start_skips_player_names` fails against original production and passes
+with deferred names. Its 24 profiles cover 2, 16 and 255 members; v2, Relay
+ceilings, disabled transports, missing Direct endpoints, incompatible capabilities,
+and actual Host/WebRTC, Mesh/WebRTC and Host/Direct selection. Unique 4/32-byte
+names and a rotated roster retain the same authority. The controls check exact
+legacy frames, peer identities and names, roles, offer directions, generations,
+endpoints, ICE, publication metrics and empty queues. An initial identical-name
+fixture could not detect cross-member name assignment; independent review found
+that gap and the final original-source regression uses distinct names.
+
+At 255 members with 32-byte names, v3 relay preparation falls from 1,023
+allocations / 130,632 bytes to 768 / 122,472. All-v2 preparation falls from
+513 / 46,992 to 258 / 38,832. The saved 255 allocations and 8,160 bytes are
+selection scratch. Actual P2P profiles retain their original allocation counts
+and bytes. This is an allocation result, not a throughput or whole-process
+memory claim. Rust, .NET and Godot SDKs are unaffected: private server selection
+storage changes; schemas, serialized fields, ordering and metrics stay the same.
+
+### A27 — Controlled relay and nested-package overlap
+
+Existing #956's historical latency failure still has no established cause.
+Two fixed default-feature relay-binary controls use CPU affinity 0 and retain all
+six cells, exact delivery checks, zero backpressure and the 250 ms p99 bound.
+The second overlaps the real all-feature nested package verifier. Both pass;
+JSON 16-player p99 is 11,907 us alone and 18,503 us with overlap. The package
+verifier also passes. These Linux ARM64 observations do not reproduce the
+historical 422,623 us failure or prove that compilation caused it. They do not
+qualify the historical all-feature graph. No scheduling policy or threshold is
+changed, and #956 remains open.
