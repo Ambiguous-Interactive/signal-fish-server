@@ -83,6 +83,22 @@ with tempfile.TemporaryDirectory() as directory:
     else:
         raise AssertionError('wrong source was accepted')
 
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / '.crates2.json').write_text(json.dumps({'installs': {}}))
+    def install(command, check):
+        assert check
+        assert command[:2] == ['cargo', 'install'], command
+        assert command[command.index('--rev') + 1] == narrow.REVISION
+        assert command[command.index('--root') + 1] == str(root)
+        (root / '.crates2.json').write_text(json.dumps({'installs': {narrow.INSTALL_KEY: {}}}))
+        return subprocess.CompletedProcess(command, 0)
+    with patch.object(narrow.sys, 'argv', ['run-narrow-mutants.py', '--install', '--tool-root', str(root)]):
+        with patch.object(narrow.subprocess, 'run', side_effect=install) as execute, patch.object(narrow, 'selector_preflight') as preflight:
+            assert narrow.main() == 0
+            execute.assert_called_once()
+            preflight.assert_called_once_with(root / 'bin/cargo-mutants')
+
 arguments = ['run-narrow-mutants.py', '--tool-root', '/isolated', '--', '--list', '--re', 'selected']
 with patch.object(narrow.sys, 'argv', arguments), patch.object(narrow, 'installed_tool', return_value=tool):
     with patch.object(narrow, 'selector_preflight', side_effect=ValueError('broken selector')), patch.object(narrow.subprocess, 'run') as execute:

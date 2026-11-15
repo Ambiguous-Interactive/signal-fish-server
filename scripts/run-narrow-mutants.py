@@ -65,7 +65,7 @@ def main():
     if arguments[:1] == ["--"]:
         arguments = arguments[1:]
     try:
-        if options.install and not (root / ".crates2.json").exists():
+        if options.install:
             subprocess.run([
                 "cargo", "install", "--git", REPOSITORY, "--rev", REVISION, "--locked",
                 "--root", str(root), "--target-dir", str(root / "target"), "cargo-mutants",
