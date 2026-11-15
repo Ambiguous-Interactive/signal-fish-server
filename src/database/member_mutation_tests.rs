@@ -896,6 +896,21 @@ async fn direct_endpoint_read_matches_validated_member_without_roster_projection
                 .unwrap(),
             crate::protocol::DirectEndpoint::from_connection_info(&info)
         );
+        for (host, port) in [
+            ("192.0.2.17", 7777),
+            ("192.0.2.18", 7777),
+            ("192.0.2.17", 7778),
+            ("0.0.0.0", 7777),
+        ] {
+            let expected = crate::protocol::DirectEndpoint::from_connection_info(&info)
+                .is_some_and(|endpoint| endpoint.host == host && endpoint.port == port);
+            assert_eq!(
+                db.player_direct_endpoint_matches(&room.id, &member, host, port)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
     }
     assert_eq!(
         db.get_player_direct_endpoint(&room.id, &Uuid::new_v4())
@@ -903,10 +918,18 @@ async fn direct_endpoint_read_matches_validated_member_without_roster_projection
             .unwrap(),
         None
     );
+    assert!(!db
+        .player_direct_endpoint_matches(&room.id, &Uuid::nil(), "192.0.2.17", 7777)
+        .await
+        .unwrap());
     let held = db.rooms.write().await;
     let mut read = Box::pin(db.get_player_direct_endpoint(&room.id, &member));
     assert!(futures_util::poll!(&mut read).is_pending());
     drop(read);
+    let mut comparison =
+        Box::pin(db.player_direct_endpoint_matches(&room.id, &member, "192.0.2.17", 7777));
+    assert!(futures_util::poll!(&mut comparison).is_pending());
+    drop(comparison);
     drop(held);
     db.fail_get_room_by_id
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -914,9 +937,17 @@ async fn direct_endpoint_read_matches_validated_member_without_roster_projection
         .get_player_direct_endpoint(&room.id, &member)
         .await
         .is_err());
+    assert!(db
+        .player_direct_endpoint_matches(&room.id, &member, "192.0.2.17", 7777)
+        .await
+        .is_err());
     db.fail_get_room_by_id
         .store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(db.delete_room(&room.id).await.unwrap());
+    assert!(!db
+        .player_direct_endpoint_matches(&room.id, &member, "192.0.2.17", 7777)
+        .await
+        .unwrap());
     assert_eq!(
         db.get_player_direct_endpoint(&room.id, &member)
             .await

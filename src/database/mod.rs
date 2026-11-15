@@ -828,6 +828,21 @@ pub trait GameDatabase: Send + Sync {
             .and_then(|player| player.direct_endpoint))
     }
 
+    /// Compare one member's validated Direct endpoint without requiring an owned snapshot.
+    /// Missing rooms, members, and unusable stored metadata never match.
+    async fn player_direct_endpoint_matches(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        host: &str,
+        port: u16,
+    ) -> Result<bool> {
+        Ok(self
+            .get_player_direct_endpoint(room_id, player_id)
+            .await?
+            .is_some_and(|endpoint| endpoint.host == host && endpoint.port == port))
+    }
+
     /// Read the spectator roster and code atomically, including pending rooms.
     /// The default preserves complete-snapshot visibility and storage errors.
     async fn get_room_spectator_snapshot(
@@ -3012,6 +3027,26 @@ impl GameDatabase for InMemoryDatabase {
             .and_then(|room| room.players.get(player_id))
             .and_then(|player| player.connection_info.as_ref())
             .and_then(crate::protocol::DirectEndpoint::from_connection_info))
+    }
+
+    async fn player_direct_endpoint_matches(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        host: &str,
+        port: u16,
+    ) -> Result<bool> {
+        #[cfg(test)]
+        self.before_room_read_for_test().await?;
+        Ok(self
+            .rooms
+            .read()
+            .await
+            .get(room_id)
+            .and_then(|room| room.players.get(player_id))
+            .and_then(|player| player.connection_info.as_ref())
+            .and_then(crate::protocol::DirectEndpoint::validated_parts)
+            == Some((host, port)))
     }
 
     /// Copy the spectator roster and code without player or session metadata.
