@@ -161,6 +161,11 @@ server source is 1f8638fd. No receipt gate, deadline, or production source chang
 The issue retains the commands, identities, result hashes, and remaining acceptance criteria.
 See [the runtime reproduction notes](../../clients/native/tests/fixtures/README.md#trial-slot-1-godot-43-prefix-comparison).
 
+Task claim: 22:38 UTC; owner acceptance after independent audit: 22:47 UTC on 2026-11-15.
+Elapsed task time is about nine minutes at minute precision, including tool waits.
+Active effort and blocked time were not separately instrumented; do not infer them from elapsed time.
+PR #1672 records delivery independently from this task acceptance.
+
 The original cohort remains 42 open issues. New issues: zero. Reopened issues: zero.
 Duplicates closed: zero. Existing issues closed: zero. Accepted runtime qualification tasks: one.
 No historical root-cause criterion is satisfied by this experiment.
@@ -181,7 +186,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 
 | Slot | Allocation | Issue / PR | Accepted outcome and remaining work |
 | --- | --- | --- | --- |
-| 1 | Debt | [#1244][i1244] / delivery PR pending | Four current-source Godot 4.3 controls pass; historical cause remains open. |
+| 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
 | 2 | Debt | Pending | Not started |
 | 3 | Debt | Pending | Not started |
 | 4 | Debt | Pending | Not started |
