@@ -17995,3 +17995,49 @@ verifier also passes. These Linux ARM64 observations do not reproduce the
 historical 422,623 us failure or prove that compilation caused it. They do not
 qualify the historical all-feature graph. No scheduling policy or threshold is
 changed, and #956 remains open.
+
+Subsequent matched controls use the all-feature relay binary. JSON 16-player
+p99 is 80,835 us alone and 16,446 us with nested compilation; MessagePack is
+11,030 and 27,676 us. All six cells and the package verifier pass in both
+feature graphs. The binary hashes and raw attempts remain in
+`progress/session-707/`. This qualifies the current controls, not the original
+failure's cause.
+
+### A28 — Complete ten-minute single-room delivery and replay
+
+Existing #775/#1009's unchanged single-room prerequisite completes on session
+707 head `a77ac51d`. Run `d6160297-fee9-4a81-bf65-e03be13ab561` uses 16 players,
+60 sends/s each, 96-byte application values, seed 1, v3 JSON reliable delivery,
+four generator workers, 120 seconds of warm-up and 600 seconds of measurement.
+The original 250 ms generator-lag bound, two-second drain and one-second resource
+sampling remain. No local builds or other tests overlap the run. The Linux ARM64
+host remains shared, with CPU affinity 0–11; this is not an isolated capacity limit.
+
+All 691,232 scheduled sends complete. All 10,368,480 recipient deliveries arrive,
+with zero unsent, outstanding, missing, duplicate, misrouted or out-of-order
+obligations. Measured latency has 8,640,480 samples, p99 7,515 us and maximum
+143,380 us. Generator lag peaks at 109,869 us, below the unchanged 250,000 us
+bound. The complete artifact replay matches the original summary exactly.
+End-to-end collection, validation, output and replay take 1,004.66 seconds.
+
+The 722 resource samples peak at 736,202,752 generator RSS bytes and 68,837,376
+server RSS bytes. Final measured CPU totals are 328.72 generator seconds and
+423.14 server seconds. The maximum sampler wake lag is 4,913 us. Per-thread
+scheduling, cgroup counters, host CPU/memory pressure and process high-water
+observations are retained with the exact manifests and raw records. Sampling
+does not establish an arbitrary-input memory bound.
+
+Generator SHA-256 is
+`eda53aca6de6642a2649cef32ce0111fae9d10ba22341dae6e9958dc25a1a790`;
+server SHA-256 is
+`3605be23468a0558e598894a6734536a68bcd98f08365bdcc7a96094865d2b5b`.
+The standalone capacity entry point reproduces the workload with
+`CAPACITY_RUNNER_ROOMS=1`, `PLAYERS=16`, `RATE_PER_SENDER=60`, `PAYLOAD_BYTES=96`,
+`SEED=1`, `ENCODING=v3-json`, `CLASS=reliable`, `WARMUP_SECS=120`,
+`DURATION_SECS=600`, `LAG_BOUND_MS=250` and `SAMPLE_INTERVAL_MS=1000`; every
+listed setting uses the `CAPACITY_RUNNER_` prefix and a fresh `OUTPUT_DIR`.
+
+This fresh qualification does not explain the two historical #1009 stalls,
+attribute them to the name-copy repair, prove the 999-room upper shape feasible,
+or bound all generator memory. Keep #775/#1009 open for those remaining
+requirements. Full local artifacts remain under `progress/session-707/long-cell`.
