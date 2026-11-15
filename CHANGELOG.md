@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority
   transfers; peer metadata writes also require `lease_room_member_route`.
 - Reduce server work when checking reliable delivery deadlines across mixed and lossy gameplay backlogs (#1540).
-- Reduce P2P game-start memory use for players that do not support Direct transport (#636).
+- Reduce P2P game-start memory use when Direct transport cannot affect session selection (#636).
 - **Breaking:** Add native `EngineEvent::PairReady`, `EngineEvent::ChannelSendComplete`, and
   `EngineEvent::RemoteCandidateComplete` for pending work; exhaustive matches must handle them (#1510, #1512, #1516).
 - **Breaking:** Require a mutable native `Engine` for `start_selected_candidate_pair_probe` (#1507).
@@ -77,6 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exclude multicast and limited broadcast IP destinations from Direct host selection, while preserving DNS labels
+  (#1663).
 - Exclude numeric zero-address aliases from Direct host election and use a usable peer or relay fallback (#1658).
 - Return an error when an admitted WebRTC signal cannot reach its target (#1645).
 - Keep P2P host selection stable for players with no stored join time (#1642).

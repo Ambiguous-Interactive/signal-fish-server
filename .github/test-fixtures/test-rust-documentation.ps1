@@ -51,6 +51,10 @@ foreach ($attribute in @('capture', 'derive(Capture)', 'cfg_attr(feature = "macr
 }
 $old = "#![capture]`nfn first() {}`n/// OLD`nfn second() {}`n"
 $cases += ,@('custom inner attribute', $old, $old.Replace('OLD', 'NEW'), $false)
+$old = "/// OLD`nmod nested {`n#![capture]`nfn inside() {}`n}`n"
+$cases += ,@('later inner attribute can transform enclosing docs', $old, $old.Replace('OLD', 'NEW'), $false)
+$old = "/// OLD`n#[inline]`n#[capture]`nfn inside() {}`n"
+$cases += ,@('later custom attribute after compiler attribute', $old, $old.Replace('OLD', 'NEW'), $false)
 foreach ($declaration in @(
     'fn generic<const N: usize = { 1 + 1 }>()',
     'impl<const N: usize = { 1 + 1 }> Generic<N>',
@@ -128,6 +132,31 @@ try {
     Git config commit.gpgsign false
     Git config core.hooksPath .git/empty-hooks
     Git config core.autocrlf false
+    $blobPayload = "雪`0exact bytes`n"
+    [IO.File]::WriteAllText((Join-Path $temporary 'blob-payload'), $blobPayload, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $temporary 'empty-blob'), '')
+    $payloadId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'blob-payload')).Stdout.Trim()
+    $emptyId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'empty-blob')).Stdout.Trim()
+    $blobBudget = $script:MaxBatchedBlobBytes
+    try {
+        $script:MaxBatchedBlobBytes = [Text.Encoding]::UTF8.GetByteCount($blobPayload)
+        foreach ($singleProcess in @($false, $true)) {
+            $texts = Get-IndexBlobTexts -ObjectIds @($payloadId, $emptyId, $payloadId) -SingleProcess:$singleProcess
+            if ($texts.Count -ne 2 -or $texts[$payloadId] -cne $blobPayload -or $texts[$emptyId] -cne '') { throw 'Bounded blob reader changed exact bytes, empty content, or duplicate identity' }
+        }
+        $script:MaxBatchedBlobBytes--
+        if ($null -ne (Get-IndexBlobTexts -ObjectIds @($payloadId) -SingleProcess -AllowBudgetMiss)) { throw 'Single-process reader exceeded its optional byte budget' }
+        $budgetRejected = $false
+        try { [void](Get-IndexBlobTexts -ObjectIds @($payloadId) -SingleProcess) } catch {
+            $budgetRejected = $_.Exception.Message -like 'Staged blob batch is *'
+        }
+        if (-not $budgetRejected) { throw 'Single-process reader lost the mandatory byte limit' }
+        $missingRejected = $false
+        try { [void](Get-IndexBlobTexts -ObjectIds @('0' * 40) -SingleProcess -AllowBudgetMiss) } catch {
+            $missingRejected = $_.Exception.Message -like 'Unexpected git cat-file*'
+        }
+        if (-not $missingRejected) { throw 'Single-process reader swallowed a missing object as a budget miss' }
+    } finally { $script:MaxBatchedBlobBytes = $blobBudget }
     foreach ($path in @('server.rs', 'bench.rs')) { [IO.File]::WriteAllText((Join-Path $temporary $path), $source) }
     Git add .
     Git commit -qm seed
@@ -234,6 +263,13 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
         foreach ($path in $cachePaths) {
             if (-not (Test-FileDiffIsTestOnly -Path $path -CachedContent $cache[$path])) { throw "Cached docs rejected: $path, Worktree=$mode" }
         }
+    }
+    $script:InspectWorktree = $false
+    $script:PendingChangelogRustDiff = Start-PendingGit -GitArguments @('diff', '--raw', '--no-abbrev', '--no-renames', '-z', '--cached', 'HEAD', '--', '*.rs')
+    $cache = Get-ChangelogRustTextCache -Paths $cachePaths
+    if ($cache.Count -ne 3 -or $null -ne $script:PendingChangelogRustDiff) { throw 'Prefetched Rust metadata did not retain the requested scope' }
+    foreach ($path in $cachePaths) {
+        if (-not (Test-FileDiffIsTestOnly -Path $path -CachedContent $cache[$path])) { throw "Prefetched docs rejected: $path" }
     }
     $script:InspectWorktree = $true
     $originalBudget = $script:MaxBatchedBlobBytes

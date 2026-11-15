@@ -27,7 +27,7 @@ impl DirectEndpoint {
     }
 }
 
-/// Accept an IP address (except an unspecified address) or a conservative DNS
+/// Accept an individual IP destination or a conservative DNS
 /// hostname. Resolution and reachability remain client responsibilities.
 fn direct_host_is_usable(host: &str) -> bool {
     use std::net::IpAddr;
@@ -41,19 +41,20 @@ fn direct_host_is_usable(host: &str) -> bool {
         // A trailing root dot is DNS syntax, not IP-literal syntax. Reject the
         // ambiguous form instead of letting an unspecified IP masquerade as a
         // syntactically valid absolute DNS name.
-        let unspecified = match address {
-            IpAddr::V4(address) => address.is_unspecified(),
+        let unusable = match address {
+            IpAddr::V4(address) => is_unusable_ipv4_address(address),
             IpAddr::V6(address) => {
                 address.is_unspecified()
+                    || address.is_multicast()
                     || address
                         .to_ipv4_mapped()
-                        .is_some_and(|address| address.is_unspecified())
+                        .is_some_and(is_unusable_ipv4_address)
             }
         };
-        return hostname == host && !unspecified;
+        return hostname == host && !unusable;
     }
 
-    !is_unspecified_ipv4_alias(hostname)
+    !is_unusable_ipv4_alias(hostname)
         && !hostname.is_empty()
         && hostname.split('.').all(|label| {
             !label.is_empty()
@@ -72,18 +73,25 @@ fn direct_host_is_usable(host: &str) -> bool {
         })
 }
 
-fn is_unspecified_ipv4_alias(hostname: &str) -> bool {
-    hostname
-        .split('.')
-        .take(5)
-        .enumerate()
-        .all(|(index, component)| {
-            let digits = component
+fn is_unusable_ipv4_address(address: std::net::Ipv4Addr) -> bool {
+    address.is_unspecified() || address.is_multicast() || address.is_broadcast()
+}
+
+fn is_unusable_ipv4_alias(hostname: &str) -> bool {
+    let numeric = hostname.split('.').enumerate().all(|(index, component)| {
+        index < 4
+            && if let Some(digits) = component
                 .strip_prefix("0x")
                 .or_else(|| component.strip_prefix("0X"))
-                .unwrap_or(component);
-            index < 4 && !digits.is_empty() && digits.bytes().all(|byte| byte == b'0')
-        })
+            {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+            } else {
+                !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+            }
+    });
+    numeric
+        && matches!(url::Host::parse(hostname), Ok(url::Host::Ipv4(address))
+        if is_unusable_ipv4_address(address))
 }
 
 pub fn validate_game_name_with_config(name: &str, config: &ProtocolConfig) -> Result<(), String> {

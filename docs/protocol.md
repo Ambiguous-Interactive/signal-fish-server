@@ -1821,7 +1821,8 @@ one authoritative publication share that generation. For `host + direct`, it als
 `direct_endpoint: { host, port }`, projected from the elected host's validated
 self-declared `ConnectionInfo::Direct`. Other plans omit the field. Validation
 proves only that the host/port is syntactically connectable (non-zero port;
-non-empty bounded IP address or DNS hostname; no unspecified address), not that
+non-empty bounded IP address or DNS hostname; no unspecified, multicast, or limited
+broadcast destination, including numeric IPv4 aliases), not that
 the endpoint is reachable, so the relay fallback remains mandatory.
 
 Endpoint visibility follows the existing room-member metadata boundary, not the

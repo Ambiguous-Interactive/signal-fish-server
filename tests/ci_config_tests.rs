@@ -25748,7 +25748,8 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 } catch {
                     $caught = $_.Exception.Message -eq "policy probe"
                 }
-                if (-not $caught -or $null -ne $script:PendingChangelogBlob) {
+                if (-not $caught -or $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogRustDiff) {
                     throw "a throwing check must preserve its error and clear the pending content read"
                 }
                 if (-not $pending.StdoutTask.IsCompleted -or -not $pending.StderrTask.IsCompleted) {
@@ -25760,9 +25761,10 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
 
                 $script:RealStartPendingGit = ${function:Start-PendingGit}
                 $script:StartedPending = [System.Collections.Generic.List[object]]::new()
+                $script:StartupFailureAfter = 3
                 function Start-PendingGit {
                     param([string[]]$GitArguments)
-                    if ($script:StartedPending.Count -eq 3) { throw "startup probe" }
+                    if ($script:StartedPending.Count -eq $script:StartupFailureAfter) { throw "startup probe" }
                     $started = & $script:RealStartPendingGit -GitArguments @("--version")
                     [void]$script:StartedPending.Add($started)
                     $started
@@ -25774,7 +25776,8 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 if (-not $caught -or $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
                     $null -ne $script:PendingWorktreeRustDiff -or
-                    $null -ne $script:PendingChangelogBlob) {
+                    $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogRustDiff) {
                     throw "a startup failure must preserve its error and clear all pending queries"
                 }
                 foreach ($started in $script:StartedPending) {
@@ -25784,6 +25787,25 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                     $disposed = $false
                     try { $started.Process.WaitForExit() } catch { $disposed = $true }
                     if (-not $disposed) { throw "a startup failure must dispose sibling processes" }
+                }
+
+                $script:StartedPending.Clear()
+                $script:StartupFailureAfter = 1
+                $caught = $false
+                try { Start-StagedPolicyQueries } catch {
+                    $caught = $_.Exception.Message -eq "startup probe"
+                }
+                if (-not $caught -or $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogRustDiff) {
+                    throw "a staged startup failure must clear both pending reads"
+                }
+                foreach ($started in $script:StartedPending) {
+                    if (-not $started.StdoutTask.IsCompleted -or -not $started.StderrTask.IsCompleted) {
+                        throw "a staged startup failure must drain sibling streams"
+                    }
+                    $disposed = $false
+                    try { $started.Process.WaitForExit() } catch { $disposed = $true }
+                    if (-not $disposed) { throw "a staged startup failure must dispose sibling processes" }
                 }
 
                 # A broken first cleanup must not leave the final content
@@ -25798,15 +25820,17 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 $script:PendingWorktreeUntracked = [pscustomobject]@{ Id = 2 }
                 $script:PendingWorktreeRustDiff = [pscustomobject]@{ Id = 3 }
                 $script:PendingChangelogBlob = [pscustomobject]@{ Id = 4 }
+                $script:PendingChangelogRustDiff = [pscustomobject]@{ Id = 5 }
                 $caught = $false
                 try { Remove-PreCommitPendingGit } catch {
                     $caught = $_.Exception.Message -eq "cleanup probe 1"
                 }
-                if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4' -or
+                if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4,5' -or
                     $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
                     $null -ne $script:PendingWorktreeRustDiff -or
-                    $null -ne $script:PendingChangelogBlob) {
+                    $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogRustDiff) {
                     throw "cleanup must attempt every query, clear its fields, and preserve the first error"
                 }
             "#,

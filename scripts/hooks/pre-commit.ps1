@@ -105,6 +105,7 @@ $script:PendingWorktreeStatus = $null
 $script:PendingWorktreeUntracked = $null
 $script:PendingWorktreeRustDiff = $null
 $script:PendingChangelogBlob = $null
+$script:PendingChangelogRustDiff = $null
 $script:WorktreeDiscoveryTimer = $null
 $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!)|(#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest))"
 
@@ -170,12 +171,14 @@ function Remove-PreCommitPendingGit {
         $script:PendingWorktreeStatus,
         $script:PendingWorktreeUntracked,
         $script:PendingWorktreeRustDiff,
-        $script:PendingChangelogBlob
+        $script:PendingChangelogBlob,
+        $script:PendingChangelogRustDiff
     )
     $script:PendingWorktreeStatus = $null
     $script:PendingWorktreeUntracked = $null
     $script:PendingWorktreeRustDiff = $null
     $script:PendingChangelogBlob = $null
+    $script:PendingChangelogRustDiff = $null
     $firstError = $null
     foreach ($pending in $pendingQueries) {
         if ($null -ne $pending) {
@@ -216,12 +219,25 @@ function Start-WorktreePolicyQueries {
     }
 }
 
+function Start-StagedPolicyQueries {
+    try {
+        $script:PendingChangelogBlob = Start-PendingGit -GitArguments @("show", ":CHANGELOG.md")
+        $script:PendingChangelogRustDiff = Start-PendingGit -GitArguments @("diff", "--raw", "--no-abbrev", "--no-renames", "-z", "--cached", "HEAD", "--", "*.rs")
+    } catch {
+        $startupError = $_
+        try { Remove-PreCommitPendingGit } catch { }
+        throw $startupError
+    }
+}
+
 if (-not $SourceOnly) {
     $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
     Set-Location $script:RepoRoot
     $script:InspectWorktree = [bool]$Worktree
     if ($script:InspectWorktree) {
         Start-WorktreePolicyQueries
+    } else {
+        Start-StagedPolicyQueries
     }
 }
 
@@ -622,10 +638,61 @@ function Read-AsciiLineFromBytes {
     $line
 }
 
+function Get-BoundedIndexBlobBytes {
+    param([string[]]$ObjectIds, [switch]$AllowBudgetMiss)
+
+    $startInfo = New-NativeProcessStartInfo -FileName 'git' -Arguments @('cat-file', '--batch-command') -RedirectStandardInput
+    $process = [Diagnostics.Process]::Start($startInfo)
+    $stdoutStream = [IO.MemoryStream]::new()
+    $stdoutTask = $null
+    $stderrTask = $null
+    try {
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $totalBytes = [long]0
+        foreach ($objectId in $ObjectIds) {
+            if ($objectId -cnotmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$') { throw 'Invalid Git object id in blob batch' }
+            $process.StandardInput.WriteLine("info $objectId")
+            $process.StandardInput.Flush()
+            $header = $process.StandardOutput.ReadLineAsync().GetAwaiter().GetResult()
+            if ($null -eq $header) { throw 'git cat-file --batch-command ended before size information' }
+            $fields = $header.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+            if ($fields.Count -ne 3 -or $fields[1] -cne 'blob' -or -not [StringComparer]::OrdinalIgnoreCase.Equals($fields[0], $objectId)) {
+                throw "Unexpected git cat-file --batch-command size header: $header"
+            }
+            $size = [long]::Parse($fields[2], [Globalization.CultureInfo]::InvariantCulture)
+            if ($size -lt 0 -or $size -gt $script:MaxBatchedBlobBytes - $totalBytes) {
+                if ($AllowBudgetMiss) { return $null }
+                throw "Staged blob batch is above the $script:MaxBatchedBlobBytes byte pre-commit limit."
+            }
+            $totalBytes += $size
+        }
+        # No contents exist in the reader buffer: only info commands were sent.
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        foreach ($objectId in $ObjectIds) { $process.StandardInput.WriteLine("contents $objectId") }
+        $process.StandardInput.Close()
+        $process.WaitForExit()
+        [void]$stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw "git cat-file --batch-command failed:`n$stderr" }
+        [pscustomobject]@{ ExitCode = 0; StdoutBytes = $stdoutStream.ToArray(); Output = $stderr }
+    } finally {
+        try {
+            $process.StandardInput.Close()
+            $process.WaitForExit()
+            if ($null -ne $stdoutTask) { [void]$stdoutTask.GetAwaiter().GetResult() }
+            if ($null -ne $stderrTask) { [void]$stderrTask.GetAwaiter().GetResult() }
+        } finally {
+            $stdoutStream.Dispose()
+            $process.Dispose()
+        }
+    }
+}
+
 function Get-IndexBlobTexts {
     param(
         [Parameter(Mandatory = $true)][string[]]$ObjectIds,
-        [switch]$AllowBudgetMiss
+        [switch]$AllowBudgetMiss,
+        [switch]$SingleProcess
     )
 
     $textsByObjectId = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -641,34 +708,40 @@ function Get-IndexBlobTexts {
         return $textsByObjectId
     }
 
-    $batchInput = ($orderedObjectIds -join "`n") + "`n"
-    $sizeCheck = Invoke-NativeWithInput -FileName "git" -Arguments @("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)") -InputText $batchInput
-    if ($sizeCheck.ExitCode -ne 0) {
-        throw "git cat-file --batch-check failed:`n$($sizeCheck.Output)"
-    }
-
-    $totalByteCount = [int64]0
-    foreach ($rawLine in $sizeCheck.Stdout -split "`n") {
-        $line = $rawLine.Trim()
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
+    if ($SingleProcess) {
+        $result = Get-BoundedIndexBlobBytes -ObjectIds $orderedObjectIds.ToArray() -AllowBudgetMiss:$AllowBudgetMiss
+        if ($null -eq $result) { return $null }
+    } else {
+        $batchInput = ($orderedObjectIds -join "`n") + "`n"
+        $sizeCheck = Invoke-NativeWithInput -FileName "git" -Arguments @("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)") -InputText $batchInput
+        if ($sizeCheck.ExitCode -ne 0) {
+            throw "git cat-file --batch-check failed:`n$($sizeCheck.Output)"
         }
 
-        $fields = @($line.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries))
-        if ($fields.Count -ne 3 -or $fields[1] -ne "blob") {
-            throw "Unexpected git cat-file --batch-check line: $line"
+        $totalByteCount = [int64]0
+        foreach ($rawLine in $sizeCheck.Stdout -split "`n") {
+            $line = $rawLine.Trim()
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+
+            $fields = @($line.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries))
+            if ($fields.Count -ne 3 -or $fields[1] -ne "blob") {
+                throw "Unexpected git cat-file --batch-check line: $line"
+            }
+
+            $totalByteCount += [int64]::Parse($fields[2], [System.Globalization.CultureInfo]::InvariantCulture)
+            if ($totalByteCount -gt $script:MaxBatchedBlobBytes) {
+                if ($AllowBudgetMiss) { return $null }
+                throw "Staged blob batch is $totalByteCount bytes, above the $script:MaxBatchedBlobBytes byte pre-commit limit. Split oversized .llm files and run ./scripts/generate-skills-index.sh."
+            }
         }
 
-        $totalByteCount += [int64]::Parse($fields[2], [System.Globalization.CultureInfo]::InvariantCulture)
-        if ($totalByteCount -gt $script:MaxBatchedBlobBytes) {
-            if ($AllowBudgetMiss) { return $null }
-            throw "Staged blob batch is $totalByteCount bytes, above the $script:MaxBatchedBlobBytes byte pre-commit limit. Split oversized .llm files and run ./scripts/generate-skills-index.sh."
+        $result = Invoke-NativeBytesWithInput -FileName "git" -Arguments @("cat-file", "--batch") -InputText $batchInput
+        if ($result.ExitCode -ne 0) {
+            throw "git cat-file --batch failed:`n$($result.Output)"
         }
-    }
 
-    $result = Invoke-NativeBytesWithInput -FileName "git" -Arguments @("cat-file", "--batch") -InputText $batchInput
-    if ($result.ExitCode -ne 0) {
-        throw "git cat-file --batch failed:`n$($result.Output)"
     }
 
     $offset = 0
@@ -1680,7 +1753,14 @@ function Get-ChangelogRustTextCache {
     if ($Paths.Count -lt 3) { return $cache }
     try {
         $diffArgs = if ($script:InspectWorktree) { @() } else { @("--cached") }
-        $raw = Invoke-Native -FileName git -Arguments (@("diff", "--raw", "--no-abbrev", "--no-renames", "-z") + $diffArgs + @("HEAD", "--") + $Paths)
+        $arguments = @("diff", "--raw", "--no-abbrev", "--no-renames", "-z") + $diffArgs + @("HEAD", "--") + $Paths
+        $pending = $script:PendingChangelogRustDiff
+        $script:PendingChangelogRustDiff = $null
+        $raw = if ($null -eq $pending) {
+            Invoke-Native -FileName git -Arguments $arguments
+        } else {
+            Wait-PendingGit -Pending $pending -GitArguments $arguments -AllowFailure
+        }
         if ($raw.ExitCode -ne 0) { return $cache }
         $records = $raw.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
         $entries = [System.Collections.Generic.List[object]]::new()
@@ -1700,7 +1780,7 @@ function Get-ChangelogRustTextCache {
             if (-not $script:InspectWorktree) { $objects.Add($entry.New) }
         }
         if ($objects.Count -eq 0) { return $cache }
-        $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray()
+        $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray() -SingleProcess
         $retainedBytes = [long]0
         if ($script:InspectWorktree) {
             $plannedBytes = [long]0
