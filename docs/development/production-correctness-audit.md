@@ -18215,17 +18215,22 @@ They do not establish the cause of either historical missing receipt.
 
 After both sends complete on the current physical link, the CLI now starts one
 background sample after its existing 250 ms linger interval. The link owns that
-query and cancels it on retirement. The owner can keep processing callbacks and
-WebSocket traffic. Samples retain physical generation and phase. Setup fields
+query and cancels it on retirement. Established SDP work shares the same task
+owner, so completed sends still start evidence while setup holds the physical
+link. Restoration retains that owner and cannot start a duplicate. The owner can
+keep processing callbacks and WebSocket traffic. Samples retain physical generation
+and phase. Setup fields
 come from request time; shared receipt counters are read after transport access.
 The layers are not atomic. A normal successful process can exit before this
 best-effort sample finishes; held successful peers remain observable.
 
 At failed run cutoff, the verdict is fixed before sampling all obligated peers
 concurrently under one shared 250 ms diagnostic deadline. No callback is consumed
-and no send or receipt debt can be paid by this wait. Each snapshot section has
-its own bounded stderr record, so normal SCTP evidence is not lost behind a
-truncated full snapshot. Existing stderr admission can still drop records when
+and no send or receipt debt can be paid by this wait. The failure warning retains
+its existing local `snapshot` JSON envelope.
+Each larger transport section has its own bounded stderr record, so normal SCTP
+evidence is not lost behind a truncated full snapshot. Existing stderr admission
+can still drop records when
 output is blocked. There is no periodic log or change to stdout event schemas.
 
 The new controls hold the actual RTC core and require a bounded timed-out sample,
@@ -18233,9 +18238,13 @@ then retain exact subsequent reliable gameplay. Reference and Godot profiles run
 in both offer roles, retire pending queries, and repeat on fresh physical links.
 The owner control requires both current-link sends before starting exactly one
 query; historical sends cannot start it. Failed-cutoff sampling leaves receipt
-debt and physical generation unchanged. Compiled faults that suppress the
+debt and physical generation unchanged. Held-offer and held-answer controls keep
+completed-send evidence during SDP, reject duplicate requests after restoration,
+and cancel requests when pending setup retires. Compiled faults that suppress the
 background query or remove terminal transport access fail their intended
-assertions. Restored controls and the prior bounded-snapshot gameplay history
+assertions. The existing timeout-envelope consumer rejects the removed JSON key
+and passes after the original envelope returns. Restored controls and the prior
+bounded-snapshot gameplay history
 pass. None of these controls reproduces the historical service failure.
 
 The one-millisecond Godot unreliable lifetime, exact reliable and unreliable

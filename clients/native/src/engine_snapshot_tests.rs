@@ -1234,3 +1234,119 @@ async fn exchange_diagnostic_is_nonblocking_once_per_generation_and_cancelled_on
         }
     }
 }
+
+/// #1639: completed sends can request evidence while an established SDP worker owns the link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exchange_diagnostic_survives_established_sdp_ownership_and_cancels_with_it() {
+    for profile in [ChannelProfile::Reference, ChannelProfile::Godot] {
+        for holds_offer in [false, true] {
+            for retire_pending in [false, true] {
+                let (mut pair, _) = unconnected_pair(profile);
+                pair.negotiate().await;
+                let offer = pair.sender.peers[&pair.receiver_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp;
+                let answer = pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .local_description()
+                    .await
+                    .unwrap()
+                    .sdp;
+                let (engine, peer, operation, step) = if holds_offer {
+                    (
+                        &mut pair.receiver,
+                        pair.sender_id,
+                        Negotiation::Offer(offer),
+                        "remote_offer",
+                    )
+                } else {
+                    (
+                        &mut pair.sender,
+                        pair.receiver_id,
+                        Negotiation::Answer(answer),
+                        "remote_answer",
+                    )
+                };
+                let generation = engine.diagnostic_snapshot(peer)["generation"].clone();
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                engine.negotiation_hold = Some(NegotiationHold {
+                    step,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                });
+                engine
+                    .start_negotiation(
+                        peer,
+                        operation,
+                        Deadline::after(tokio::time::Instant::now(), Duration::from_secs(10)),
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                    .await
+                    .unwrap();
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    engine
+                        .send_channel(peer, label)
+                        .await
+                        .unwrap()
+                        .send_text(label)
+                        .await
+                        .unwrap();
+                }
+                let (samples, mut received) = mpsc::unbounded_channel();
+                let delay = if retire_pending {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::ZERO
+                };
+                assert!(engine.start_exchange_diagnostic_with(peer, delay, move |snapshot| { samples.send(snapshot).unwrap(); }),
+                    "completed current-link sends must keep their sample request while SDP owns the link");
+                assert!(
+                    !engine.start_exchange_diagnostic_with(peer, delay, |_| panic!(
+                        "one query per physical generation"
+                    ))
+                );
+                if retire_pending {
+                    engine.remove_peer(peer).await.unwrap();
+                    let retired_sample =
+                        tokio::time::timeout(Duration::from_secs(1), received.recv())
+                            .await
+                            .unwrap();
+                    assert!(
+                        retired_sample.is_none(),
+                        "retiring held SDP must cancel the query and release its publisher"
+                    );
+                    release.notify_one();
+                    assert!(engine.take_ready_negotiation().is_none());
+                } else {
+                    let snapshot = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(snapshot["generation"], generation);
+                    assert_eq!(snapshot["negotiation_pending"], true);
+                    assert!(snapshot["sctp"].is_object());
+                    assert!(engine.negotiation_pending(peer));
+                    release.notify_one();
+                    tokio::time::timeout(Duration::from_secs(5), engine.next_negotiation())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(!engine.negotiation_pending(peer));
+                    assert_eq!(engine.diagnostic_snapshot(peer)["generation"], generation);
+                    assert!(!engine.start_exchange_diagnostic_with(
+                        peer,
+                        Duration::ZERO,
+                        |_| panic!("worker restoration must preserve the same query owner")
+                    ));
+                }
+                pair.cleanup().await;
+            }
+        }
+    }
+}

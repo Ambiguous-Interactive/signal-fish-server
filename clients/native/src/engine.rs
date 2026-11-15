@@ -558,6 +558,7 @@ pub enum CandidateApplyResult {
 }
 
 type ChannelSends = Arc<std::sync::Mutex<HashMap<String, Box<dyn JoinHandle>>>>;
+type ExchangeDiagnostic = Arc<std::sync::Mutex<Option<Box<dyn JoinHandle>>>>;
 
 /// Borrow one physical send owner, including established state held by setup.
 struct SendLink<'a> {
@@ -589,7 +590,7 @@ struct PeerLink {
     channel_tasks: Vec<Box<dyn JoinHandle>>,
     /// At most one nominated-pair query belongs to this physical link.
     selected_pair_probe: Option<SelectedPairProbe>,
-    exchange_diagnostic: Option<Box<dyn JoinHandle>>,
+    exchange_diagnostic: ExchangeDiagnostic,
     readiness_check: Option<ReadinessCheck>,
     /// At most one application send per required exchange label.
     channel_sends: ChannelSends,
@@ -617,7 +618,12 @@ impl PeerLink {
             task.abort();
         }
         self.selected_pair_probe = None;
-        if let Some(task) = self.exchange_diagnostic.take() {
+        if let Some(task) = self
+            .exchange_diagnostic
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
             task.abort();
         }
         self.readiness_check = None;
@@ -775,6 +781,7 @@ struct PendingNegotiation {
     receive_admission: Option<Arc<ChannelReceiveAdmission>>,
     open_labels: BTreeSet<String>,
     channel_sends: ChannelSends,
+    exchange_diagnostic: ExchangeDiagnostic,
     events: std::collections::VecDeque<EngineEvent>,
 }
 
@@ -981,6 +988,11 @@ impl Engine {
             .get(&peer)
             .map(|link| link.channel_sends.clone())
             .unwrap_or_default();
+        let exchange_diagnostic = worker
+            .peers
+            .get(&peer)
+            .map(|link| link.exchange_diagnostic.clone())
+            .unwrap_or_default();
         let receive_admission = worker
             .peers
             .get(&peer)
@@ -1036,6 +1048,7 @@ impl Engine {
                         receive_admission,
                         open_labels,
                         channel_sends,
+                        exchange_diagnostic,
                         events: Default::default(),
                     },
                 );
@@ -1348,7 +1361,7 @@ impl Engine {
             pair_connected: false,
             channel_tasks: Vec::with_capacity(self.settings.channel_profile.labels().len()),
             selected_pair_probe: None,
-            exchange_diagnostic: None,
+            exchange_diagnostic: ExchangeDiagnostic::default(),
             readiness_check: None,
             channel_sends: ChannelSends::default(),
             candidate_task: None,
@@ -2172,19 +2185,40 @@ impl Engine {
         publish: impl FnOnce(serde_json::Value) + Send + 'static,
     ) -> bool {
         let mut snapshot = self.diagnostic_snapshot(peer);
-        let Some(link) = self.peers.get_mut(&peer) else {
-            return false;
-        };
-        if link.exchange_diagnostic.is_some() {
+        let (pc, channels, open_labels, admission, owner) =
+            if let Some(link) = self.peers.get(&peer) {
+                (
+                    link.pc.clone(),
+                    link.channels.clone(),
+                    link.open_labels.clone(),
+                    link.receive_admission.clone(),
+                    link.exchange_diagnostic.clone(),
+                )
+            } else if let Some(pending) = self
+                .pending_negotiations
+                .get(&peer)
+                .filter(|pending| pending.pair_connected)
+            {
+                let (Some(pc), Some(admission)) = (&pending.pc, &pending.receive_admission) else {
+                    return false;
+                };
+                (
+                    pc.clone(),
+                    pending.channels.clone(),
+                    pending.open_labels.clone(),
+                    admission.clone(),
+                    pending.exchange_diagnostic.clone(),
+                )
+            } else {
+                return false;
+            };
+        let mut task = owner.lock().unwrap_or_else(|error| error.into_inner());
+        if task.is_some() || admission.terminal.load(Ordering::Relaxed) {
             return false;
         }
-        let pc = link.pc.clone();
-        let channels = link.channels.clone();
-        let open_labels = link.open_labels.clone();
-        let admission = link.receive_admission.clone();
         let budget = self.message_budget.clone();
         let profile = self.settings.channel_profile;
-        link.exchange_diagnostic = Some(self.runtime.spawn(Box::pin(async move {
+        *task = Some(self.runtime.spawn(Box::pin(async move {
             tokio::time::sleep(delay).await;
             let fields = sample_transport_fields(
                 pc.as_ref(),

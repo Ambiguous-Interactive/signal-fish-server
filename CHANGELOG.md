@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report accepted and rejected remote browser channels to diagnose stalled P2P connections (#853, #889).
 - Report SCTP credit, send windows, queued DATA, and TSN ownership to diagnose stalled native P2P transfers (#1319).
 - Report session metrics scan and capture times in trace logs.
-- Report native transport counters after exchange sends and failed deadlines to diagnose missing P2P receipts (#1639).
+- Report native transport counters after exchange sends, including during SDP, and at failed deadlines to diagnose
+  missing P2P receipts (#1639).
 
 ### Changed
 

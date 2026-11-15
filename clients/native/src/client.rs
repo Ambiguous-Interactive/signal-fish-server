@@ -2094,8 +2094,12 @@ impl Orchestrator<'_> {
                 ExchangeLedger::missing_labels(self.exchange_ledger.received.get(&peer));
             if !missing_sent.is_empty() || !missing_received.is_empty() {
                 tracing::warn!(%peer,
-                    ?missing_sent, ?missing_received,
-                    connected = self.connected_pairs.contains(&peer),
+                    snapshot = %json!({
+                        "missing_sent": missing_sent,
+                        "missing_received": missing_received,
+                        "connected": self.connected_pairs.contains(&peer),
+                        "link": self.engine.diagnostic_snapshot(peer),
+                    }),
                     "Exchange timed out");
             }
             crate::engine::report_transport_diagnostic(peer, "failed_cutoff", &snapshot);
