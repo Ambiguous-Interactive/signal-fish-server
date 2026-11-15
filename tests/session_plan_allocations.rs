@@ -11,6 +11,8 @@ mod departure_costs;
 mod direct_election;
 #[path = "live_p2p_allocations/endpoint_costs.rs"]
 mod endpoint_costs;
+#[path = "live_p2p_allocations/fallback_costs.rs"]
+mod fallback_costs;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
@@ -494,6 +496,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "finalized_fallback_copies_only_required_endpoints",
+            fallback_costs::finalized_fallback_copies_only_required_endpoints,
+        ),
         allocation_harness::trial(
             "direct_start_matches_borrowed_election_oracle",
             direct_election::direct_start_matches_borrowed_election_oracle,

@@ -576,6 +576,7 @@ impl EnhancedGameServer {
     /// unconfirmed peer; the relay floor always works) and is correct under the
     /// room-affinity model.
     /// Revisit when a single room can span nodes.
+    #[cfg(any(test, feature = "allocation-tracking"))]
     pub(crate) fn session_members_from<'a>(
         &self,
         players: impl IntoIterator<Item = &'a PlayerInfo>,

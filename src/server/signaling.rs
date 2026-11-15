@@ -622,8 +622,9 @@ impl EnhancedGameServer {
                             Some(room) => (room.authority_player, server.session_members_from_selection(
                                 room.players.into_iter().filter(|player| is_routed(&player.id)),
                             )),
-                            None => (baseline_room.authority_player, server.session_members_from(
-                                baseline_room.players.values().filter(|player| is_routed(&player.id)),
+                            None => (baseline_room.authority_player, server.session_members_from_selection(
+                                baseline_room.players.values().filter(|player| is_routed(&player.id))
+                                    .map(|player| crate::database::SessionPlayer::for_transport(player, include_direct)),
                             )),
                         };
 

@@ -836,6 +836,24 @@ pub mod allocation_benchmark {
         server.start_game_publication_builder(room)
     }
 
+    /// Publish a captured finalized baseline through the production refresh and fallback path.
+    pub async fn publish_finalized_baseline_for_measurement(
+        server: &std::sync::Arc<super::EnhancedGameServer>,
+        room: std::sync::Arc<crate::protocol::Room>,
+        joiner: crate::protocol::PlayerId,
+    ) -> bool {
+        let Some(player) = room.players.get(&joiner).cloned() else {
+            return false;
+        };
+        let guard = server
+            .message_coordinator
+            .lock_room_event_mutation(&room.id)
+            .await;
+        server
+            .publish_finalized_join_membership(room, joiner, player, guard)
+            .await
+    }
+
     /// Exercise the production session-member projection without publishing frames.
     pub fn session_members_for_measurement(
         server: &super::EnhancedGameServer,
