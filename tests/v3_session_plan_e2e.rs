@@ -264,6 +264,7 @@ type SessionPlan = Box<signal_fish_server::protocol::SessionPlanPayload>;
 
 #[derive(Debug)]
 struct Finalization {
+    peer_connections: Vec<signal_fish_server::protocol::PeerConnectionInfo>,
     session_plan: Option<SessionPlan>,
     skipped_after_game_starting: String,
 }
@@ -282,12 +283,12 @@ impl Finalization {
 /// Read until `GameStarting` is observed (asserting no `SessionPlan` precedes
 /// it), then collect a `SessionPlan` if one arrives within a short window.
 async fn read_finalization(ws: &mut WsStream) -> Finalization {
-    next_matching_server_message_within(
+    let peer_connections = next_matching_server_message_within(
         ws,
         SERVER_MESSAGE_TIMEOUT,
         "finalization GameStarting",
         |message| match message {
-            ServerMessage::GameStarting { .. } => Some(()),
+            ServerMessage::GameStarting { peer_connections } => Some(peer_connections),
             ServerMessage::SessionPlan(_) => {
                 panic!("SessionPlan must not arrive before GameStarting")
             }
@@ -311,6 +312,7 @@ async fn read_finalization(ws: &mut WsStream) -> Finalization {
         .await;
 
     Finalization {
+        peer_connections,
         session_plan,
         skipped_after_game_starting,
     }
@@ -451,12 +453,75 @@ fn direct_endpoints_reject_all_numeric_unspecified_ipv4_aliases() {
     }
 }
 
-/// #1658: finalize, fallback election and live endpoint withdrawal use the same readiness rule.
+/// #1663: group IP literals cannot anchor a point-to-point Direct session.
+#[test]
+fn direct_endpoints_reject_group_address_literals() {
+    for host in [
+        "224.0.0.1",
+        "239.255.255.255",
+        "255.255.255.255",
+        "ff02::1",
+        "ff0e::1",
+        "::ffff:224.0.0.1",
+        "::ffff:255.255.255.255",
+        "224.1",
+        "239.65535",
+        "4009754625",
+        "4294967295",
+        "0xef000001",
+        "0XFFFFFFFF",
+        "0357.0.0.1",
+        "037777777777",
+        "0xef.0.1",
+        "255.0xffffff",
+        "239.1.",
+    ] {
+        assert!(
+            DirectEndpoint::from_connection_info(&ConnectionInfo::Direct {
+                host: host.into(),
+                port: 7777,
+            })
+            .is_none(),
+            "group destination {host} cannot host a Direct session"
+        );
+    }
+    for host in [
+        "223.255.255.255",
+        "240.0.0.1",
+        "4026531841",
+        "192.0.2.255",
+        "::1",
+        "2001:db8::1",
+        "::ffff:192.0.2.1",
+        "host.example",
+    ] {
+        assert_eq!(
+            DirectEndpoint::from_connection_info(&ConnectionInfo::Direct {
+                host: host.into(),
+                port: 7777,
+            }),
+            Some(DirectEndpoint {
+                host: host.into(),
+                port: 7777
+            })
+        );
+    }
+}
+
+/// #1658/#1663: finalization, host election and withdrawal share endpoint readiness.
 #[tokio::test]
-async fn direct_room_numeric_unspecified_hosts_use_an_executable_plan() {
-    for (host_endpoint, client_endpoint) in
-        [("0", None), ("0x0", Some("192.0.2.20")), ("0.00.0", None)]
-    {
+async fn direct_room_unusable_hosts_use_an_executable_plan() {
+    for (host_endpoint, client_endpoint) in [
+        ("0", None),
+        ("0x0", Some("192.0.2.20")),
+        ("0.00.0", None),
+        ("224.0.0.1", None),
+        ("ff02::1", Some("192.0.2.20")),
+        ("255.255.255.255", None),
+        ("::ffff:239.1.2.3", Some("192.0.2.20")),
+        ("0xef000001", None),
+        ("4294967295", Some("192.0.2.20")),
+    ] {
         let running_server = start_server_with_session(SessionConfig {
             default_topology: Topology::Host,
             enable_webrtc: false,
@@ -496,6 +561,24 @@ async fn direct_room_numeric_unspecified_hosts_use_an_executable_plan() {
         send(&mut host, &ClientMessage::StartGame).await;
         let (host_plan, client_plan) =
             tokio::join!(read_finalization(&mut host), read_finalization(&mut client));
+        for publication in [&host_plan, &client_plan] {
+            assert_eq!(publication.peer_connections.len(), 2);
+            for (id, endpoint) in [(host_id, Some(host_endpoint)), (client_id, client_endpoint)] {
+                let peer = publication
+                    .peer_connections
+                    .iter()
+                    .find(|peer| peer.player_id == id)
+                    .unwrap();
+                assert_eq!(
+                    peer.connection_info,
+                    endpoint.map(|host| ConnectionInfo::Direct {
+                        host: host.into(),
+                        port: 7777,
+                    }),
+                    "legacy metadata must retain its exact value"
+                );
+            }
+        }
         let host_plan = host_plan.expect_session_plan("host");
         let client_plan = client_plan.expect_session_plan("client");
         let generation = host_plan.generation;
@@ -548,7 +631,7 @@ async fn direct_room_numeric_unspecified_hosts_use_an_executable_plan() {
                 &mut client,
                 &ClientMessage::ProvideConnectionInfo {
                     connection_info: ConnectionInfo::Direct {
-                        host: "0X000".into(),
+                        host: host_endpoint.into(),
                         port: 7777,
                     },
                 },

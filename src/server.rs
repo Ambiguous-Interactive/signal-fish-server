@@ -563,6 +563,37 @@ pub mod allocation_benchmark {
         );
     }
 
+    /// Select both P2P transports with optional mesh support for allocation fixtures.
+    pub fn negotiate_p2p_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+        mesh: bool,
+    ) {
+        server.set_client_protocol(
+            player_id,
+            super::connection_manager::NegotiatedProtocol {
+                version: 3,
+                transports: vec![
+                    crate::protocol::Transport::Relay,
+                    crate::protocol::Transport::Direct,
+                    crate::protocol::Transport::WebRtc,
+                ],
+                topologies: if mesh {
+                    vec![
+                        crate::protocol::Topology::Relay,
+                        crate::protocol::Topology::Host,
+                        crate::protocol::Topology::Mesh,
+                    ]
+                } else {
+                    vec![
+                        crate::protocol::Topology::Relay,
+                        crate::protocol::Topology::Host,
+                    ]
+                },
+            },
+        );
+    }
+
     /// Select Direct host capabilities for embedded allocation fixtures.
     pub fn negotiate_direct_for_measurement(
         server: &super::EnhancedGameServer,

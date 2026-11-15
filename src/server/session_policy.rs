@@ -621,7 +621,7 @@ impl EnhancedGameServer {
         let session_records = self.session_records();
 
         Box::new(move |finalized, game_starting| {
-            let members: Vec<SessionMember> = finalized
+            let mut members: Vec<SessionMember> = finalized
                 .members
                 .iter()
                 .map(|player| {
@@ -630,13 +630,28 @@ impl EnhancedGameServer {
                             SessionCapabilities::from(protocol)
                         }),
                     );
-                    SessionMember::from_finalized_player(
-                        player,
-                        capabilities,
-                        session_config.enable_direct,
-                    )
+                    SessionMember::from_finalized_player(player, capabilities, false)
                 })
                 .collect();
+            let desired = desired_topology_for(&finalized.game_name, &session_config);
+            if session_config.enable_direct
+                && desired != Topology::Relay
+                && crate::session_member::all_support(&members, Topology::Host, Transport::Direct)
+                && crate::session_member::select_session_pair(
+                    &members,
+                    desired,
+                    false,
+                    session_config.enable_webrtc,
+                )
+                .1 == Transport::Relay
+            {
+                for (member, player) in members.iter_mut().zip(&finalized.members) {
+                    member.direct_endpoint = player
+                        .connection_info
+                        .as_ref()
+                        .and_then(DirectEndpoint::from_connection_info);
+                }
+            }
             let decision = choose_session_plan(
                 &finalized.game_name,
                 finalized.authority_player,

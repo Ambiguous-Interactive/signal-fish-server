@@ -3,7 +3,8 @@ use super::*;
 use signal_fish_server::coordination::FinalizedRoom;
 use signal_fish_server::protocol::{DirectEndpoint, PeerConnectionInfo, PlayerInfo};
 use signal_fish_server::server::allocation_benchmark::{
-    negotiate_direct_for_measurement, start_game_builder_for_measurement,
+    negotiate_direct_for_measurement, negotiate_p2p_for_measurement,
+    start_game_builder_for_measurement,
 };
 use std::sync::Arc;
 
@@ -11,8 +12,19 @@ use std::sync::Arc;
 pub(crate) fn disabled_direct_start_skips_endpoints() {
     let mut disabled_profiles = Vec::new();
     for members in [2_u128, 16, 255] {
-        for (enable_direct, direct_members) in [(false, 0), (true, 0), (true, 1), (true, members)] {
-            let direct = direct_members == members;
+        for (enable_direct, direct_members, dual, desired, enable_webrtc, mesh_capable) in [
+            (false, 0, false, Topology::Host, true, true),
+            (true, 0, false, Topology::Host, true, true),
+            (true, 1, false, Topology::Host, true, true),
+            (true, members, false, Topology::Host, false, true),
+            (true, 0, true, Topology::Host, true, true),
+            (true, 0, true, Topology::Mesh, true, true),
+            (true, 0, true, Topology::Relay, true, true),
+            (true, 0, true, Topology::Mesh, true, false),
+            (true, 0, true, Topology::Host, false, true),
+            (true, 0, true, Topology::Mesh, false, true),
+        ] {
+            let direct = direct_members == members || (dual && !enable_webrtc);
             let mixed = direct_members > 0 && !direct;
             allocation_harness::block_on(async {
                 let server = EnhancedGameServer::new(
@@ -23,8 +35,8 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     ProtocolConfig::default(),
                     RelayTypeConfig::default(),
                     SessionConfig {
-                        default_topology: Topology::Host,
-                        enable_webrtc: !direct,
+                        default_topology: desired,
+                        enable_webrtc,
                         enable_direct,
                         ..Default::default()
                     },
@@ -48,7 +60,9 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
                     receivers.push(receiver);
                     server.connect_client(id, sender).await;
-                    if index <= direct_members {
+                    if dual {
+                        negotiate_p2p_for_measurement(&server, &id, mesh_capable);
+                    } else if index <= direct_members {
                         negotiate_direct_for_measurement(&server, &id);
                     } else {
                         negotiate_webrtc_for_measurement(&server, &id);
@@ -97,18 +111,25 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     let region = stats_alloc::Region::new(ALLOCATOR);
                     let publication = builder(&finalized, starting.clone());
                     let stats = region.change();
-                    println!("START_ENDPOINT_COST members={members} enable_direct={enable_direct} direct_members={direct_members} host_len={:?} stats={stats:?}", host.map(str::len));
+                    println!("START_ENDPOINT_COST members={members} enable_direct={enable_direct} direct_members={direct_members} dual={dual} desired={desired:?} webrtc={enable_webrtc} host_len={:?} stats={stats:?}", host.map(str::len));
                     profiles.push(stats);
                     let valid_direct = direct && host == Some(long_host.as_str());
-                    let expected_transport = if valid_direct {
+                    let expected_transport = if desired == Topology::Relay {
+                        Transport::Relay
+                    } else if valid_direct {
                         Transport::Direct
                     } else if direct || mixed {
                         Transport::Relay
                     } else {
                         Transport::WebRtc
                     };
-                    let expected_topology = if (direct || mixed) && !valid_direct {
+                    let expected_topology = if expected_transport == Transport::Relay {
                         Topology::Relay
+                    } else if desired == Topology::Mesh
+                        && mesh_capable
+                        && expected_transport == Transport::WebRtc
+                    {
+                        Topology::Mesh
                     } else {
                         Topology::Host
                     };
@@ -144,17 +165,26 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                         let expected_peers: Vec<_> = players
                             .iter()
                             .filter(|peer| {
-                                expected_topology == Topology::Host
-                                    && peer.id != player.id
-                                    && (player.id == players[0].id || peer.id == players[0].id)
+                                peer.id != player.id
+                                    && (expected_topology == Topology::Mesh
+                                        || (expected_topology == Topology::Host
+                                            && (player.id == players[0].id
+                                                || peer.id == players[0].id)))
                             })
                             .collect();
                         assert_eq!(plan.peers.len(), expected_peers.len());
                         for (peer, expected) in plan.peers.iter().zip(expected_peers) {
                             assert_eq!(peer.player_id, expected.id);
                             assert_eq!(peer.player_name, expected.name);
-                            assert_eq!(peer.is_authority, player.id != players[0].id);
-                            assert_eq!(peer.initiate, player.id != players[0].id);
+                            assert_eq!(peer.is_authority, expected.id == players[0].id);
+                            assert_eq!(
+                                peer.initiate,
+                                if expected_topology == Topology::Mesh {
+                                    player.id < expected.id
+                                } else {
+                                    player.id != players[0].id
+                                }
+                            );
                         }
                     }
                     (publication.after_game_starting)();
@@ -162,7 +192,7 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                         assert_membership_queue_empty(receiver);
                     }
                 }
-                if direct_members == 0 {
+                if !direct {
                     disabled_profiles.push((members, enable_direct, profiles));
                 }
             });

@@ -17880,3 +17880,68 @@ union, pinned toolchain, flags, assertions and 45-minute limit remain intact.
 Nested and near-prefix controls and the live workflow guard require complete,
 disjoint ownership. Thirteen Python partition controls pass. Hosted
 failure-reproduction qualification remains required before closing #1662.
+
+### F372 — Group IP literals could become Direct hosts
+
+Existing audit #826 found #1663 on `d269f495`. The endpoint validator accepted
+IPv4 and IPv6 multicast literals, limited IPv4 broadcast and IPv4-mapped forms.
+Finalization could select that endpoint instead of another usable host or the
+Relay floor. A running Direct host could also publish a group destination.
+
+`direct_endpoints_reject_group_address_literals` fails on original production
+with `224.0.0.1`. The real WebSocket control
+`direct_room_unusable_hosts_use_an_executable_plan` also fails on that source.
+The repair excludes those IP literals and their numeric IPv4 aliases from the
+shared readiness predicate.
+The controls retain valid literal and DNS spellings, exact legacy metadata,
+successor election, shared generations, peer directions and terminal Relay resets.
+They cover initial selection and live endpoint withdrawal. These are server
+publication contracts, not proof of network reachability. Compact decimal,
+hexadecimal and octal IPv4 aliases use the existing
+[URL host parser](https://url.spec.whatwg.org/#concept-ipv4-parser) after a numeric-shape check.
+Valid numeric spellings and ordinary DNS names retain their exact wire value.
+DNS resolution remains a client responsibility.
+Rust #301, .NET #154 and Godot #579 retain separate SDK assessments.
+
+### F373 — WebRTC starts retained unused Direct hostnames
+
+Existing campaign #636 found an unmeasured capability combination: players that
+support both Direct and WebRTC. Game-start preparation copied every valid Direct
+hostname before selecting the richer WebRTC rung. Relay ceilings and incompatible
+mixed rooms could retain the same unused endpoints.
+
+The expanded `disabled_direct_start_skips_endpoints` contract fails with original
+publication code. For 255 dual-capable Host/WebRTC players with 253-byte hostnames,
+it measures 2,041 allocations and 218,279 allocated bytes, versus 1,786 and 153,764
+without endpoints. The 255 extra allocations and 64,515 bytes are unused copies.
+Preparation now reads endpoint metadata only when every member supports
+Host/Direct, the ceiling permits Host and no WebRTC rung can execute.
+
+Exact publication controls cover 2, 16 and 255 members, Host/Mesh/Relay ceilings,
+both transports, Host-only WebRTC fallback, mixed capabilities, disabled WebRTC,
+and actual Direct selection. They retain exact legacy frames, names, host/peer
+fields, directions, generations and ICE behavior. This is an allocation result;
+no runtime throughput or remote-network claim is made.
+
+### A26 — Full-repository Rustdoc checks exceeded the hook budget
+
+Existing #1441's functional classification repair was already merged. Its exact
+seven-file, fourteen-line production/benchmark method-doc fixture still exceeded
+the unchanged 1,000 ms hook policy timer in the full repository. Matched original
+runs report 1,208/1,201/1,217/1,204/1,270 ms. The repair prunes unrelated macro and
+attribute span work, overlaps independent staged metadata/content reads and uses
+one Git process for bounded exact-blob reads. All blob sizes and identities are
+checked before any content request. Existing byte budgets and fallback checks remain.
+
+The selected repair reports 933/895/887/883/944 ms for the same root fixture.
+A fresh linked worktree reports 941/942/981 ms staged and 766/726/767 ms in
+Worktree mode. These use the original `HookBudgetMs`/`PreCommitTimer` boundary.
+Full PowerShell process wall time remains above one second and is retained
+separately; this is not a sub-second process-startup claim. Failed and slower
+experiments remain recorded, including a run that overlapped Nextest.
+
+Controls retain later inner/custom attribute rejection, exact NUL/Unicode and
+empty blob bytes, duplicate IDs, exact byte limits, required/optional budget
+misses, missing objects and pending-process cleanup. No checks or limits are
+removed. Broader filesystem and refactor timing investigations #811/#1486 remain
+separate. Current-head hosted qualification is required before closing #1441.

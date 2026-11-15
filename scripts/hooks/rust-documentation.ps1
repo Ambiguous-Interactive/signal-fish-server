@@ -181,6 +181,7 @@ function Remove-RustDocumentationComments {
         if ($macroBraceDepth -eq 0) { $trustedBuiltinDerives = $false; $trustedAsyncTrait = $false; break }
     }
     $unsafeAttributeSpans = [System.Collections.Generic.List[object]]::new()
+    $hasInnerAttributes = [regex]::IsMatch($productionCode, '#\s*!')
     $bracePositions = [regex]::Matches($code, '[{}]')
     $bracePosition = 0
     $braceDepth = 0
@@ -192,8 +193,6 @@ function Remove-RustDocumentationComments {
             if ($bracePositions[$bracePosition].Value -ceq '{') { $braceDepth++ } else { $braceDepth-- }
             $bracePosition++
         }
-        if (Test-RustCompilerAttribute -Attribute $attribute.Groups['body'].Value -TrustedAsyncTrait ($trustedAsyncTrait -and $braceDepth -eq 0) -TrustedBuiltinDerives ($trustedBuiltinDerives -and $braceDepth -eq 0)) { continue }
-        if ($attribute.Value -cmatch '^#\s*!') { throw 'Unclassified inner Rust attribute' }
         $start = $attribute.Index
         for ($previous = $attributeIndex - 1; $previous -ge 0; $previous--) {
             $previousEnd = $attributes[$previous].Index + $attributes[$previous].Length
@@ -201,6 +200,9 @@ function Remove-RustDocumentationComments {
             $start = $attributes[$previous].Index
         }
         while ($start -gt 0 -and [char]::IsWhiteSpace($code[$start - 1])) { $start-- }
+        if (-not $hasInnerAttributes -and $start -gt $ChangedEnd) { break }
+        if (Test-RustCompilerAttribute -Attribute $attribute.Groups['body'].Value -TrustedAsyncTrait ($trustedAsyncTrait -and $braceDepth -eq 0) -TrustedBuiltinDerives ($trustedBuiltinDerives -and $braceDepth -eq 0)) { continue }
+        if ($attribute.Value -cmatch '^#\s*!') { throw 'Unclassified inner Rust attribute' }
         $end = $attribute.Index + $attribute.Length
         for ($next = $attributeIndex + 1; $next -lt $attributes.Count; $next++) {
             if ($code.Substring($end, $attributes[$next].Index - $end).Trim().Length -ne 0) { break }
@@ -209,9 +211,13 @@ function Remove-RustDocumentationComments {
         $end = Get-RustAttributedItemEnd -Code $code -Start $end
         $unsafeAttributeSpans.Add(@{ Start = $start; End = $end })
     }
-    foreach ($macro in $macroSpans) { $unsafeAttributeSpans.Add(@{ Start = $macro.Index; End = $macro.Index + $macro.Length }) }
+    foreach ($macro in $macroSpans) {
+        if ($macro.Index -gt $ChangedEnd) { break }
+        if ($macro.Index + $macro.Length -lt $ChangedStart) { continue }
+        $unsafeAttributeSpans.Add(@{ Start = $macro.Index; End = $macro.Index + $macro.Length })
+    }
     $unsafeSpans = [System.Collections.Generic.List[object]]::new()
-    foreach ($span in @($unsafeAttributeSpans | Sort-Object -Property Start, End)) {
+    foreach ($span in @($unsafeAttributeSpans | Where-Object { $_.Start -le $ChangedEnd -and $_.End -ge $ChangedStart } | Sort-Object -Property Start, End)) {
         if ($unsafeSpans.Count -gt 0 -and $span.Start -le $unsafeSpans[$unsafeSpans.Count - 1].End) {
             $previous = $unsafeSpans[$unsafeSpans.Count - 1]
             $previous.End = [System.Math]::Max($previous.End, $span.End)
