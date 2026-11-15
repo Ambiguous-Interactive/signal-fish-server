@@ -623,6 +623,9 @@ fn main() {
         allocation_harness::trial("host_departure_skips_legacy_player_metadata", || {
             live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(false, false)
         }),
+        allocation_harness::trial("direct_refresh_skips_other_direct_endpoints", || {
+            live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(true, true)
+        }),
         allocation_harness::trial("direct_refresh_skips_legacy_player_metadata", || {
             live_p2p_allocations::live_host_operation_does_not_copy_legacy_metadata(true, false)
         }),

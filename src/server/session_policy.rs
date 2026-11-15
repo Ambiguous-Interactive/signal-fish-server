@@ -1217,9 +1217,16 @@ impl EnhancedGameServer {
                 _ => {}
             }
         }
+        let host_remains_eligible = stored.host == Some(*player_id)
+            && DirectEndpoint::validated_parts(&connection_info).is_some()
+            && crate::session_capability::supports_session(
+                self.session_capabilities(player_id),
+                stored.topology,
+                stored.transport,
+            );
         let mut room = match self
             .database
-            .get_room_session_selection_snapshot(room_id)
+            .get_room_session_selection_snapshot_for_transport(room_id, !host_remains_eligible)
             .await
         {
             Ok(Some(room)) => room,
