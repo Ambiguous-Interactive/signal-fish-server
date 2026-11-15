@@ -17945,3 +17945,9 @@ empty blob bytes, duplicate IDs, exact byte limits, required/optional budget
 misses, missing objects and pending-process cleanup. No checks or limits are
 removed. Broader filesystem and refactor timing investigations #811/#1486 remain
 separate. Current-head hosted qualification is required before closing #1441.
+
+The post-commit root fixture at `c6a5b70d` reports 1,113/1,098/14,287/1,836/1,575 ms.
+All policy verdicts pass, but these timings invalidate a current-head sub-second
+claim. The 14-second attempt includes 3,654 ms in Git discovery and 2,871 ms in
+the changelog gate. This locates slow work but does not establish its cause.
+Keep #1441 open until matched current-head attribution and qualification complete.
