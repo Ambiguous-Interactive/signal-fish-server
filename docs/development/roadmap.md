@@ -188,7 +188,7 @@ The existing Rustdoc corpus preserves staged/worktree positives, executable nega
 attributes, macros, and revision ranges. Independent review found no semantic mismatch in 4,000
 baseline/candidate comparisons, including malformed input and scoped ranges.
 
-Twenty alternating same-index pairs give these hook-timer results on Linux ARM64:
+Twenty alternating pairs using one temporary index give these hook-timer results on Linux ARM64:
 
 | Hook timing | Baseline | Candidate |
 | --- | ---: | ---: |
@@ -210,8 +210,17 @@ Use an alternate Git index, never the user's real index. Alternate baseline and 
 on that same index and filesystem with SIGNAL_FISH_HOOK_PROFILE=1. Retain hook and process-wall time,
 exit status, source/loader/helper hashes, and all attempts. The existing issue retains exact manifests.
 
-This accepts a measured normal-workload improvement. It does not explain the retained 14-second
-filesystem/discovery observation or prove a universal runtime bound. Keep #1441 open for that limit.
+Committed source 7fd1f131 then ran the same seven-file edits in a linked worktree with its actual index.
+All verdicts pass, but staged hook times are 1,051/1,013/996/1,051/1,042 ms and worktree times are
+1,207/1,204/1,258/1,211/1,190 ms. This misses the target and prevents issue completion.
+The temporary-index comparison does not establish actual-index or linked-worktree timing.
+The full original worktree also passes slowly at 1,193 ms while checking unrelated untracked skills;
+the generated catalog change was restored and user files were preserved.
+
+This delivers a measured reduction in two avoidable costs, with remaining timing work explicit.
+It does not explain the retained 14-second filesystem/discovery observation or prove a universal
+runtime bound. Keep #1441 open. Next profile actual-index discovery and blob reads; do not rerun
+unchanged temporary-index comparisons as closure evidence.
 New, reopened, closed, and duplicate-disposition issue counts are zero for this slot.
 No server API, runtime dependency, client protocol, or hook timing boundary changes.
 
@@ -230,7 +239,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | Slot | Allocation | Issue / PR | Accepted outcome and remaining work |
 | --- | --- | --- | --- |
 | 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
-| 2 | Debt | [#1441][i1441] / delivery PR pending | Hook p95 1,039→877 ms; historical outlier remains open. |
+| 2 | Debt | [#1441][i1441] / delivery PR pending | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
 | 3 | Debt | Pending | Not started |
 | 4 | Debt | Pending | Not started |
 | 5 | Exploration | Pending | Not started |
