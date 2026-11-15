@@ -76,8 +76,8 @@ Session notes under `progress/` are local planning artifacts. Keep them
 gitignored and never force-add or commit them; durable decisions belong in the
 relevant source, test, documentation, issue, or pull request.
 
-Follow the [backlog contract and ten-session trial](../docs/development/roadmap.md) for task selection,
-experiments, existing-issue updates, historical closure evidence, and separate task/delivery reporting.
+Follow [the backlog contract](../docs/development/roadmap.md) for issue selection, experiments, and acceptance.
+
 ### Session Time-Box (Required)
 
 - Limit each working session to **two hours** of active work and one PR. Prioritize correctness,
