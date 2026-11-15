@@ -41,11 +41,15 @@ class IterationEntrypoints(unittest.TestCase):
                 different = Path(directory) / "different"
                 different.mkdir()
                 expected_root = different.resolve().as_posix()
+            shell = bash_executable()
             env = dict(os.environ, LC_ALL="C", EXPECTED_ROOT=expected_root)
+            if Path(shell).is_absolute():
+                path_key = next((key for key in env if key.upper() == "PATH"), "PATH")
+                env[path_key] = str(Path(shell).parent) + os.pathsep + env.get(path_key, "")
             cwd = Path(directory) / "nested" if nested else Path(directory)
             cwd.mkdir(exist_ok=True)
             return subprocess.run(
-                [bash_executable(), (scripts / script).as_posix(), *args],
+                [shell, (scripts / script).as_posix(), *args],
                 cwd=cwd, env=env, capture_output=True, text=True, check=False,
             )
 
@@ -57,6 +61,18 @@ class IterationEntrypoints(unittest.TestCase):
             exists.side_effect = [False, False]
             with self.assertRaisesRegex(FileNotFoundError, "Git Bash"):
                 bash_executable("nt")
+
+    def test_selected_shell_directory_reaches_nested_bash(self):
+        shell = ROOT.parent / "selected-shell" / "bash"
+        with patch.object(os, "environ", {"pAtH": "original-path", "KEEP": "value"}):
+            with patch(__name__ + ".bash_executable", return_value=str(shell)):
+                with patch.object(subprocess, "run") as run:
+                    self.run_wrapper("test.sh")
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["pAtH"], str(shell.parent) + os.pathsep + "original-path")
+        self.assertEqual([key for key in environment if key.upper() == "PATH"], ["pAtH"])
+        self.assertEqual(environment["KEEP"], "value")
+        self.assertEqual(run.call_args.args[0][0], str(shell))
 
     def test_defaults_scope_and_propagate_failure(self):
         for script in ("test.sh", "run-local-ci.sh"):
