@@ -2248,7 +2248,14 @@ Write-Profile -Name "Changed file discovery" -ElapsedMilliseconds $changedFilesT
     })
 $script:HookPolicyChangedFiles = [string[]]@($allChangedFiles | Where-Object { $script:HookPolicyFiles -contains $_ })
 $script:StagedFiles = $allChangedFiles
-if ((-not $script:InspectWorktree) -and $allChangedFiles.Count -gt 0) {
+# Only these checks can use worktree text after proving it equals the index.
+# Ordinary Rust classification reads exact blobs, so it needs no filesystem comparison.
+$worktreeTextRelevant = @($allChangedFiles | Where-Object {
+        $script:HookPolicyFiles -contains $_ -or
+        $script:SkillsIndexToolingFiles -contains $_ -or
+        ($_.StartsWith(".llm/") -and $_.EndsWith(".md"))
+    }).Count -gt 0
+if ((-not $script:InspectWorktree) -and $worktreeTextRelevant) {
     $script:UseWorktreeTextForStagedFiles = Test-WorktreeMatchesIndexForPaths -Paths $allChangedFiles
 }
 

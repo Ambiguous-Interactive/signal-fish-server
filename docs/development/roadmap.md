@@ -28,10 +28,8 @@ Refresh issue comments and dependencies before claiming. Blocked tasks return to
 
 | Order | Existing issue | Next discriminating experiment |
 | --- | --- | --- |
-| 1 | [#1264][i1264] | Resume Engine events and separate budget refusal from channel closure with exact counts. |
-| 2 | [#1426][i1426] | Reproduce the missing-span panic on pinned source; separate span misuse from bind failure. |
-| 3 | [#775][i775] | Measure event/oracle memory at increasing workload sizes before another upper-shape run. |
-| 4 | [#1441][i1441] | Compare pure Rustdoc staged/worktree cases and profile remaining exact-blob runtime. |
+| 1 | [#1426][i1426] | Reproduce the missing-span panic on pinned source; separate span misuse from bind failure. |
+| 2 | [#775][i775] | Measure event/oracle memory at increasing workload sizes before another upper-shape run. |
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
@@ -39,6 +37,9 @@ Record the reason. Use parent/sub-issue relationships for decomposition and bloc
 only for demonstrated prerequisites. Do not infer dependencies from a shared campaign reference.
 
 Existing #1244 requires a changed historical-input experiment before re-entering this queue.
+Existing #1264 lacks the original terminal-event identity; its current typed controls already exist.
+Recover that evidence or define a discriminating pinned-source recurrence before scheduling it again.
+Existing #1441 has new normal-workload measurements below; historical timing outliers remain unresolved.
 
 ## Original cohort
 
@@ -172,6 +173,61 @@ No historical root-cause criterion is satisfied by this experiment.
 Next #1244 work must recover a pinned historical comparison or a new correlated failing history;
 do not repeat this unchanged four-worker matrix. #1264 is the next independent ready investigation.
 
+## Trial slot 2 evidence
+
+Slot 2 selects existing #1441 after a source/artifact audit of #1264.
+The only retained original #1264 artifact explicitly omits the event identity.
+No unchanged saturation rerun was started. The issue records the evidence needed to resume.
+The local host is Linux; #1426 needs a correlated Windows panic capture.
+The #1441 hook cost blocks documentation work and has an executable local reproduction.
+
+Two changes reduce confirmed overhead: copy ordinary Rust spans together when masking literals/comments,
+and skip worktree/index comparison when no staged check uses worktree text.
+Rust classification still reads exact Git blobs. Relevant mixed changes still compare all staged paths.
+The existing Rustdoc corpus preserves staged/worktree positives, executable negatives, strings,
+attributes, macros, and revision ranges. Independent review found no semantic mismatch in 4,000
+baseline/candidate comparisons, including malformed input and scoped ranges.
+
+Twenty alternating pairs using one temporary index give these hook-timer results on Linux ARM64:
+
+| Hook timing | Baseline | Candidate |
+| --- | ---: | ---: |
+| Median | 1,016 ms | 827.5 ms |
+| Nearest-rank p95 | 1,039 ms | 877 ms |
+| Maximum | 1,051 ms | 915 ms |
+
+Every verdict passes. Candidate process-wall p95 is 1,163.675 ms; it is not sub-second.
+An earlier lexer-only candidate improved median but missed the target at p95 1,023 ms.
+That cohort and all failures remain retained. Its final pairs overlapped owner readiness probes;
+the final cohort did not. Shared-host external load was not controlled.
+
+Reproduce the seven-file index by adding two method-doc lines before these anchors at baseline a48657dd:
+`room_exists` in database/mod.rs, `decision_with` in server/session_policy.rs, `instance_id` in server.rs,
+`validate_game_name_with_config` in protocol/validation.rs, `handle_player_ready` in server/ready_state.rs,
+`sorted_routed_player_ids` in server/signaling.rs, and `relay_serialization_runtime` in its benchmark.
+The first six paths are under src/; the benchmark is under benches/.
+Use an alternate Git index, never the user's real index. Alternate baseline and candidate hook processes
+on that same index and filesystem with SIGNAL_FISH_HOOK_PROFILE=1. Retain hook and process-wall time,
+exit status, source/loader/helper hashes, and all attempts. The existing issue retains exact manifests.
+
+Committed source 7fd1f131 then ran the same seven-file edits in a linked worktree with its actual index.
+All verdicts pass, but staged hook times are 1,051/1,013/996/1,051/1,042 ms and worktree times are
+1,207/1,204/1,258/1,211/1,190 ms. This misses the target and prevents issue completion.
+The temporary-index comparison does not establish actual-index or linked-worktree timing.
+The full original worktree also passes slowly at 1,193 ms while checking unrelated untracked skills;
+the generated catalog change was restored and user files were preserved.
+
+This delivers a measured reduction in two avoidable costs, with remaining timing work explicit.
+It does not explain the retained 14-second filesystem/discovery observation or prove a universal
+runtime bound. Keep #1441 open. Next profile actual-index discovery and blob reads; do not rerun
+unchanged temporary-index comparisons as closure evidence.
+New, reopened, closed, and duplicate-disposition issue counts are zero for this slot.
+No server API, runtime dependency, client protocol, or hook timing boundary changes.
+Claim: 23:08 UTC; partial source-cost improvement accepted after review at 23:25 UTC on 2026-11-15.
+Elapsed task time is about 17 minutes at minute precision, including tool waits.
+Active effort and blocked time were not separately instrumented. Overall issue acceptance remains incomplete.
+PR #1673 records delivery separately.
+
 ## Ten-session trial
 
 Setup is not a trial delivery session. Sessions 1–4 and 6–9 address existing debt.
@@ -187,7 +243,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | Slot | Allocation | Issue / PR | Accepted outcome and remaining work |
 | --- | --- | --- | --- |
 | 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
-| 2 | Debt | Pending | Not started |
+| 2 | Debt | [#1441][i1441] / [#1673](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1673) | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
 | 3 | Debt | Pending | Not started |
 | 4 | Debt | Pending | Not started |
 | 5 | Exploration | Pending | Not started |
