@@ -3418,6 +3418,165 @@ async fn running_direct_endpoint_loss_elects_ready_peer_and_ignores_other_sessio
     assert_silent(&mut peer_rx).await;
 }
 
+/// #636: read alternate Direct endpoints only when the stored host needs replacement.
+#[tokio::test(start_paused = true)]
+async fn running_direct_endpoint_refresh_projects_candidates_only_for_failover() {
+    for (case, endpoint_lost, downgraded) in [
+        ("healthy replacement", false, false),
+        ("endpoint loss", true, false),
+        ("capability loss", false, true),
+    ] {
+        let server = create_server_with_session(SessionConfig {
+            default_topology: Topology::Host,
+            enable_webrtc: false,
+            enable_direct: true,
+            ..SessionConfig::default()
+        })
+        .await;
+        let (host, mut host_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        let direct = NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::Direct],
+            topologies: vec![Topology::Relay, Topology::Host],
+        };
+        for player in [host, peer] {
+            server.set_client_protocol(&player, direct.clone());
+        }
+        let room = finalized_db_room_with(&server, host, &[(peer, "Peer-雪")]).await;
+        publish_room_members(&server, &room, &[host, peer]).await;
+        let old_endpoint = ConnectionInfo::Direct {
+            host: "192.0.2.10".into(),
+            port: 7777,
+        };
+        let peer_endpoint = ConnectionInfo::Direct {
+            host: "192.0.2.30".into(),
+            port: 9999,
+        };
+        for (player, endpoint) in [(host, &old_endpoint), (peer, &peer_endpoint)] {
+            assert!(server
+                .database
+                .update_player_connection_info(&room, &player, endpoint.clone())
+                .await
+                .unwrap());
+        }
+        let players = server.database.get_room_players(&room).await.unwrap();
+        let host_name = players
+            .iter()
+            .find(|player| player.id == host)
+            .unwrap()
+            .name
+            .clone();
+        server
+            .emit_session_plan(&room, &finalized("host-game", players, Some(host)))
+            .await;
+        let initial = expect_plan(&mut host_rx, case).await;
+        let _ = expect_plan(&mut peer_rx, case).await;
+        if downgraded {
+            server.set_client_protocol(&host, v3_relay_only());
+        }
+        let replacement = ConnectionInfo::Direct {
+            host: if endpoint_lost {
+                "0.0.0.0"
+            } else {
+                "192.0.2.20"
+            }
+            .into(),
+            port: 8888,
+        };
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<crate::database::InMemoryDatabase>()
+            .unwrap();
+        let before = database.session_direct_projection_reads_for_test();
+        server
+            .handle_provide_connection_info(&host, replacement.clone())
+            .await;
+        let host_plan = expect_plan(&mut host_rx, case).await;
+        let peer_plan = expect_plan(&mut peer_rx, case).await;
+        let elected = if endpoint_lost || downgraded {
+            peer
+        } else {
+            host
+        };
+        let endpoint = if elected == host {
+            &replacement
+        } else {
+            &peer_endpoint
+        };
+        assert_ne!(host_plan.generation, initial.generation, "{case}");
+        assert_eq!(host_plan.generation, peer_plan.generation, "{case}");
+        for plan in [&host_plan, &peer_plan] {
+            assert_eq!(plan.topology, Topology::Host, "{case}");
+            assert_eq!(plan.transport, Transport::Direct, "{case}");
+            assert_eq!(plan.host, Some(elected), "{case}");
+            assert_eq!(
+                plan.direct_endpoint,
+                crate::protocol::DirectEndpoint::from_connection_info(endpoint),
+                "{case}"
+            );
+            assert!(plan.ice_servers.is_empty(), "{case}");
+            assert_eq!(plan.fallback, Transport::Relay, "{case}");
+        }
+        for (recipient, plan, other, other_name) in [
+            (host, &host_plan, peer, "Peer-雪"),
+            (peer, &peer_plan, host, host_name.as_str()),
+        ] {
+            let peers: Vec<_> = plan
+                .peers
+                .iter()
+                .map(|peer| {
+                    (
+                        peer.player_id,
+                        peer.player_name.as_str(),
+                        peer.is_authority,
+                        peer.initiate,
+                    )
+                })
+                .collect();
+            let expected = if downgraded {
+                vec![]
+            } else {
+                vec![(other, other_name, other == elected, recipient != elected)]
+            };
+            assert_eq!(peers, expected, "{case}, recipient={recipient}");
+        }
+        assert_eq!(
+            server.active_session_plan(&room),
+            Some(ActiveSessionPlan {
+                topology: Topology::Host,
+                transport: Transport::Direct,
+                host: Some(elected),
+            }),
+            "{case}"
+        );
+        let stored = server
+            .database
+            .get_room_by_id(&room)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.players[&host].connection_info,
+            Some(replacement),
+            "{case}"
+        );
+        assert_eq!(
+            stored.players[&peer].connection_info,
+            Some(peer_endpoint),
+            "{case}"
+        );
+        assert_eq!(
+            database.session_direct_projection_reads_for_test() - before,
+            u32::from(endpoint_lost || downgraded),
+            "{case}"
+        );
+        assert_plan_queue_empty(&mut host_rx);
+        assert_plan_queue_empty(&mut peer_rx);
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn running_direct_host_endpoint_refresh_is_atomic_serialized_and_cancellation_safe() {
     let server = create_server_with_session(SessionConfig {

@@ -230,3 +230,40 @@ Raw local commands, outputs, source hashes, invalid prewarm attempts, filesystem
 probes, and summaries remain under `progress/iteration-performance/`.
 The completed raw report is `matched-wrapper-20.json`; its SHA-256 is
 `cba3d25b3e1ec4041023250601c490c1520080722142aa0dfc2d84a0b65b934a`.
+
+## Runtime crate decision (#642)
+
+Defer a full runtime crate split. Use the existing proof-core and tooling
+boundaries, and public server contracts for routine server edits. A runtime
+split adds publishing, feature, visibility, and mutation-coverage work. The
+measured public-contract path does not currently justify that cost. Accept
+slower private unit-test edits as a known exception. Revisit this decision if
+a required server workflow repeatedly exceeds the target on native storage.
+
+Session 708 measured 20 warm edits to `src/server.rs` with
+`bash scripts/dev-loop.sh =test_multi_player_room_scenario`. All 20 selected
+regressions passed. The default artifact directory used ext4, with no target
+override or concurrent Cargo process. The host was Linux aarch64 with Rust
+1.94.0. Median elapsed time was 6.430 seconds; nearest-rank p95 was 7.126
+seconds. Two separate warm-ups took 8.587 and 1.584 seconds.
+
+The elapsed samples, in execution order, were:
+
+```text
+6.439 6.388 6.452 6.500 6.239 6.811 6.421 6.661 6.233 6.541
+7.170 7.126 6.909 6.463 6.280 6.135 6.211 6.294 6.156 6.264
+```
+
+These are current-source measurements, not a matched comparison with the
+older 9p cohort. Comment edits force runtime-crate recompilation but do not
+represent every patch. Elapsed time includes selection, build, metadata,
+and execution. Internal compiler, linker, and scheduler costs were not
+separately traced. This decision resolves the crate-split choice in #642;
+it does not prove the private root-unit floor, every edit path, or CI p95.
+The wider performance and CI campaigns remain open. Raw commands, outputs,
+source identity, and full-precision samples remain locally in
+`progress/session-708/native-loop-final.json`.
+
+An earlier 20-edit cohort measured an intermediate endpoint-refresh candidate
+with an owned endpoint retained across storage. It remains separately recorded
+in `progress/session-708/native-loop.json`; no samples were pooled or discarded.

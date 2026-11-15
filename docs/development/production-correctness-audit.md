@@ -100,6 +100,30 @@ baseline. It maps audit ownership; it does not certify these operations.
 
 ## Bounded histories without a confirmed defect
 
+### A11 — Session 708 Direct host replacement and recovery
+
+Existing issues: #636 and #826. A live Direct host endpoint replacement copied
+all stored fallback endpoints before retaining the healthy host. A new
+allocation history varies one other member's hostname over 9, 63, and 253 bytes
+in a three-player room. Original-source preparation uses 54 allocations and
+13,197 / 13,251 / 13,441 bytes. The repair uses 52 allocations and 13,179 bytes
+in every cell. This measures allocation work, not a throughput gain.
+
+The exact server history covers healthy replacement, endpoint loss, and a
+capability-downgraded host with a usable replacement address. It checks storage,
+peer names and offer directions, selected host and endpoint, and one fresh
+shared generation. Healthy replacement requests no fallback endpoint projection.
+Both recovery cases retain the projection and elect the capable peer. Original
+source fails the healthy-copy assertion. A control that omits every fallback
+projection fails the endpoint-loss wire assertion: Relay instead of Host.
+
+Six scoped server controls pass, including storage failure, route loss,
+duplicate updates, and cancellation. Two real WebSocket controls pass the
+Direct endpoint and unusable-host contracts. These histories preserve the
+existing protocol. They establish no new gameplay correctness defect and do
+not complete the wider A01–A22 audit. Raw source identities, every attempt,
+and logs remain under `progress/session-708/`.
+
 ### A11/A20 — Session 690 active consumer on one worker
 
 Existing issues: #1264 and #1240. A new current-thread Engine control uses the
