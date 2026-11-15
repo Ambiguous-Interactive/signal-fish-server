@@ -28,16 +28,17 @@ Refresh issue comments and dependencies before claiming. Blocked tasks return to
 
 | Order | Existing issue | Next discriminating experiment |
 | --- | --- | --- |
-| 1 | [#1244][i1244] | Compare pinned Godot 4.3 isolated and loaded recovery with ingress and callback evidence. |
-| 2 | [#1264][i1264] | Resume Engine events and separate budget refusal from channel closure with exact counts. |
-| 3 | [#1426][i1426] | Reproduce the missing-span panic on pinned source; separate span misuse from bind failure. |
-| 4 | [#775][i775] | Measure event/oracle memory at increasing workload sizes before another upper-shape run. |
-| 5 | [#1441][i1441] | Compare pure Rustdoc staged/worktree cases and profile remaining exact-blob runtime. |
+| 1 | [#1264][i1264] | Resume Engine events and separate budget refusal from channel closure with exact counts. |
+| 2 | [#1426][i1426] | Reproduce the missing-span panic on pinned source; separate span misuse from bind failure. |
+| 3 | [#775][i775] | Measure event/oracle memory at increasing workload sizes before another upper-shape run. |
+| 4 | [#1441][i1441] | Compare pure Rustdoc staged/worktree cases and profile remaining exact-blob runtime. |
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
 Record the reason. Use parent/sub-issue relationships for decomposition and blocked-by relationships
 only for demonstrated prerequisites. Do not infer dependencies from a shared campaign reference.
+
+Existing #1244 requires a changed historical-input experiment before re-entering this queue.
 
 ## Original cohort
 
@@ -145,6 +146,27 @@ return the issue to triage with a changed experiment or concrete blocker. Do not
 Use Fixes only for complete acceptance; use Refs for partial progress.
 Report task acceptance separately from PR delivery. Never count diagnostic work as a repaired incident.
 
+## Trial slot 1 evidence
+
+On 2026-11-15, existing #1244 received the experiment contract before execution.
+Four native Godot 4.3 pairings passed: both offer roles, first without added workers,
+then with four CPU workers. Each case checked two physical generations and both directions.
+All 2,048 required reliable snapshot receipts and 512 startup receipts passed.
+An independent raw-byte audit checked all 1,024 Godot-to-native snapshot callbacks.
+Removing sequence zero or reversing the first two callbacks failed the audit in all four cases.
+
+This accepts current-source qualification only. It does not reproduce the historical missing prefix.
+Chromium 156 differs from the historical Chromium 154. The driver is pinned to f3d3f86;
+server source is 1f8638fd. No receipt gate, deadline, or production source changed.
+The issue retains the commands, identities, result hashes, and remaining acceptance criteria.
+See [the runtime reproduction notes](../../clients/native/tests/fixtures/README.md#trial-slot-1-godot-43-prefix-comparison).
+
+The original cohort remains 42 open issues. New issues: zero. Reopened issues: zero.
+Duplicates closed: zero. Existing issues closed: zero. Accepted runtime qualification tasks: one.
+No historical root-cause criterion is satisfied by this experiment.
+Next #1244 work must recover a pinned historical comparison or a new correlated failing history;
+do not repeat this unchanged four-worker matrix. #1264 is the next independent ready investigation.
+
 ## Ten-session trial
 
 Setup is not a trial delivery session. Sessions 1–4 and 6–9 address existing debt.
@@ -159,7 +181,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 
 | Slot | Allocation | Issue / PR | Accepted outcome and remaining work |
 | --- | --- | --- | --- |
-| 1 | Debt | Pending | Not started |
+| 1 | Debt | [#1244][i1244] / delivery PR pending | Four current-source Godot 4.3 controls pass; historical cause remains open. |
 | 2 | Debt | Pending | Not started |
 | 3 | Debt | Pending | Not started |
 | 4 | Debt | Pending | Not started |
