@@ -111,6 +111,10 @@ def main():
         # Non-PR events and missing bases must run all specialist checks.
         selected = dict.fromkeys(("lean", "proof_faults", "packaging", "fuzz", "capacity"), True)
         if args.event == "pull_request" and base:
+            available = subprocess.run(["git", "cat-file", "-e", f"{base}^{{commit}}"], cwd=ROOT,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if available.returncode != 0:
+                subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", base], cwd=ROOT, check=True)
             paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", base, "HEAD"], cwd=ROOT).decode().split("\0")
             selected = classify([p for p in paths if p])
         for key, value in selected.items():

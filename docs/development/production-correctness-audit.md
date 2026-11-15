@@ -17845,3 +17845,20 @@ forwarding experiment arguments. A negative control rejects ignored filters
 before execution. Both unfiltered configured inventories on original main
 contain the same 574 entries. Global tools, hosted pins and the production
 oracle are unchanged. Narrow-oracle results retain their stated scope.
+
+### A24 — Verification selection retains the recorded PR comparison
+
+The second hosted head of session 705 finds #1661. Job `132669094962`
+checks out merge `4508adde` at depth two. Its merge message names updated
+main `21ad3d09`, while the event still records base `9cf03f39`. The recorded
+base is outside the shallow history, so the selector's `git diff` fails.
+This is a confirmed checkout boundary failure, not a rejected proof.
+
+The shared selector now fetches the exact recorded base at depth one only
+when its commit is absent. The comparison and selection rules stay unchanged.
+A real local Git control advances beyond a recorded base, clones at depth
+two and requires the original comparison to select only affected work.
+It fails before repair and passes afterward. An unavailable remote must
+still fail with no selection outputs. Both formal selection and the CI
+quick gate use this same script. No full-history fetch or skipped proof is
+introduced. The sixteen Python selection controls pass.
