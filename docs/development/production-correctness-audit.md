@@ -18179,9 +18179,14 @@ The extra selection copy cannot affect a WebRTC plan.
 A new complete reconnect control varies one incumbent's valid Direct address
 through absent, 63-byte and 253-byte values. The old server allocates four address
 lengths. The repaired server needs three, all in existing baseline snapshots.
-At 253 bytes, the measured cost falls from 115 allocations / 27,315 bytes to
+The initial 253-byte profile falls from 115 allocations / 27,315 bytes to
 114 / 27,062. This is one scoped reconnect measurement, not a throughput claim.
 The exact 63-to-253-byte slope requires three copies, without a tolerance.
+The final strict comparison reuses one warmed runtime, server, room and actor.
+It retains absent, short and long setup histories, then checks two short/long
+pairs against the same 570-byte requirement. Fresh-instance setup allocations
+cannot become endpoint-size evidence. This avoids the confounded comparison
+class in #1650; it does not attribute that historical allocation site.
 
 The baseline builder now uses the existing transport-aware player projection.
 It includes endpoints only for a sticky Direct plan. The reconnect owns the
@@ -18191,13 +18196,13 @@ legacy metadata, capability, publication order or host-selection rule changes.
 
 The positive Direct reconnect control retains the exact incumbent endpoint,
 host, peer identity, offer direction, shared fresh generation, lifecycle opening
-and stored metadata at three valid address lengths. Its endpoint-growth slope
-requires six copies: three legacy snapshots, one selection candidate and two
+and stored metadata at three valid address lengths. Its measured growth has
+six copies: three legacy snapshots, one selection candidate and two
 recipient plans. A compiled source fault that restores WebRTC endpoint selection
 fails the three-copy assertion. A second fault that omits Direct selection fails
 the required Host topology assertion by incorrectly resetting the room to Relay.
-Restored source passes both controls and the
-existing join and custom-metadata reconnect controls.
+Restored source passes both controls and the existing join and custom-metadata
+reconnect controls.
 
 The active Rust, .NET and Godot clients need no change. Their reviewed session
 surfaces consume `SessionPlan.direct_endpoint`; it remains absent for WebRTC and

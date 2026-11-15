@@ -476,14 +476,6 @@ fn finalized_membership_reuses_owned_room_snapshots(
             assert_eq!(stored.players[&host].connection_info, host_info);
         });
     }
-    if direct_endpoint && reconnect {
-        let copies = if direct_session { 6 } else { 3 };
-        assert_eq!(
-            profiles[2].bytes_allocated - profiles[1].bytes_allocated,
-            copies * (sizes[2] - sizes[1]),
-            "reconnect must retain only legacy baseline copies and the selected Direct endpoint"
-        );
-    }
     let baseline = profiles[0].bytes_allocated;
     let allowed_copies = match (actor_name, reconnect) {
         (true, true) => 8,
@@ -693,9 +685,10 @@ fn main() {
         allocation_harness::trial("finalized_join_skips_unused_direct_endpoints", || {
             finalized_membership_reuses_owned_room_snapshots(false, false, true, Transport::WebRtc)
         }),
-        allocation_harness::trial("finalized_reconnect_skips_unused_direct_endpoints", || {
-            finalized_membership_reuses_owned_room_snapshots(true, false, true, Transport::WebRtc)
-        }),
+        allocation_harness::trial(
+            "finalized_reconnect_skips_unused_direct_endpoints",
+            reconnect_costs::webrtc_reconnect_skips_unused_direct_endpoints,
+        ),
         allocation_harness::trial("finalized_direct_reconnect_retains_host_endpoint", || {
             finalized_membership_reuses_owned_room_snapshots(true, false, true, Transport::Direct)
         }),
