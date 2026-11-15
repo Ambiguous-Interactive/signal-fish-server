@@ -23373,6 +23373,12 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
     let miri = jobs
         .as_mapping_get("miri")
         .expect("ci-safety.yml must define the miri job");
+    assert_eq!(
+        miri.as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(45),
+        "partition interpreter work without extending its existing job limit"
+    );
     let lanes = miri
         .as_mapping_get("strategy")
         .and_then(|strategy| strategy.as_mapping_get("matrix"))
@@ -23398,6 +23404,33 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
             filters.split_whitespace().collect(),
             exclusions.split_whitespace().collect(),
         ));
+    }
+
+    for (name, expected) in [
+        (
+            "server-maintenance",
+            vec!["server::maintenance", "server::moderation_tests"],
+        ),
+        (
+            "server-delivery",
+            vec![
+                "server::game_data_tests",
+                "server::message_coordinator_tests",
+            ],
+        ),
+    ] {
+        let matching: Vec<_> = lanes
+            .iter()
+            .filter(|lane| lane.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .collect();
+        assert_eq!(matching.len(), 1, "{name} needs one lane");
+        let included: Vec<_> = matching[0]
+            .as_mapping_get("modules")
+            .and_then(Yaml::as_str)
+            .expect("heavy server lane modules")
+            .split_whitespace()
+            .collect();
+        assert_eq!(included, expected, "{name}: retain both heavy test owners");
     }
 
     let lib_rs = read_file(&root.join("src/lib.rs"));
@@ -35360,8 +35393,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     With 57 shards, ceil(570/57) * 29s remains 290s.
     574 (was 570): the Host/WebRTC pre-gather fallback adds four decision sites.
     With 58 shards, ceil(574/58) * 29s remains 290s.
+    584 (was 574): numeric zero-address validation adds endpoint decision sites (#1658).
+    With 59 shards, ceil(584/59) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 574;
+const MUTATION_TOTAL_MUTANTS: u32 = 584;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -35629,12 +35664,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/58"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/59"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/58` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/59` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -35785,7 +35820,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/58 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/59 --print-cmd",
         violations.join("\n")
     );
 }

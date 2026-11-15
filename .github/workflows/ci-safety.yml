@@ -27,7 +27,7 @@
 #   setting is independent of whether a workflow reports its own failure.
 #
 # Jobs:
-#   - miri: Ten parallel lanes partition the compiled library test list.
+#   - miri: Twelve parallel lanes partition the compiled library test list.
 #     Exact test paths prevent nested modules from duplicating expensive
 #     work in other lanes. Coordination, session policy, server, WebSocket,
 #     and the remaining modules have separate budgets.
@@ -139,7 +139,15 @@ jobs:
             modules: "coordination::outbound_queue::tests::deadline_scan_cost"
           - name: server
             modules: "server"
-            exclude_modules: "server::session_policy_tests server::ready_state_tests server::room_service_tests"
+            exclude_modules:
+              "server::session_policy_tests server::ready_state_tests server::room_service_tests
+              server::maintenance server::moderation_tests server::game_data_tests server::message_coordinator_tests"
+          # These groups used about 17.4 and 15.1 minutes in run 43666622174.
+          # The old combined server lane kept progressing until its 45-minute limit.
+          - name: server-maintenance
+            modules: "server::maintenance server::moderation_tests"
+          - name: server-delivery
+            modules: "server::game_data_tests server::message_coordinator_tests"
           - name: room-service
             modules: "server::room_service_tests"
           - name: session-policy

@@ -577,6 +577,33 @@ This is an informational tool — it always exits 0 and is not a CI gate.
 
 ## Running Tests Locally
 
+### Narrow Mutation Experiments
+
+Use the scoped runner for name-filtered mutation experiments ([#1481](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1481)).
+Released cargo-mutants 27.1.0 ignores name filters for struct-field deletions.
+The runner uses upstream repair
+[`b00aff0c`](https://github.com/sourcefrog/cargo-mutants/commit/b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b9).
+
+```bash
+# Install once into ignored progress/tools, then run the no-build selector checks.
+python3 scripts/run-narrow-mutants.py --install
+# Inspect the selected inventory before running a narrow experiment.
+python3 scripts/run-narrow-mutants.py -- --list --re '^src/session_capability\.rs:'
+# Run the same selection with the configured production oracle.
+python3 scripts/run-narrow-mutants.py -- --re '^src/session_capability\.rs:'
+```
+
+Every invocation checks the installed source revision. It then checks struct-field
+inclusion, exclusion and nonmatching filters before forwarding any arguments.
+Use `--tool-root PATH` for another isolated installation. The runner does not
+change `PATH`, the global tool, the CI tool pin, or the configured full oracle.
+The first install builds the pinned source and needs network access.
+
+Configuration file globs and command-line file globs combine. Use an anchored
+name filter to narrow the configured scope. If an experiment supplies its own
+test filter, report its results only for that experiment. An unrelated mutant
+missed by a narrow test is not evidence about the full production oracle.
+
 ### Run All CI Config Tests
 
 ```bash

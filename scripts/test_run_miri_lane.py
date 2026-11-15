@@ -64,18 +64,23 @@ class MiriLaneTests(unittest.TestCase):
         self.assertEqual(partitions[0], names[2:])
         self.assertEqual(sorted(name for part in partitions for name in part), sorted(names))
 
-    def test_three_heavy_server_children_keep_every_path_once(self):
+    def test_seven_heavy_server_children_keep_every_path_once(self):
         children = ["server::ready_state_tests", "server::session_policy_tests",
-                    "server::room_service_tests"]
+                    "server::room_service_tests", "server::maintenance",
+                    "server::moderation_tests", "server::game_data_tests",
+                    "server::message_coordinator_tests"]
         names = [child + "::one" for child in children]
+        names.extend(child + "::nested::two" for child in children)
         names.extend(child + "_extra::two" for child in children)
         names.append("server::tests::three")
         partitions = [LANE.select_tests(names, ["server"], children)]
-        partitions.extend(LANE.select_tests(names, [child]) for child in children)
+        partitions.extend(LANE.select_tests(names, [child]) for child in children[:3])
+        partitions.append(LANE.select_tests(names, children[3:5]))
+        partitions.append(LANE.select_tests(names, children[5:]))
         flattened = [name for part in partitions for name in part]
         self.assertEqual(sorted(flattened), sorted(names))
         self.assertEqual(len(set(flattened)), len(names))
-        self.assertEqual(partitions[0], names[3:])
+        self.assertEqual(partitions[0], names[2 * len(children):])
 
     def test_heavy_coordination_child_keeps_its_near_prefix_sibling(self):
         child = "coordination::outbound_queue::tests::deadline_scan_cost"

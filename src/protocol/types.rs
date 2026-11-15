@@ -598,6 +598,19 @@ mod tests {
                 false,
             ),
             ("unspecified IPv6", "::", 7777, false),
+            ("decimal zero alias", "00", 7777, false),
+            ("hexadecimal zero alias", "0x0", 7777, false),
+            ("uppercase hexadecimal zero alias", "0X000", 7777, false),
+            ("mixed numeric zero alias", "0x0.00.0.0X0", 7777, false),
+            ("absolute numeric zero alias", "0.0x0.", 7777, false),
+            ("mapped IPv4 zero", "::ffff:0.0.0.0", 7777, false),
+            ("mapped IPv6 zero", "::ffff:0:0", 7777, false),
+            ("mapped nonzero IPv4", "::ffff:192.0.2.10", 7777, true),
+            ("nonzero numeric IPv4 alias", "127.1", 7777, true),
+            ("nonzero hexadecimal IPv4 alias", "0x7f000001", 7777, true),
+            ("numeric DNS labels", "0.0.0.0.0", 7777, true),
+            ("DNS label without hex digits", "0x", 7777, true),
+            ("numeric DNS suffix", "host.0", 7777, true),
         ];
 
         for (name, host, port, expected) in cases {

@@ -41,10 +41,20 @@ fn direct_host_is_usable(host: &str) -> bool {
         // A trailing root dot is DNS syntax, not IP-literal syntax. Reject the
         // ambiguous form instead of letting an unspecified IP masquerade as a
         // syntactically valid absolute DNS name.
-        return hostname == host && !address.is_unspecified();
+        let unspecified = match address {
+            IpAddr::V4(address) => address.is_unspecified(),
+            IpAddr::V6(address) => {
+                address.is_unspecified()
+                    || address
+                        .to_ipv4_mapped()
+                        .is_some_and(|address| address.is_unspecified())
+            }
+        };
+        return hostname == host && !unspecified;
     }
 
-    !hostname.is_empty()
+    !is_unspecified_ipv4_alias(hostname)
+        && !hostname.is_empty()
         && hostname.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
@@ -59,6 +69,20 @@ fn direct_host_is_usable(host: &str) -> bool {
                 && label
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+fn is_unspecified_ipv4_alias(hostname: &str) -> bool {
+    hostname
+        .split('.')
+        .take(5)
+        .enumerate()
+        .all(|(index, component)| {
+            let digits = component
+                .strip_prefix("0x")
+                .or_else(|| component.strip_prefix("0X"))
+                .unwrap_or(component);
+            index < 4 && !digits.is_empty() && digits.bytes().all(|byte| byte == b'0')
         })
 }
 

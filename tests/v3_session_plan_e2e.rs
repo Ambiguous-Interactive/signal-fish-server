@@ -383,6 +383,208 @@ async fn mesh_room_finalization_sends_game_starting_then_session_plan() {
     running_server.shutdown().await;
 }
 
+/// #1658: unspecified connect targets must never become executable Direct endpoints.
+#[test]
+fn direct_endpoints_reject_all_numeric_unspecified_ipv4_aliases() {
+    for components in 1..=4 {
+        for zero in ["0", "00", "000", "0x0", "0X000"] {
+            let host = vec![zero; components].join(".");
+            for host in [host.clone(), format!("{host}.")] {
+                assert_eq!(
+                    DirectEndpoint::from_connection_info(&ConnectionInfo::Direct {
+                        host: host.clone(),
+                        port: 7777,
+                    }),
+                    None,
+                    "unspecified IPv4 alias {host:?} cannot anchor Direct gameplay"
+                );
+            }
+        }
+    }
+    for host in [
+        "0x0.00.000.0X0",
+        "0.0x000",
+        "0.0.0x0",
+        "0x0.0.0.0",
+        "::ffff:0.0.0.0",
+        "::ffff:0:0",
+        "0:0:0:0:0:ffff:0:0",
+        "::0.0.0.0",
+        "::0000",
+    ] {
+        assert!(
+            DirectEndpoint::from_connection_info(&ConnectionInfo::Direct {
+                host: host.into(),
+                port: 7777,
+            })
+            .is_none(),
+            "unspecified connect target alias {host:?}"
+        );
+    }
+    for host in [
+        "127.0.0.1",
+        "127.1",
+        "0x7f000001",
+        "2130706433",
+        "::ffff:192.0.2.10",
+        "::ffff:c000:20a",
+        "::192.0.2.10",
+        "0.example",
+        "host.0",
+        "0x0.example",
+        "0.0.0.0.example",
+        "0.0.0.0.0",
+        "host.example.",
+    ] {
+        let endpoint = DirectEndpoint::from_connection_info(&ConnectionInfo::Direct {
+            host: host.into(),
+            port: 7777,
+        });
+        assert_eq!(
+            endpoint,
+            Some(DirectEndpoint {
+                host: host.into(),
+                port: 7777,
+            }),
+            "usable or DNS endpoint {host:?} must retain its exact spelling"
+        );
+    }
+}
+
+/// #1658: finalize, fallback election and live endpoint withdrawal use the same readiness rule.
+#[tokio::test]
+async fn direct_room_numeric_unspecified_hosts_use_an_executable_plan() {
+    for (host_endpoint, client_endpoint) in
+        [("0", None), ("0x0", Some("192.0.2.20")), ("0.00.0", None)]
+    {
+        let running_server = start_server_with_session(SessionConfig {
+            default_topology: Topology::Host,
+            enable_webrtc: false,
+            enable_direct: true,
+            ..SessionConfig::default()
+        })
+        .await;
+        let mut host = connect(running_server.addr()).await;
+        authenticate_v3_direct(&mut host).await;
+        let (_, room_code, host_id) = join_room(&mut host, None, "Host").await;
+        let mut client = connect(running_server.addr()).await;
+        authenticate_v3_direct(&mut client).await;
+        let (_, _, client_id) = join_room(&mut client, Some(room_code), "Client").await;
+        for (socket, endpoint) in [
+            (&mut host, Some(host_endpoint)),
+            (&mut client, client_endpoint),
+        ] {
+            if let Some(endpoint) = endpoint {
+                send(
+                    socket,
+                    &ClientMessage::ProvideConnectionInfo {
+                        connection_info: ConnectionInfo::Direct {
+                            host: endpoint.into(),
+                            port: 7777,
+                        },
+                    },
+                )
+                .await;
+            }
+        }
+        ready(&mut host).await;
+        await_ready_count(&mut host, 1).await;
+        await_ready_count(&mut client, 1).await;
+        ready(&mut client).await;
+        await_ready_count(&mut host, 2).await;
+        await_ready_count(&mut client, 2).await;
+        send(&mut host, &ClientMessage::StartGame).await;
+        let (host_plan, client_plan) =
+            tokio::join!(read_finalization(&mut host), read_finalization(&mut client));
+        let host_plan = host_plan.expect_session_plan("host");
+        let client_plan = client_plan.expect_session_plan("client");
+        let generation = host_plan.generation;
+        for (plan, recipient) in [(host_plan, host_id), (client_plan, client_id)] {
+            assert_eq!(plan.generation, generation);
+            let expected = if client_endpoint.is_some() {
+                (Topology::Host, Transport::Direct, Some(client_id))
+            } else {
+                (Topology::Relay, Transport::Relay, None)
+            };
+            assert_eq!(
+                (plan.topology, plan.transport, plan.host),
+                expected,
+                "host={host_endpoint:?}, client={client_endpoint:?}"
+            );
+            assert_eq!(
+                plan.direct_endpoint,
+                client_endpoint.map(|endpoint| DirectEndpoint {
+                    host: endpoint.into(),
+                    port: 7777,
+                })
+            );
+            assert_eq!(plan.peers.len(), usize::from(client_endpoint.is_some()));
+            if client_endpoint.is_some() {
+                let peer = &plan.peers[0];
+                assert_eq!(
+                    peer.player_id,
+                    if recipient == host_id {
+                        client_id
+                    } else {
+                        host_id
+                    }
+                );
+                assert_eq!(
+                    peer.player_name,
+                    if recipient == host_id {
+                        "Client"
+                    } else {
+                        "Host"
+                    }
+                );
+                assert_eq!(peer.initiate, recipient != client_id);
+                assert_eq!(peer.is_authority, peer.player_id == client_id);
+            }
+            assert_eq!(plan.fallback, Transport::Relay);
+            assert!(plan.ice_servers.is_empty());
+        }
+        if client_endpoint.is_some() {
+            send(
+                &mut client,
+                &ClientMessage::ProvideConnectionInfo {
+                    connection_info: ConnectionInfo::Direct {
+                        host: "0X000".into(),
+                        port: 7777,
+                    },
+                },
+            )
+            .await;
+            let mut reset_generation = None;
+            for socket in [&mut host, &mut client] {
+                let reset = next_matching_server_message_within(
+                    socket,
+                    SERVER_MESSAGE_TIMEOUT,
+                    "Direct host withdrew its executable endpoint",
+                    |message| match message {
+                        ServerMessage::SessionPlan(plan) => Some(plan),
+                        _ => None,
+                    },
+                )
+                .await;
+                assert_eq!(
+                    (reset.topology, reset.transport, reset.host),
+                    (Topology::Relay, Transport::Relay, None)
+                );
+                assert_eq!(reset.direct_endpoint, None);
+                assert!(reset.peers.is_empty());
+                assert!(reset.ice_servers.is_empty());
+                assert_eq!(reset.fallback, Transport::Relay);
+                assert_ne!(reset.generation, generation);
+                assert_eq!(
+                    *reset_generation.get_or_insert(reset.generation),
+                    reset.generation
+                );
+            }
+        }
+        running_server.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn direct_room_selects_and_delivers_the_validated_host_endpoint() {
     let running_server = start_server_with_session(SessionConfig {

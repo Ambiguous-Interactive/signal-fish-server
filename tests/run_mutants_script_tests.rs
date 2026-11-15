@@ -20,6 +20,107 @@ mod common;
 #[cfg(unix)]
 use common::{bash_command, repo_root, strip_comment_lines};
 
+#[cfg(unix)]
+#[test]
+fn test_narrow_mutants_preflight_rejects_ignored_filters_before_execution() {
+    let program = r#"
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+from unittest.mock import patch
+
+spec = importlib.util.spec_from_file_location('narrow', 'scripts/run-narrow-mutants.py')
+narrow = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(narrow)
+tool = Path('/isolated/bin/cargo-mutants')
+baseline = [
+    'selector.rs:3:5: replace select -> Config with Default::default()',
+    'selector.rs:3:14: delete field enabled from struct Config expression in select',
+    'selector.rs:3:29: delete field other from struct Config expression in select',
+]
+
+def listing(command, text):
+    assert text
+    assert command[:3] == [str(tool), 'mutants', '--no-config'], command
+    assert '--Zmutate-file' in command and '--json' in command, command
+    names = baseline
+    if '--re' in command:
+        pattern = command[command.index('--re') + 1]
+        names = [baseline[1]] if pattern == 'delete field enabled ' else []
+    if '--exclude-re' in command:
+        pattern = command[command.index('--exclude-re') + 1]
+        names = [baseline[0], baseline[2]] if pattern == 'delete field enabled ' else []
+    return json.dumps([{'name': name} for name in names])
+
+with patch.object(narrow.subprocess, 'check_output', side_effect=listing) as checked:
+    narrow.selector_preflight(tool)
+    assert checked.call_count == 5
+
+for broken_flag in ['--re', '--exclude-re']:
+    def broken_listing(command, text):
+        if broken_flag in command:
+            return json.dumps([{'name': name} for name in baseline])
+        return listing(command, text)
+    with patch.object(narrow.subprocess, 'check_output', side_effect=broken_listing):
+        try:
+            narrow.selector_preflight(tool)
+        except ValueError as error:
+            assert broken_flag in str(error), error
+        else:
+            raise AssertionError(f'ignored {broken_flag} was accepted')
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / '.crates2.json').write_text(json.dumps({'installs': {narrow.INSTALL_KEY: {}}}))
+    assert narrow.installed_tool(root) == root / 'bin/cargo-mutants'
+    (root / '.crates2.json').write_text(json.dumps({'installs': {'wrong source': {}}}))
+    try:
+        narrow.installed_tool(root)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('wrong source was accepted')
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / '.crates2.json').write_text(json.dumps({'installs': {}}))
+    def install(command, check):
+        assert check
+        assert command[:2] == ['cargo', 'install'], command
+        assert command[command.index('--rev') + 1] == narrow.REVISION
+        assert command[command.index('--root') + 1] == str(root)
+        (root / '.crates2.json').write_text(json.dumps({'installs': {narrow.INSTALL_KEY: {}}}))
+        return subprocess.CompletedProcess(command, 0)
+    with patch.object(narrow.sys, 'argv', ['run-narrow-mutants.py', '--install', '--tool-root', str(root)]):
+        with patch.object(narrow.subprocess, 'run', side_effect=install) as execute, patch.object(narrow, 'selector_preflight') as preflight:
+            assert narrow.main() == 0
+            execute.assert_called_once()
+            preflight.assert_called_once_with(root / 'bin/cargo-mutants')
+
+arguments = ['run-narrow-mutants.py', '--tool-root', '/isolated', '--', '--list', '--re', 'selected']
+with patch.object(narrow.sys, 'argv', arguments), patch.object(narrow, 'installed_tool', return_value=tool):
+    with patch.object(narrow, 'selector_preflight', side_effect=ValueError('broken selector')), patch.object(narrow.subprocess, 'run') as execute:
+        assert narrow.main() == 1
+        execute.assert_not_called()
+    with patch.object(narrow, 'selector_preflight'), patch.object(narrow.subprocess, 'run', return_value=subprocess.CompletedProcess([], 42)) as execute:
+        assert narrow.main() == 42
+        execute.assert_called_once_with([str(tool), 'mutants', '--list', '--re', 'selected'], check=False)
+"#;
+    let output = std::process::Command::new("python3")
+        .args(["-c", program])
+        .current_dir(repo_root())
+        .output()
+        .expect("run narrow mutation selector controls");
+    assert!(
+        output.status.success(),
+        "narrow mutation selector controls failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Run `scripts/run-mutants.sh` with `args` from the repository root and return
 /// `(success, stdout, stderr)`.
 ///

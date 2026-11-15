@@ -1171,14 +1171,13 @@ impl EnhancedGameServer {
         stored: ActiveSessionPlan,
         room_event_guard: RoomEventMutationGuard,
     ) -> bool {
-        let replacement = DirectEndpoint::from_connection_info(&connection_info);
-        if let Some(endpoint) = replacement.as_ref() {
+        if let Some((host, port)) = DirectEndpoint::validated_parts(&connection_info) {
             match self
                 .database
-                .get_player_direct_endpoint(room_id, player_id)
+                .player_direct_endpoint_matches(room_id, player_id, host, port)
                 .await
             {
-                Ok(Some(previous)) if previous == *endpoint => {
+                Ok(true) => {
                     return self
                         .store_routed_connection_info(room_id, player_id, connection_info)
                         .await;
@@ -1207,7 +1206,7 @@ impl EnhancedGameServer {
         else {
             return false;
         };
-        host.direct_endpoint = replacement;
+        host.direct_endpoint = DirectEndpoint::from_connection_info(&connection_info);
         let routed = match self.message_coordinator.routed_player_ids(room_id).await {
             Ok(ids) => ids.map(sorted_routed_player_ids),
             Err(_) => return false,

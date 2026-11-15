@@ -300,6 +300,75 @@ pub(crate) fn direct_repeat_cost_does_not_copy_other_members() {
                     port: 7777
                 })
             );
+            let mut hostname_profiles = Vec::new();
+            for hostname in [
+                "192.0.2.1".to_string(),
+                "a".repeat(63),
+                [
+                    "a".repeat(63),
+                    "b".repeat(63),
+                    "c".repeat(63),
+                    "d".repeat(61),
+                ]
+                .join("."),
+            ] {
+                let endpoint = ConnectionInfo::Direct {
+                    host: hostname.clone(),
+                    port: 7777,
+                };
+                let previous = generation;
+                server
+                    .handle_provide_connection_info(&host, endpoint.clone())
+                    .await;
+                if hostname != "192.0.2.1" {
+                    let mut updated_generation = None;
+                    for receiver in &mut receivers {
+                        let message = receiver.try_recv().unwrap();
+                        let ServerMessage::SessionPlan(plan) = message.as_ref() else {
+                            panic!("expected endpoint refresh: {message:?}");
+                        };
+                        assert_eq!(plan.host, Some(host));
+                        assert_eq!(plan.topology, Topology::Host);
+                        assert_eq!(plan.transport, Transport::Direct);
+                        assert_eq!(plan.direct_endpoint.as_ref().unwrap().host, hostname);
+                        assert_eq!(plan.direct_endpoint.as_ref().unwrap().port, 7777);
+                        assert_ne!(Some(plan.generation), previous);
+                        if let Some(expected) = updated_generation {
+                            assert_eq!(plan.generation, expected);
+                        }
+                        updated_generation = Some(plan.generation);
+                        assert_membership_queue_empty(receiver);
+                    }
+                    generation = updated_generation;
+                }
+                // Measure only unchanged endpoints on the same room and source.
+                server
+                    .handle_provide_connection_info(&host, endpoint.clone())
+                    .await;
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                server.handle_provide_connection_info(&host, endpoint).await;
+                let stats = region.change();
+                println!(
+                    "DIRECT_REPEAT_HOSTNAME members={count} hostname_bytes={} stats={stats:?}",
+                    hostname.len()
+                );
+                hostname_profiles.push(stats.bytes_allocated);
+                for receiver in &mut receivers {
+                    assert_membership_queue_empty(receiver);
+                }
+                assert_eq!(
+                    server
+                        .database()
+                        .get_player_direct_endpoint(&room, &host)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .host,
+                    hostname
+                );
+            }
+            assert!(hostname_profiles.iter().all(|bytes| *bytes == hostname_profiles[0]),
+                "duplicate endpoint copied hostnames: members={count} profiles={hostname_profiles:?}");
         });
     }
     for profile in &profiles {

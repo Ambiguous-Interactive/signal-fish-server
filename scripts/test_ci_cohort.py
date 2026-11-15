@@ -1,6 +1,11 @@
 """Behavioral controls for fast/deep verification selection."""
 import importlib.util
 import json
+import contextlib
+import io
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -11,6 +16,51 @@ spec.loader.exec_module(cohort)
 
 
 class SelectionTests(unittest.TestCase):
+    def test_recorded_base_outside_shallow_history_is_fetched_before_selection(self):
+        for remote_available in [True, False]:
+            with self.subTest(remote_available=remote_available), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                origin = root / "origin"
+                checkout = root / "checkout"
+                def git(*arguments, cwd=origin):
+                    return subprocess.check_output(["git", *arguments], cwd=cwd, stderr=subprocess.DEVNULL).decode().strip()
+                origin.mkdir()
+                git("init", "--initial-branch=main")
+                git("config", "user.name", "Cohort Control")
+                git("config", "user.email", "cohort@example.test")
+                (origin / "src").mkdir()
+                (origin / "src/server.rs").write_text("base")
+                git("add", ".")
+                git("commit", "-m", "recorded base")
+                base = git("rev-parse", "HEAD")
+                (origin / "docs").mkdir()
+                for index in range(3):
+                    (origin / "docs/notes.md").write_text(str(index))
+                    git("add", ".")
+                    git("commit", "-m", "advance main")
+                (origin / "src/server.rs").write_text("changed server")
+                git("add", ".")
+                git("commit", "-m", "checked out merge")
+                git("clone", "--depth=2", origin.as_uri(), str(checkout), cwd=root)
+                self.assertNotEqual(subprocess.run(["git", "cat-file", "-e", base], cwd=checkout,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode, 0)
+                if not remote_available:
+                    git("remote", "set-url", "origin", (root / "missing").as_uri(), cwd=checkout)
+                output = io.StringIO()
+                with mock.patch.object(cohort, "ROOT", checkout), mock.patch.dict(os.environ, {"BASE_SHA": base}):
+                    with mock.patch("sys.argv", ["ci-cohort.py", "--outputs", "--event", "pull_request"]), contextlib.redirect_stdout(output):
+                        if remote_available:
+                            cohort.main()
+                        else:
+                            with self.assertRaises(subprocess.CalledProcessError):
+                                cohort.main()
+                if remote_available:
+                    git("cat-file", "-e", base, cwd=checkout)
+                    self.assertEqual(dict(line.split("=") for line in output.getvalue().splitlines()),
+                        {"lean": "false", "proof_faults": "false", "packaging": "false", "fuzz": "true", "capacity": "false"})
+                else:
+                    self.assertEqual(output.getvalue(), "")
+
     def test_capacity_qualification_is_deep_or_affected(self):
         self.assertNotIn("capacity_runner", cohort.runtime_targets())
         self.assertFalse(cohort.classify(["src/server.rs"])["capacity"])

@@ -17787,3 +17787,96 @@ empty queues, both readiness states and non-finalized state remain required.
 Restoring full-room snapshot cloning fails the revised oracle. This removes
 a confounded comparison without adding tolerance or attributing the original
 64-byte site. #1650 remains open and does not count as an existing issue fixed.
+
+### F370 — Numeric zero-address aliases could become Direct hosts
+
+Session 705 advances existing #826 with confirmed finding #1658. Endpoint
+validation rejected canonical `0.0.0.0` but accepted numeric aliases as DNS
+names. A local Rust socket-resolution control maps `0`, `0x0`, and mixed
+zero-valued components to that same unspecified address. The new public
+WebSocket finalization control on main `7cf6d891` selects Host/Direct for
+endpoint `0` instead of the required Relay floor (Nextest `91cc8089`).
+The projection control fails independently. A second red control
+(`979cf855`) identifies IPv4-mapped IPv6 zero targets such as
+`::ffff:0.0.0.0`; native unspecified IPv6 was already rejected.
+
+The repair excludes one-to-four-component zero-valued IPv4 spellings and
+IPv4-mapped unspecified IPv6 without resolving DNS. Nonzero numeric targets
+and DNS names retain their exact spelling. Public session histories require
+the Relay floor when no host is usable, election of a second usable member,
+and a fresh shared Relay reset when the elected host withdraws its endpoint.
+The checks retain peer lists, fallback, generation and empty ICE assertions.
+This proves endpoint projection and signaling behavior, not remote network
+reachability or a cause for historical WebRTC incidents.
+
+External-client source inspection found the endpoint view and validation in
+Rust `da8f2d16`, .NET `e467c871`, and Godot `58f880b1`. Their separate
+acceptance work is tracked in Rust #301, .NET #154 and Godot #579. No wire
+field or error code changes. Client qualification remains open.
+
+### F371 — Unchanged Direct endpoint reports copied two hostnames
+
+Session 705 advances existing #636 and #826 with finding #1659. The complete
+live host update first copied incoming metadata into a temporary endpoint,
+then copied the stored endpoint for comparison. Matched room/source
+controls measure 11 allocations and 2,562 / 2,670 / 3,050 bytes for
+9 / 63 / 253-byte names before repair (Nextest `02fbe463`).
+The exact hostname-independent byte assertion fails.
+
+A borrowed storage comparison removes both copies and defers endpoint
+ownership until a changed endpoint needs publication. The storage trait
+retains a source-compatible default. Shipped storage keeps missing-member,
+unusable-endpoint, lock-wait and read-failure behavior. The original routing
+fence and metadata write remain required even for duplicate reports.
+Complete two-, 16- and 255-member histories now use nine allocations and
+2,432 bytes for each name length. They retain exact refresh plans, shared
+fresh generations, empty duplicate queues and stored endpoint checks.
+This is an allocation result on the ARM development host; it establishes
+no throughput or latency result. External SDK behavior is unchanged.
+
+### A23 — Narrow mutation selectors use a scoped upstream repair
+
+Session 705 addresses existing #1481 with an isolated runner pinned to
+upstream `b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b9`. Released 27.1.0
+ignores struct-field name filters. Actual include/exclude/nonmatch/exclude-all
+counts are 2/3/2/2 before repair and 1/2/0/0 afterward. Each invocation checks
+installed source identity and five no-build selector inventories before
+forwarding experiment arguments. A negative control rejects ignored filters
+before execution. Both unfiltered configured inventories on original main
+contain the same 574 entries. Global tools, hosted pins and the production
+oracle are unchanged. Narrow-oracle results retain their stated scope.
+
+### A24 — Verification selection retains the recorded PR comparison
+
+The second hosted head of session 705 finds #1661. Job `132669094962`
+checks out merge `4508adde` at depth two. Its merge message names updated
+main `21ad3d09`, while the event still records base `9cf03f39`. The recorded
+base is outside the shallow history, so the selector's `git diff` fails.
+This is a confirmed checkout boundary failure, not a rejected proof.
+
+The shared selector now fetches the exact recorded base at depth one only
+when its commit is absent. The comparison and selection rules stay unchanged.
+A real local Git control advances beyond a recorded base, clones at depth
+two and requires the original comparison to select only affected work.
+It fails before repair and passes afterward. An unavailable remote must
+still fail with no selection outputs. Both formal selection and the CI
+quick gate use this same script. No full-history fetch or skipped proof is
+introduced. The sixteen Python selection controls pass.
+
+### A25 — The remaining server interpreter lane exhausted its budget
+
+Main `9cf03f39` run `43666622174` has eleven successful jobs and a cancelled
+server Miri job `132667350335`. The job selects 499 of 1,830 compiled tests,
+keeps completing tests through 02:56:55 UTC, and is cancelled at its existing
+45-minute limit. GitHub's check annotation confirms that execution exceeded
+45m0s. No analyzer failure is observed in the retained log. The cancellation
+is not a passing analyzer result (#1662).
+
+Serial completion windows include about 17.4 minutes for maintenance and
+moderation and 15.1 minutes for gameplay and message-coordinator controls.
+The workflow now gives these four complete module families two dedicated
+lanes and excludes them from residual server. The exact-name runner, compiled
+union, pinned toolchain, flags, assertions and 45-minute limit remain intact.
+Nested and near-prefix controls and the live workflow guard require complete,
+disjoint ownership. Thirteen Python partition controls pass. Hosted
+failure-reproduction qualification remains required before closing #1662.

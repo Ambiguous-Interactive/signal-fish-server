@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server memory use when a live Direct host repeats its endpoint (#1659, #636).
 - Reduce server memory use and storage work during P2P session and lobby cleanup (#636).
 - Pre-gather ICE for host-only clients when a mesh-preferring game can use Host/WebRTC.
 - Reduce server locking and routing work during live P2P plan publication, room changes, and WebRTC signaling (#636).
@@ -76,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exclude numeric zero-address aliases from Direct host election and use a usable peer or relay fallback (#1658).
 - Return an error when an admitted WebRTC signal cannot reach its target (#1645).
 - Keep P2P host selection stable for players with no stored join time (#1642).
 - Report failed WebRTC routing checks so peers can retry signaling (#1640).
