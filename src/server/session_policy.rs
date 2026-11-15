@@ -96,7 +96,7 @@ pub(crate) use crate::session_member::SessionMember;
 pub(crate) use crate::session_member::{RELAY_FLOOR, UPGRADE_LADDER};
 
 impl SessionMember {
-    /// Build a finalization candidate without retaining an unused Direct endpoint.
+    /// Build a finalization candidate before peer names are needed.
     pub(super) fn from_finalized_player(
         player: &PlayerInfo,
         capabilities: SessionCapabilities,
@@ -111,6 +111,7 @@ impl SessionMember {
                     Topology::Host,
                     Transport::Direct,
                 ),
+            false,
         )
     }
 
@@ -119,10 +120,15 @@ impl SessionMember {
         player: &PlayerInfo,
         capabilities: SessionCapabilities,
         include_direct_endpoint: bool,
+        include_player_name: bool,
     ) -> Self {
         Self {
             player_id: player.id,
-            player_name: player.name.clone(),
+            player_name: if include_player_name {
+                player.name.clone()
+            } else {
+                String::new()
+            },
             is_authority: player.is_authority,
             joined_at: player
                 .connected_at
@@ -577,7 +583,12 @@ impl EnhancedGameServer {
         players
             .into_iter()
             .map(|player| {
-                SessionMember::from_player(player, self.session_capabilities(&player.id), true)
+                SessionMember::from_player(
+                    player,
+                    self.session_capabilities(&player.id),
+                    true,
+                    true,
+                )
             })
             .collect()
     }
@@ -652,13 +663,18 @@ impl EnhancedGameServer {
                         .and_then(DirectEndpoint::from_connection_info);
                 }
             }
-            let decision = choose_session_plan(
+            let mut decision = choose_session_plan(
                 &finalized.game_name,
                 finalized.authority_player,
                 members,
                 &session_config,
             );
             let relay_floor = decision.is_relay();
+            if !relay_floor {
+                for (member, player) in decision.members.iter_mut().zip(&finalized.members) {
+                    member.player_name = player.name.clone();
+                }
+            }
             let emits_v3_plan = decision.members.iter().any(SessionMember::supports_v3);
             // Wall clock (durable record): TURN credentials carry absolute
             // expiry instants the client sees; capture once per emission.

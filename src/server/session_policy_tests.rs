@@ -7402,7 +7402,7 @@ fn finalization_projection_does_not_retain_unused_direct_endpoints() {
         let member = SessionMember::from_finalized_player(&player, capabilities, direct_enabled);
         assert_eq!(member.direct_endpoint, expected_endpoint, "{case}");
         assert_eq!(member.player_id, player.id, "{case}");
-        assert_eq!(member.player_name, player.name, "{case}");
+        assert!(member.player_name.is_empty(), "names are deferred: {case}");
         assert_eq!(member.is_authority, player.is_authority, "{case}");
         assert_eq!(Some(member.joined_at), player.connected_at, "{case}");
         assert_eq!(member.capabilities, capabilities, "{case}");

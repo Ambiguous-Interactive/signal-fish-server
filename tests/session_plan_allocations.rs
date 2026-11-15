@@ -12,6 +12,8 @@ mod endpoint_costs;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
+#[path = "live_p2p_allocations/name_costs.rs"]
+mod name_costs;
 #[path = "live_p2p_allocations/publication_costs.rs"]
 mod publication_costs;
 #[path = "live_p2p_allocations/readiness_costs.rs"]
@@ -447,6 +449,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "relay_start_skips_player_names",
+            name_costs::relay_start_skips_player_names,
+        ),
         allocation_harness::trial(
             "authority_denial_avoids_room_publication",
             control_costs::authority_denial_avoids_room_publication,
