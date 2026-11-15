@@ -1223,11 +1223,11 @@ async fn exchange_diagnostic_is_nonblocking_once_per_generation_and_cancelled_on
                 }
             ));
             pair.receiver.remove_peer(peer).await.unwrap();
+            let retired_sample = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("retirement releases the publisher within the original deadline");
             assert!(
-                tokio::time::timeout(Duration::from_secs(1), received.recv())
-                    .await
-                    .unwrap()
-                    .is_none(),
+                retired_sample.is_none(),
                 "retirement cancels the sleeping query and releases its publisher"
             );
             pair.sender.remove_peer(pair.receiver_id).await.unwrap();
