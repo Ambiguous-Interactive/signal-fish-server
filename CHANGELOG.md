@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Require custom routing coordinators to implement `lease_room_routes` for ready toggles and authority
   transfers; peer metadata writes also require `lease_room_member_route`.
 - Reduce server work when checking reliable delivery deadlines across mixed and lossy gameplay backlogs (#1540).
-- Reduce game-start memory use when session selection does not need Direct endpoints or player names (#636).
+- Reduce game-start memory use by copying only the elected Direct host address and required player names (#636).
 - **Breaking:** Add native `EngineEvent::PairReady`, `EngineEvent::ChannelSendComplete`, and
   `EngineEvent::RemoteCandidateComplete` for pending work; exhaustive matches must handle them (#1510, #1512, #1516).
 - **Breaking:** Require a mutable native `Engine` for `start_selected_candidate_pair_probe` (#1507).

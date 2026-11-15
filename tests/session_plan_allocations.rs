@@ -7,6 +7,8 @@ mod allocation_harness;
 mod control_costs;
 #[path = "live_p2p_allocations/departure_costs.rs"]
 mod departure_costs;
+#[path = "live_p2p_allocations/direct_election.rs"]
+mod direct_election;
 #[path = "live_p2p_allocations/endpoint_costs.rs"]
 mod endpoint_costs;
 mod live_p2p_allocations;
@@ -449,6 +451,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "direct_start_matches_borrowed_election_oracle",
+            direct_election::direct_start_matches_borrowed_election_oracle,
+        ),
         allocation_harness::trial(
             "relay_start_skips_player_names",
             name_costs::relay_start_skips_player_names,
