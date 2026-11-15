@@ -1379,3 +1379,23 @@ Room-code validation, endpoint reachability, profile commit, publication and
 concurrent correspondence remain separate open obligations in P03/P31/Q01–Q04.
 This internal refactor preserves wire behavior, errors, public constant paths,
 defaults and configuration. Rust, .NET and Godot clients need no changes.
+
+### Finalized-join fallback caller evidence
+
+The #1464 control in
+[`fallback_costs.rs`](../../tests/live_p2p_allocations/fallback_costs.rs)
+compares complete production fallback publications with an independent sorted
+host-election and adjacency-list oracle. The storage row is absent while one
+captured finalized baseline and its routed members remain. Both 2- and
+16-member rooms cover Mesh/WebRTC, Host/WebRTC and Host/Direct, then retire
+every compatible member from the selected pair. Stale and capable authorities,
+unsupported recipients, exact endpoints, sticky axes and the final hostless
+Relay reset retain explicit verdicts. Restoring every capability after reset
+cannot restart the cleared session; retaining the sticky entry fails that check.
+Removing the caller's authority changes
+the required host and fails the control. Removing Direct projection resets a
+required Host/Direct plan and also fails. Restored source passes.
+
+This is new caller correspondence evidence for membership repair. It is not a
+Lean theorem, an extraction check, storage-error attribution or a proof of
+publication scheduling. The existing asynchronous and snapshot boundaries remain.

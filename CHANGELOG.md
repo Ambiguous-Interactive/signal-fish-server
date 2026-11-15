@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce server memory used to retry delayed authority changes (#636).
 - Reduce server memory used for P2P reports, room replies, room-code changes, and refused room operations (#636).
 - Reduce server memory used to send live P2P join and reconnect events and skip unused Direct addresses during
-  WebRTC recovery (#636).
+  WebRTC recovery, including late-join baseline fallback (#636).
 - Reduce server memory use for refused authority requests (#636).
 - Avoid unused routing wakeups during live room changes (#636).
 - Reduce server work for gameplay relays that finish after routing contention (#636).

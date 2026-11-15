@@ -18258,3 +18258,55 @@ remain open for source attribution. #1244's actual Godot runtime probe is outsid
 this change. Rust, .NET and Godot SDKs are unaffected: the changes are local
 reference-client stderr diagnostics and server allocation work, with unchanged
 wire messages and session behavior.
+
+### F378 — Late-join fallback copied unused Direct addresses
+
+Existing #636 and #826: at baseline `2c68a744`, finalized-join publication uses
+its delivered room baseline when the storage refresh fails, returns no room,
+or no longer matches the finalized join. That fallback called the unrestricted
+player projection. Unlike the normal refresh path, it copied every usable
+Direct endpoint even for sticky WebRTC sessions.
+
+The new complete publication control retains one server, room identity, actor,
+routing set and captured baseline. It removes the storage row to enter the
+existing missing-room fallback. It varies one incumbent address from 63 to 253
+bytes, retains the first short/long profiles, then compares two warm short/long
+pairs without a tolerance. Original source allocates 190 extra bytes in the
+first two-player Mesh/WebRTC pair. The repaired fallback allocates zero bytes
+for that address growth. It reuses the existing transport-aware `SessionPlayer`
+projection and retains endpoints for sticky Direct sessions.
+
+The control covers 2 and 16 members with Mesh/WebRTC, Host/WebRTC and
+Host/Direct plans. Every complete publication checks the opening lifecycle,
+all peer identities, names, authority/offer flags, exact host and endpoint,
+shared fresh generation, empty ICE, relay fallback and empty trailing queues.
+Direct requires exactly `(members + 1) * 190` bytes of address growth: one
+selection candidate and every outgoing plan. A source fault that suppresses
+Direct selection fails the required Host/Direct assertion by resetting to Relay.
+The pre-existing storage-error fallback test covers the error branch separately.
+This controlled missing-row history is not a new claim about storage reachability,
+remote socket connectivity, or the causes of old allocation incidents.
+
+### A31 — Fallback publication preserves host-repair caller arguments
+
+Existing #1464 gains a distinct production caller control. After the allocation
+comparisons, every capability-compatible member retires from the selected P2P
+pair in turn. Each complete fallback publication is compared with an independent
+sorted election and adjacency-list oracle. It includes stale authority choices,
+a capable later authority, unsupported recipients, host replacement, retained
+sticky axes and the terminal no-host Relay reset. Restored capabilities cannot
+restart the cleared session. A source fault that retains its sticky entry fails
+that final Relay assertion. Mesh retains its axes as the
+pairable set shrinks. Both sizes and all three selected pairs run unchanged.
+
+A compiled source fault discards the caller's authority. The 16-member
+Host/WebRTC history then selects member 3 instead of required member 16 and
+fails the exact host assertion. Restoring production source passes the complete
+control and the existing normal join and Direct reconnect controls. These are
+adapter tests, not new Lean theorems or proof of asynchronous scheduling. The
+source-linked proof boundaries and the wider campaigns stay open.
+
+The active Rust, .NET and Godot clients need no change. Their current protocol
+surfaces consume `SessionPlan.direct_endpoint`; the selected endpoints, peer
+sets, lifecycle order and wire fields are unchanged. The removed WebRTC-only
+selection copies are internal to the server.
