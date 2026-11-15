@@ -28,8 +28,7 @@ Refresh issue comments and dependencies before claiming. Blocked tasks return to
 
 | Order | Existing issue | Next discriminating experiment |
 | --- | --- | --- |
-| 1 | [#1426][i1426] | Reproduce the missing-span panic on pinned source; separate span misuse from bind failure. |
-| 2 | [#775][i775] | Measure event/oracle memory at increasing workload sizes before another upper-shape run. |
+| 1 | [#1224][i1224] | Deliver the verified strict SCTP test-lint repair and close after green CI. |
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
@@ -40,6 +39,9 @@ Existing #1244 requires a changed historical-input experiment before re-entering
 Existing #1264 lacks the original terminal-event identity; its current typed controls already exist.
 Recover that evidence or define a discriminating pinned-source recurrence before scheduling it again.
 Existing #1441 has new normal-workload measurements below; historical timing outliers remain unresolved.
+Existing #1426 needs a correlated Windows panic capture before an unchanged rerun can resolve attribution.
+Existing #775 refuses its upper retained-record shape before allocation. Largest-cell qualification needs
+streaming work or a provisioned host; the current 31 GiB host cannot hold its required recipient rows.
 
 ## Original cohort
 
@@ -228,6 +230,39 @@ Elapsed task time is about 17 minutes at minute precision, including tool waits.
 Active effort and blocked time were not separately instrumented. Overall issue acceptance remains incomplete.
 PR #1673 records delivery separately.
 
+## Trial slot 3 evidence
+
+Slot 3 selects existing #1224 after checking #775's largest-cell prerequisites.
+At source 16fe2b75, the existing admission control refuses all 11,048,652,288 planned upper-shape
+send/delivery records before artifacts or connections. Even five u64 fields per recipient row require
+over 414 GB, excluding all other fields and process state. This host has 32,541,140 KiB total memory.
+The source gate and lower-bound arithmetic justify deferring that full live shape without overriding budgets.
+This selection audit consumes no delivery slot and does not complete the broader #775 work.
+
+The exact strict vendored SCTP command reproduces all 61 existing #1224 findings.
+Four test-only files now use equivalent initializers, payload iterators, patterns and conversions,
+fixed-size expectations, and explicit panic branches. Every protocol assertion and test name remains.
+No lint suppression, production source, package metadata, license, or upstream author changes.
+The copy remains published rtc-sctp 0.21.1 with the provenance in
+[the existing patch notes](../../third_party/rtc-sctp/PATCH.md).
+
+Strict all-target vendored lint now passes. All 278 selected association/endpoint/chunk/queue tests pass;
+59 other library tests are explicitly unselected. The native startup-prefix control also passes both
+physical generations. Root formatting and strict all-target/all-feature lint pass.
+Intermediate loop-count and mutability repair attempts remain retained; neither is counted as green.
+A forced absent INIT downcast fails at the repaired panic; restoring the source passes the same selector.
+Independent review found no weakened assertion or changed protocol behavior.
+
+Gate decision: run strict vendored-test lint inside the existing native interoperability script and job,
+using its target cache and setup. Dependency lint alone does not check the standalone package's tests.
+No separate workflow or job is added. The corrected local lint run takes 5.94 seconds; that one sample
+does not establish hosted CI cost. Existing reset, queue, shutdown, and live interop selections stay intact.
+
+Original #1224 is eligible for closure only after current-head CI, review, merge and local sync pass.
+The linked issue records that final decision. No replacement issue was created.
+Raw diagnostics, all attempts, lint logs, test inventories and source identities remain under
+progress/backlog-trial/slot-3/. Essential commands and outcomes are recorded in the original issue.
+
 ## Ten-session trial
 
 Setup is not a trial delivery session. Sessions 1–4 and 6–9 address existing debt.
@@ -244,7 +279,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | --- | --- | --- | --- |
 | 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
 | 2 | Debt | [#1441][i1441] / [#1673](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1673) | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
-| 3 | Debt | Pending | Not started |
+| 3 | Debt | [#1224][i1224] / delivery PR pending | All 61 strict test-lint findings fixed; closure pending delivery. |
 | 4 | Debt | Pending | Not started |
 | 5 | Exploration | Pending | Not started |
 | 6 | Debt | Pending | Not started |

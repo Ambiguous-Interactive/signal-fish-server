@@ -73,6 +73,12 @@ cargo fmt --check
 echo "==> Linting the reference client (clippy, zero warnings)"
 cargo clippy --locked --all-targets -- -D warnings
 
+# Dependency lint does not inspect this standalone package's test targets (#1224).
+# Reuse the native graph and existing job instead of adding another workflow.
+echo "==> Linting vendored SCTP tests (clippy, zero warnings)"
+cargo clippy --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --all-targets -- -D warnings
+
 echo "==> Verifying WebRTC event retention and driver cancellation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib peer_connection::
