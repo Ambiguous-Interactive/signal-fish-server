@@ -23373,6 +23373,12 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
     let miri = jobs
         .as_mapping_get("miri")
         .expect("ci-safety.yml must define the miri job");
+    assert_eq!(
+        miri.as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(45),
+        "partition interpreter work without extending its existing job limit"
+    );
     let lanes = miri
         .as_mapping_get("strategy")
         .and_then(|strategy| strategy.as_mapping_get("matrix"))
@@ -23398,6 +23404,33 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
             filters.split_whitespace().collect(),
             exclusions.split_whitespace().collect(),
         ));
+    }
+
+    for (name, expected) in [
+        (
+            "server-maintenance",
+            vec!["server::maintenance", "server::moderation_tests"],
+        ),
+        (
+            "server-delivery",
+            vec![
+                "server::game_data_tests",
+                "server::message_coordinator_tests",
+            ],
+        ),
+    ] {
+        let matching: Vec<_> = lanes
+            .iter()
+            .filter(|lane| lane.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .collect();
+        assert_eq!(matching.len(), 1, "{name} needs one lane");
+        let included: Vec<_> = matching[0]
+            .as_mapping_get("modules")
+            .and_then(Yaml::as_str)
+            .expect("heavy server lane modules")
+            .split_whitespace()
+            .collect();
+        assert_eq!(included, expected, "{name}: retain both heavy test owners");
     }
 
     let lib_rs = read_file(&root.join("src/lib.rs"));
