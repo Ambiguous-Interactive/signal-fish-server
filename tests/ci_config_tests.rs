@@ -35423,8 +35423,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     With 61 shards, ceil(601/61) * 29s remains 290s.
     605 (was 601): host readiness adds four explicit eligibility decision sites (#636).
     With 61 shards, ceil(605/61) * 29s remains 290s.
+    606 (was 605): Direct endpoint selection adds one host-identity match site (#636).
+    With 61 shards, ceil(606/61) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 605;
+const MUTATION_TOTAL_MUTANTS: u32 = 606;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

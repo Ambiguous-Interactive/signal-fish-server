@@ -88,7 +88,12 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     "d".repeat(61),
                 ]
                 .join(".");
-                for host in [None, Some("0.0.0.0"), Some(long_host.as_str())] {
+                for host in [
+                    None,
+                    Some("0.0.0.0"),
+                    Some("192.0.2.1"),
+                    Some(long_host.as_str()),
+                ] {
                     for player in &mut players {
                         player.connection_info = host.map(|host| ConnectionInfo::Direct {
                             host: host.into(),
@@ -113,7 +118,7 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                     let stats = region.change();
                     println!("START_ENDPOINT_COST members={members} enable_direct={enable_direct} direct_members={direct_members} dual={dual} desired={desired:?} webrtc={enable_webrtc} host_len={:?} stats={stats:?}", host.map(str::len));
                     profiles.push(stats);
-                    let valid_direct = direct && host == Some(long_host.as_str());
+                    let valid_direct = direct && host.is_some_and(|host| host != "0.0.0.0");
                     let expected_transport = if desired == Topology::Relay {
                         Transport::Relay
                     } else if valid_direct {
@@ -152,7 +157,7 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                         assert_eq!(
                             plan.direct_endpoint,
                             valid_direct.then(|| DirectEndpoint {
-                                host: long_host.clone(),
+                                host: host.unwrap().to_string(),
                                 port: 7777
                             })
                         );
@@ -192,6 +197,11 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
                         assert_membership_queue_empty(receiver);
                     }
                 }
+                if direct && desired != Topology::Relay {
+                    assert_eq!(profiles[3].bytes_allocated - profiles[2].bytes_allocated,
+                        (usize::try_from(members).unwrap() + 1) * (long_host.len() - "192.0.2.1".len()),
+                        "Direct start copied endpoints beyond the elected host: members={members} profiles={profiles:?}");
+                }
                 if !direct {
                     disabled_profiles.push((members, enable_direct, profiles));
                 }
@@ -199,10 +209,10 @@ pub(crate) fn disabled_direct_start_skips_endpoints() {
         }
     }
     for (members, enable_direct, profiles) in &disabled_profiles {
-        assert_eq!(profiles[2].allocations, profiles[0].allocations,
+        assert_eq!(profiles[3].allocations, profiles[0].allocations,
             "unavailable Direct copied one endpoint per member: members={members} enable_direct={enable_direct} profiles={disabled_profiles:?}");
         assert_eq!(
-            profiles[2].bytes_allocated, profiles[0].bytes_allocated,
+            profiles[3].bytes_allocated, profiles[0].bytes_allocated,
             "unavailable Direct copied hostnames: members={members} enable_direct={enable_direct} profiles={disabled_profiles:?}"
         );
         assert_eq!(profiles[1].allocations, profiles[0].allocations);

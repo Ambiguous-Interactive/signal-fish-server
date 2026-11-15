@@ -18125,3 +18125,44 @@ low-level controls retain all four live shutdown states. It does not exercise
 a full handshake, run this new schedule against an independent implementation,
 prove public-wrapper exposure or attribute #1120. No production SCTP source
 changes in this session. The earlier A20 evidence and its limits remain intact.
+
+### F376 — Direct game start copied unelected host addresses
+
+Existing #636 and #826: the production start builder copied every executable
+Direct candidate's address before choosing one host. At baseline `fba34a27`,
+the exact two-player address-growth control allocates 976 extra bytes when both
+addresses grow from 9 to 253 bytes. Only one selected candidate and two outgoing
+plans need those addresses: the required growth is 732 bytes. Restoring the old
+candidate-copy loop fails that assertion (Nextest `d7c5e042`).
+
+The builder now filters borrowed metadata with the existing endpoint validator
+and selects the host with the shared production election function. It copies
+only that endpoint before running the existing selection and publication path.
+The existing unanimous Direct-capability and WebRTC-preference gates still run
+first. Authority preference, unknown-time ordering and UUID ties use the same
+member snapshot and election rule. No await separates the borrowed candidates
+from the selected endpoint copy.
+
+The repaired control checks full publications at 2, 16 and 255 members. Its exact
+address-growth requirement is `(members + 1) * address_growth`, including the
+one selected candidate and every outgoing plan. Unavailable Direct and preferred
+WebRTC cells require no address-dependent allocation. The measured 253-byte
+Direct profiles use 18/130/2042 allocations and 1919/13875/218532 bytes. This
+saves one candidate allocation per unelected member; it is not a throughput
+measurement.
+
+Existing #1464 gains separate bounded caller evidence: an independent sorted
+oracle checks 27,648 complete publications across endpoint masks, valid/absent/
+stale authorities, equal/unknown/extreme timestamps, roster permutations,
+capabilities and topology ceilings. It checks exact hosts, endpoints, peer
+identities, names, authority/offer flags, phases and shared generation. Compiled
+source faults that discard authority or attach another member's endpoint must
+fail the matching assertions before restored source passes. This is adapter
+testing, not a new Lean theorem or proof of asynchronous publication. P10 keeps
+its remaining proof boundaries open.
+
+Rust, .NET and Godot clients need no change: the server sends the same selected
+host, address, peer set and message order. The reviewed SDK surfaces consume
+`SessionPlan.direct_endpoint`; they never observe discarded selection candidates.
+The allocation and caller controls complement the real WebSocket Direct
+finalization contracts. They do not qualify Direct socket reachability.

@@ -656,7 +656,24 @@ impl EnhancedGameServer {
                 )
                 .1 == Transport::Relay
             {
-                for (member, player) in members.iter_mut().zip(&finalized.members) {
+                let host = crate::session_member::elect_host(
+                    finalized.authority_player,
+                    members
+                        .iter()
+                        .zip(&finalized.members)
+                        .filter_map(|(member, player)| {
+                            player
+                                .connection_info
+                                .as_ref()
+                                .and_then(DirectEndpoint::validated_parts)
+                                .map(|_| member)
+                        }),
+                );
+                if let Some((member, player)) = members
+                    .iter_mut()
+                    .zip(&finalized.members)
+                    .find(|(member, _)| Some(member.player_id) == host)
+                {
                     member.direct_endpoint = player
                         .connection_info
                         .as_ref()
