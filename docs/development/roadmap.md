@@ -223,6 +223,10 @@ runtime bound. Keep #1441 open. Next profile actual-index discovery and blob rea
 unchanged temporary-index comparisons as closure evidence.
 New, reopened, closed, and duplicate-disposition issue counts are zero for this slot.
 No server API, runtime dependency, client protocol, or hook timing boundary changes.
+Claim: 23:08 UTC; partial source-cost improvement accepted after review at 23:25 UTC on 2026-11-15.
+Elapsed task time is about 17 minutes at minute precision, including tool waits.
+Active effort and blocked time were not separately instrumented. Overall issue acceptance remains incomplete.
+PR #1673 records delivery separately.
 
 ## Ten-session trial
 
@@ -239,7 +243,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | Slot | Allocation | Issue / PR | Accepted outcome and remaining work |
 | --- | --- | --- | --- |
 | 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
-| 2 | Debt | [#1441][i1441] / delivery PR pending | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
+| 2 | Debt | [#1441][i1441] / [#1673](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1673) | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
 | 3 | Debt | Pending | Not started |
 | 4 | Debt | Pending | Not started |
 | 5 | Exploration | Pending | Not started |
