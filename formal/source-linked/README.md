@@ -1380,6 +1380,32 @@ concurrent correspondence remain separate open obligations in P03/P31/Q01–Q04.
 This internal refactor preserves wire behavior, errors, public constant paths,
 defaults and configuration. Rust, .NET and Godot clients need no changes.
 
+### Startup bounds and retained configuration evidence
+
+The #1464 integration control
+`startup_protocol_bounds_preserve_validation_and_config_identity` exercises
+64 bounds pairs through JSON serialization/deserialization, loaded validation
+and the public `EnhancedGameServer::new` constructor. Each axis uses
+`0, 1, 2, 3, 4, 32767, 65534, 65535`. An independent legal-range oracle checks
+exact refusals and priority. All three accepted ranges retain the complete
+supplied protocol configuration, including non-default fields. Negotiation
+through that retained object covers every `u16` client value and the omitted
+version default.
+
+Temporary compiled source faults replace either the constructor validation
+argument or the stored protocol object with defaults. The first must fail the
+constructor refusal assertion; the second must fail configuration identity.
+Restored source passes. Run the control with:
+
+```bash
+bash scripts/dev-loop.sh startup_protocol_bounds_preserve_validation_and_config_identity
+```
+
+This is bounded adapter evidence. It adds no Lean theorem and proves no live
+socket, process startup, cancellation or concurrent correspondence. Invalid
+bounds outside the sampled pairs remain covered by the pure bounds proofs,
+not by this constructor control. Runtime and client behavior stay unchanged.
+
 ### Finalized-join fallback caller evidence
 
 The #1464 control in

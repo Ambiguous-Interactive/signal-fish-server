@@ -3505,3 +3505,77 @@ async fn real_binary_routes_top_level_readyz_to_the_real_handler() {
         "the readiness verdict is status-only; a text body would be the fallback banner"
     );
 }
+
+/// #1464: exercise the public startup boundary separately from pure bounds proofs.
+#[tokio::test]
+async fn startup_protocol_bounds_preserve_validation_and_config_identity() {
+    use signal_fish_server::database::DatabaseConfig;
+    use signal_fish_server::server::EnhancedGameServer;
+
+    let values = [0, 1, 2, 3, 4, 32767, 65534, u16::MAX];
+    for minimum in values {
+        for maximum in values {
+            let mut config = open_metrics_config();
+            config.protocol.min_protocol_version = minimum;
+            config.protocol.max_protocol_version = maximum;
+            // Non-default fields also detect replacement of the validated object.
+            config.protocol.room_code_length = 7;
+            config.protocol.max_player_name_length = 41;
+            let config: Config = serde_json::from_value(
+                serde_json::to_value(config).expect("serialize startup input"),
+            )
+            .expect("deserialize startup input");
+            let expected_error = if minimum < 2 {
+                Some(format!(
+                    "protocol.min_protocol_version ({minimum}) must be >= 2"
+                ))
+            } else if maximum < minimum {
+                Some(format!("protocol.max_protocol_version ({maximum}) must be >= protocol.min_protocol_version ({minimum})"))
+            } else if maximum > 3 {
+                Some(format!("protocol.max_protocol_version ({maximum}) must be <= 3 (the highest version this server build implements)"))
+            } else {
+                None
+            };
+            let loaded = validate_config_security(&config);
+            assert_eq!(
+                loaded.as_ref().err().map(ToString::to_string),
+                expected_error,
+                "loaded bounds {minimum}..={maximum}",
+            );
+            let constructed = EnhancedGameServer::new(
+                test_server_config(),
+                config.protocol.clone(),
+                config.relay_types.clone(),
+                config.session.clone(),
+                config.turn.clone(),
+                DatabaseConfig::InMemory,
+                config.metrics.clone(),
+                config.coordination.clone(),
+                config.security.transport.clone(),
+                config.security.allowed_apps.clone(),
+            )
+            .await;
+            assert_eq!(
+                constructed.as_ref().err().map(ToString::to_string),
+                expected_error,
+                "constructor bounds {minimum}..={maximum}",
+            );
+            if let Ok(server) = constructed {
+                let retained = server.protocol_config();
+                assert_eq!(
+                    serde_json::to_value(retained).expect("retained config"),
+                    serde_json::to_value(&config.protocol).expect("supplied config"),
+                    "constructor must retain the supplied protocol object",
+                );
+                assert_eq!(retained.negotiate_protocol_version(None), minimum);
+                for client in 0..=u16::MAX {
+                    assert_eq!(
+                        retained.negotiate_protocol_version(Some(client)),
+                        client.min(maximum),
+                        "retained bounds {minimum}..={maximum}, client {client}",
+                    );
+                }
+            }
+        }
+    }
+}
