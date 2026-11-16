@@ -2483,6 +2483,251 @@ fn inbound_schema_accepts_wire_samples_and_only_supported_nested_commands() {
 }
 
 #[test]
+fn connection_metadata_variants_match_input_and_legacy_output_schemas() {
+    use serde_json::{json, Value};
+    use signal_fish_server::protocol::{ClientMessage, ConnectionInfo, ServerMessage};
+
+    let docs = Yaml::load_from_str(&spec_text()).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schema = |name| {
+        mapping_path(root, &["components", "schemas", name]).expect("metadata boundary schema")
+    };
+    let source = read_file(&repo_root().join("src/protocol/types.rs"));
+    let expected: BTreeSet<_> = enum_variants(&source, "ConnectionInfo")
+        .into_iter()
+        .collect();
+    let mut covered = BTreeSet::new();
+    let mut cases = vec![
+        (
+            "Direct",
+            json!({"type":"direct", "host":"例え.example", "port":0}),
+        ),
+        (
+            "Direct",
+            json!({"type":"direct", "host":"192.0.2.1", "port":65535}),
+        ),
+        (
+            "UnityRelay",
+            json!({"type":"unity_relay", "allocation_id":"allocation", "connection_data":"opaque", "key":"fixture"}),
+        ),
+    ];
+    for transport in [
+        None,
+        Some("auto"),
+        Some("tcp"),
+        Some("udp"),
+        Some("websocket"),
+    ] {
+        for client_id in [None, Some(Value::Null), Some(json!(0)), Some(json!(65535))] {
+            let mut info = json!({"type":"relay", "host":"relay.example", "port":7777,
+                "allocation_id":"allocation", "token":"fixture"});
+            if let Some(transport) = transport {
+                info["transport"] = json!(transport);
+            }
+            if let Some(client_id) = client_id {
+                info["client_id"] = client_id;
+            }
+            cases.push(("Relay", info));
+        }
+    }
+    for sdp in [None, Some(Value::Null), Some(json!("SDP-観客"))] {
+        for candidates in [json!([]), json!(["candidate:fixture", "候補"])] {
+            let mut info = json!({"type":"webrtc", "ice_candidates":candidates});
+            if let Some(sdp) = &sdp {
+                info["sdp"] = sdp.clone();
+            }
+            cases.push(("WebRTC", info));
+        }
+    }
+    for data in [
+        Value::Null,
+        json!(true),
+        json!(42),
+        json!(1.5),
+        json!("観客"),
+        json!([null, false, {"nested":[1, "two"]}]),
+        json!({"type":"direct", "data":{"arbitrary":true}}),
+    ] {
+        cases.push(("Custom", json!({"type":"custom", "data":data})));
+    }
+    for (tag, field) in [
+        ("direct", "port"),
+        ("relay", "port"),
+        ("relay", "client_id"),
+    ] {
+        let branch = schema("ConnectionInfo")
+            .as_mapping_get("oneOf")
+            .and_then(Yaml::as_sequence)
+            .unwrap()
+            .iter()
+            .find(|branch| {
+                mapping_path(branch, &["properties", "type", "const"]).and_then(Yaml::as_str)
+                    == Some(tag)
+            })
+            .expect("numeric metadata branch");
+        let property = mapping_path(branch, &["properties", field]).expect("u16 metadata field");
+        assert_eq!(
+            property.as_mapping_get("type").and_then(Yaml::as_str),
+            Some("integer")
+        );
+        assert_eq!(
+            property
+                .as_mapping_get("minimum")
+                .and_then(Yaml::as_integer),
+            Some(0)
+        );
+        assert_eq!(
+            property
+                .as_mapping_get("maximum")
+                .and_then(Yaml::as_integer),
+            Some(i64::from(u16::MAX))
+        );
+        for invalid in [json!(-1), json!(u32::from(u16::MAX) + 1)] {
+            let mut info = cases
+                .iter()
+                .find(|(_, info)| info["type"] == tag)
+                .unwrap()
+                .1
+                .clone();
+            info[field] = invalid;
+            assert!(
+                serde_json::from_value::<ConnectionInfo>(info.clone()).is_err(),
+                "Rust accepted out-of-range {tag}.{field}: {info}"
+            );
+        }
+    }
+    let v2_join: Value = include_str!("../.llm/code-samples/protocol/v2-server-messages.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("canonical sample"))
+        .find(|wire| wire["type"] == "RoomJoined")
+        .expect("v2 room join");
+    let v3_join: Value = include_str!("../.llm/code-samples/protocol/v3-server-messages.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("canonical sample"))
+        .find(|wire| wire["type"] == "RoomJoined")
+        .expect("v3 room join");
+    for (variant, info) in &cases {
+        covered.insert((*variant).to_string());
+        let parsed: ConnectionInfo = serde_json::from_value(info.clone()).expect("Rust metadata");
+        let normalized = serde_json::to_value(parsed).expect("serialize metadata");
+        assert!(
+            schema_shape_matches(root, schema("ConnectionInfo"), info),
+            "schema rejected accepted {variant} input: {info}"
+        );
+        assert!(
+            schema_shape_matches(root, schema("ConnectionInfo"), &normalized),
+            "schema rejected emitted {variant}: {normalized}"
+        );
+        let mut expected_wire = info.clone();
+        if *variant == "Relay" {
+            if expected_wire.get("transport").is_none() {
+                expected_wire["transport"] = json!("auto");
+            }
+            if expected_wire["client_id"].is_null() {
+                expected_wire.as_object_mut().unwrap().remove("client_id");
+            }
+        } else if *variant == "WebRTC" && expected_wire.get("sdp").is_none() {
+            expected_wire["sdp"] = Value::Null;
+        }
+        assert_eq!(normalized, expected_wire, "metadata normalization: {info}");
+        let reparsed: ConnectionInfo =
+            serde_json::from_value(normalized.clone()).expect("metadata round trip");
+        assert_eq!(serde_json::to_value(reparsed).unwrap(), normalized);
+        let input = json!({"type":"ProvideConnectionInfo", "data":{"connection_info":info}});
+        let parsed: ClientMessage =
+            serde_json::from_value(input.clone()).expect("metadata command");
+        assert!(
+            schema_shape_matches(root, schema("ClientMessageEnvelope"), &input),
+            "schema rejected metadata command: {input}"
+        );
+        let emitted = serde_json::to_value(parsed).unwrap();
+        assert_eq!(emitted["data"]["connection_info"], normalized);
+        assert!(schema_shape_matches(
+            root,
+            schema("ClientMessageEnvelope"),
+            &emitted
+        ));
+        let wrapped = json!({"type":"RoomOperation", "data":{
+            "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "operation":input}});
+        assert!(serde_json::from_value::<ClientMessage>(wrapped.clone()).is_err());
+        assert!(!schema_shape_matches(
+            root,
+            schema("ClientMessageEnvelope"),
+            &wrapped
+        ));
+        let mut join = v2_join.clone();
+        join["data"]["current_players"][0]["connection_info"] = normalized.clone();
+        let mut v3_with_metadata = v3_join.clone();
+        v3_with_metadata["data"]["current_players"][0]["connection_info"] = normalized.clone();
+        assert!(
+            !schema_shape_matches_version(root, schema("RoomJoined"), &v3_with_metadata, Some(3)),
+            "v3 schema accepted legacy metadata: {v3_with_metadata}"
+        );
+        let starting = json!({"type":"GameStarting", "data":{"peer_connections":[{
+            "player_id":"00000000-0000-0000-0000-000000000001", "player_name":"観客",
+            "is_authority":true, "relay_type":"custom-label", "connection_info":normalized
+        }]}});
+        for (name, wire) in [("RoomJoined", join), ("GameStarting", starting)] {
+            let parsed: ServerMessage =
+                serde_json::from_value(wire.clone()).expect("legacy metadata envelope");
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap(),
+                wire,
+                "legacy round trip: {wire}"
+            );
+            assert!(
+                schema_shape_matches(root, schema(name), &wire),
+                "legacy schema: {wire}"
+            );
+        }
+    }
+    assert_eq!(
+        covered, expected,
+        "metadata cases must cover every Rust variant"
+    );
+    for invalid in [
+        json!({"type":"unknown"}),
+        json!({"type":"direct", "host":false, "port":7777}),
+        json!({"type":"direct", "host":"host"}),
+        json!({"type":"unity_relay", "allocation_id":"a", "connection_data":"b"}),
+        json!({"type":"relay", "host":"host", "port":7777, "allocation_id":"a", "token":false}),
+        json!({"type":"relay", "host":"host", "port":7777, "allocation_id":"a", "token":"t", "transport":"unknown"}),
+        json!({"type":"relay", "host":"host", "port":7777, "allocation_id":"a", "token":"t", "client_id":"one"}),
+        json!({"type":"webrtc", "ice_candidates":[false]}),
+        json!({"type":"webrtc", "sdp":null}),
+        json!({"type":"custom"}),
+        json!({"type":"relay", "host":"host", "port":7777, "allocation_id":"a", "token":"t", "transport":null}),
+        json!({"type":"webrtc", "ice_candidates":[], "sdp":false}),
+    ] {
+        assert!(
+            serde_json::from_value::<ConnectionInfo>(invalid.clone()).is_err(),
+            "Rust accepted {invalid}"
+        );
+        assert!(
+            !schema_shape_matches(root, schema("ConnectionInfo"), &invalid),
+            "schema accepted {invalid}"
+        );
+        for wrapped in [false, true] {
+            let input = json!({"type":"ProvideConnectionInfo", "data":{"connection_info":invalid}});
+            let wire = if wrapped {
+                json!({"type":"RoomOperation", "data":{
+                "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "operation":input}})
+            } else {
+                input
+            };
+            assert!(serde_json::from_value::<ClientMessage>(wire.clone()).is_err());
+            assert!(!schema_shape_matches(
+                root,
+                schema("ClientMessageEnvelope"),
+                &wire
+            ));
+        }
+    }
+}
+
+#[test]
 fn join_room_optional_fields_match_schema_in_both_envelopes() {
     use serde_json::{json, Value};
     use signal_fish_server::protocol::ClientMessage;
