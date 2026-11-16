@@ -26,11 +26,12 @@ Resume an unfinished task before selecting a new one. One owner claims one issue
 These are bounded investigation tasks; ready does not mean a production defect is confirmed.
 Refresh issue comments and dependencies before claiming. Blocked tasks return to triage.
 
-Slot 8 records the bounded A01 nested operation-result experiment under
-[#826][i826] in [PR #1679](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1679).
-Exact nested reachability and all 15 representative result shapes
-qualify; exhaustive fields, version eligibility and runtime projections remain open.
-The issue owns delivery state. Refresh existing debt before selecting the next task.
+Slot 9 records bounded A01 nested version-branch evidence under [#826][i826].
+Six populated result vectors preserve version selection through nested results
+and reconnect replay arrays. Marker faults distinguish the new guard from the
+prior shape check. Shared shapes remain eligible. Exhaustive fields, metadata,
+spectator rosters and runtime projections remain open.
+The issue owns delivery state. Slot 10 and the final cohort assessment remain.
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
