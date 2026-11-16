@@ -238,9 +238,28 @@ fn resolve_local_reference<'doc, 'input>(
 /// `properties`, `additionalProperties`, and array `items`) rather than
 /// pretending to be a general-purpose JSON Schema implementation.
 fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -> bool {
+    schema_shape_matches_version(root, schema, value, None)
+}
+
+/// Apply version metadata at every visited schema node. Shared branches stay
+/// eligible. This is a schema-shape check, not a runtime capability gate.
+fn schema_shape_matches_version(
+    root: &Yaml,
+    schema: &Yaml,
+    value: &serde_json::Value,
+    version: Option<i64>,
+) -> bool {
+    if version.is_some_and(|version| {
+        schema
+            .as_mapping_get("x-protocol-version")
+            .and_then(Yaml::as_integer)
+            .is_some_and(|advertised| advertised != version)
+    }) {
+        return false;
+    }
     if let Some(reference) = schema.as_mapping_get("$ref").and_then(Yaml::as_str) {
         return resolve_local_reference(root, reference)
-            .is_some_and(|resolved| schema_shape_matches(root, resolved, value));
+            .is_some_and(|resolved| schema_shape_matches_version(root, resolved, value, version));
     }
 
     if value.is_null() && schema.as_mapping_get("nullable").and_then(Yaml::as_bool) == Some(true) {
@@ -250,7 +269,7 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
     if let Some(branches) = schema.as_mapping_get("oneOf").and_then(Yaml::as_sequence) {
         if branches
             .iter()
-            .filter(|branch| schema_shape_matches(root, branch, value))
+            .filter(|branch| schema_shape_matches_version(root, branch, value, version))
             .count()
             != 1
         {
@@ -260,7 +279,7 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
     if let Some(branches) = schema.as_mapping_get("anyOf").and_then(Yaml::as_sequence) {
         if !branches
             .iter()
-            .any(|branch| schema_shape_matches(root, branch, value))
+            .any(|branch| schema_shape_matches_version(root, branch, value, version))
         {
             return false;
         }
@@ -268,23 +287,25 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
     if let Some(branches) = schema.as_mapping_get("allOf").and_then(Yaml::as_sequence) {
         if !branches
             .iter()
-            .all(|branch| schema_shape_matches(root, branch, value))
+            .all(|branch| schema_shape_matches_version(root, branch, value, version))
         {
             return false;
         }
     }
     if let Some(forbidden) = schema.as_mapping_get("not") {
-        if schema_shape_matches(root, forbidden, value) {
+        if schema_shape_matches_version(root, forbidden, value, version) {
             return false;
         }
     }
     if let Some(condition) = schema.as_mapping_get("if") {
-        let consequence = if schema_shape_matches(root, condition, value) {
+        let consequence = if schema_shape_matches_version(root, condition, value, version) {
             schema.as_mapping_get("then")
         } else {
             schema.as_mapping_get("else")
         };
-        if consequence.is_some_and(|branch| !schema_shape_matches(root, branch, value)) {
+        if consequence
+            .is_some_and(|branch| !schema_shape_matches_version(root, branch, value, version))
+        {
             return false;
         }
     }
@@ -378,7 +399,7 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
                 if let Some((_, field_value)) =
                     key.as_str().and_then(|key| object.get_key_value(key))
                 {
-                    if !schema_shape_matches(root, property_schema, field_value) {
+                    if !schema_shape_matches_version(root, property_schema, field_value, version) {
                         return false;
                     }
                 }
@@ -407,7 +428,7 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
         if let Some(item_schema) = schema.as_mapping_get("items") {
             if !items
                 .iter()
-                .all(|item| schema_shape_matches(root, item_schema, item))
+                .all(|item| schema_shape_matches_version(root, item_schema, item, version))
             {
                 return false;
             }
@@ -1994,6 +2015,106 @@ fn nested_result_schema_accepts_all_wire_variants_and_rejects_invalid_results() 
             !schema_shape_matches(root, schema, &wire),
             "schema accepted invalid result: {wire}"
         );
+    }
+}
+
+#[test]
+fn nested_result_schema_preserves_version_eligibility() {
+    use serde_json::{json, Value};
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let schema = schemas
+        .iter()
+        .find(|(tag, _)| tag == "RoomOperationResult")
+        .expect("reachable result envelope")
+        .1;
+    let wrap = |result: Value| {
+        json!({"type":"RoomOperationResult", "data":{
+            "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "result":result
+        }})
+    };
+    let samples: Vec<Vec<Value>> = [
+        include_str!("../.llm/code-samples/protocol/v2-server-messages.jsonl"),
+        include_str!("../.llm/code-samples/protocol/v3-server-messages.jsonl"),
+    ]
+    .iter()
+    .map(|samples| {
+        samples
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("server sample JSON"))
+            .collect()
+    })
+    .collect();
+    let sample = |index: usize, tag: &str| {
+        samples[index]
+            .iter()
+            .find(|wire| wire["type"] == tag)
+            .unwrap_or_else(|| panic!("v{} lacks {tag} sample", index + 2))
+            .clone()
+    };
+    let player_joined = |index| {
+        json!({"type":"PlayerJoined", "data":{
+            "player":sample(index, "RoomJoined")["data"]["current_players"][0].clone()
+        }})
+    };
+    let empty_spectator = sample(0, "SpectatorJoined");
+    for (index, version) in [(0, 2), (1, 3)] {
+        let other_version = 5 - version;
+        let joined = sample(index, "RoomJoined");
+        let mut reconnected = sample(index, "Reconnected");
+        reconnected["data"]["missed_events"] = json!([player_joined(index)]);
+        let mut spectator = empty_spectator.clone();
+        spectator["data"]["current_players"] = joined["data"]["current_players"].clone();
+        for result in [joined, reconnected, spectator] {
+            let tag = result["type"].as_str().expect("result tag");
+            let wire = wrap(result.clone());
+            assert!(
+                schema_shape_matches(root, schema, &wire),
+                "v{version} nested {tag}: unversioned shape rejected {wire}"
+            );
+            assert!(
+                schema_shape_matches_version(root, schema, &wire, Some(version)),
+                "v{version} nested {tag}: advertised branch rejected {wire}"
+            );
+            assert!(
+                !schema_shape_matches_version(root, schema, &wire, Some(other_version)),
+                "v{version} nested {tag}: wrong version {other_version} accepted {wire}"
+            );
+
+            let mut hybrid = result.clone();
+            let player = &mut hybrid["data"]["current_players"][0];
+            if version == 2 {
+                player["epoch"] = json!(1);
+                player["seq"] = json!(0);
+            } else {
+                player["connected_at"] = json!("2026-09-20T12:00:00Z");
+            }
+            assert!(
+                !schema_shape_matches_version(root, schema, &wrap(hybrid), Some(version)),
+                "v{version} nested {tag}: hybrid player snapshot accepted"
+            );
+            if tag == "Reconnected" {
+                let mut mixed_replay = result;
+                mixed_replay["data"]["missed_events"] = json!([player_joined(1 - index)]);
+                assert!(
+                    !schema_shape_matches_version(root, schema, &wrap(mixed_replay), Some(version)),
+                    "v{version}: cross-version nested replay item accepted"
+                );
+            }
+        }
+        // Shared shapes cannot identify the recipient version. Do not infer
+        // runtime envelope eligibility from either version's shape acceptance.
+        for result in [empty_spectator.clone(), json!({"type":"RoomLeft"})] {
+            let wire = wrap(result);
+            assert!(
+                schema_shape_matches_version(root, schema, &wire, Some(version)),
+                "v{version}: shared nested result rejected {wire}"
+            );
+        }
     }
 }
 

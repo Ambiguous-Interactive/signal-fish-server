@@ -153,11 +153,59 @@ result tags/payloads, unsupported events and recursive result envelopes must fai
 The bounded history below records the discriminating source faults.
 
 These controls check representative shapes and reachability. They do not qualify
-every field/value, general JSON Schema constraints, nested version eligibility,
+every field/value, general JSON Schema constraints, exhaustive nested version eligibility,
 actual recipient projections, negotiated extension behavior or runtime delivery.
 The full A01 and A01–A22 acceptance remain open.
 
 ## Bounded histories without a confirmed defect
+
+### A01 — Trial slot 9 nested version branches
+
+Existing #826. Source: `1af864bdfa603f21ee1374ce3c9c3f3ef26b7d2a` on Linux
+aarch64. The slot 8 shape oracle accepts either version. The top-level version
+selector does not follow nested result objects or replay arrays.
+
+`nested_result_schema_preserves_version_eligibility` checks six populated
+member/reconnect/player-roster spectator results, three per protocol version.
+The version-aware shape oracle carries the selected version through references,
+combinators, object properties and array items. The unversioned wrapper retains
+its prior behavior. Each result must match its version and reject the opposite
+version and a hybrid player snapshot. Reconnect includes a same-version
+`PlayerJoined` replay item and rejects the opposite-version item. Player data
+comes from canonical room-join samples. Spectator and replay events are built
+from that data; they are schema vectors, not captured runtime output.
+Empty spectator-join and room-left results remain shared shapes in both versions.
+This does not authorize a room-operation envelope on a v2 connection.
+
+The initial fixture attempt fails because the canonical v3 corpus has no
+standalone `PlayerJoined` example. The corrected fixture builds that event from
+its canonical player snapshot. The restored schema passes in Nextest `ad5d39ee`
+(0.039 seconds; scoped build 1.14 seconds). Changing only `V3SpectatorJoined`'s
+version marker to 2 leaves the old nested-shape guard green (`ea6ee29b`) and fails
+the new guard (`966a92ce`). Changing only `V3PlayerJoined`'s marker to 2 likewise
+passes the old guard (`f8e281c1`) and fails the new guard inside the reconnect
+replay array (`da779025`). Both are assertion failures. Both faults are restored.
+No production or schema defect is established.
+
+All 28 owning schema controls pass in `717d1f5c` (0.455 seconds; warm build
+1.30 seconds). Eleven source-policy controls pass in `08e7a5dc`. Full strict
+Clippy and formatting pass. No p95 or performance improvement is claimed.
+Independent review finds no blocker. The issue owns publication and final-head
+checks. Raw logs remain in ignored `progress/backlog-trial/slot-9/`.
+
+Commands:
+
+```bash
+bash scripts/dev-loop.sh nested_result_schema_preserves_version_eligibility --all-features
+bash scripts/dev-loop.sh nested_result_schema_accepts_all_wire_variants_and_rejects_invalid_results --all-features
+bash scripts/dev-loop.sh --clippy --changed origin/main --all-features
+```
+
+This is internal verification work. No changelog or Rust, .NET or Godot client
+change is needed: schema, wire bytes and runtime stay the same. Exhaustive
+field/value and version-metadata coverage, populated spectator rosters, all
+replay event types, actual recipient projections and runtime delivery remain
+open. The wider A01–A22 campaign and historical failures remain open.
 
 ### A01 — Trial slot 8 nested operation results
 
