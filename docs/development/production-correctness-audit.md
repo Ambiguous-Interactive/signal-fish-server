@@ -145,12 +145,62 @@ Missing discriminators and boolean replacements for object payloads must fail.
 Existing physical-binary, accountability and replay controls retain their separate
 version and hybrid checks. F380 records the sample defects and source faults.
 
+Trial slot 8 adds exact reachability for all 15 nested `RoomOperationResult`
+variants through the outbound operation. Its 21 wire vectors cover every result,
+including both canonical member/reconnect projections and result-only moderation
+responses. Rust round trips and reachable schema shapes must agree. Malformed
+result tags/payloads, unsupported events and recursive result envelopes must fail.
+The bounded history below records the discriminating source faults.
+
 These controls check representative shapes and reachability. They do not qualify
-every field/value, general JSON Schema constraints, all nested operation results,
+every field/value, general JSON Schema constraints, nested version eligibility,
 actual recipient projections, negotiated extension behavior or runtime delivery.
 The full A01 and A01–A22 acceptance remain open.
 
 ## Bounded histories without a confirmed defect
+
+### A01 — Trial slot 8 nested operation results
+
+Existing #826. Source: `3041f8f2f9fe1946c1812742f57316a95f75c6a4` on Linux
+aarch64. The top-level outbound inventory does not inspect the nested result
+union. Existing golden vectors pin Rust bytes separately. Neither establishes
+that every nested result remains reachable through the AsyncAPI operation.
+
+`nested_result_schema_matches_exact_rust_variant_set` follows the reachable
+`RoomOperationResult` envelope to its nested union. It compares all 15 tags with
+the Rust enum and rejects duplicate branches.
+`nested_result_schema_accepts_all_wire_variants_and_rejects_invalid_results`
+checks 21 representative vectors: 13 from the canonical v2/v3 corpus and eight
+explicit result-only vectors. They cover all 15 result variants, both canonical
+member/reconnect projections, and both room-access states. Each vector must
+round-trip exactly through Rust and match the reachable schema. Boolean result
+tags/payloads, nested `Pong`, recursive results, missing failure reasons and null
+results must fail. Existing golden vectors retain exact JSON/MessagePack bytes
+and additive outer-envelope behavior.
+
+The unchanged source passes both new controls in Nextest `15c0467a` (0.056 seconds;
+first scoped build 1.39 seconds). Removing only the nested `AuthorityTransferred`
+reference leaves the old outbound guard green (`d2b0005f`) while both new controls
+fail (`33798389`). The component and its declared token remain. Adding only a
+nested `Pong` reference makes the inventory and invalid-result assertions fail
+(`f91cb31d`). Both faults are restored. These are assertion failures, not build
+failures. No production or schema defect is established.
+
+Commands:
+
+```bash
+bash scripts/dev-loop.sh nested_result_schema --all-features
+bash scripts/dev-loop.sh outbound_schema_operation_reaches_exact_rust_message_set --all-features
+cargo nextest run --all-features --test protocol_spec_consistency --test room_operation_wire_golden --test protocol_samples
+```
+
+This is internal verification work. No changelog entry or Rust, .NET or Godot
+client change is needed because the schema, wire fields, bytes and runtime stay
+the same. Decoder acceptance of additive fields alone does not establish drift
+in an emitted-message schema. Exhaustive fields/values, version eligibility,
+runtime projections and the wider campaign remain open. No historical failure
+cause or campaign closure is claimed. The issue owns delivery results; raw logs
+remain in ignored `progress/backlog-trial/slot-8/`.
 
 ### A11 — Session 708 Direct host replacement and recovery
 

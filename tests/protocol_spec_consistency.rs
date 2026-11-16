@@ -1847,6 +1847,157 @@ fn outbound_schema_accepts_canonical_server_samples() {
 }
 
 #[test]
+fn nested_result_schema_matches_exact_rust_variant_set() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let envelope = schemas
+        .iter()
+        .find(|(tag, _)| tag == "RoomOperationResult")
+        .expect("reachable result envelope")
+        .1;
+    let reference = envelope
+        .as_mapping_get("$ref")
+        .and_then(Yaml::as_str)
+        .expect("result envelope reference");
+    let envelope = resolve_local_reference(root, reference).expect("result envelope schema");
+    let branches = mapping_path(
+        envelope,
+        &["properties", "data", "properties", "result", "oneOf"],
+    )
+    .and_then(Yaml::as_sequence)
+    .expect("reachable nested result union");
+    let mut actual = BTreeSet::new();
+    for branch in branches {
+        let tags = envelope_tags(root, branch);
+        assert_eq!(tags.len(), 1, "each nested branch must name one result");
+        let tag = tags.into_iter().next().expect("one result tag");
+        assert!(actual.insert(tag.clone()), "duplicate nested result {tag}");
+    }
+    let source = read_file(&repo_root().join("src/protocol/messages.rs"));
+    let expected: BTreeSet<_> = enum_variants(&source, "RoomOperationResult")
+        .into_iter()
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "Rust result inventory must not be empty"
+    );
+    assert_eq!(actual, expected, "reachable result union differs from Rust");
+}
+
+#[test]
+fn nested_result_schema_accepts_all_wire_variants_and_rejects_invalid_results() {
+    use serde_json::{json, Value};
+    use signal_fish_server::protocol::{RoomOperationResult, ServerMessage};
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let schema = schemas
+        .iter()
+        .find(|(tag, _)| tag == "RoomOperationResult")
+        .expect("reachable result envelope")
+        .1;
+    let source = read_file(&repo_root().join("src/protocol/messages.rs"));
+    let expected: BTreeSet<_> = enum_variants(&source, "RoomOperationResult")
+        .into_iter()
+        .collect();
+    let mut results = Vec::new();
+    for samples in [
+        include_str!("../.llm/code-samples/protocol/v2-server-messages.jsonl"),
+        include_str!("../.llm/code-samples/protocol/v3-server-messages.jsonl"),
+    ] {
+        for line in samples.lines().filter(|line| !line.trim().is_empty()) {
+            let wire: Value = serde_json::from_str(line).expect("canonical server sample");
+            let tag = wire["type"].as_str().expect("sample tag");
+            if expected.contains(tag) {
+                results.push(wire);
+            } else if tag == "RoomOperationResult" {
+                results.push(wire["data"]["result"].clone());
+            }
+        }
+    }
+    // Result-only variants have no top-level ServerMessage equivalent.
+    results.push(json!({"type":"OperationFailed", "data":{
+        "reason":"not in room", "error_code":"NOT_IN_ROOM"
+    }}));
+    for tag in [
+        "PlayerKicked",
+        "PlayerBanned",
+        "PlayerUnbanned",
+        "AuthorityTransferred",
+    ] {
+        results.push(json!({"type":tag, "data":{
+            "player_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        }}));
+    }
+    results.push(json!({"type":"RoomCodeRegenerated", "data":{"room_code":"ABC123"}}));
+    for protected in [false, true] {
+        results.push(json!({"type":"RoomAccessUpdated", "data":{"requires_password":protected}}));
+    }
+    let mut covered = BTreeSet::new();
+    for result in results {
+        let tag = result["type"].as_str().expect("result tag");
+        let wire = json!({"type":"RoomOperationResult", "data":{
+            "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "result":result
+        }});
+        let parsed: ServerMessage = serde_json::from_value(wire.clone())
+            .unwrap_or_else(|error| panic!("Rust rejected nested {tag}: {error}: {wire}"));
+        assert_eq!(
+            serde_json::to_value(parsed).expect("result serialization"),
+            wire,
+            "nested {tag}: Rust round trip"
+        );
+        assert!(
+            schema_shape_matches(root, schema, &wire),
+            "schema rejected nested {tag}: {wire}"
+        );
+
+        for pointer in ["/data/result/type", "/data/result/data"] {
+            if wire.pointer(pointer).is_some() {
+                let mut invalid = wire.clone();
+                *invalid.pointer_mut(pointer).expect("existing result field") = json!(false);
+                assert!(
+                    serde_json::from_value::<ServerMessage>(invalid.clone()).is_err(),
+                    "Rust accepted invalid nested {tag} at {pointer}"
+                );
+                assert!(
+                    !schema_shape_matches(root, schema, &invalid),
+                    "schema accepted invalid nested {tag} at {pointer}: {invalid}"
+                );
+            }
+        }
+        covered.insert(tag.to_string());
+    }
+    assert_eq!(
+        covered, expected,
+        "nested wire vectors differ from Rust variants"
+    );
+
+    // A valid top-level event is not necessarily a valid correlated result.
+    for result in [
+        json!({"type":"Pong"}),
+        json!({"type":"RoomOperationResult", "data":{}}),
+        json!({"type":"OperationFailed", "data":{}}),
+        Value::Null,
+    ] {
+        assert!(
+            serde_json::from_value::<RoomOperationResult>(result.clone()).is_err(),
+            "Rust accepted unsupported or malformed result: {result}"
+        );
+        let wire = json!({"type":"RoomOperationResult", "data":{
+            "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "result":result
+        }});
+        assert!(
+            !schema_shape_matches(root, schema, &wire),
+            "schema accepted invalid result: {wire}"
+        );
+    }
+}
+
+#[test]
 fn inbound_schema_unions_match_exact_rust_operation_sets() {
     let text = spec_text();
     let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");

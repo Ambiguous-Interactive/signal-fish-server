@@ -26,8 +26,9 @@ Resume an unfinished task before selecting a new one. One owner claims one issue
 These are bounded investigation tasks; ready does not mean a production defect is confirmed.
 Refresh issue comments and dependencies before claiming. Blocked tasks return to triage.
 
-Slot 7 records the bounded A01 outbound schema and canonical sample experiment
-under [#826][i826] in [PR #1678](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1678).
+Slot 8 records the bounded A01 nested operation-result experiment under
+[#826][i826]. Exact nested reachability and all 15 representative result shapes
+qualify; exhaustive fields, version eligibility and runtime projections remain open.
 The issue owns delivery state. Refresh existing debt before selecting the next task.
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
@@ -338,7 +339,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | 5 | Exploration | [#1111][i1111] / [#1653](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1653) | Current-source prost 0.14.6 records qualify; PR merged and Docker publication passed. |
 | 6 | Debt | [#826][i826] / [#1677](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1677) | Exact inbound unions and existing join null values qualify; broader audit remains open. |
 | 7 | Debt | [#826][i826] / [#1678](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1678) | Exact outbound reachability and corrected reconnect samples qualify; broader audit remains open. |
-| 8 | Debt | Pending | Not started |
+| 8 | Debt | [#826][i826] | All 15 nested result variants qualify; omission and unsupported-event faults fail; broader audit remains open. |
 | 9 | Debt | Pending | Not started |
 | 10 | Exploration | Pending | Not started |
 
