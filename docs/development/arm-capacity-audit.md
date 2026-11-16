@@ -7407,3 +7407,58 @@ delivery evidence. Raw attempts, including both rejected zero-allocation checks,
 remain in `progress/session-730/`. The broad campaign remains open. Rust, .NET
 and Godot clients need no changes: wire values, ordering, deadlines, configuration
 and public production APIs stay unchanged.
+
+### Abandoned-room discovery without member metadata
+
+Existing #636 owns this finite obligation at baseline `e05245a5`.
+`cleanup_abandoned_room` copied a complete room before reading only its game
+name and code for the room-code lock. It now uses the existing atomic
+`get_room_code_snapshot` projection. The shipped in-memory adapter copies only
+identity fields. Custom adapters retain the default full-room read and its
+missing-row and error results; no custom-adapter allocation gain is claimed.
+The room mutation gate, second rollback read, pending-publication check, deletion,
+retry ownership and counters stay unchanged.
+
+The control holds the production code lock on one unchanged abandoned room.
+It changes the creator's nested custom metadata through 0, 1,024, 65,536, 0 and
+65,536 bytes. Three attempts run per value. First-use samples stay visible;
+the two later samples must match exactly across values. Every attempt must
+refuse deletion. After each value the control checks the exact stored metadata,
+room code, game name, member count and pending-room identity. After releasing
+the lock it requires deletion, then a false result for the missing room.
+Setup, metadata changes, assertions and printing are outside measured regions.
+The dev-only entry point calls the production attempt without worker scheduling.
+
+Measured on the shared ARM64 Linux host, Rust 1.94.0, all features, debug profile:
+
+| Metadata bytes | Original allocations / bytes | Repaired allocations / bytes |
+| --- | ---: | ---: |
+| 0 | 13 / 1,847 | 5 / 345 |
+| 1,024 | 14 / 2,871 | 5 / 345 |
+| 65,536 | 14 / 67,383 | 5 / 345 |
+
+All three samples at every value match within each source version. The large
+cell saves nine allocations and 67,038 allocated bytes per blocked attempt.
+Both versions retain one formatting resize. These are allocation measurements;
+they do not establish latency, throughput, resident memory or node capacity.
+
+The original production read fails the exact allocation-count requirement
+(Nextest `e20b6ecc`). The repaired read passes the same control
+(`969934d3`, measured output `c88b5e2a`). Six focused all-feature histories pass
+(`8de842c6`): pending projection, delayed storage, caller cancellation, independent
+room progress, code reuse during stalled GC, and published rollback residue with
+new-member protection. They retain all original waits and deletion assertions.
+
+```bash
+bash scripts/dev-loop.sh --all-features abandoned_room_discovery_skips_member_metadata
+cargo nextest run --locked --all-features --test session_plan_allocations \
+  -E 'test(abandoned_room_discovery_skips_member_metadata)' --success-output immediate
+cargo nextest run --locked --all-features --lib \
+  -E 'test(abandoned_room) | test(committed_creation_with_failed_rollback) | test(lobby_state_projection_matches_pending_finalized_and_failed_reads)'
+```
+
+Raw attempts remain in `progress/session-731/`. An initial invocation without
+the required allocation feature stopped before test execution; it is not red
+regression evidence. The broad campaign remains open. Rust, .NET and Godot
+clients need no changes: wire values, ordering, deadlines, configuration and
+public production APIs stay unchanged. The issue owns final review and delivery.

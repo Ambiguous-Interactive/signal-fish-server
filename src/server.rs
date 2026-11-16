@@ -497,6 +497,21 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    /// Measure one abandoned-room attempt without worker scheduler allocations.
+    pub async fn cleanup_abandoned_room_for_measurement(
+        server: &super::EnhancedGameServer,
+        room_id: crate::protocol::RoomId,
+    ) -> bool {
+        server.cleanup_abandoned_room(room_id).await
+    }
+
+    /// Hold the production room-code lock across a maintenance measurement.
+    pub fn room_code_lock_for_measurement(
+        server: &super::EnhancedGameServer,
+    ) -> std::sync::Arc<dyn crate::distributed::DistributedLock> {
+        std::sync::Arc::clone(&server.distributed_lock)
+    }
+
     /// Measure the production connection-registry discovery used by maintenance.
     pub fn maintenance_candidates_for_measurement(
         server: &super::EnhancedGameServer,

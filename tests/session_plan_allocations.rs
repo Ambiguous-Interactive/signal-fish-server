@@ -503,6 +503,10 @@ fn main() {
             maintenance_costs::maintenance_discovery_skips_unselected_connections,
         ),
         allocation_harness::trial(
+            "abandoned_room_discovery_skips_member_metadata",
+            maintenance_costs::abandoned_room_discovery_skips_member_metadata,
+        ),
+        allocation_harness::trial(
             "finalized_fallback_copies_only_required_endpoints",
             fallback_costs::finalized_fallback_copies_only_required_endpoints,
         ),

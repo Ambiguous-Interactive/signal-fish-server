@@ -6,6 +6,117 @@ use signal_fish_server::server::allocation_benchmark::{
 use std::hint::black_box;
 use std::time::Instant;
 
+/// #636: a blocked cleanup attempt needs room identity, not retained gameplay metadata.
+pub(crate) fn abandoned_room_discovery_skips_member_metadata() {
+    use signal_fish_server::server::allocation_benchmark::{
+        cleanup_abandoned_room_for_measurement, room_code_lock_for_measurement,
+    };
+
+    allocation_harness::block_on(async {
+        allocation_harness::warm_current_thread_runtime().await;
+        let server = EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let creator = Uuid::from_u128(1);
+        let room = server
+            .database()
+            .create_pending_room_classified(
+                "cleanup-profile".into(),
+                Some("CLEAN1".into()),
+                2,
+                false,
+                creator,
+                "relay".into(),
+                "test".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        server
+            .database()
+            .abandon_room(&room.id, &creator)
+            .await
+            .unwrap();
+        let locks = room_code_lock_for_measurement(&server);
+        let held = locks
+            .acquire(
+                &format!("room_join:{}:{}", room.game_name, room.code),
+                std::time::Duration::from_secs(3600),
+            )
+            .await
+            .unwrap();
+        let mut profiles = Vec::new();
+        for bytes in [0, 1024, 65536, 0, 65536] {
+            let metadata = serde_json::json!({"nested": ["x".repeat(bytes)]});
+            assert!(server
+                .database()
+                .update_player_connection_info(
+                    &room.id,
+                    &creator,
+                    ConnectionInfo::Custom {
+                        data: metadata.clone()
+                    },
+                )
+                .await
+                .unwrap());
+            for round in 0..3 {
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                let deleted = cleanup_abandoned_room_for_measurement(&server, room.id).await;
+                let stats = region.change();
+                assert!(
+                    !deleted,
+                    "cleanup must preserve a room with its code locked"
+                );
+                println!("ABANDONED_DISCOVERY bytes={bytes} round={round} stats={stats:?}");
+                if round > 0 {
+                    profiles.push((bytes, stats));
+                }
+            }
+            let stored = server
+                .database()
+                .get_room_by_id(&room.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.game_name, room.game_name);
+            assert_eq!(stored.code, room.code);
+            assert_eq!(stored.players.len(), 1);
+            assert!(matches!(&stored.players[&creator].connection_info,
+                Some(ConnectionInfo::Custom { data }) if *data == metadata));
+            assert_eq!(
+                server.database().pending_room_ids().await.unwrap(),
+                vec![room.id]
+            );
+        }
+        assert!(locks.release(&held).await.unwrap());
+        assert!(cleanup_abandoned_room_for_measurement(&server, room.id).await);
+        assert!(!server.database().room_exists(&room.id).await.unwrap());
+        assert!(!cleanup_abandoned_room_for_measurement(&server, room.id).await);
+        for (bytes, stats) in &profiles {
+            assert_eq!(
+                stats.allocations, profiles[0].1.allocations,
+                "room discovery copied member metadata: bytes={bytes} profiles={profiles:?}"
+            );
+            assert_eq!(
+                stats.bytes_allocated, profiles[0].1.bytes_allocated,
+                "room discovery copied member metadata: bytes={bytes} profiles={profiles:?}"
+            );
+        }
+    });
+}
+
 pub(crate) fn maintenance_discovery_skips_unselected_connections() {
     allocation_harness::block_on(async {
         let mut empty_profiles = Vec::new();

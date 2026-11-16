@@ -81,8 +81,8 @@ impl EnhancedGameServer {
     }
 
     /// Revalidate and reclaim one room without delaying other admitted rooms.
-    async fn cleanup_abandoned_room(&self, room_id: RoomId) -> bool {
-        let room = match self.database.get_room_by_id(&room_id).await {
+    pub(super) async fn cleanup_abandoned_room(&self, room_id: RoomId) -> bool {
+        let room = match self.database.get_room_code_snapshot(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
                 self.pending_creation_rollbacks.remove(&room_id);
