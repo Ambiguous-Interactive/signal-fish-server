@@ -16,6 +16,8 @@ mod fallback_costs;
 mod live_p2p_allocations;
 #[path = "live_p2p_allocations/lobby_costs.rs"]
 mod lobby_costs;
+#[path = "live_p2p_allocations/maintenance_costs.rs"]
+mod maintenance_costs;
 #[path = "live_p2p_allocations/name_costs.rs"]
 mod name_costs;
 #[path = "live_p2p_allocations/publication_costs.rs"]
@@ -496,6 +498,10 @@ fn finalized_membership_reuses_owned_room_snapshots(
 /// Run each measurement on the thread that owns its harness bookkeeping.
 fn main() {
     allocation_harness::run_trials(vec![
+        allocation_harness::trial(
+            "maintenance_discovery_skips_unselected_connections",
+            maintenance_costs::maintenance_discovery_skips_unselected_connections,
+        ),
         allocation_harness::trial(
             "finalized_fallback_copies_only_required_endpoints",
             fallback_costs::finalized_fallback_copies_only_required_endpoints,

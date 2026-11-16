@@ -497,6 +497,32 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    /// Measure the production connection-registry discovery used by maintenance.
+    pub fn maintenance_candidates_for_measurement(
+        server: &super::EnhancedGameServer,
+        unregister: bool,
+    ) -> Vec<(crate::protocol::RoomId, crate::protocol::PlayerId)> {
+        if unregister {
+            server
+                .connection_manager
+                .pending_unregistration_candidates()
+        } else {
+            server.connection_manager.assigned_room_candidates()
+        }
+    }
+
+    /// Prepare registry-only room assignments without storage or socket work.
+    pub async fn assign_room_for_maintenance_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+        room_id: crate::protocol::RoomId,
+    ) {
+        server
+            .connection_manager
+            .assign_client_to_room(player_id, room_id)
+            .await;
+    }
+
     /// Measure the complete pending authority notice with its production storage check.
     pub async fn publish_authority_release_for_measurement(
         server: &super::EnhancedGameServer,

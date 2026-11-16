@@ -1373,6 +1373,27 @@ impl ConnectionManager {
         self.clients.iter().map(|entry| *entry.key()).collect()
     }
 
+    /// Discover room cleanup hints; workers revalidate membership before teardown.
+    pub(super) fn assigned_room_candidates(&self) -> Vec<(RoomId, PlayerId)> {
+        self.clients
+            .iter()
+            .filter_map(|entry| entry.room_id.map(|room_id| (room_id, *entry.key())))
+            .collect()
+    }
+
+    /// Discover interrupted teardown hints without changing retry ownership.
+    pub(super) fn pending_unregistration_candidates(&self) -> Vec<(RoomId, PlayerId)> {
+        self.clients
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .lifecycle
+                    .unregister_needs_retry()
+                    .then_some((RoomId::nil(), *entry.key()))
+            })
+            .collect()
+    }
+
     /// Scrape-time walk over every live connection's classified outbound
     /// queue: total resident items and the oldest resident item's enqueue
     /// instant. This runs on the metrics endpoint, never the write path;

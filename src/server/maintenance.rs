@@ -641,16 +641,7 @@ impl EnhancedGameServer {
     /// task is cancelled after the durable delete but before local teardown.
     pub(crate) async fn cleanup_clients_in_missing_rooms(self: &Arc<Self>) -> usize {
         let deadline = MaintenanceWorkers::deadline();
-        let candidates = self
-            .connection_manager
-            .client_ids()
-            .into_iter()
-            .filter_map(|player_id| {
-                self.connection_manager
-                    .get_client_room(&player_id)
-                    .map(|room_id| (room_id, player_id))
-            })
-            .collect();
+        let candidates = self.connection_manager.assigned_room_candidates();
         let cleaned = self.missing_room_workers
             .run(
                 candidates,
@@ -834,17 +825,7 @@ impl EnhancedGameServer {
 
     /// Retry interrupted socket teardown without waiting for activity expiry.
     async fn retry_pending_unregistrations(self: &Arc<Self>) {
-        let candidates = self
-            .connection_manager
-            .client_ids()
-            .into_iter()
-            .filter_map(|player| {
-                let lifecycle = self.connection_manager.client_lifecycle(&player)?;
-                lifecycle
-                    .unregister_needs_retry()
-                    .then_some((RoomId::nil(), player))
-            })
-            .collect();
+        let candidates = self.connection_manager.pending_unregistration_candidates();
         self.unregister_workers
             .run(
                 candidates,

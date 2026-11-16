@@ -343,6 +343,100 @@ fn channel() -> (
     mpsc::channel(4)
 }
 
+#[tokio::test]
+async fn assigned_room_candidates_follow_current_membership() {
+    let manager = make_manager(4);
+    assert!(manager.assigned_room_candidates().is_empty());
+    let players = [
+        PlayerId::from_u128(1),
+        PlayerId::from_u128(2),
+        PlayerId::from_u128(3),
+    ];
+    let mut receivers = Vec::new();
+    for player in players {
+        let (sender, receiver) = channel();
+        receivers.push(receiver);
+        manager
+            .connect_test_client(player, sender, "127.0.0.1:5000".parse().unwrap())
+            .await;
+    }
+    assert!(manager.assigned_room_candidates().is_empty());
+
+    let initial_room = RoomId::from_u128(10);
+    let next_room = RoomId::from_u128(11);
+    manager
+        .assign_client_to_room(&players[1], RoomId::nil())
+        .await;
+    manager
+        .assign_client_to_room(&players[2], initial_room)
+        .await;
+    let mut candidates = manager.assigned_room_candidates();
+    candidates.sort_unstable();
+    assert_eq!(
+        candidates,
+        vec![(RoomId::nil(), players[1]), (initial_room, players[2])]
+    );
+
+    manager.assign_client_to_room(&players[2], next_room).await;
+    assert!(manager.clear_room_assignment(&players[1]).is_some());
+    assert_eq!(
+        manager.assigned_room_candidates(),
+        vec![(next_room, players[2])]
+    );
+    assert!(manager.remove_client(&players[2]).is_some());
+    assert!(manager.assigned_room_candidates().is_empty());
+    assert!(manager.has_client(&players[0]));
+    assert!(manager.has_client(&players[1]));
+}
+
+#[tokio::test]
+async fn pending_unregistration_candidates_follow_attempt_lifecycle() {
+    let manager = make_manager(4);
+    assert!(manager.pending_unregistration_candidates().is_empty());
+    let players = [
+        PlayerId::from_u128(1),
+        PlayerId::from_u128(2),
+        PlayerId::from_u128(3),
+    ];
+    let mut receivers = Vec::new();
+    for player in players {
+        let (sender, receiver) = channel();
+        receivers.push(receiver);
+        manager
+            .connect_test_client(player, sender, "127.0.0.1:5000".parse().unwrap())
+            .await;
+    }
+    assert!(manager.pending_unregistration_candidates().is_empty());
+    let active_lifecycle = manager.client_lifecycle(&players[0]).unwrap();
+    let canceled_lifecycle = manager.client_lifecycle(&players[1]).unwrap();
+    let completed_lifecycle = manager.client_lifecycle(&players[2]).unwrap();
+    let active_attempt = active_lifecycle.start_unregister().unwrap();
+    let canceled_attempt = canceled_lifecycle.start_unregister().unwrap();
+    let mut completed_attempt = completed_lifecycle.start_unregister().unwrap();
+    assert!(manager.pending_unregistration_candidates().is_empty());
+    drop(canceled_attempt);
+    completed_attempt.complete();
+    drop(completed_attempt);
+    assert_eq!(
+        manager.pending_unregistration_candidates(),
+        vec![(RoomId::nil(), players[1])]
+    );
+
+    let mut retried_attempt = canceled_lifecycle.start_unregister().unwrap();
+    assert!(manager.pending_unregistration_candidates().is_empty());
+    retried_attempt.complete();
+    drop(retried_attempt);
+    assert!(manager.pending_unregistration_candidates().is_empty());
+    drop(active_attempt);
+    assert_eq!(
+        manager.pending_unregistration_candidates(),
+        vec![(RoomId::nil(), players[0])]
+    );
+    assert!(manager.remove_client(&players[0]).is_some());
+    assert!(active_lifecycle.unregister_needs_retry());
+    assert!(manager.pending_unregistration_candidates().is_empty());
+}
+
 #[track_caller]
 fn expect_reassigned(outcome: ReassignmentOutcome) -> ClientDeliveryHandle {
     match outcome {

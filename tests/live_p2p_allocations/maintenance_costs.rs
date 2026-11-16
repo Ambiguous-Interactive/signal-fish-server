@@ -1,0 +1,107 @@
+//! Bound connection discovery scratch independently of unselected connections.
+use super::*;
+use signal_fish_server::server::allocation_benchmark::{
+    assign_room_for_maintenance_measurement, maintenance_candidates_for_measurement,
+};
+use std::hint::black_box;
+use std::time::Instant;
+
+pub(crate) fn maintenance_discovery_skips_unselected_connections() {
+    allocation_harness::block_on(async {
+        let mut empty_profiles = Vec::new();
+        for count in [0_u128, 16, 256, 4096] {
+            let server = EnhancedGameServer::new(
+                ServerConfig::default(),
+                ProtocolConfig::default(),
+                RelayTypeConfig::default(),
+                SessionConfig::default(),
+                TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                MetricsConfig::default(),
+                CoordinationConfig::default(),
+                TransportSecurityConfig::default(),
+                vec![],
+            )
+            .await
+            .unwrap();
+            let mut receivers = Vec::new();
+            for index in 1..=count {
+                let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                receivers.push(receiver);
+                server.connect_client(Uuid::from_u128(index), sender).await;
+            }
+            for unregister in [false, true] {
+                let region = stats_alloc::Region::new(ALLOCATOR);
+                let candidates = maintenance_candidates_for_measurement(&server, unregister);
+                let stats = region.change();
+                assert!(candidates.is_empty());
+                println!("MAINTENANCE_EMPTY count={count} unregister={unregister} stats={stats:?}");
+                empty_profiles.push((count, unregister, stats));
+                record_discovery_times(&server, count, unregister, false);
+            }
+            let mut expected = Vec::new();
+            for index in (1..=count).step_by(2) {
+                let player = Uuid::from_u128(index);
+                let room = Uuid::from_u128(10_000 + index % 7);
+                assign_room_for_maintenance_measurement(&server, &player, room).await;
+                expected.push((room, player));
+            }
+            expected.sort_unstable();
+            let region = stats_alloc::Region::new(ALLOCATOR);
+            let mut actual = maintenance_candidates_for_measurement(&server, false);
+            let stats = region.change();
+            actual.sort_unstable();
+            assert_eq!(
+                actual, expected,
+                "mixed room assignments at {count} clients"
+            );
+            println!(
+                "MAINTENANCE_ASSIGNED count={count} selected={} stats={stats:?}",
+                actual.len()
+            );
+            let fixed = empty_profiles
+                .iter()
+                .find(|(size, unregister, _)| *size == 0 && !unregister)
+                .unwrap()
+                .2;
+            assert!(stats.allocations <= fixed.allocations + usize::from(!actual.is_empty()));
+            let output_bytes = actual.len() * std::mem::size_of::<(Uuid, Uuid)>();
+            assert!(
+                stats.bytes_allocated <= fixed.bytes_allocated + output_bytes,
+                "assigned discovery retained client-ID scratch: count={count} stats={stats:?}"
+            );
+            record_discovery_times(&server, count, false, true);
+            assert!(maintenance_candidates_for_measurement(&server, true).is_empty());
+        }
+        for unregister in [false, true] {
+            let baseline = empty_profiles
+                .iter()
+                .find(|(count, mode, _)| *count == 0 && *mode == unregister)
+                .unwrap()
+                .2;
+            for (count, mode, stats) in &empty_profiles {
+                if *mode == unregister {
+                    assert_eq!(stats.allocations, baseline.allocations,
+                        "unselected connections added scratch: count={count} unregister={unregister} stats={stats:?} baseline={baseline:?}");
+                    assert_eq!(stats.reallocations, baseline.reallocations);
+                    assert_eq!(stats.bytes_allocated, baseline.bytes_allocated);
+                }
+            }
+        }
+    });
+}
+
+fn record_discovery_times(
+    server: &EnhancedGameServer,
+    count: u128,
+    unregister: bool,
+    assigned: bool,
+) {
+    for round in 0..5 {
+        let started = Instant::now();
+        for _ in 0..100 {
+            black_box(maintenance_candidates_for_measurement(server, unregister));
+        }
+        println!("MAINTENANCE_TIME count={count} unregister={unregister} assigned={assigned} round={round} iterations=100 elapsed_ns={}", started.elapsed().as_nanos());
+    }
+}

@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Reduce server memory use when a live Direct host repeats or replaces its endpoint (#1659, #636).
-- Reduce server memory use and storage work during P2P session and lobby cleanup and guest departures (#636).
+- Reduce server memory use, repeated connection scans, and storage work during P2P session and lobby cleanup
+  and guest departures (#636).
 - Pre-gather ICE for host-only clients when a mesh-preferring game can use Host/WebRTC.
 - Reduce server locking and routing work during live P2P plan publication, room changes, and WebRTC signaling (#636).
 - Reduce server memory used to retry delayed authority changes (#636).
