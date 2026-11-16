@@ -186,6 +186,13 @@ nested `Pong` reference makes the inventory and invalid-result assertions fail
 (`f91cb31d`). Both faults are restored. These are assertion failures, not build
 failures. No production or schema defect is established.
 
+After restoration, all 27 owning schema controls pass in `655c4592`
+(0.454 seconds). Eleven source-policy controls pass in `e032c681`; all nine
+golden/sample controls pass in `47bdd30d`. Formatting, full strict Clippy,
+Markdown, doc consistency and focused spelling checks pass. Independent review
+finds no blocker. [PR #1679](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1679)
+owns hosted delivery; the issue records its final verified head and merge state.
+
 Commands:
 
 ```bash
