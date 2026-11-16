@@ -1406,6 +1406,41 @@ socket, process startup, cancellation or concurrent correspondence. Invalid
 bounds outside the sampled pairs remain covered by the pure bounds proofs,
 not by this constructor control. Runtime and client behavior stay unchanged.
 
+### Live configured bounds handshake evidence
+
+The #1464 `configured_bounds_reach_live_handshake` control uses the production
+plain-TCP listener and real WebSockets. It checks all three valid deployment
+ranges (`2..2`, `2..3`, `3..3`), both route defaults and both app-ID policies.
+Each eligible route checks omitted offers and explicit `0, 1, 2, 3, 4, 65535`.
+The independent oracle uses the route default, ceiling and floor directly.
+It does not call the production negotiation helper.
+
+The matrix accepts 66 handshakes, including 15 same-socket retries after a
+pending refusal. It checks version, floor and ceiling fields in ProtocolInfo,
+then requires a Ping/Pong exchange on the completed connection. Eleven
+below-floor offers on open-policy connections require refusal and closure.
+One open-policy v2 route is refused before Authenticate in the v3-only range.
+All six server instances complete explicit shutdown.
+
+Two temporary compiled faults target only the live `decide_handshake_version`
+call in `src/websocket/connection.rs`. Replacing the supplied ceiling with `3`
+fails the `2..2`/explicit-3 version assertion (Nextest `8ee1f645`). Replacing
+its handshake-state argument with `false` fails the required open-policy close
+assertion (`a8802305`). Both faults restore the original file byte-for-byte.
+Initial unchanged-source green is `48c30209`; final restored evidence is
+recorded in the linked issue. No production defect is established.
+
+```bash
+bash scripts/dev-loop.sh configured_bounds_reach_live_handshake --all-features
+```
+
+This is finite live caller/state evidence, not a Lean theorem or arbitrary-input
+refinement. It excludes TLS, process startup, cancellation and concurrent
+correspondence. Existing constructor and pure proofs retain their own scope.
+Rust, .NET and Godot clients need no change: runtime, configuration and wire
+behavior stay unchanged. This test-only work needs no changelog entry.
+The broader #1464 criteria and historical failures remain open.
+
 ### Finalized-join fallback caller evidence
 
 The #1464 control in

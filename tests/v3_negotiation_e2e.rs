@@ -76,13 +76,21 @@ async fn start_server_with_app_policy_and_stats(
 }
 
 async fn start_v3_only_server(app_id_allowlist_enabled: bool) -> RunningTestServer {
+    start_server_with_bounds(app_id_allowlist_enabled, 3, 3).await
+}
+
+async fn start_server_with_bounds(
+    app_id_allowlist_enabled: bool,
+    minimum: u16,
+    maximum: u16,
+) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
     server_config.app_id_allowlist_enabled = app_id_allowlist_enabled;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
-    protocol_config.min_protocol_version = 3;
-    protocol_config.max_protocol_version = 3;
+    protocol_config.min_protocol_version = minimum;
+    protocol_config.max_protocol_version = maximum;
 
     let game_server = EnhancedGameServer::new(
         server_config,
@@ -1142,4 +1150,134 @@ async fn open_policy_late_authenticate_after_application_message_answers_invalid
         other => panic!("expected Error, got {other:?}"),
     }
     running_server.shutdown().await;
+}
+
+/// #1464: constructor identity alone does not check live caller inputs or state.
+#[tokio::test]
+async fn configured_bounds_reach_live_handshake() {
+    async fn send_auth(ws: &mut WsStream, offer: Option<u16>) {
+        ws.send(Message::Text(
+            serde_json::to_string(&version_only_auth(offer))
+                .expect("serialize authentication")
+                .into(),
+        ))
+        .await
+        .expect("send authentication");
+    }
+
+    async fn assert_closed(ws: &mut WsStream) {
+        let next = tokio::time::timeout(SERVER_MESSAGE_TIMEOUT, ws.next())
+            .await
+            .expect("refused open-policy socket must close");
+        assert!(
+            matches!(next, None | Some(Ok(Message::Close(_)))),
+            "refused socket delivered another message: {next:?}"
+        );
+    }
+
+    let mut outcomes = [0usize; 4];
+    for (minimum, maximum) in [(2, 2), (2, 3), (3, 3)] {
+        for allowlist in [true, false] {
+            let running = start_server_with_bounds(allowlist, minimum, maximum).await;
+            for (path, route_default) in [("/v2/ws", 2), ("/v3/ws", 3)] {
+                /*
+                    Open policy refuses an inadmissible route before Authenticate,
+                    even if a later explicit offer would be accepted.
+                */
+                if !allowlist && route_default < minimum {
+                    let mut ws = connect(running.addr(), path).await;
+                    assert!(matches!(
+                        next_server_message(&mut ws).await,
+                        ServerMessage::AuthenticationError {
+                            error_code: ErrorCode::UnsupportedProtocolVersion,
+                            ..
+                        }
+                    ));
+                    assert_closed(&mut ws).await;
+                    outcomes[3] += 1;
+                    continue;
+                }
+                for offer in [
+                    None,
+                    Some(0),
+                    Some(1),
+                    Some(2),
+                    Some(3),
+                    Some(4),
+                    Some(u16::MAX),
+                ] {
+                    let context = format!("bounds {minimum}..={maximum}, allowlist={allowlist}, {path}, offer={offer:?}");
+                    let mut ws = connect(running.addr(), path).await;
+                    send_auth(&mut ws, offer).await;
+                    let mut expected = offer.unwrap_or(route_default).min(maximum);
+                    if expected < minimum {
+                        let refused = next_server_message(&mut ws).await;
+                        assert!(
+                            matches!(
+                                refused,
+                                ServerMessage::AuthenticationError {
+                                    error_code: ErrorCode::UnsupportedProtocolVersion,
+                                    ..
+                                }
+                            ),
+                            "{context}: expected refusal, got {refused:?}"
+                        );
+                        if !allowlist {
+                            assert_closed(&mut ws).await;
+                            outcomes[2] += 1;
+                            continue;
+                        }
+                        /* A pending refusal must permit retry on this socket. */
+                        outcomes[1] += 1;
+                        send_auth(&mut ws, Some(minimum)).await;
+                        expected = minimum;
+                    }
+                    let authenticated = next_server_message(&mut ws).await;
+                    assert!(
+                        matches!(authenticated, ServerMessage::Authenticated { .. }),
+                        "{context}: expected authentication, got {authenticated:?}"
+                    );
+                    let response = next_server_message(&mut ws).await;
+                    let ServerMessage::ProtocolInfo(info) = response else {
+                        panic!("{context}: expected protocol info, got {response:?}");
+                    };
+                    assert_eq!(
+                        info.protocol_version,
+                        (expected == 3).then_some(3),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        info.min_protocol_version,
+                        (expected == 3).then_some(minimum),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        info.max_protocol_version,
+                        (expected == 3).then_some(maximum),
+                        "{context}"
+                    );
+                    // Exercise the stored handshake state after its two replies.
+                    ws.send(Message::Text(
+                        serde_json::to_string(&ClientMessage::Ping)
+                            .expect("serialize ping")
+                            .into(),
+                    ))
+                    .await
+                    .expect("send ping after handshake");
+                    assert!(
+                        matches!(next_server_message(&mut ws).await, ServerMessage::Pong),
+                        "{context}: completed handshake must permit application traffic"
+                    );
+                    ws.close(None).await.expect("close accepted socket");
+                    outcomes[0] += 1;
+                }
+            }
+            running.shutdown().await;
+        }
+    }
+    assert_eq!(
+        outcomes,
+        [66, 15, 11, 1],
+        "accepted, retried, closed after offer, closed before offer"
+    );
 }
