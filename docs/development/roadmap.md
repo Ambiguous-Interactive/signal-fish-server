@@ -26,9 +26,9 @@ Resume an unfinished task before selecting a new one. One owner claims one issue
 These are bounded investigation tasks; ready does not mean a production defect is confirmed.
 Refresh issue comments and dependencies before claiming. Blocked tasks return to triage.
 
-| Order | Existing issue | Next discriminating experiment |
-| --- | --- | --- |
-| 1 | [#826][i826] | Slot 6 owns A01's inbound crosswalk and join-schema null contract; see the current issue evidence. |
+Slot 6 completed the bounded A01 crosswalk and join-schema experiment under
+[#826][i826]. No task is claimed for slot 7. Refresh existing debt and record
+a new experiment before the next session.
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
@@ -336,7 +336,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | 3 | Debt | [#1224][i1224] / [#1674](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1674) | Existing issue completed: 61 lint findings fixed, owning tests and hosted controls pass. |
 | 4 | Debt | [#1501][i1501] / [#1675](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1675) | Upstream repair and constraints assessed; original warning remains unreproduced. |
 | 5 | Exploration | [#1111][i1111] / [#1653](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1653) | Current-source prost 0.14.6 records qualify; PR merged and Docker publication passed. |
-| 6 | Debt | [#826][i826] | Exact inbound unions and existing join null values qualify; session delivery pending. |
+| 6 | Debt | [#826][i826] / [#1677](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1677) | Exact inbound unions and existing join null values qualify; broader audit remains open. |
 | 7 | Debt | Pending | Not started |
 | 8 | Debt | Pending | Not started |
 | 9 | Debt | Pending | Not started |
