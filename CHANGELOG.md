@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Correct reconnect examples to include the restored player and the v3 reconnect token (#826).
 - Allow the existing null values for optional join fields in the protocol schema (#826).
 - Exclude multicast and limited broadcast IP destinations from Direct host selection, while preserving DNS labels
   (#1663).
