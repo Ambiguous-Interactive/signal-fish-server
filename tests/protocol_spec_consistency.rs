@@ -3576,6 +3576,290 @@ mod projection_runtime {
         running.shutdown().await;
     }
 
+    /// #826: exercise nested result projection at the production socket writer,
+    /// with independent legacy recipients and canonical operation identities.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn correlated_lifecycle_results_preserve_values_on_real_sockets() {
+        let docs = Yaml::load_from_str(&spec_text()).expect("protocol YAML");
+        let root = docs.first().expect("protocol document");
+        let mut protocol = test_helpers::test_protocol_config();
+        protocol.sdk_compatibility.enforce = false;
+        let server = test_helpers::create_test_server_with_config(
+            test_helpers::test_server_config(),
+            protocol,
+        )
+        .await;
+        let router = create_router("http://localhost:3000").with_state(server.clone());
+        let running = test_helpers::RunningTestServer::spawn(server, router).await;
+        let url = format!("ws://{}/ws", running.addr());
+        let mut sockets = Vec::new();
+        for version in [2, 2, 3] {
+            let (mut socket, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), connect_async(&url))
+                    .await
+                    .expect("connect deadline")
+                    .expect("connect WebSocket");
+            send(
+                &mut socket,
+                json!({"type":"Authenticate", "data":{
+                    "app_id":"correlated-runtime", "protocol_version":version,
+                    "requested_capabilities":["room_operation_ids"]
+                }}),
+            )
+            .await;
+            receive_exact(&mut socket, "Authenticated").await;
+            let info = receive_exact(&mut socket, "ProtocolInfo").await;
+            assert_eq!(
+                info["data"]["protocol_version"],
+                if version == 3 { json!(3) } else { Value::Null }
+            );
+            assert_eq!(
+                info["data"]["capabilities"]
+                    .as_array()
+                    .expect("capabilities")
+                    .contains(&json!("room_operation_ids")),
+                version == 3
+            );
+            sockets.push(socket);
+        }
+        let mut actor = sockets.pop().unwrap();
+        let mut watcher = sockets.pop().unwrap();
+        let mut host = sockets.pop().unwrap();
+        send(
+            &mut host,
+            json!({"type":"JoinRoom", "data":{
+                "game_name":"correlated-runtime", "player_name":"Host-観客",
+                "max_players":4, "supports_authority":false
+            }}),
+        )
+        .await;
+        let joined = receive_exact(&mut host, "RoomJoined").await;
+        assert_runtime_shape(root, &joined, 2);
+        let room_id = joined["data"]["room_id"].clone();
+        let room_code = joined["data"]["room_code"].clone();
+        let host_id = joined["data"]["player_id"].clone();
+        receive_exact(&mut host, "LobbyStateChanged").await;
+        let metadata = json!({"type":"custom", "data":{"nested":[null, false, "観客"]}});
+        send(
+            &mut host,
+            json!({"type":"ProvideConnectionInfo", "data":{
+                "connection_info":metadata
+            }}),
+        )
+        .await;
+        send(&mut host, json!({"type":"Ping"})).await;
+        receive_exact(&mut host, "Pong").await;
+        send(
+            &mut watcher,
+            json!({"type":"JoinAsSpectator", "data":{
+                "game_name":"correlated-runtime", "room_code":room_code,
+                "spectator_name":"Watcher-é"
+            }}),
+        )
+        .await;
+        let watched = receive_exact(&mut watcher, "SpectatorJoined").await;
+        assert_runtime_shape(root, &watched, 2);
+        let watcher_id = watched["data"]["spectator_id"].clone();
+        assert_eq!(
+            watched["data"]["current_players"][0]["connection_info"],
+            metadata
+        );
+        receive_exact(&mut host, "NewSpectatorJoined").await;
+
+        // Join-only makes the missing-room refusal independent of random codes.
+        let failure = operation_result(
+            root,
+            &mut actor,
+            1,
+            json!({"type":"JoinRoom", "data":{
+                "game_name":"missing-correlated-game", "room_code":room_code,
+                "player_name":"Member-Ω", "join_only":true
+            }}),
+            "RoomJoinFailed",
+        )
+        .await;
+        assert_eq!(failure["data"]["error_code"], "ROOM_NOT_FOUND");
+        assert!(failure["data"]["reason"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+        let member = operation_result(
+            root,
+            &mut actor,
+            2,
+            json!({"type":"JoinRoom", "data":{
+                "game_name":"correlated-runtime", "room_code":room_code,
+                "player_name":"Member-Ω", "supports_authority":false, "join_only":true
+            }}),
+            "RoomJoined",
+        )
+        .await;
+        let actor_id = member["data"]["player_id"].clone();
+        assert_eq!(member["data"]["room_id"], room_id);
+        assert_eq!(member["data"]["room_code"], room_code);
+        assert_roster_values(
+            &member["data"]["current_players"],
+            &[
+                (host_id.clone(), "Host-観客"),
+                (actor_id.clone(), "Member-Ω"),
+            ],
+        );
+        assert_v3_member_fields(&member["data"]["current_players"]);
+        assert_spectator_roster(
+            &member["data"]["current_spectators"],
+            &[(watcher_id.clone(), "Watcher-é")],
+            3,
+        );
+        for socket in [&mut host, &mut watcher] {
+            let event = receive_exact(socket, "PlayerJoined").await;
+            assert_runtime_shape(root, &event, 2);
+            assert_eq!(event["data"]["player"]["id"], actor_id);
+            assert_eq!(event["data"]["player"]["name"], "Member-Ω");
+        }
+        let left =
+            operation_result(root, &mut actor, 3, json!({"type":"LeaveRoom"}), "RoomLeft").await;
+        assert_eq!(left, json!({"type":"RoomLeft"}));
+        for socket in [&mut host, &mut watcher] {
+            let event = receive_exact(socket, "PlayerLeft").await;
+            assert_runtime_shape(root, &event, 2);
+            assert_eq!(event["data"]["player_id"], actor_id);
+        }
+
+        for (join_id, leave_id, populated) in [(4, 5, true), (6, 7, false)] {
+            let joined = operation_result(
+                root,
+                &mut actor,
+                join_id,
+                json!({"type":"JoinAsSpectator", "data":{
+                    "game_name":"correlated-runtime", "room_code":room_code,
+                    "spectator_name":"Actor-Ω"
+                }}),
+                "SpectatorJoined",
+            )
+            .await;
+            assert_eq!(joined["data"]["room_id"], room_id);
+            assert_eq!(joined["data"]["room_code"], room_code);
+            assert_eq!(joined["data"]["spectator_id"], actor_id);
+            assert_eq!(joined["data"]["reason"], "joined");
+            assert_roster_values(
+                &joined["data"]["current_players"],
+                &[(host_id.clone(), "Host-観客")],
+            );
+            assert_v3_member_fields(&joined["data"]["current_players"]);
+            assert_spectator_roster(
+                &joined["data"]["current_spectators"],
+                &[
+                    (watcher_id.clone(), "Watcher-é"),
+                    (actor_id.clone(), "Actor-Ω"),
+                ],
+                3,
+            );
+            for socket in [&mut host, &mut watcher] {
+                let event = receive_exact(socket, "NewSpectatorJoined").await;
+                assert_runtime_shape(root, &event, 2);
+                assert_spectator_entry(&event["data"]["spectator"], &actor_id, "Actor-Ω", 2);
+                assert_fanout_roster(
+                    &event,
+                    &[
+                        (watcher_id.clone(), "Watcher-é"),
+                        (actor_id.clone(), "Actor-Ω"),
+                    ],
+                    2,
+                );
+            }
+            if !populated {
+                send(&mut watcher, json!({"type":"LeaveSpectator"})).await;
+                let left = receive_exact(&mut watcher, "SpectatorLeft").await;
+                assert_runtime_shape(root, &left, 2);
+                assert_spectator_roster(
+                    &left["data"]["current_spectators"],
+                    &[(actor_id.clone(), "Actor-Ω")],
+                    2,
+                );
+                receive_exact(&mut host, "SpectatorDisconnected").await;
+                let event = receive_exact(&mut actor, "SpectatorDisconnected").await;
+                assert_runtime_shape(root, &event, 3);
+                assert_eq!(event["data"]["spectator_id"], watcher_id);
+                assert_fanout_roster(&event, &[(actor_id.clone(), "Actor-Ω")], 3);
+            }
+            let left = operation_result(
+                root,
+                &mut actor,
+                leave_id,
+                json!({"type":"LeaveSpectator"}),
+                "SpectatorLeft",
+            )
+            .await;
+            assert_eq!(left["data"]["room_id"], room_id);
+            assert_eq!(left["data"]["room_code"], room_code);
+            assert_eq!(left["data"]["reason"], "voluntary_leave");
+            let expected = if populated {
+                vec![(watcher_id.clone(), "Watcher-é")]
+            } else {
+                vec![]
+            };
+            assert_spectator_roster(&left["data"]["current_spectators"], &expected, 3);
+            let event = receive_exact(&mut host, "SpectatorDisconnected").await;
+            assert_runtime_shape(root, &event, 2);
+            assert_eq!(event["data"]["spectator_id"], actor_id);
+            assert_fanout_roster(&event, &expected, 2);
+            if populated {
+                receive_exact(&mut watcher, "SpectatorDisconnected").await;
+            }
+            for socket in [&mut host, &mut watcher, &mut actor] {
+                send(socket, json!({"type":"Ping"})).await;
+                receive_exact(socket, "Pong").await;
+            }
+        }
+        for socket in [&mut host, &mut watcher, &mut actor] {
+            socket
+                .close(None)
+                .await
+                .expect("close correlated scenario socket");
+        }
+        running.shutdown().await;
+    }
+
+    async fn operation_result(
+        root: &Yaml<'_>,
+        socket: &mut Socket,
+        id: u128,
+        operation: Value,
+        tag: &str,
+    ) -> Value {
+        let id = uuid::Uuid::from_u128(id).to_string();
+        send(
+            socket,
+            json!({"type":"RoomOperation", "data":{
+                "operation_id":id, "operation":operation
+            }}),
+        )
+        .await;
+        let frame = receive_exact(socket, "RoomOperationResult").await;
+        assert_eq!(
+            frame["data"]["operation_id"], id,
+            "exact correlation: {frame}"
+        );
+        let result = &frame["data"]["result"];
+        assert_eq!(result["type"], tag, "exact nested result: {frame}");
+        assert_runtime_shape(root, &frame, 3);
+        result.clone()
+    }
+
+    fn assert_v3_member_fields(roster: &Value) {
+        for member in roster.as_array().expect("member roster") {
+            assert!(
+                member.get("connection_info").is_none(),
+                "v3 metadata omission: {member}"
+            );
+            assert!(
+                member.get("connected_at").is_none(),
+                "v3 timestamp omission: {member}"
+            );
+            assert!(member["epoch"].as_u64().is_some_and(|epoch| epoch > 0));
+            assert_eq!(member["seq"], 0);
+        }
+    }
+
     async fn receive_exact(socket: &mut Socket, tag: &str) -> Value {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
