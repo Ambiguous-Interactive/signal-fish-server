@@ -72,6 +72,81 @@ the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
 and trace-validation paths need separate dispositions. Client packages have
 separate build and test gates.
 
+### Scheduled mutation evidence assessment
+
+A separately authorized session assesses seven missed mutations from
+[scheduled run 43817046158](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/43817046158).
+The failed source is `20aecff52e3b53dadd2cd23c5677656502fc187a`.
+Current source `28351414cdb876602ba34675e2de4cf44e46125c` has identical
+production bodies in both affected files. The failed run remains failed.
+
+The scheduled oracle uses library tests with `trace-validation`. Existing
+integration and allocation controls do not run in that oracle. New library
+controls exercise the public endpoint constructor and the production start
+publication builder. The endpoint table checks 17 address spellings with zero
+and nonzero ports. The builder checks 72 configurations and 144 recipient plans:
+Relay, Host and Mesh preferences; Direct and WebRTC settings; Direct capability;
+no usable endpoint, authority endpoint and successor endpoint. It checks exact
+peer names, offer roles, host endpoint, common generation, message phases and
+saved session state. This is builder-boundary evidence, not live socket delivery.
+
+The five-component mutation (`index < 4` to `index <= 4`) is equivalent at the
+public boundary. Only exactly five numeric components can change the preliminary
+predicate. Pinned `url` 2.5.8 rejects more than four IPv4 components before returning
+`Host::Ipv4`. Thus the final alias predicate remains false. Empty components cannot
+pass the numeric gate; the caller strips a final DNS root dot. The five-part DNS
+positive guards the nearby public behavior. This proof is specific to the pinned
+parser. No mutation exclusion or inventory change follows from this assessment.
+
+The three start-builder conjunction changes can copy an unused endpoint. The
+session selector independently applies configuration, capability and transport
+priority, so output checks alone cannot assess this cost. The existing
+`disabled_direct_start_skips_endpoints` allocation trial compares absent,
+unusable, short and long hosts across 2, 16 and 255 members. It checks exact
+allocation counts and bytes for unavailable Direct paths.
+
+Exact source faults produce these results. Each nonzero result is an intended
+assertion failure, not a build or tool error.
+
+| Scheduled job | Exact fault | Discriminating observation |
+| --- | --- | --- |
+| 133132699999 | Final IPv4 address OR becomes AND | New library control accepts multicast `224.0.0.1` incorrectly. |
+| 133132700066 | Hex-digit AND becomes OR | New library control rejects the preserved DNS spelling `0x`. |
+| 133132700066 | Component index `< 4` becomes `<= 4` | New controls pass; pinned-parser equivalence proof applies. |
+| 133132700018 | Each of the three builder AND guards becomes OR, separately | Existing cost control observes one extra allocation in a two-member unavailable-Direct case. |
+| 133132700168 | Delete `!` from `!relay_floor` | New builder control observes an empty peer name instead of `Guest-観客`. |
+
+After byte-identical production restoration, both new library controls pass
+(Nextest `8e1db5ac`, build 11.76 s, execution 0.041 s). The existing allocation
+trial passes (`283b7028`, build 6.59 s, execution 0.163 s). Ten owning validation
+and start-builder controls pass. These are scoped observations, not p95 or
+performance improvement claims. Independent review checks source restoration,
+the exact faults and the pinned-parser proof.
+
+The three cost faults remain outside the scheduled library oracle. The equivalent
+fault also remains in the inventory. This session does not repair the entire
+scheduled campaign or claim that a new full mutation run passes. No threshold,
+exclusion, feature set, shard count or timeout changed. The original failure
+has a bounded explanation: three library coverage gaps, three cost assertions
+outside that oracle, and one equivalent predicate under the pinned parser.
+
+Reproduce the new library controls:
+
+```bash
+bash scripts/dev-loop.sh --features trace-validation direct_endpoint_address_boundaries_preserve_dns_and_unicast start_publication_preserves_named_peers_and_endpoint_selection
+```
+
+Reproduce the existing cost control:
+
+```bash
+cargo nextest run --test session_plan_allocations --features allocation-tracking -E 'test(disabled_direct_start_skips_endpoints)'
+```
+
+This is internal-only test evidence. Production, wire fields, client behavior and
+mutation policy stay unchanged. Rust, .NET and Godot need no migration. No
+changelog entry applies. The wider audit and unrelated historical causes remain
+open. Bounded acceptance and final delivery belong to existing issue #826.
+
 ### Inbound operation crosswalk
 
 Refreshed from `src/protocol/messages.rs` and `src/server/message_router.rs`

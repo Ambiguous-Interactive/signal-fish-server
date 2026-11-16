@@ -8359,3 +8359,119 @@ async fn stored_unknown_join_times_finalize_and_relay_both_signal_directions() {
         }
     }
 }
+
+/// Exercise the production start builder, not the isolated emit test harness.
+#[tokio::test]
+async fn start_publication_preserves_named_peers_and_endpoint_selection() {
+    for desired in [Topology::Relay, Topology::Host, Topology::Mesh] {
+        for enable_direct in [false, true] {
+            for enable_webrtc in [false, true] {
+                for direct_capable in [false, true] {
+                    for endpoint_owner in [None, Some(0), Some(1)] {
+                        let server = create_server_with_session(SessionConfig {
+                            default_topology: desired,
+                            enable_direct,
+                            enable_webrtc,
+                            ..SessionConfig::default()
+                        })
+                        .await;
+                        let ids = [PlayerId::from_u128(1), PlayerId::from_u128(2)];
+                        let names = ["Host-雪", "Guest-観客"];
+                        let mut players = Vec::new();
+                        for (index, id) in ids.into_iter().enumerate() {
+                            let (sender, _receiver) = mpsc::channel(16);
+                            server.connect_client(id, sender).await;
+                            let mut protocol = v3_webrtc();
+                            if direct_capable {
+                                protocol.transports.push(Transport::Direct);
+                            }
+                            server.set_client_protocol(&id, protocol);
+                            let mut player = player_info(id, names[index], index == 0);
+                            player.connection_info = Some(ConnectionInfo::Direct {
+                                host: if endpoint_owner == Some(index) {
+                                    "192.0.2.17".into()
+                                } else {
+                                    "0.0.0.0".into()
+                                },
+                                port: 7777,
+                            });
+                            players.push(player);
+                        }
+                        let expected = if desired != Topology::Relay && enable_webrtc {
+                            (desired, Transport::WebRtc)
+                        } else if desired != Topology::Relay
+                            && enable_direct
+                            && direct_capable
+                            && endpoint_owner.is_some()
+                        {
+                            (Topology::Host, Transport::Direct)
+                        } else {
+                            (Topology::Relay, Transport::Relay)
+                        };
+                        let host = match expected {
+                            (Topology::Host, Transport::Direct) => endpoint_owner.map(|i| ids[i]),
+                            (Topology::Host, Transport::WebRtc) => Some(ids[0]),
+                            _ => None,
+                        };
+                        let room_id = RoomId::new_v4();
+                        let starting = Arc::new(ServerMessage::GameStarting {
+                            peer_connections: Vec::new(),
+                        });
+                        let publication = (server.start_game_publication_builder(room_id))(
+                            &finalized("boundary-game", players, Some(ids[0])),
+                            Arc::clone(&starting),
+                        );
+                        assert_eq!(publication.recipient_messages.len(), 2);
+                        let mut generation = None;
+                        for (index, batch) in publication.recipient_messages.iter().enumerate() {
+                            assert_eq!(batch.player_id, ids[index]);
+                            assert_eq!(batch.first_phase, 0);
+                            assert_eq!(batch.messages.len(), 2);
+                            assert!(Arc::ptr_eq(&batch.messages[0], &starting));
+                            let ServerMessage::SessionPlan(plan) = batch.messages[1].as_ref()
+                            else {
+                                panic!("expected tailored SessionPlan");
+                            };
+                            assert_eq!((plan.topology, plan.transport), expected);
+                            assert_eq!(plan.host, host);
+                            assert_eq!(*generation.get_or_insert(plan.generation), plan.generation);
+                            assert_eq!(
+                                plan.direct_endpoint,
+                                (expected.1 == Transport::Direct).then(|| {
+                                    crate::protocol::DirectEndpoint {
+                                        host: "192.0.2.17".into(),
+                                        port: 7777,
+                                    }
+                                })
+                            );
+                            if expected.0 == Topology::Relay {
+                                assert!(plan.peers.is_empty());
+                            } else {
+                                assert_eq!(plan.peers.len(), 1);
+                                assert_eq!(plan.peers[0].player_id, ids[1 - index]);
+                                assert_eq!(plan.peers[0].player_name, names[1 - index]);
+                                assert_eq!(
+                                    plan.peers[0].initiate,
+                                    if expected.0 == Topology::Mesh {
+                                        index == 0
+                                    } else {
+                                        Some(ids[index]) != host
+                                    }
+                                );
+                            }
+                        }
+                        (publication.after_game_starting)();
+                        assert_eq!(
+                            server.active_session_plan(&room_id),
+                            (expected.0 != Topology::Relay).then_some(ActiveSessionPlan {
+                                topology: expected.0,
+                                transport: expected.1,
+                                host,
+                            })
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

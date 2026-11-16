@@ -293,6 +293,45 @@ mod tests {
     use super::*;
     use crate::config::ProtocolConfig;
 
+    /// Keep the public endpoint contract in the library mutation oracle.
+    #[test]
+    fn direct_endpoint_address_boundaries_preserve_dns_and_unicast() {
+        for (host, usable) in [
+            ("0.0.0.0", false),
+            ("224.0.0.1", false),
+            ("239.255.255.255", false),
+            ("255.255.255.255", false),
+            ("::ffff:224.0.0.1", false),
+            ("0x0", false),
+            ("0XFFFFFFFF", false),
+            ("223.255.255.255", true),
+            ("240.0.0.1", true),
+            ("192.0.2.255", true),
+            ("127.1", true),
+            ("0x", true),
+            ("0X", true),
+            ("0x.0", true),
+            ("0XHost", true),
+            ("host.example.", true),
+            ("0.0.0.0.0", true),
+        ] {
+            for port in [0, 7777] {
+                let connection = ConnectionInfo::Direct {
+                    host: host.into(),
+                    port,
+                };
+                assert_eq!(
+                    DirectEndpoint::from_connection_info(&connection),
+                    (usable && port != 0).then(|| DirectEndpoint {
+                        host: host.into(),
+                        port
+                    }),
+                    "host={host:?}, port={port}"
+                );
+            }
+        }
+    }
+
     /// Compare room admission against canonical caseless matching across both paths.
     #[test]
     fn name_comparison_matches_canonical_keys_for_ascii_and_unicode_rooms() {
