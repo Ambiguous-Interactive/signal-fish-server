@@ -321,6 +321,21 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
     }
 
     let schema_type = schema.as_mapping_get("type").and_then(Yaml::as_str);
+    if let Some(types) = schema.as_mapping_get("type").and_then(Yaml::as_sequence) {
+        let matches = types.iter().any(|kind| match kind.as_str() {
+            Some("null") => value.is_null(),
+            Some("string") => value.is_string(),
+            Some("integer") => value.is_i64() || value.is_u64(),
+            Some("boolean") => value.is_boolean(),
+            Some("number") => value.is_number(),
+            Some("object") => value.is_object(),
+            Some("array") => value.is_array(),
+            other => panic!("unsupported schema type in union: {other:?}"),
+        });
+        if !matches {
+            return false;
+        }
+    }
     let has_object_keywords = schema.as_mapping_get("required").is_some()
         || schema.as_mapping_get("properties").is_some()
         || schema.as_mapping_get("additionalProperties").is_some();
@@ -399,6 +414,7 @@ fn schema_shape_matches(root: &Yaml, schema: &Yaml, value: &serde_json::Value) -
         }
     } else {
         match schema_type {
+            Some("null") if !value.is_null() => return false,
             Some("string") if !value.is_string() => return false,
             Some("integer") if !value.is_i64() && !value.is_u64() => return false,
             Some("boolean") if !value.is_boolean() => return false,
@@ -1618,6 +1634,265 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
             !schema_shape_matches(root, schema, &value),
             "{schema_name} accepted {case}: {value}"
         );
+    }
+}
+
+#[test]
+fn inbound_schema_unions_match_exact_rust_operation_sets() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let source = read_file(&repo_root().join("src/protocol/messages.rs"));
+    for (enum_name, path) in [
+        (
+            "ClientMessage",
+            vec!["components", "schemas", "ClientMessageEnvelope", "oneOf"],
+        ),
+        (
+            "RoomOperationRequest",
+            vec![
+                "components",
+                "schemas",
+                "RoomOperation",
+                "properties",
+                "data",
+                "properties",
+                "operation",
+                "oneOf",
+            ],
+        ),
+    ] {
+        let branches = mapping_path(root, &path)
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| panic!("{enum_name}: missing inbound union at {path:?}"));
+        let declared: Vec<_> = branches
+            .iter()
+            .map(|branch| {
+                let reference = branch
+                    .as_mapping_get("$ref")
+                    .and_then(Yaml::as_str)
+                    .unwrap_or_else(|| panic!("{enum_name}: expected a schema reference"));
+                let schema = resolve_local_reference(root, reference)
+                    .unwrap_or_else(|| panic!("{enum_name}: unresolved {reference}"));
+                mapping_path(schema, &["properties", "type", "const"])
+                    .and_then(Yaml::as_str)
+                    .unwrap_or_else(|| panic!("{enum_name}: {reference} needs an exact type tag"))
+                    .to_string()
+            })
+            .collect();
+        let unique: BTreeSet<_> = declared.iter().cloned().collect();
+        assert_eq!(
+            unique.len(),
+            declared.len(),
+            "{enum_name}: duplicate inbound branch"
+        );
+        let expected: BTreeSet<_> = enum_variants(&source, enum_name).into_iter().collect();
+        assert!(
+            !expected.is_empty(),
+            "{enum_name}: source inventory must not be empty"
+        );
+        assert_eq!(
+            unique, expected,
+            "{enum_name}: inbound union differs from Rust variants"
+        );
+    }
+}
+
+#[test]
+fn inbound_schema_accepts_wire_samples_and_only_supported_nested_commands() {
+    use serde_json::{json, Value};
+    use signal_fish_server::protocol::ClientMessage;
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let envelope = mapping_path(root, &["components", "schemas", "ClientMessageEnvelope"])
+        .expect("client envelope");
+    let source = read_file(&repo_root().join("src/protocol/messages.rs"));
+    let nested_variants: BTreeSet<_> = enum_variants(&source, "RoomOperationRequest")
+        .into_iter()
+        .collect();
+    let mut covered = BTreeSet::new();
+    let mut nested_covered = BTreeSet::new();
+    let wrap = |operation: Value| {
+        json!({
+            "type": "RoomOperation",
+            "data": {
+                "operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "operation": operation
+            }
+        })
+    };
+    let check = |wire: &Value| {
+        let parsed: ClientMessage = serde_json::from_value(wire.clone())
+            .unwrap_or_else(|error| panic!("Rust rejected {wire}: {error}"));
+        assert!(
+            schema_shape_matches(root, envelope, wire),
+            "schema rejected input {wire}"
+        );
+        let encoded = serde_json::to_value(parsed).expect("serialize client command");
+        assert!(
+            schema_shape_matches(root, envelope, &encoded),
+            "schema rejected output {encoded}"
+        );
+    };
+
+    for (version, samples) in [
+        (
+            2,
+            include_str!("../.llm/code-samples/protocol/v2-client-messages.jsonl"),
+        ),
+        (
+            3,
+            include_str!("../.llm/code-samples/protocol/v3-client-messages.jsonl"),
+        ),
+    ] {
+        for (line, sample) in samples.lines().enumerate() {
+            let wire: Value = serde_json::from_str(sample)
+                .unwrap_or_else(|error| panic!("v{version} sample {}: {error}", line + 1));
+            check(&wire);
+            let kind = wire["type"].as_str().expect("sample type");
+            covered.insert(kind.to_string());
+            // A command's presence in the top-level union does not authorize it
+            // inside RoomOperation. Runtime version/capability gates are separate.
+            if nested_variants.contains(kind) {
+                check(&wrap(wire.clone()));
+                nested_covered.insert(kind.to_string());
+            } else {
+                let invalid = wrap(wire.clone());
+                assert!(
+                    serde_json::from_value::<ClientMessage>(invalid.clone()).is_err(),
+                    "Rust accepted unsupported nested {kind}"
+                );
+                assert!(
+                    !schema_shape_matches(root, envelope, &invalid),
+                    "schema accepted unsupported nested {kind}"
+                );
+            }
+        }
+    }
+    let player = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    for operation in [
+        json!({"type":"KickPlayer", "data":{"player_id":player}}),
+        json!({"type":"RegenerateRoomCode"}),
+        json!({"type":"SetRoomAccess", "data":{"password":"room-password"}}),
+        json!({"type":"SetRoomAccess", "data":{"password":null}}),
+        json!({"type":"BanPlayer", "data":{"player_id":player}}),
+        json!({"type":"UnbanPlayer", "data":{"player_id":player}}),
+        json!({"type":"TransferAuthority", "data":{"player_id":player}}),
+    ] {
+        let kind = operation["type"].as_str().expect("operation type");
+        check(&wrap(operation.clone()));
+        nested_covered.insert(kind.to_string());
+        assert!(
+            serde_json::from_value::<ClientMessage>(operation.clone()).is_err(),
+            "Rust accepted nested-only {kind} at top level"
+        );
+        assert!(
+            !schema_shape_matches(root, envelope, &operation),
+            "schema accepted nested-only {kind} at top level"
+        );
+    }
+    assert_eq!(
+        covered,
+        enum_variants(&source, "ClientMessage")
+            .into_iter()
+            .collect(),
+        "canonical samples must exercise every top-level command"
+    );
+    assert_eq!(
+        nested_covered, nested_variants,
+        "wire cases must exercise every nested command"
+    );
+
+    for (name, invalid) in [
+        ("unknown command", wrap(json!({"type":"UnknownOperation"}))),
+        (
+            "missing operation",
+            json!({"type":"RoomOperation", "data":{"operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}}),
+        ),
+        (
+            "missing operation id",
+            json!({"type":"RoomOperation", "data":{"operation":{"type":"LeaveRoom"}}}),
+        ),
+        (
+            "missing target",
+            wrap(json!({"type":"KickPlayer", "data":{}})),
+        ),
+        (
+            "wrong target type",
+            wrap(json!({"type":"TransferAuthority", "data":{"player_id":42}})),
+        ),
+    ] {
+        assert!(
+            serde_json::from_value::<ClientMessage>(invalid.clone()).is_err(),
+            "Rust accepted {name}: {invalid}"
+        );
+        assert!(
+            !schema_shape_matches(root, envelope, &invalid),
+            "schema accepted {name}: {invalid}"
+        );
+    }
+}
+
+#[test]
+fn join_room_optional_fields_match_schema_in_both_envelopes() {
+    use serde_json::{json, Value};
+    use signal_fish_server::protocol::ClientMessage;
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let envelope = mapping_path(root, &["components", "schemas", "ClientMessageEnvelope"])
+        .expect("client envelope");
+    for (field, valid, invalid) in [
+        ("room_code", json!("ABC123"), json!(42)),
+        ("max_players", json!(4), json!("four")),
+        ("supports_authority", json!(false), json!("false")),
+        ("relay_transport", json!("auto"), json!("unknown")),
+        ("password", json!("room-password"), json!(false)),
+        ("join_only", json!(false), json!("false")),
+    ] {
+        for (case, value, accepted) in [
+            ("omitted", None, true),
+            ("null", Some(Value::Null), true),
+            ("valid", Some(valid), true),
+            ("wrong type or token", Some(invalid), false),
+        ] {
+            let mut join =
+                json!({"type":"JoinRoom", "data":{"game_name":"game", "player_name":"player"}});
+            if let Some(value) = value {
+                join["data"][field] = value;
+            }
+            for wrapped in [false, true] {
+                let wire = if wrapped {
+                    json!({"type":"RoomOperation", "data":{
+                        "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "operation":join
+                    }})
+                } else {
+                    join.clone()
+                };
+                let parsed = serde_json::from_value::<ClientMessage>(wire.clone());
+                assert_eq!(
+                    parsed.is_ok(),
+                    accepted,
+                    "Rust {field}/{case}, wrapped={wrapped}: {wire}"
+                );
+                assert_eq!(
+                    schema_shape_matches(root, envelope, &wire),
+                    accepted,
+                    "schema {field}/{case}, wrapped={wrapped}: {wire}"
+                );
+                if let Ok(parsed) = parsed {
+                    let encoded = serde_json::to_value(parsed).expect("serialize join");
+                    assert!(
+                        schema_shape_matches(root, envelope, &encoded),
+                        "schema rejected emitted {field}/{case}, wrapped={wrapped}: {encoded}"
+                    );
+                }
+            }
+        }
     }
 }
 
