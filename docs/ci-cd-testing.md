@@ -864,25 +864,49 @@ reproducibility). The nightly pin follows the same strategy as
 
 ### Miri Scope
 
-Miri runs on server library unit tests (`--lib`). Integration tests are
-excluded because they use networking, async runtimes, and OS-level I/O
-that Miri cannot interpret.
+Miri runs on server library unit tests (`--lib`). This workflow excludes
+integration tests. Real networking and unsupported OS calls need separate
+runtime controls. Interpreting async unit tests does not qualify OS behavior.
 
-Since the #424 lane split, the library suite runs as two parallel lanes —
-`Miri (core)` (`websocket`, `coordination`, `server`, `protocol`) and
-`Miri (remaining)` (every other module). The lane filters are libtest name
-filters whose union is pinned by
-`test_ci_safety_miri_lane_filters_cover_every_library_module`, so a new
-library module that is named by no lane fails CI instead of silently
-skipping Miri.
+The workflow matrix partitions the library suite by module. Its current lane
+names and exclusions live in `.github/workflows/ci-safety.yml`.
+`scripts/run-miri-lane.py` lists the compiled tests, selects complete module
+paths, and runs exact test names. Each lane retains its selected-test manifest.
+The scope checks reject gaps and overlap; a passing lane covers only its
+selected tests and interpreted schedules.
+
+### Miri Provenance Limit
+
+Existing [#1501](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1501)
+assesses a warning in `parking_lot_core` 0.9.12. Its WordLock
+`LockState::queue_head` helper converts an integer to a pointer. Miri warns
+that this exposed provenance can hide pointer bugs. A warning-bearing pass
+does not establish strict provenance or absence of undefined behavior in
+untested paths.
+
+Keep the real lock/race test and its assertions. Keep the current
+`-Zmiri-disable-isolation` flag, which permits host operations and does not
+silence this diagnostic. Do not add `-Zmiri-permissive-provenance` to hide it.
+The [Miri flag reference](https://github.com/rust-lang/miri/blob/master/README.md)
+explains the difference between warning-bearing and strict provenance modes.
+
+Upstream [#541](https://github.com/Amanieu/parking_lot/issues/541) links the
+repair. Published [`parking_lot_core` 0.10.0](https://github.com/Amanieu/parking_lot/blob/1a5c3dd5c328b574234082e3ae4d8de078090d87/core/src/word_lock.rs)
+uses pointer-preserving operations but requires Rust 1.95. This project pins
+Rust 1.94; DashMap 6.2.1 and
+parking_lot 0.12.5 also require the 0.9 series. The release is not a compatible
+lockfile update. Reassess after both caller constraints and the toolchain
+support the replacement; then rerun the same test with strict provenance.
+Existing [#1111](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1111)
+tracks this dependency watch. This records an analyzer limit, not a demonstrated runtime defect.
 
 ### Viewing Results
 
 Output artifacts are uploaded even when either gating analyzer reports a
 finding:
 
-- `miri-output-core` / `miri-output-remaining` — Miri analysis output, one
-  artifact per lane (issue #424 lane split)
+- `miri-output-<lane>` — Miri analysis output and selected-test manifest for
+  each workflow lane
 - `asan-output` — AddressSanitizer analysis output
 
 Download these from the workflow run's Artifacts section in GitHub Actions.
