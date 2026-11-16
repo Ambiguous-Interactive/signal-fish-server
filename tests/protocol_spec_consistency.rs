@@ -3819,6 +3819,238 @@ mod projection_runtime {
         running.shutdown().await;
     }
 
+    /// #826: reconnect and replay must cross the actual correlated writer seam.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn correlated_reconnect_preserves_snapshot_and_replay_on_real_sockets() {
+        let docs = Yaml::load_from_str(&spec_text()).expect("protocol YAML");
+        let root = docs.first().expect("protocol document");
+        let mut protocol = test_helpers::test_protocol_config();
+        protocol.sdk_compatibility.enforce = false;
+        let server = test_helpers::create_test_server_with_config(
+            test_helpers::test_server_config(),
+            protocol,
+        )
+        .await;
+        let router = create_router("http://localhost:3000").with_state(server.clone());
+        let running = test_helpers::RunningTestServer::spawn(server.clone(), router).await;
+        let url = format!("ws://{}/ws", running.addr());
+        let mut sockets = Vec::new();
+        for version in [2, 3, 2, 3] {
+            let (mut socket, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), connect_async(&url))
+                    .await
+                    .expect("connect deadline")
+                    .expect("connect WebSocket");
+            send(
+                &mut socket,
+                json!({"type":"Authenticate", "data":{
+                    "app_id":"reconnect-runtime", "protocol_version":version,
+                    "requested_capabilities":["room_operation_ids"]
+                }}),
+            )
+            .await;
+            receive_exact(&mut socket, "Authenticated").await;
+            let info = receive_exact(&mut socket, "ProtocolInfo").await;
+            assert_eq!(
+                info["data"]["capabilities"]
+                    .as_array()
+                    .expect("capabilities")
+                    .contains(&json!("room_operation_ids")),
+                version == 3
+            );
+            sockets.push(socket);
+        }
+        let mut retry = sockets.pop().unwrap();
+        let mut watcher = sockets.pop().unwrap();
+        let mut original = sockets.pop().unwrap();
+        let mut host = sockets.pop().unwrap();
+        send(
+            &mut host,
+            json!({"type":"JoinRoom", "data":{
+                "game_name":"reconnect-runtime", "player_name":"Host-観客",
+                "max_players":4, "supports_authority":false
+            }}),
+        )
+        .await;
+        let room = receive_exact(&mut host, "RoomJoined").await;
+        let room_id = room["data"]["room_id"].clone();
+        let room_code = room["data"]["room_code"].clone();
+        let host_id = room["data"]["player_id"].clone();
+        receive_exact(&mut host, "LobbyStateChanged").await;
+        let metadata = json!({"type":"custom", "data":{"nested":[null, false, "観客"]}});
+        send(
+            &mut host,
+            json!({"type":"ProvideConnectionInfo", "data":{
+                "connection_info":metadata
+            }}),
+        )
+        .await;
+        send(&mut host, json!({"type":"Ping"})).await;
+        receive_exact(&mut host, "Pong").await;
+        let joined = operation_result(
+            root,
+            &mut original,
+            101,
+            json!({
+                "type":"JoinRoom", "data":{
+                    "game_name":"reconnect-runtime", "room_code":room_code,
+                    "player_name":"Recover-é", "supports_authority":false, "join_only":true
+                }
+            }),
+            "RoomJoined",
+        )
+        .await;
+        let player_id = joined["data"]["player_id"].clone();
+        let token = joined["data"]["reconnection_token"]
+            .as_str()
+            .expect("join token")
+            .to_owned();
+        let old_epoch = joined["data"]["current_players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == player_id)
+            .unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+        receive_exact(&mut host, "PlayerJoined").await;
+        // A TCP loss creates the pending record through the production lifecycle.
+        drop(original);
+        let identity = uuid::Uuid::parse_str(player_id.as_str().unwrap()).unwrap();
+        let manager = server.reconnection_manager().expect("reconnect manager");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !manager.has_pending_reconnection(&identity).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical loss arms reconnect");
+        let left = receive_exact(&mut host, "PlayerLeft").await;
+        assert_eq!(left["data"]["player_id"], player_id);
+
+        // A spectator joins during absence. Its legacy event is an independent
+        // witness for both replay identity and v3 delta projection.
+        send(
+            &mut watcher,
+            json!({"type":"JoinAsSpectator", "data":{
+                "game_name":"reconnect-runtime", "room_code":room_code,
+                "spectator_name":"Missed-Ω"
+            }}),
+        )
+        .await;
+        let watched = receive_exact(&mut watcher, "SpectatorJoined").await;
+        assert_runtime_shape(root, &watched, 2);
+        let watcher_id = watched["data"]["spectator_id"].clone();
+        assert_eq!(
+            watched["data"]["current_players"][0]["connection_info"],
+            metadata
+        );
+        let live = receive_exact(&mut host, "NewSpectatorJoined").await;
+        assert_runtime_shape(root, &live, 2);
+        assert_fanout_roster(&live, &[(watcher_id.clone(), "Missed-Ω")], 2);
+        let failed = operation_result(
+            root,
+            &mut retry,
+            102,
+            json!({
+                "type":"Reconnect", "data":{
+                    "player_id":player_id, "room_id":room_id, "auth_token":"wrong-token"
+                }
+            }),
+            "ReconnectionFailed",
+        )
+        .await;
+        assert_eq!(failed["data"]["error_code"], "RECONNECTION_TOKEN_INVALID");
+        assert!(
+            manager.has_pending_reconnection(&identity).await,
+            "a wrong token must not consume pending recovery"
+        );
+        let restored = operation_result(
+            root,
+            &mut retry,
+            103,
+            json!({
+                "type":"Reconnect", "data":{
+                    "player_id":player_id, "room_id":room_id, "auth_token":token
+                }
+            }),
+            "Reconnected",
+        )
+        .await;
+        let data = &restored["data"];
+        assert_eq!(data["room_id"], room_id);
+        assert_eq!(data["room_code"], room_code);
+        assert_eq!(data["player_id"], player_id);
+        assert_eq!(data["game_name"], "reconnect-runtime");
+        assert_eq!(data["max_players"], 4);
+        assert_eq!(data["supports_authority"], false);
+        assert_eq!(data["is_authority"], false);
+        assert_eq!(data["lobby_state"], "lobby");
+        assert_eq!(data["ready_players"], json!([]));
+        assert_eq!(data["replay"], "complete");
+        let rotated = data["reconnection_token"].as_str().expect("rotated token");
+        assert!(!rotated.is_empty());
+        assert_ne!(rotated, token);
+        assert_roster_values(
+            &data["current_players"],
+            &[
+                (host_id.clone(), "Host-観客"),
+                (player_id.clone(), "Recover-é"),
+            ],
+        );
+        assert_v3_member_fields(&data["current_players"]);
+        assert_spectator_roster(
+            &data["current_spectators"],
+            &[(watcher_id.clone(), "Missed-Ω")],
+            3,
+        );
+        let players = data["current_players"].as_array().unwrap();
+        let recovered = players.iter().find(|p| p["id"] == player_id).unwrap();
+        assert!(recovered["epoch"].as_u64().unwrap() > old_epoch);
+        let watermarks = data["sender_watermarks"]
+            .as_array()
+            .expect("sender watermarks");
+        assert_eq!(watermarks.len(), players.len());
+        for player in players {
+            let watermark = watermarks
+                .iter()
+                .find(|w| w["player_id"] == player["id"])
+                .expect("each current sender has a watermark");
+            assert_eq!(watermark["epoch"], player["epoch"]);
+            assert_eq!(watermark["seq"], player["seq"]);
+        }
+        let replay = data["missed_events"].as_array().expect("replay array");
+        assert_eq!(
+            replay.len(),
+            1,
+            "only the missed spectator delta is replayed: {replay:?}"
+        );
+        assert_eq!(replay[0]["type"], "NewSpectatorJoined");
+        assert_eq!(replay[0]["data"]["reason"], live["data"]["reason"]);
+        assert_spectator_entry(&replay[0]["data"]["spectator"], &watcher_id, "Missed-Ω", 3);
+        assert_fanout_roster(&replay[0], &[(watcher_id.clone(), "Missed-Ω")], 3);
+        for socket in [&mut host, &mut watcher] {
+            let event = receive_exact(socket, "PlayerReconnected").await;
+            assert_runtime_shape(root, &event, 2);
+            assert_eq!(event["data"]["player_id"], player_id);
+            assert_eq!(event["data"]["player"]["id"], player_id);
+            assert_eq!(event["data"]["player"]["name"], "Recover-é");
+            assert!(event["data"]["player"]["connected_at"].is_string());
+            assert!(event["data"].get("epoch").is_none());
+        }
+        for socket in [&mut host, &mut watcher, &mut retry] {
+            send(socket, json!({"type":"Ping"})).await;
+            receive_exact(socket, "Pong").await;
+        }
+        for socket in [&mut host, &mut watcher, &mut retry] {
+            socket
+                .close(None)
+                .await
+                .expect("close reconnect scenario socket");
+        }
+        running.shutdown().await;
+    }
+
     async fn operation_result(
         root: &Yaml<'_>,
         socket: &mut Socket,
