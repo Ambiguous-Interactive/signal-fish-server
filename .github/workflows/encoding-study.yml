@@ -124,9 +124,9 @@ jobs:
         run: |
           for seed in 1524 1525; do
             python3 benches/encoding/cross_language.py --verify-recorded \
-              "benches/encoding/results/2026-11-12-cross-language-aarch64/seed-$seed"
+              "benches/encoding/results/2026-11-16-cross-language-aarch64/seed-$seed"
           done
       - name: Recompute order cohorts from raw samples
         run: >-
           python3 benches/encoding/verify_order_cohorts.py
-          benches/encoding/results/2026-11-12-cross-language-aarch64 --self-test
+          benches/encoding/results/2026-11-16-cross-language-aarch64 --self-test

@@ -289,6 +289,33 @@ current exact-name lane selection and artifact names. Tests, assertions, ignores
 unchanged. Independent review corrected the helper name and found no other blocker.
 All attempts, source identities, release checksums and logs remain under progress/backlog-trial/slot-4/.
 The original issue records commands and unmet acceptance; delivery does not close that criterion.
+PR #1675 merged at `c7241ff0` with 16 successful checks, six policy skips and a neutral
+CodeRabbit rate-limit result. Independent review found no blocker. Original #1501 stays open.
+
+## Trial slot 5 evidence
+
+GOAL.md requires resuming relevant open dependency work before a new task. Existing PR #1653
+had a failing cross-language reconciliation after prost/prost-derive 0.14.4 changed to 0.14.6.
+This exploration slot resumed that PR under existing #1111; the queued A01 task remains unclaimed.
+No replacement PR or issue was created.
+
+The matched control isolates the lockfile. Both November 12 records pass with the baseline lock
+and reject the candidate lock. Every other source hash matches. The guard correctly refuses
+old measurements as current-source evidence; no codec disagreement follows from that failure.
+
+Two new seeded records retain the unchanged corpus, harnesses, schemas, generated bindings,
+assertions and negative controls. Each passes 20 cells, eight Rust reference wires and 15 negative
+controls. The independent verifier reconciles raw streams and all 64 order comparisons, including
+six negative controls. Both source manifests and CSV summaries reconcile. Rust wire exports remain
+byte-identical to the historical exports. Five owning Rust corpus tests and strict lint pass.
+
+The workflow points its existing reconciliation steps to the new records. The verifier and all
+historical records remain unchanged. The shared-host measurements establish no speed improvement,
+stable codec ranking or production encoding adoption. The
+[current record](../../benches/encoding/results/2026-11-16-cross-language-aarch64/README.md)
+retains methods, limits and raw data. Existing #1111 remains open for incompatible upstream work.
+The issue records commands, acceptance and delivery. Local control logs remain under
+progress/backlog-trial/slot-5/.
 
 ## Ten-session trial
 
@@ -308,7 +335,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | 2 | Debt | [#1441][i1441] / [#1673](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1673) | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
 | 3 | Debt | [#1224][i1224] / [#1674](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1674) | Existing issue completed: 61 lint findings fixed, owning tests and hosted controls pass. |
 | 4 | Debt | [#1501][i1501] / [#1675](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1675) | Upstream repair and constraints assessed; original warning remains unreproduced. |
-| 5 | Exploration | Pending | Not started |
+| 5 | Exploration | [#1111][i1111] / [#1653](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1653) | Current-source prost 0.14.6 records qualify; existing PR delivery pending. |
 | 6 | Debt | Pending | Not started |
 | 7 | Debt | Pending | Not started |
 | 8 | Debt | Pending | Not started |
