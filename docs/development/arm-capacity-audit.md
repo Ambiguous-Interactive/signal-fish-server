@@ -7345,3 +7345,65 @@ measurement floor. The final parent hashes in fixed chunks. Raw attempts,
 source and binary identities, exact bytes and per-child wait4 measurements
 remain in `progress/session-700/`. These are collection profiles, not live C3
 capacity or end-to-end gameplay measurements.
+
+### Connection maintenance discovery without full client-ID scratch
+
+Existing #636 owns this finite obligation at baseline `dca14f3f`.
+Missing-room cleanup and interrupted-unregister discovery first collected all
+client IDs, then looked up each ID again. The retry scan also cloned every
+lifecycle handle. Both now read the required fields directly from each registry
+entry. They retain owned candidate tuples before workers begin. The workers
+still revalidate lifecycle, room assignment, retry state and storage as before.
+Neither snapshot is an atomic view of the whole registry or a teardown decision.
+
+The registry-only allocation control uses 0, 16, 256 and 4,096 deterministic
+client IDs. It measures both all-unselected scans and a half-assigned room scan.
+The mixed scan checks every exact room/player tuple after sorting. Setup,
+coordinator registration, output assertions and printing are outside the region.
+These figures are allocated bytes per discovery, including iterator guards:
+
+| Clients | Unselected original | Unselected repaired | Half-assigned original | Half-assigned repaired |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 1,536 | 1,536 | 1,536 | 1,536 |
+| 16 | 1,792 | 1,536 | 2,048 | 1,792 |
+| 256 | 5,632 | 1,536 | 9,728 | 5,632 |
+| 4,096 | 67,072 | 1,536 | 132,608 | 67,072 |
+
+Both unselected scans save 65,536 bytes at 4,096 clients. Each removes one
+allocation and ten vector resizes there. The mixed scan removes one allocation
+and ten resizes while retaining all 2,048 output tuples. DashMap 6.2.1 still
+allocates an iterator guard per shard, including empty shards. The initial
+zero-allocation expectation failed on both versions; it was rejected. The final
+bound compares with the empty registry's fixed cost and permits only output
+storage for selected candidates. It does not waive client-count growth.
+
+Restoring both original discovery bodies fails that bound at 16 clients in the
+room scan. Restoring only the original retry body fails the retry bound at the
+same size. The repaired source passes. New unit histories retain nil room IDs,
+reassignment, cleared and removed memberships, and running, canceled and completed
+unregister attempts. Existing delayed-storage, stale-assignment, cancellation and
+owned retry histories pass unchanged.
+
+On the shared ARM64 Linux host with Rust 1.94.0 and unoptimized test binaries,
+five batches of 100 all-unselected scans at 4,096 clients give these local ranges:
+room discovery 202.769–214.321 ms before and 43.681–47.410 ms after; retry discovery
+228.275–256.111 ms before and 51.381–55.141 ms after. Medians are 208.476→44.715 ms
+and 240.300→53.542 ms. Source/workload cohorts match; builds ran sequentially.
+Registry hash seeds and host scheduling were not fixed. These observations do not
+establish production latency, throughput, lock-contention bounds or node capacity.
+The allocated-byte reduction is the deterministic acceptance result.
+
+Reproduce the resource bound with:
+
+```bash
+bash scripts/dev-loop.sh --features allocation-tracking maintenance_discovery_skips_unselected_connections
+bash scripts/dev-loop.sh assigned_room_candidates_follow_current_membership pending_unregistration_candidates_follow_attempt_lifecycle
+bash scripts/dev-loop.sh --all-features maintenance_recovers_panicked_unregister_without_activity_expiry \
+  unregister_retry deleted_room
+```
+
+Independent review found no blocker. The original issue owns final CI, review and
+delivery evidence. Raw attempts, including both rejected zero-allocation checks,
+remain in `progress/session-730/`. The broad campaign remains open. Rust, .NET
+and Godot clients need no changes: wire values, ordering, deadlines, configuration
+and public production APIs stay unchanged.
