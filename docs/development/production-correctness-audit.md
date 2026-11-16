@@ -129,7 +129,7 @@ retain exact JSON/MessagePack bytes and canonical correlation IDs.
 
 ### Outbound operation evidence
 
-Trial slot 7 starts from `e4c4ba24`. The `receiveFromServer` operation reaches
+Trial slot 7 starts from `e4c4ba243cb5a34d94df8fe7259059f8931ed070`. The `receiveFromServer` operation reaches
 all 32 `ServerMessage` variants through its signaling channel and component
 message references. The negotiated `TokenBindingChallenge` extension is the
 one additional message; it uses a separate frame type. The binary carrier
@@ -18420,7 +18420,7 @@ outbound projection and runtime-boundary coverage. The A01–A22 campaign stays 
 
 ### F380 — Canonical reconnect examples omitted required runtime state
 
-Existing #826, trial slot 7. At `e4c4ba24`, the v2 `Reconnected` example has an
+Existing #826, trial slot 7. At `e4c4ba243cb5a34d94df8fe7259059f8931ed070`, the v2 `Reconnected` example has an
 empty `current_players` list. The v3 example omits `reconnection_token`.
 Both examples round-trip through Rust, but the existing schema rejects them.
 `reconnection_service.rs` refuses a baseline without the restored member and
