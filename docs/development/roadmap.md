@@ -426,3 +426,13 @@ keep campaigns open after child completion; link new blockers without expanding 
 [i1616]: https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1616
 [i1639]: https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1639
 [i1650]: https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1650
+
+## Post-trial session — populated spectator schema boundaries
+
+The user separately authorized one new bounded session under [#826][i826].
+The completed trial and its assessment remain unchanged. The new control checks
+populated spectator snapshots, legal roster events, reconnect replay and nested
+results. A wrong spectator item reference passes the old empty-roster control
+and fails the new guard. No production/schema defect is established.
+See [the audit evidence](production-correctness-audit.md#a01--populated-spectator-schema-boundaries-2026-11-16).
+Full runtime projection and campaign acceptance remain open. #826 owns delivery.
