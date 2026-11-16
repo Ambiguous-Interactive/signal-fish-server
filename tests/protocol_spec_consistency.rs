@@ -27,6 +27,7 @@
 #![cfg(test)]
 
 mod common;
+mod test_helpers;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -3215,4 +3216,208 @@ where
         "spec/signal-fish-protocol.asyncapi.yaml must declare {enum_name} `type` token '{token}' \
          (serde form of {enum_name}::{value:?}) as a const/enum value",
     );
+}
+
+mod metadata_runtime {
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
+    use signal_fish_server::websocket::create_router;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    use super::{mapping_path, schema_shape_matches_version, spec_text, test_helpers};
+    use saphyr::{LoadableYamlNode, Yaml};
+
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn send(socket: &mut Socket, value: Value) {
+        socket
+            .send(Message::Text(value.to_string().into()))
+            .await
+            .expect("send metadata scenario command");
+    }
+
+    async fn receive(socket: &mut Socket, tag: &str) -> Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let frame = tokio::time::timeout_at(deadline, socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for {tag}"))
+                .expect("socket remains open")
+                .expect("read scenario frame");
+            let Message::Text(text) = frame else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(&text).expect("raw JSON frame");
+            assert!(
+                !matches!(value["type"].as_str(), Some("Error" | "RoomJoinFailed")),
+                "unexpected refusal while waiting for {tag}: {value}"
+            );
+            if value["type"] == tag {
+                return value;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_reaches_mixed_version_snapshots_and_game_start_on_real_sockets() {
+        let docs = Yaml::load_from_str(&spec_text()).expect("protocol YAML");
+        let root = docs.first().expect("protocol document");
+        let cases = [
+            json!({"type":"direct", "host":"192.0.2.1", "port":7777}),
+            json!({"type":"unity_relay", "allocation_id":"allocation", "connection_data":"opaque", "key":"fixture"}),
+            json!({"type":"relay", "host":"relay.example", "port":65535, "transport":"udp",
+                "allocation_id":"allocation", "token":"fixture", "client_id":0}),
+            json!({"type":"webrtc", "sdp":"SDP-観客", "ice_candidates":["candidate:fixture", "候補"]}),
+            json!({"type":"custom", "data":{"nested":[null, false, "観客", {"port":0}]}}),
+        ];
+        for info in cases {
+            let mut protocol = test_helpers::test_protocol_config();
+            protocol.sdk_compatibility.enforce = false;
+            let server = test_helpers::create_test_server_with_config(
+                test_helpers::test_server_config(),
+                protocol,
+            )
+            .await;
+            let router = create_router("http://localhost:3000").with_state(server.clone());
+            let running = test_helpers::RunningTestServer::spawn(server, router).await;
+            let url = format!("ws://{}/ws", running.addr());
+            let mut sockets = Vec::new();
+            let mut ids = Vec::new();
+            let mut room_code = Value::Null;
+            let mut room_id = Value::Null;
+            for (index, version) in [2_u16, 2, 3].into_iter().enumerate() {
+                let (mut socket, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), connect_async(&url))
+                        .await
+                        .expect("connect deadline")
+                        .expect("connect WebSocket");
+                send(
+                    &mut socket,
+                    json!({"type":"Authenticate", "data":{
+                        "app_id":"metadata-runtime", "protocol_version":version
+                    }}),
+                )
+                .await;
+                receive(&mut socket, "Authenticated").await;
+                let negotiation = receive(&mut socket, "ProtocolInfo").await;
+                assert_eq!(
+                    negotiation["data"]["protocol_version"],
+                    if version == 3 { json!(3) } else { Value::Null }
+                );
+                send(
+                    &mut socket,
+                    json!({"type":"JoinRoom", "data":{
+                        "game_name":"metadata-runtime", "room_code":room_code,
+                        "player_name":format!("Member{index}"), "max_players":3,
+                        "supports_authority":false
+                    }}),
+                )
+                .await;
+                let joined = receive(&mut socket, "RoomJoined").await;
+                let schema = mapping_path(root, &["components", "schemas", "RoomJoined"])
+                    .expect("reachable RoomJoined schema");
+                assert!(
+                    schema_shape_matches_version(root, schema, &joined, Some(i64::from(version))),
+                    "v{version} runtime snapshot schema: {info}: {joined}"
+                );
+                ids.push(joined["data"]["player_id"].clone());
+                assert_eq!(
+                    joined["data"]["current_players"]
+                        .as_array()
+                        .expect("roster")
+                        .len(),
+                    index + 1
+                );
+                if index == 0 {
+                    room_code = joined["data"]["room_code"].clone();
+                    room_id = joined["data"]["room_id"].clone();
+                    send(
+                        &mut socket,
+                        json!({"type":"ProvideConnectionInfo", "data":{
+                            "connection_info":info
+                        }}),
+                    )
+                    .await;
+                    send(&mut socket, json!({"type":"Ping"})).await;
+                    receive(&mut socket, "Pong").await;
+                } else {
+                    assert_eq!(joined["data"]["room_id"], room_id);
+                    let members = joined["data"]["current_players"]
+                        .as_array()
+                        .expect("roster");
+                    let actual_ids: std::collections::BTreeSet<_> = members
+                        .iter()
+                        .map(|member| member["id"].as_str().expect("player UUID"))
+                        .collect();
+                    let expected_ids: std::collections::BTreeSet<_> = ids
+                        .iter()
+                        .map(|id| id.as_str().expect("joined UUID"))
+                        .collect();
+                    assert_eq!(actual_ids, expected_ids);
+                    let provider = members
+                        .iter()
+                        .find(|member| member["id"] == ids[0])
+                        .expect("metadata provider is in snapshot");
+                    if version == 2 {
+                        assert_eq!(
+                            provider.get("connection_info"),
+                            Some(&info),
+                            "v2 runtime snapshot preserves exact metadata: {joined}"
+                        );
+                        assert!(provider.get("connected_at").is_some());
+                        assert!(provider.get("epoch").is_none());
+                        assert!(provider.get("seq").is_none());
+                    } else {
+                        assert!(provider.get("connection_info").is_none());
+                        assert!(provider.get("connected_at").is_none());
+                        assert!(provider["epoch"].as_u64().is_some_and(|epoch| epoch > 0));
+                        assert_eq!(provider["seq"], 0);
+                    }
+                }
+                sockets.push(socket);
+            }
+            for socket in &mut sockets {
+                send(socket, json!({"type":"PlayerReady"})).await;
+                send(socket, json!({"type":"Ping"})).await;
+                receive(socket, "Pong").await;
+            }
+            send(&mut sockets[0], json!({"type":"StartGame"})).await;
+            for (socket, version) in sockets.iter_mut().zip([2_u16, 2, 3]) {
+                let starting = receive(socket, "GameStarting").await;
+                let schema = mapping_path(root, &["components", "schemas", "GameStarting"])
+                    .expect("reachable GameStarting schema");
+                assert!(
+                    schema_shape_matches_version(root, schema, &starting, Some(i64::from(version))),
+                    "v{version} runtime handoff schema: {info}: {starting}"
+                );
+                let peers = starting["data"]["peer_connections"]
+                    .as_array()
+                    .expect("handoff peers");
+                let actual_ids: std::collections::BTreeSet<_> = peers
+                    .iter()
+                    .map(|peer| peer["player_id"].as_str().expect("peer UUID"))
+                    .collect();
+                let expected_ids: std::collections::BTreeSet<_> = ids
+                    .iter()
+                    .map(|id| id.as_str().expect("joined UUID"))
+                    .collect();
+                assert_eq!(actual_ids, expected_ids);
+                assert_eq!(peers.len(), ids.len());
+                for peer in peers {
+                    let expected = (peer["player_id"] == ids[0]).then_some(&info);
+                    assert_eq!(
+                        peer.get("connection_info"),
+                        expected,
+                        "v{version} runtime handoff metadata: {info}: {starting}"
+                    );
+                }
+            }
+            for socket in &mut sockets {
+                socket.close(None).await.expect("close scenario socket");
+            }
+            running.shutdown().await;
+        }
+    }
 }
