@@ -999,14 +999,15 @@ components:
           properties:
             game_name: { type: string }
             room_code:
-              type: string
-              description: Omit to create a new room; provide to join/create by code.
+              type: [string, 'null']
+              description: Omit or send null to create a new room; provide a code to join/create by code.
             player_name: { type: string }
-            max_players: { type: integer, description: Ceiling, not a required count. }
-            supports_authority: { type: boolean }
+            max_players: { type: [integer, 'null'], description: Ceiling, not a required count. }
+            supports_authority: { type: [boolean, 'null'] }
             relay_transport:
-              allOf:
+              anyOf:
                 - { $ref: '#/components/schemas/RelayTransport' }
+                - { type: 'null' }
               description: >-
                 Reserved compatibility hint; currently ignored. Omission and
                 all accepted values have identical server behavior.

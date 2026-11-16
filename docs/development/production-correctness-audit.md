@@ -44,7 +44,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
-| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
+| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound union and sample-shape controls; join null mismatch repaired in F379 |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
@@ -74,29 +74,58 @@ separate build and test gates.
 
 ### Inbound operation crosswalk
 
-This inventory follows `ClientMessage` and `RoomOperationRequest` at the
-baseline. It maps audit ownership; it does not certify these operations.
+Refreshed from `src/protocol/messages.rs` and `src/server/message_router.rs`
+at `8af6c147` on 2026-11-16. The two tables cover all 15 `ClientMessage`
+variants and all 11 `RoomOperationRequest` variants. They map audit ownership;
+they do not certify the operations.
 
-| Wire operation | Audit tasks | Required observable boundaries |
+[Inbound schema controls](../../tests/protocol_spec_consistency.rs) now compare
+each union's exact discriminator set with its Rust enum. Canonical v2/v3 samples
+exercise all 15 top-level variants. Wrapped legacy samples and explicit moderation
+vectors exercise all 11 nested variants. Input and serialized output must match
+the corresponding schema shapes. Unsupported nesting and missing required fields
+must fail. These are shape checks, not runtime authorization or delivery proof.
+F379 records the scope and negative controls.
+
+| ClientMessage variant | Audit tasks | Required observable boundaries |
 | --- | --- | --- |
 | `Authenticate` | A02, A03, A18 | Endpoint default, explicit version, tenant proof, negotiated capability publication |
 | `JoinRoom` | A07, A08, A11 | Admission rollback, membership baseline, readiness and plan publication |
 | `LeaveRoom` | A04, A07, A09, A14 | Unroute, terminal watermark, authority change, old queued tail |
-| `GameData` and binary relay | A13, A14, A15 | Validate before stamp, fan-out set, exact delivery or omission evidence |
+| `GameData` | A13, A14, A15 | Validate before stamp, fan-out set, exact delivery or omission evidence |
 | `Signal` | A11, A12 | Same room, negotiated transport, session generation, error and valid budgets |
 | `AuthorityRequest` | A09 | Role commit, personalized event, denial and reply budget |
 | `PlayerReady` | A08 | Toggle, membership snapshot, broadcast; repeated requests are not idempotent |
 | `StartGame` | A08, A11 | Authorization, exact readiness set, game and session-plan transaction |
 | `ProvideConnectionInfo` | A06, A11 | Metadata validation, endpoint usability, snapshot freshness |
-| `Ping` and WebSocket Ping/Pong | A04, A16 | Source identity, liveness, response budget, probe completion |
+| `Ping` | A04, A16 | Source identity, liveness, response budget |
 | `Reconnect` | A04, A05, A06 | Claim, identity reassignment, snapshot queue commit, token rotation |
-| `JoinAsSpectator`, `LeaveSpectator` | A10, A14 | Role exclusion, baseline/terminal event, generation barrier |
+| `JoinAsSpectator` | A10, A14 | Role exclusion, baseline event, generation barrier |
+| `LeaveSpectator` | A10, A14 | Role exclusion, terminal event, generation barrier |
+| `RoomOperation` | A01, A12 | Capability gate, canonical ID, correlated result; no deduplication promise |
 | `TransportStatus` | A11, A12 | Negotiated capability, per-generation deduplication, fan-out suppression |
-| `RoomOperation` envelope | A01, A12 | Capability gate, canonical ID, correlated result; no deduplication promise |
-| Wrapped join/leave/reconnect/spectator operations | A05, A07, A10 | Same transaction as legacy command, one correctly correlated terminal result |
-| `KickPlayer`, `BanPlayer`, `UnbanPlayer` | A05, A09, A15 | Authority check, target lifecycle, reconnect tombstone, ban perimeter, close |
-| `RegenerateRoomCode`, `SetRoomAccess` | A07, A09 | Admission serialization, authorization, uncertain response recovery |
+
+| RoomOperationRequest variant | Audit tasks | Required observable boundaries |
+| --- | --- | --- |
+| `JoinRoom` | A07, A08, A11 | Same admission transaction as legacy join; correlated result |
+| `LeaveRoom` | A04, A07, A09, A14 | Same departure transaction as legacy leave; correlated result |
+| `Reconnect` | A04, A05, A06 | Same claim and restore transaction; correlated result |
+| `JoinAsSpectator` | A10, A14 | Same spectator admission transaction; correlated result |
+| `LeaveSpectator` | A10, A14 | Same spectator departure transaction; correlated result |
+| `KickPlayer` | A05, A09, A15 | Authority check, target lifecycle, reconnect tombstone, close |
+| `BanPlayer` | A05, A09, A15 | Authority check, target lifecycle, reconnect tombstone, ban perimeter, close |
+| `UnbanPlayer` | A09 | Authority check, room-scoped ban removal, correlated result |
+| `RegenerateRoomCode` | A07, A09 | Admission serialization, authorization, uncertain response recovery |
+| `SetRoomAccess` | A07, A09 | Admission serialization, authorization, uncertain response recovery |
 | `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
+
+Physical binary relay frames belong to A13–A15. WebSocket Ping/Pong belongs to
+A04/A16. Neither is a `ClientMessage` variant. The shared inbound schema union
+is not a negotiated-version allowlist. Existing
+[v3 negotiation socket controls](../../tests/v3_negotiation_e2e.rs) separately
+check v2 envelope refusal, missing-capability refusal and uncorrelated malformed
+input errors. The [room-operation golden vectors](../../tests/room_operation_wire_golden.rs)
+retain exact JSON/MessagePack bytes and canonical correlation IDs.
 
 ## Bounded histories without a confirmed defect
 
@@ -18310,3 +18339,58 @@ The active Rust, .NET and Godot clients need no change. Their current protocol
 surfaces consume `SessionPlan.direct_endpoint`; the selected endpoints, peer
 sets, lifecycle order and wire fields are unchanged. The removed WebRTC-only
 selection copies are internal to the server.
+
+### F379 — Join schema rejected existing null option values
+
+Existing #826, trial slot 6. At `8af6c147`, both Rust join variants accept
+omitted or null `room_code`, `max_players`, `supports_authority` and
+`relay_transport`. Serialization emits null when those four values are absent.
+The shared AsyncAPI `JoinRoom` schema instead required non-null values when
+present. This also rejected the unchanged canonical v2 join samples and the
+nested `RoomOperation` shape. It is a schema defect, not a server admission defect.
+
+The new `inbound_schema_accepts_wire_samples_and_only_supported_nested_commands`
+control fails on the original schema in Nextest `9fcb1ad5` at the canonical
+`relay_transport:null` sample. The repair gives the four properties explicit
+null alternatives. It preserves omission, field types and relay tokens.
+`join_room_optional_fields_match_schema_in_both_envelopes` checks six optional
+fields with omitted, null, valid and invalid inputs in both envelopes (48 cells).
+Every accepted value also checks the server's serialized shape. The shared shape
+checker now handles JSON Schema type arrays and the null type; it remains a
+limited shape checker, not a general validator for formats, ranges or lengths.
+
+`inbound_schema_unions_match_exact_rust_operation_sets` derives both expected
+sets from source and compares the correct unions' discriminator declarations.
+Two controlled faults remove only the nested `KickPlayer` reference or the
+top-level `ClientSignal` reference. Both keep their declared tokens elsewhere.
+The old global token check passes each fault; the new exact-union check fails
+at the missing Rust variant. Restored source passes. No runtime dispatch defect
+was found by this experiment.
+
+Reproduction commands:
+
+```bash
+bash scripts/dev-loop.sh inbound_schema join_room_optional_fields --all-features
+bash scripts/dev-loop.sh --changed origin/main --all-features
+```
+
+All 23 owning schema controls pass in Nextest `214c253f`; all 11 selected source
+policy controls also pass. The three new controls pass together in `f7414edf`.
+Raw logs and temporary schema-fault records remain under
+`progress/backlog-trial/slot-6/`. Essential source, commands and results remain
+here and in #826. A later socket-control build hit a full build-cache volume;
+this was a build failure, not a contract red result. Removing stale generated
+incremental cache restored space. All five unchanged golden-vector and socket
+controls pass in Nextest `30fd9d6c` (4.018 seconds).
+
+External-client assessment: no migration is needed. The server parser, emitted
+bytes and runtime gates do not change. The
+[Rust models at da8f2d16](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/blob/da8f2d16b2515a12e20483db550da3abccdb64ff/src/protocol.rs)
+omit unset join fields. The
+[.NET writer at e467c871](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/blob/e467c8712089f87b7dac670f5f6a731937829bed/src/SignalFish.Client/Protocol/EnvelopeWriter.cs)
+already emits these four nulls. The
+[Godot builders at 58f880b1](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/blob/58f880b13428c0b29dff18b4662aad2cedb819ae/addons/signal_fish/protocol/sf_messages.gd)
+omit unset join fields. All three construct their existing messages explicitly;
+the corrected schema accepts their existing shapes. This source assessment does
+not qualify their full runtime suites. A01 still lacks exhaustive field/value,
+outbound projection and runtime-boundary coverage. The A01–A22 campaign stays open.
