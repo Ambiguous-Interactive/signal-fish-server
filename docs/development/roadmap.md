@@ -31,7 +31,9 @@ Six populated result vectors preserve version selection through nested results
 and reconnect replay arrays. Marker faults distinguish the new guard from the
 prior shape check. Shared shapes remain eligible. Exhaustive fields, metadata,
 spectator rosters and runtime projections remain open.
-The issue owns delivery state. Slot 10 and the final cohort assessment remain.
+Slot 10 explores the public startup boundary under [#1464][i1464].
+The final assessment below separates accepted criteria from issue closures.
+The issues own final delivery state. No further trial slot is authorized.
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
@@ -320,6 +322,28 @@ retains methods, limits and raw data. Existing #1111 remains open for incompatib
 The issue records commands, acceptance and delivery. Local control logs remain under
 progress/backlog-trial/slot-5/.
 
+## Trial slot 10 evidence
+
+Existing #1464 owns the final exploration experiment. No unfinished PR remained.
+The public constructor and loaded validator agree with an independent exact-error
+oracle on 64 bounds pairs, including all three accepted deployment ranges.
+Accepted constructors retain the complete supplied protocol configuration after
+JSON serialization/deserialization. Each retained object negotiates all 65,536
+explicit client versions and the omitted-version default.
+
+Two compiled faults distinguish the boundaries. Replacing the constructor's
+validation input with defaults wrongly accepts `0..=0`. Replacing the stored
+protocol object with defaults fails identity for valid `2..=2`. Both fail their
+owning assertions. Restored source passes. The initial nonexistent shutdown-call
+attempt was a build failure, not red evidence. Source, command, timing and hashes
+are in the [issue results](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1464#issuecomment-6907627656).
+
+This is bounded adapter evidence, not a production repair or a new theorem.
+Live socket/process startup, arbitrary-input constructor refinement, cancellation
+and concurrent correspondence remain open. The source-linked README records
+these limits. Runtime, configuration and Rust/.NET/Godot client behavior do not
+change. No changelog entry applies. Keep #1464 open.
+
 ## Ten-session trial
 
 Setup is not a trial delivery session. Sessions 1–4 and 6–9 address existing debt.
@@ -342,14 +366,19 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | 6 | Debt | [#826][i826] / [#1677](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1677) | Exact inbound unions and existing join null values qualify; broader audit remains open. |
 | 7 | Debt | [#826][i826] / [#1678](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1678) | Exact outbound reachability and corrected reconnect samples qualify; broader audit remains open. |
 | 8 | Debt | [#826][i826] / [#1679](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1679) | All 15 nested result variants qualify; omission and unsupported-event faults fail; broader audit remains open. |
-| 9 | Debt | Pending | Not started |
-| 10 | Exploration | Pending | Not started |
+| 9 | Debt | [#826][i826] / [#1680](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1680) | Six nested version vectors and marker faults qualify; broader audit remains open. |
+| 10 | Exploration | [#1464][i1464] | Startup bounds and retained configuration controls pass; broader correspondence remains open. |
 
 At slot 10, compare the original cohort's completed issues and remaining obligations with this baseline.
 Report new issues, reopened issues, duplicates, accepted product outcomes, task age, cycle time,
 blocked time, and comparable developer/CI timings separately. Explain unresolved debt with evidence.
 Change one workflow constraint at a time. Do not promise zero issues or use closure counts as a quota.
 Do not add a Project board, dashboard, enforcement hook, or stale-closure automation during this trial.
+
+The [final 42-issue assessment](backlog-trial-assessment.md) records each original
+issue, accepted criteria, closures, new scope, blockers, age, cycle time, effort
+and measurement limits. Final delivery evidence belongs to #1464. The trial ends
+after slot 10; no further session is authorized by this plan.
 
 Adoption checks: select an existing issue without replacement; keep partial repairs open;
 close only complete evidence-backed repairs; retain historical failures after passing reruns;
