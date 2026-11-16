@@ -28,7 +28,7 @@ Refresh issue comments and dependencies before claiming. Blocked tasks return to
 
 | Order | Existing issue | Next discriminating experiment |
 | --- | --- | --- |
-| 1 | [#1224][i1224] | Deliver the verified strict SCTP test-lint repair and close after green CI. |
+| 1 | [#826][i826] | Reconcile A01's operation crosswalk with current protocol variants and evidence; identify a bounded missing wire contract. |
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
@@ -42,6 +42,8 @@ Existing #1441 has new normal-workload measurements below; historical timing out
 Existing #1426 needs a correlated Windows panic capture before an unchanged rerun can resolve attribution.
 Existing #775 refuses its upper retained-record shape before allocation. Largest-cell qualification needs
 streaming work or a provisioned host; the current 31 GiB host cannot hold its required recipient rows.
+Existing #1501 has an upstream assessment below. Re-entry requires a changed warning-path experiment,
+not another unchanged passing run.
 
 ## Original cohort
 
@@ -258,10 +260,35 @@ using its target cache and setup. Dependency lint alone does not check the stand
 No separate workflow or job is added. The corrected local lint run takes 5.94 seconds; that one sample
 does not establish hosted CI cost. Existing reset, queue, shutdown, and live interop selections stay intact.
 
-Original #1224 is eligible for closure only after current-head CI, review, merge and local sync pass.
-The linked issue records that final decision. No replacement issue was created.
+Original #1224 closed as completed through PR #1674. Its 27 checks were terminal: 19 successful
+and eight policy skips. CodeRabbit approved the verified head. Local main synced to merge
+`e6e7a379`. The original issue records acceptance and timing. No replacement issue was created.
 Raw diagnostics, all attempts, lint logs, test inventories and source identities remain under
 progress/backlog-trial/slot-3/. Essential commands and outcomes are recorded in the original issue.
+
+## Trial slot 4 evidence
+
+Existing #1501 now has a bounded upstream provenance assessment. The original hosted log confirms
+the core 0.9.12 WordLock cast warning through DashMap during the auth race test. The lane passed
+459 tests with 16 existing ignores. That pass does not establish strict provenance.
+
+Published core 0.10.0 uses pointer-preserving operations. Its verified release requires Rust 1.95;
+the project pins 1.94. DashMap 6.2.1 and parking_lot 0.12.5 require the 0.9 series. The dry-run
+resolver rejects 0.10.0 at DashMap's requirement and leaves the lockfile unchanged.
+Existing #1111 owns the compatible-release watch. No dependency override or new issue was added.
+
+The pinned nightly's isolated auth control passes without the warning on ARM and x86 interpreter
+targets. The ARM 16-seed control also passes without it. All 475 historical names were recovered
+and verified against current and original-source listings. Both exact-scope replays pass the auth
+group without the warning; their unrelated tails were stopped and are not full-lane green results.
+The original source's higher-preemption and strict-mode controls also pass without reaching the cast.
+These negative reproduction results do not qualify the warned path. Original #1501 stays open.
+
+The CI testing guide records the analyzer limit, unchanged diagnostic policy, upstream constraint,
+current exact-name lane selection and artifact names. Tests, assertions, ignores and CI flags remain
+unchanged. Independent review corrected the helper name and found no other blocker.
+All attempts, source identities, release checksums and logs remain under progress/backlog-trial/slot-4/.
+The original issue records commands and unmet acceptance; delivery does not close that criterion.
 
 ## Ten-session trial
 
@@ -279,8 +306,8 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | --- | --- | --- | --- |
 | 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
 | 2 | Debt | [#1441][i1441] / [#1673](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1673) | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
-| 3 | Debt | [#1224][i1224] / [#1674](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1674) | All 61 strict test-lint findings fixed; closure pending delivery. |
-| 4 | Debt | Pending | Not started |
+| 3 | Debt | [#1224][i1224] / [#1674](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1674) | Existing issue completed: 61 lint findings fixed, owning tests and hosted controls pass. |
+| 4 | Debt | [#1501][i1501] / delivery pending | Upstream repair and constraints assessed; original warning remains unreproduced. |
 | 5 | Exploration | Pending | Not started |
 | 6 | Debt | Pending | Not started |
 | 7 | Debt | Pending | Not started |
