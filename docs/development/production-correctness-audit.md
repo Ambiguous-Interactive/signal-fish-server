@@ -234,6 +234,53 @@ The full A01 and A01–A22 acceptance remain open.
 
 ## Bounded histories without a confirmed defect
 
+### A01 Correlated reconnect values on real sockets
+
+Authorized session 729 uses base `61997ea5` on Linux ARM64. Existing #826 owns
+this bounded task. The completed trial assessment remains unchanged.
+`correlated_reconnect_preserves_snapshot_and_replay_on_real_sockets` uses the
+production router and JSON sockets. A v3 member physically drops. The test
+waits for the real pending record without changing server state. A v2 spectator
+joins during absence; a v2 host witnesses its exact full-roster event.
+
+Three correlated operations check canonical IDs: join, wrong-token refusal and
+successful reconnect. Wrong-token refusal preserves the pending record.
+The successful response pins room and player identity, Unicode names, populated
+member and spectator snapshots, lobby/readiness values, complete replay status,
+nonempty rotated token, increased player epoch and matching sender watermarks.
+V3 snapshots omit legacy connection metadata and timestamps. Replay contains
+exactly the missed spectator event with its exact identity/name and slim
+counted roster. Both v2 witnesses receive the restored member identity and name
+with a timestamp. Timestamp equality is not claimed. Ordered Ping/Pong barriers
+precede socket cleanup. Each receive checks the exact next JSON message under
+one absolute deadline. The existing shape oracle checks captured envelopes;
+it is not a full JSON Schema validator.
+
+Initial green `6ff5d213` builds in 1.87 seconds and runs in 0.108 seconds.
+A temporary fault in `project_replayed_event_for_v3` changes only the replayed
+spectator name to `fault-replay-name`. In run `d0eb2cf9` (build 8.54 seconds),
+`nested_result_schema_preserves_version_eligibility` passes in 0.044 seconds;
+the new socket test fails at the exact spectator-name assertion in 0.115 seconds.
+The source is restored byte-for-byte. This demonstrates discriminating coverage,
+not a production defect, historical cause or performance improvement.
+The first owning run `9426f8bc` catches a test cleanup race: closing the host
+before the watcher barrier can deliver PlayerLeft before Pong. All barriers now
+complete before any socket closes. This is a fixture repair, not runtime red.
+
+Reproduce with:
+
+```bash
+bash scripts/dev-loop.sh correlated_reconnect_preserves_snapshot_and_replay_on_real_sockets --all-features
+bash scripts/dev-loop.sh --clippy --changed origin/main --all-features
+```
+
+No runtime, schema, wire or API change is delivered. This internal control needs
+no changelog entry or Rust, .NET or Godot client change. Alternate encodings,
+other replay variants, truncation, response loss, concurrency, external client
+runtimes, exhaustive A01 values and A01–A22 remain outside this acceptance.
+Historical failures remain open. The original issue records review, checks,
+merge and sync. Raw attempts remain under ignored `progress/session-729/`.
+
 ### A01 Correlated lifecycle values on real sockets
 
 Authorized session 728, existing #826. Base `a32fd7e1a5c4287fe00d404568c31514274eb9ab`,

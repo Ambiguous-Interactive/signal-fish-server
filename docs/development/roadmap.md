@@ -500,3 +500,17 @@ See [the bounded audit history](production-correctness-audit.md#a01-correlated-l
 The issue owns final review, check, merge and sync evidence.
 This accepts bounded criteria, not issue closure or a historical repair.
 The trial assessment stays unchanged. No next task is claimed.
+
+## Authorized session 729 evidence
+
+Existing [#826][i826] receives a new correlated reconnect socket control at
+base `61997ea5`. Physical loss creates the pending record. A spectator joins
+during absence; the reconnect restores exact room, player and spectator values
+and replays that spectator delta. A wrong token preserves pending recovery.
+The v3 response checks token rotation, an increased incarnation epoch, sender
+watermarks and metadata omission. V2 witnesses retain the full spectator event.
+A replay-name fault leaves the prior synthetic control green and fails the
+new exact-value assertion. The production source is restored byte-for-byte.
+See [the audit record](production-correctness-audit.md#a01-correlated-reconnect-values-on-real-sockets).
+The issue owns final review and delivery. Accepted bounded criteria do not
+close #826 or attribute a historical failure. The trial assessment is unchanged.
