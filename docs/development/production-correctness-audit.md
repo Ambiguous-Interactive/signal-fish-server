@@ -18760,3 +18760,60 @@ That client task remains open separately from server acceptance. The .NET
 client at `e467c871` parses a nullable ClientId; Godot at `30526d3f` accepts null
 and omits absent IDs. Neither needs a change because runtime output is unchanged.
 These source assessments do not qualify client runtime suites.
+
+### A01 Real-socket metadata projection matrix
+
+Existing #826 owns this bounded session 726 task. Base:
+`68fc07711576239f133d8c860caa76e4fbc95758`; Linux aarch64 devcontainer.
+The completed ten-slot trial is unchanged. The hypothesis is that Serde/schema
+fixtures can pass while the production writer changes a recipient's metadata.
+No production defect is established by this experiment.
+
+`metadata_reaches_mixed_version_snapshots_and_game_start_on_real_sockets`
+starts five production-router servers. Each has a v2 metadata provider, a later
+v2 observer and a v3 observer. The cases cover Direct, UnityRelay, Relay, WebRTC
+and Custom metadata, including Unicode and nested Custom JSON. The provider
+stores metadata through ProvideConnectionInfo. An ordered Ping/Pong barrier
+completes that command before either observer joins. Raw RoomJoined frames
+retain the exact metadata and timestamp for v2; v3 omits both and retains the
+provider's nonzero epoch and zero sequence. Exact roster identities and counts
+exclude missing, substituted or duplicate players.
+
+After ordered readiness barriers, an explicit StartGame produces three raw
+GameStarting frames per case. Every frame retains the exact provider metadata
+and omits metadata for the other two players. Exact identities and counts pin
+all three recipients' complete handoff membership. Fifteen RoomJoined frames
+and fifteen GameStarting frames pass the existing version-aware reachable
+schema shape oracle. Ten snapshots contain the provider after metadata storage.
+These are live socket output checks, not only hand-built wire fixtures.
+
+Initial corrected green: Nextest `31031b64`, build 1.39 seconds, test 0.324 seconds.
+A temporary production-writer fault removes only Custom metadata from v3
+GameStarting. In the same run (`4bc78345`), the prior metadata Serde/schema
+matrix passes and the new socket test fails at its exact Custom handoff
+assertion. Build takes 10.06 seconds; the passing and failing tests take
+0.093 and 0.334 seconds. The fault is restored before validation or publication.
+Restored owning run `63782bd2` passes all 31 tests in 0.512 seconds after a
+7.34-second build. Source-policy run `daf8baa6` passes all 11 controls. An initial
+compile error, an incorrect v2 ProtocolInfo expectation and a missing explicit
+StartGame are test setup failures, not production defect evidence.
+No p95, performance gain or historical incident attribution follows.
+
+Reproduce with:
+
+```bash
+bash scripts/dev-loop.sh metadata_reaches_mixed_version_snapshots_and_game_start_on_real_sockets --all-features
+bash scripts/dev-loop.sh --clippy --changed origin/main
+```
+
+Each receive uses one absolute deadline. Successful cases close their sockets
+and await the shared server shutdown drain. Raw attempts remain in ignored
+`progress/session-726/`; #826 owns review and delivery results. This internal
+control changes no runtime source, schema, wire bytes or client API. Rust,
+.NET and Godot clients need no change. No changelog entry is required.
+
+Acceptance is limited to these five metadata values, two snapshot cohorts and
+three handoff recipients per case. It does not qualify every optional value,
+reconnect/replay/correlated operation path, alternate encoding, external client
+runtime, physical metadata endpoint or all A01 fields. A01–A22 and historical failures stay open.
+The schema helper remains a shape oracle, not a full JSON Schema validator.

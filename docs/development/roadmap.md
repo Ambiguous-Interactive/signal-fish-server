@@ -459,3 +459,17 @@ fault passes the prior sample guards and fails the new matrix.
 See [the audit evidence](production-correctness-audit.md#f381-relay-metadata-schema-rejected-a-null-client-id).
 Full runtime projection and campaign acceptance remain open. Historical
 failures and the completed trial remain unchanged. #826 owns delivery.
+
+## Authorized session 726 evidence
+
+Existing [#826][i826] connects the metadata fixture matrix to real WebSocket
+output. Five cases cover all ConnectionInfo variants with mixed v2/v3 members.
+Ten later-join snapshots pin exact v2 metadata retention and v3 omission.
+Fifteen GameStarting handoffs retain exact provider metadata and complete player
+identities. All thirty captured envelopes pass the existing schema shape oracle.
+A production Custom-handoff omission leaves the prior fixture green and fails
+the new socket assertion. The fault is restored; no production defect is found.
+See the [audit record](production-correctness-audit.md#a01-real-socket-metadata-projection-matrix)
+and original issue for validation, review and delivery. This is bounded runtime
+acceptance; exhaustive A01, other lifecycle paths, historical causes and campaign
+closure remain open. The ten-slot trial assessment is unchanged.
