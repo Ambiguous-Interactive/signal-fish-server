@@ -18775,8 +18775,8 @@ v2 observer and a v3 observer. The cases cover Direct, UnityRelay, Relay, WebRTC
 and Custom metadata, including Unicode and nested Custom JSON. The provider
 stores metadata through ProvideConnectionInfo. An ordered Ping/Pong barrier
 completes that command before either observer joins. Raw RoomJoined frames
-retain the exact metadata and timestamp for v2; v3 omits both and retains the
-provider's nonzero epoch and zero sequence. Exact roster identities and counts
+retain the exact metadata and include a timestamp for v2; v3 omits both and
+retains the provider's nonzero epoch and zero sequence. Exact roster identities and counts
 exclude missing, substituted or duplicate players.
 
 After ordered readiness barriers, an explicit StartGame produces three raw
