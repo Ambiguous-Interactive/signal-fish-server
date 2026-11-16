@@ -18566,3 +18566,56 @@ existing fields. No SDK change or migration is required. Consumers that copy the
 canonical corpus can refresh their fixtures separately. No client runtime suite
 is qualified by this sample-only repair. No historical failure cause, new issue
 or campaign closure is claimed.
+
+### A01 populated spectator schema boundaries 2026-11-16
+
+Existing #826; one separately authorized session after the completed trial.
+Base: `86a8ce50010e171a3996fe5f7b91f63b546d6ac4`.
+The hypothesis is that empty rosters can hide a wrong spectator item reference.
+The unchanged schema accepts all new vectors; no production or schema defect is established.
+
+The new `populated_spectator_rosters_match_schema_boundaries` control checks 26
+positive envelopes with exact Rust JSON round trips and reachable schema shapes.
+It covers v2/v3 populated RoomJoined, Reconnected and SpectatorJoined snapshots,
+the shared spectator-only branch, SpectatorLeft and their legal nested results.
+V2 roster events retain full rosters; v3 events retain empty rosters and counts.
+V3 reconnect replay includes both spectator join and departure events, also inside
+nested results. SpectatorInfo serialization retains the v2 timestamp and omits
+it for v3. A Unicode name is preserved.
+
+Thirty-eight negative envelopes cover wrong-version snapshot roster items,
+boolean names, unknown spectator fields and malformed replay spectators, through
+both direct and nested paths. Shared event unions remain eligible for either
+spectator shape. These are schema/Serde fixtures, not whole-room histories,
+live recipient projections, state consistency or socket-delivery evidence.
+V2-shaped nested results test schema composition only; they do not authorize
+RoomOperationResult delivery to a v2 client. Runtime capability gating is separate.
+The existing shape helper does not implement complete JSON Schema validation.
+
+Changing only V3SpectatorJoined.current_spectators.items to V2SpectatorInfo
+leaves the prior nested version guard green in Nextest `bf2603b6`.
+The new guard fails its intended v3 populated-envelope acceptance assertion
+in Nextest `6792cfd3`.
+The schema is restored byte-for-byte (SHA-256
+`e3dc6dc5b8bd3956f95f3605c87d23cf194544154f39435fbdcefef458ce6dfb`).
+An initial missing v3 standalone SpectatorJoined fixture fails before correction;
+it is not production red evidence. The corrected fixture derives the shared
+sample from the v2 corpus and replaces its member and spectator arrays.
+Initial green: Nextest `ec25cae6`, 1.28 seconds build and 0.050 seconds execution.
+Restored owning run: `9d9c9011`, 29 passes, 2.20 seconds build and 0.451 seconds execution.
+These single observations establish no p95 or performance improvement.
+
+Reproduce with:
+
+```bash
+bash scripts/dev-loop.sh populated_spectator_rosters_match_schema_boundaries --all-features
+bash scripts/dev-loop.sh nested_result_schema_preserves_version_eligibility --all-features
+bash scripts/dev-loop.sh --clippy --changed origin/main
+```
+
+Raw attempts remain in ignored `progress/session-722/`; #826 owns acceptance,
+review and delivery results. Rust, .NET and Godot clients need no changes:
+production fields, wire bytes, runtime and schema are unchanged. This internal
+control needs no changelog entry. Exhaustive field/value/metadata coverage,
+actual recipient projections, runtime histories and the wider A01–A22 campaign
+remain open. No historical incident or campaign closure is accepted.

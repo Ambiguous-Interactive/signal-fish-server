@@ -2119,6 +2119,172 @@ fn nested_result_schema_preserves_version_eligibility() {
 }
 
 #[test]
+fn populated_spectator_rosters_match_schema_boundaries() {
+    use serde_json::{json, Value};
+    use signal_fish_server::protocol::{ServerMessage, SpectatorInfo};
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let schema_for = |wire: &Value| {
+        schemas
+            .iter()
+            .find(|(tag, _)| wire["type"] == tag.as_str())
+            .expect("reachable server envelope")
+            .1
+    };
+    let wrap = |result: Value| {
+        json!({"type":"RoomOperationResult", "data":{
+            "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "result":result
+        }})
+    };
+    let timestamp = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
+        .expect("spectator timestamp")
+        .with_timezone(&chrono::Utc);
+    let spectator = |version| {
+        serde_json::to_value(SpectatorInfo {
+            id: uuid::Uuid::from_u128(3),
+            name: "観客".to_string(),
+            connected_at: (version == 2).then_some(timestamp),
+        })
+        .expect("serialize spectator")
+    };
+    let check = |version, wire: &Value| {
+        let decoded: ServerMessage =
+            serde_json::from_value(wire.clone()).expect("Rust accepts populated envelope");
+        assert_eq!(
+            serde_json::to_value(decoded).expect("serialize populated envelope"),
+            *wire,
+            "v{version}: Rust wire identity changed"
+        );
+        assert!(
+            schema_shape_matches_version(root, schema_for(wire), wire, Some(version)),
+            "v{version}: schema rejected populated spectator envelope {wire}"
+        );
+    };
+    for (version, samples) in [
+        (
+            2,
+            include_str!("../.llm/code-samples/protocol/v2-server-messages.jsonl"),
+        ),
+        (
+            3,
+            include_str!("../.llm/code-samples/protocol/v3-server-messages.jsonl"),
+        ),
+    ] {
+        let samples: Vec<Value> = samples
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("server sample JSON"))
+            .collect();
+        let sample = |tag: &str| {
+            samples
+                .iter()
+                .find(|wire| wire["type"] == tag)
+                .unwrap_or_else(|| panic!("v{version} lacks {tag}"))
+                .clone()
+        };
+        let member = sample("RoomJoined")["data"]["current_players"].clone();
+        let roster = json!([spectator(version)]);
+        for tag in ["RoomJoined", "Reconnected", "SpectatorJoined"] {
+            let mut wire = if tag == "SpectatorJoined" {
+                include_str!("../.llm/code-samples/protocol/v2-server-messages.jsonl")
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| serde_json::from_str::<Value>(line).expect("server sample JSON"))
+                    .find(|wire| wire["type"] == tag)
+                    .expect("shared spectator join sample")
+            } else {
+                sample(tag)
+            };
+            wire["data"]["current_players"] = member.clone();
+            wire["data"]["current_spectators"] = roster.clone();
+            check(version, &wire);
+            check(version, &wrap(wire.clone()));
+
+            // Keep the player snapshot fixed so a wrong spectator item cannot
+            // escape through the other version's envelope branch.
+            let mut wrong_version = wire.clone();
+            wrong_version["data"]["current_spectators"] = json!([spectator(5 - version)]);
+            for invalid in [
+                wrong_version,
+                {
+                    let mut invalid = wire.clone();
+                    invalid["data"]["current_spectators"][0]["name"] = json!(false);
+                    invalid
+                },
+                {
+                    let mut invalid = wire.clone();
+                    invalid["data"]["current_spectators"][0]["unexpected"] = json!(true);
+                    invalid
+                },
+            ] {
+                for candidate in [invalid.clone(), wrap(invalid)] {
+                    assert!(
+                        !schema_shape_matches_version(
+                            root,
+                            schema_for(&candidate),
+                            &candidate,
+                            Some(version)
+                        ),
+                        "v{version} {tag}: invalid spectator accepted {candidate}"
+                    );
+                }
+            }
+            if tag == "SpectatorJoined" {
+                wire["data"]["current_players"] = json!([]);
+                check(version, &wire);
+                check(version, &wrap(wire));
+            }
+        }
+
+        // V3 roster events are deltas; v2 events carry the full roster.
+        let events = [
+            json!({"type":"NewSpectatorJoined", "data":{
+                "spectator":spectator(version),
+                "current_spectators":if version == 2 {roster.clone()} else {json!([])}
+            }}),
+            json!({"type":"SpectatorDisconnected", "data":{
+                "spectator_id":uuid::Uuid::from_u128(4),
+                "current_spectators":if version == 2 {roster.clone()} else {json!([])}
+            }}),
+        ]
+        .map(|mut event| {
+            if version == 3 {
+                event["data"]["spectator_count"] = json!(1);
+            }
+            event
+        });
+        for event in &events {
+            check(version, event);
+        }
+        let left = json!({"type":"SpectatorLeft", "data":{"current_spectators":roster}});
+        check(version, &left);
+        check(version, &wrap(left));
+        if version == 3 {
+            let mut reconnect = sample("Reconnected");
+            reconnect["data"]["current_spectators"] = json!([spectator(version)]);
+            reconnect["data"]["missed_events"] = json!(events);
+            check(version, &reconnect);
+            check(version, &wrap(reconnect.clone()));
+            reconnect["data"]["missed_events"][0]["data"]["spectator"]["name"] = json!(false);
+            for invalid in [reconnect.clone(), wrap(reconnect)] {
+                assert!(
+                    !schema_shape_matches_version(
+                        root,
+                        schema_for(&invalid),
+                        &invalid,
+                        Some(version)
+                    ),
+                    "invalid replay spectator accepted {invalid}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn inbound_schema_unions_match_exact_rust_operation_sets() {
     let text = spec_text();
     let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
