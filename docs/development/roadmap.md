@@ -26,9 +26,9 @@ Resume an unfinished task before selecting a new one. One owner claims one issue
 These are bounded investigation tasks; ready does not mean a production defect is confirmed.
 Refresh issue comments and dependencies before claiming. Blocked tasks return to triage.
 
-Slot 7 advances the bounded A01 outbound schema and canonical sample experiment
-under [#826][i826]. The issue records ownership, controls and delivery evidence.
-Resume its PR before selecting another task.
+Slot 7 records the bounded A01 outbound schema and canonical sample experiment
+under [#826][i826] in [PR #1678](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1678).
+The issue owns delivery state. Refresh existing debt before selecting the next task.
 
 Correctness precedes usability, then measured performance. Within a tier, prefer dependency
 unblocking, then the oldest actionable issue. A confirmed urgent defect can change this order.
@@ -337,7 +337,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | 4 | Debt | [#1501][i1501] / [#1675](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1675) | Upstream repair and constraints assessed; original warning remains unreproduced. |
 | 5 | Exploration | [#1111][i1111] / [#1653](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1653) | Current-source prost 0.14.6 records qualify; PR merged and Docker publication passed. |
 | 6 | Debt | [#826][i826] / [#1677](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1677) | Exact inbound unions and existing join null values qualify; broader audit remains open. |
-| 7 | Debt | [#826][i826] / PR pending | Outbound reachability and reconnect sample repair; delivery pending. |
+| 7 | Debt | [#826][i826] / [#1678](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1678) | Exact outbound reachability and corrected reconnect samples qualify; broader audit remains open. |
 | 8 | Debt | Pending | Not started |
 | 9 | Debt | Pending | Not started |
 | 10 | Exploration | Pending | Not started |
