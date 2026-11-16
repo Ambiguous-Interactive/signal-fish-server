@@ -1637,6 +1637,215 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
     }
 }
 
+/// Follow only envelope unions, never nested payload objects, to identify the
+/// wire discriminators reachable from an AsyncAPI operation.
+fn envelope_tags(root: &Yaml, schema: &Yaml) -> BTreeSet<String> {
+    if let Some(reference) = schema.as_mapping_get("$ref").and_then(Yaml::as_str) {
+        let resolved =
+            resolve_local_reference(root, reference).expect("resolved envelope reference");
+        return envelope_tags(root, resolved);
+    }
+    if let Some(tag) = mapping_path(schema, &["properties", "type", "const"]).and_then(Yaml::as_str)
+    {
+        return BTreeSet::from([tag.to_string()]);
+    }
+    schema
+        .as_mapping_get("oneOf")
+        .and_then(Yaml::as_sequence)
+        .expect("envelope must declare a discriminator or versioned union")
+        .iter()
+        .flat_map(|branch| envelope_tags(root, branch))
+        .collect()
+}
+
+fn outbound_schemas<'doc, 'input>(root: &'doc Yaml<'input>) -> Vec<(String, &'doc Yaml<'input>)> {
+    let operation =
+        mapping_path(root, &["operations", "receiveFromServer"]).expect("server receive operation");
+    assert_eq!(
+        operation.as_mapping_get("action").and_then(Yaml::as_str),
+        Some("receive")
+    );
+    assert_eq!(
+        mapping_path(operation, &["channel", "$ref"]).and_then(Yaml::as_str),
+        Some("#/channels/signaling")
+    );
+    operation
+        .as_mapping_get("messages")
+        .and_then(Yaml::as_sequence)
+        .expect("outbound operation messages")
+        .iter()
+        .map(|entry| {
+            let channel_ref = entry
+                .as_mapping_get("$ref")
+                .and_then(Yaml::as_str)
+                .expect("channel message reference");
+            assert!(channel_ref.starts_with("#/channels/signaling/messages/"));
+            let channel_message =
+                resolve_local_reference(root, channel_ref).expect("reachable channel message");
+            let message_ref = channel_message
+                .as_mapping_get("$ref")
+                .and_then(Yaml::as_str)
+                .expect("component message reference");
+            let message =
+                resolve_local_reference(root, message_ref).expect("reachable component message");
+            let payload = message.as_mapping_get("payload").expect("message payload");
+            let tags = if let Some(physical) = message
+                .as_mapping_get("x-rust-server-variant")
+                .and_then(Yaml::as_str)
+            {
+                // The binary carrier is projected into physical MessagePack
+                // frames. It must not be tested as serde's JSON enum shape.
+                assert_eq!(physical, "GameDataBinary");
+                assert_eq!(
+                    message.as_mapping_get("contentType").and_then(Yaml::as_str),
+                    Some("application/msgpack")
+                );
+                BTreeSet::from([physical.to_string()])
+            } else {
+                envelope_tags(root, payload)
+            };
+            assert_eq!(
+                tags.len(),
+                1,
+                "{message_ref}: expected one message discriminator, got {tags:?}"
+            );
+            (tags.into_iter().next().expect("one tag"), payload)
+        })
+        .collect()
+}
+
+#[test]
+fn outbound_schema_operation_reaches_exact_rust_message_set() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let actual: BTreeSet<_> = schemas.iter().map(|(tag, _)| tag.clone()).collect();
+    assert_eq!(
+        actual.len(),
+        schemas.len(),
+        "duplicate outbound operation message"
+    );
+    let source = read_file(&repo_root().join("src/protocol/messages.rs"));
+    let mut expected: BTreeSet<_> = enum_variants(&source, "ServerMessage")
+        .into_iter()
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "Rust server message inventory must not be empty"
+    );
+    // This negotiated extension uses its own frame type outside ServerMessage.
+    expected.insert("TokenBindingChallenge".to_string());
+    assert_eq!(
+        actual, expected,
+        "receiveFromServer differs from Rust variants plus the token-binding extension"
+    );
+}
+
+#[test]
+fn outbound_schema_accepts_canonical_server_samples() {
+    use signal_fish_server::protocol::ServerMessage;
+
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let mut covered = BTreeSet::new();
+    for (version, samples) in [
+        (
+            2,
+            include_str!("../.llm/code-samples/protocol/v2-server-messages.jsonl"),
+        ),
+        (
+            3,
+            include_str!("../.llm/code-samples/protocol/v3-server-messages.jsonl"),
+        ),
+    ] {
+        for (index, line) in samples
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+        {
+            let wire: serde_json::Value = serde_json::from_str(line).expect("server sample JSON");
+            let tag = wire["type"].as_str().expect("server sample discriminator");
+            let schema = schemas
+                .iter()
+                .find(|(name, _)| name == tag)
+                .unwrap_or_else(|| panic!("v{version} line {}: unreachable {tag}", index + 1))
+                .1;
+            let resolved = schema
+                .as_mapping_get("$ref")
+                .and_then(Yaml::as_str)
+                .and_then(|reference| resolve_local_reference(root, reference))
+                .unwrap_or(schema);
+            // Versioned unions may also have a shared branch (for example,
+            // an empty spectator-only room). Keep that branch eligible.
+            if let Some(branches) = resolved.as_mapping_get("oneOf").and_then(Yaml::as_sequence) {
+                let branches: Vec<_> = branches
+                    .iter()
+                    .filter_map(|branch| {
+                        branch
+                            .as_mapping_get("$ref")
+                            .and_then(Yaml::as_str)
+                            .and_then(|reference| resolve_local_reference(root, reference))
+                    })
+                    .collect();
+                if branches
+                    .iter()
+                    .any(|branch| branch.as_mapping_get("x-protocol-version").is_some())
+                {
+                    assert!(branches.iter().any(|branch| {
+                        branch.as_mapping_get("x-protocol-version").and_then(Yaml::as_integer)
+                            .is_none_or(|advertised| advertised == version)
+                            && schema_shape_matches(root, branch, &wire)
+                    }), "v{version} line {}: sample does not match its version or a shared branch: {wire}", index + 1);
+                }
+            }
+            let parsed: ServerMessage =
+                serde_json::from_value(wire.clone()).expect("Rust server sample");
+            let encoded = serde_json::to_value(parsed).expect("serialize server sample");
+            assert_eq!(
+                wire,
+                encoded,
+                "v{version} line {}: Rust round trip",
+                index + 1
+            );
+            assert!(
+                schema_shape_matches(root, schema, &wire),
+                "v{version} line {}: schema rejected {wire}",
+                index + 1
+            );
+            let mut malformed = wire.clone();
+            malformed
+                .as_object_mut()
+                .expect("message object")
+                .remove("type");
+            assert!(
+                !schema_shape_matches(root, schema, &malformed),
+                "{tag}: schema accepted a missing discriminator"
+            );
+            if wire.get("data").is_some() {
+                malformed = wire.clone();
+                malformed["data"] = serde_json::Value::Bool(false);
+                assert!(
+                    !schema_shape_matches(root, schema, &malformed),
+                    "{tag}: schema accepted boolean payload"
+                );
+            }
+            covered.insert(tag.to_string());
+        }
+    }
+    let source = read_file(&repo_root().join("src/protocol/messages.rs"));
+    let mut expected: BTreeSet<_> = enum_variants(&source, "ServerMessage")
+        .into_iter()
+        .collect();
+    expected.remove("GameDataBinary"); // Separate physical frame controls.
+    assert_eq!(
+        covered, expected,
+        "canonical outbound sample inventory drifted"
+    );
+}
+
 #[test]
 fn inbound_schema_unions_match_exact_rust_operation_sets() {
     let text = spec_text();

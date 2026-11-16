@@ -44,7 +44,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
-| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound union and sample-shape controls; join null mismatch repaired in F379 |
+| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound/outbound reachability and sample-shape controls; join null mismatch repaired in F379; reconnect samples repaired in F380 |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
@@ -126,6 +126,29 @@ is not a negotiated-version allowlist. Existing
 check v2 envelope refusal, missing-capability refusal and uncorrelated malformed
 input errors. The [room-operation golden vectors](../../tests/room_operation_wire_golden.rs)
 retain exact JSON/MessagePack bytes and canonical correlation IDs.
+
+### Outbound operation evidence
+
+Trial slot 7 starts from `e4c4ba243cb5a34d94df8fe7259059f8931ed070`. The `receiveFromServer` operation reaches
+all 32 `ServerMessage` variants through its signaling channel and component
+message references. The negotiated `TokenBindingChallenge` extension is the
+one additional message; it uses a separate frame type. The binary carrier
+uses physical MessagePack schemas rather than its in-memory JSON enum shape.
+
+`outbound_schema_operation_reaches_exact_rust_message_set` compares the reachable
+discriminator set with the Rust source inventory and rejects duplicate messages.
+`outbound_schema_accepts_canonical_server_samples` checks all 44 canonical v2/v3
+server samples against their reachable schemas and exact Rust round trips.
+The samples cover all 31 JSON variants, including the added `RelayStats` example.
+Versioned unions must accept the sample's version or their shared shape.
+Missing discriminators and boolean replacements for object payloads must fail.
+Existing physical-binary, accountability and replay controls retain their separate
+version and hybrid checks. F380 records the sample defects and source faults.
+
+These controls check representative shapes and reachability. They do not qualify
+every field/value, general JSON Schema constraints, all nested operation results,
+actual recipient projections, negotiated extension behavior or runtime delivery.
+The full A01 and A01–A22 acceptance remain open.
 
 ## Bounded histories without a confirmed defect
 
@@ -18394,3 +18417,47 @@ omit unset join fields. All three construct their existing messages explicitly;
 the corrected schema accepts their existing shapes. This source assessment does
 not qualify their full runtime suites. A01 still lacks exhaustive field/value,
 outbound projection and runtime-boundary coverage. The A01–A22 campaign stays open.
+
+### F380 — Canonical reconnect examples omitted required runtime state
+
+Existing #826, trial slot 7. At `e4c4ba243cb5a34d94df8fe7259059f8931ed070`, the v2 `Reconnected` example has an
+empty `current_players` list. The v3 example omits `reconnection_token`.
+Both examples round-trip through Rust, but the existing schema rejects them.
+`reconnection_service.rs` refuses a baseline without the restored member and
+pre-issues the rotated token before publishing a successful v3 reconnect.
+The sample repair adds that member and an illustrative rotated token. The schema,
+server parser, production payloads and recipient projections remain unchanged.
+
+The original sample control fails on v2 line 17 in Nextest `edbaa39a`.
+Removing only the v3 token correction fails on v3 line 14 in `8c4d3412`.
+Removing only the outbound `ServerSignal` operation reference leaves the old
+broad token guard green (`694af476`), but the new reachable-set guard fails at
+missing `Signal` (`00c029ad`). The component and its declared token remain in
+that fault. Source restoration passes. These are assertion failures, not build
+failures. All 25 owning schema tests and four sample tests pass in `c6531cf4`
+(0.466 seconds). The first two-test build takes 1.79 seconds; one warm repair
+build takes 1.13 seconds and its tests take 0.048 seconds. These are individual
+observations, not p95 measurements or a comparable performance improvement.
+
+Commands:
+
+```bash
+bash scripts/dev-loop.sh outbound_schema --all-features
+bash scripts/dev-loop.sh spec_documents_every_client_and_server_message_variant --all-features
+cargo nextest run --all-features --test protocol_spec_consistency --test protocol_samples
+```
+
+A broader `spec_` dev-loop filter ran 12 root tests successfully but returned a
+missing-selection error in the independent tooling package. The explicit owning
+target command above avoids that ambiguous filter. An initial version selector
+also rejected the valid shared empty-spectator branch. The final selector accepts
+shared branches and still requires the advertised version for versioned shapes.
+Neither observation is a production defect. Raw logs remain under
+`progress/backlog-trial/slot-7/`; this ledger and #826 retain the essential evidence.
+
+External-client assessment: Rust, .NET and Godot are unaffected. Their wire models,
+server behavior and codec inputs remain compatible; these corrected examples use
+existing fields. No SDK change or migration is required. Consumers that copy the
+canonical corpus can refresh their fixtures separately. No client runtime suite
+is qualified by this sample-only repair. No historical failure cause, new issue
+or campaign closure is claimed.
