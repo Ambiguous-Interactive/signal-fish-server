@@ -448,3 +448,14 @@ library oracle still omits those allocation checks and retains the equivalent
 mutation. No exclusion, policy change or full-campaign pass is claimed.
 See [the audit evidence](production-correctness-audit.md#scheduled-mutation-evidence-assessment).
 The completed trial and unrelated historical failures remain unchanged.
+
+## Post-trial session for connection metadata schema parity
+
+The user separately authorized one bounded A01 task under [#826][i826].
+Thirty-six metadata vectors cover all five Rust variants at input and legacy
+output boundaries. F381 repairs the schema's rejection of an existing null
+relay client ID. Runtime bytes and behavior stay unchanged. A UnityRelay tag
+fault passes the prior sample guards and fails the new matrix.
+See [the audit evidence](production-correctness-audit.md#f381-relay-metadata-schema-rejected-a-null-client-id).
+Full runtime projection and campaign acceptance remain open. Historical
+failures and the completed trial remain unchanged. #826 owns delivery.

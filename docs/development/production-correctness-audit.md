@@ -44,7 +44,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
-| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound/outbound reachability and sample-shape controls; join null mismatch repaired in F379; reconnect samples repaired in F380 |
+| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound/outbound reachability and sample-shape controls; join null mismatch repaired in F379; reconnect samples repaired in F380; relay null metadata repaired in F381 |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
@@ -18694,3 +18694,69 @@ production fields, wire bytes, runtime and schema are unchanged. This internal
 control needs no changelog entry. Exhaustive field/value/metadata coverage,
 actual recipient projections, runtime histories and the wider A01–A22 campaign
 remain open. No historical incident or campaign closure is accepted.
+
+### F381 Relay metadata schema rejected a null client ID
+
+Existing #826 owns this bounded A01 task. Base:
+`71a23df6c15f88fa1ee93ea8fa1e3e9494964af5`. The completed trial is unchanged.
+The hypothesis was that representative metadata samples can miss optional-value
+or variant drift. The new matrix reproduces a schema defect: Rust accepts
+`{"type":"relay","host":"relay.example","port":7777,"allocation_id":"allocation","token":"fixture","client_id":null}`,
+but the original schema rejects it. `ConnectionInfo::Relay.client_id` is
+`Option<u16>`; null becomes `None` and serialization omits that field.
+Only the schema's `client_id` property gains `nullable: true`. Runtime source,
+wire output, defaults, canonical samples and transport selection do not change.
+
+`connection_metadata_variants_match_input_and_legacy_output_schemas` covers all
+five Rust variants in 36 input vectors: two Direct, one UnityRelay, 20 Relay,
+six WebRTC and seven Custom values. It checks all four relay transport tokens
+and omission; omitted/null/zero/max client IDs; omitted/null/string SDP;
+empty/populated candidate arrays; Unicode and arbitrary nested Custom JSON.
+Independent expected values pin normalization and exact emitted JSON round trips.
+All vectors pass the metadata schema and reachable `ProvideConnectionInfo` input
+schema. Each normalized value passes a v2 RoomJoined snapshot and GameStarting
+handoff. Each fails the v3 snapshot schema and unsupported RoomOperation nesting.
+These are schema/Serde fixtures, not actual recipient projections or delivery.
+
+Twelve malformed metadata vectors fail Rust and schema checks, both directly
+and through command envelopes. Three numeric properties retain integer type
+and exact `0..=65535` schema bounds. Six out-of-range values fail Rust parsing.
+The shape helper does not evaluate numeric bounds; direct bound assertions
+cover those declarations. It is not a complete JSON Schema evaluator.
+Direct port zero is valid legacy metadata; executable Direct endpoint validation
+is a separate contract. No reachability or arbitrary-input qualification follows.
+
+Original schema red: Nextest `73588be7`, 1.26 seconds build, 0.072 seconds test.
+The assertion identifies accepted Relay input with `client_id:null`.
+Repaired schema green: `808fd791`, 0.36 seconds build, 0.086 seconds test.
+A separate fault changes only the UnityRelay schema tag to `unity_relay_fault`.
+Prior inbound/outbound sample guards still pass (`e9e8220b`, two tests).
+The new matrix fails at its UnityRelay acceptance assertion (`282e68ea`).
+Restoring the schema and adding numeric controls passes (`508e2e7d`, 1.30 seconds
+build, 0.082 seconds test). No p95 or speed improvement is claimed.
+The repaired schema SHA-256 is
+`03f212d4f3ce2f519cead1cbe267014484b6fe037cc8a056a8f7ead6235979f7`.
+The first fixture wrongly allowed nested ProvideConnectionInfo and failed;
+it was corrected and is not production red evidence. A mistyped prior-test
+selector was a tool error; the corrected two-test run supplies the control.
+
+Reproduce with:
+
+```bash
+bash scripts/dev-loop.sh connection_metadata_variants_match_input_and_legacy_output_schemas --all-features
+bash scripts/dev-loop.sh --clippy --changed origin/main
+```
+
+Raw attempts remain in ignored `progress/session-725/`. The existing issue owns
+review, final validation and delivery. Acceptance is this bounded schema repair
+and its controls. Exhaustive A01 fields, runtime projection, delivery and the
+A01–A22 campaign remain open. Historical failures are unchanged; no historical
+incident cause or issue closure is claimed.
+
+Independent review found no blocker. The external Rust client already uses
+`Option<u16>` at `da8f2d16`; its byte-pinned server schema needs a refresh tracked
+in [Rust client #126](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/126).
+That client task remains open separately from server acceptance. The .NET
+client at `e467c871` parses a nullable ClientId; Godot at `30526d3f` accepts null
+and omits absent IDs. Neither needs a change because runtime output is unchanged.
+These source assessments do not qualify client runtime suites.
