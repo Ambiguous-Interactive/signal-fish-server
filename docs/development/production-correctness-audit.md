@@ -18567,7 +18567,7 @@ canonical corpus can refresh their fixtures separately. No client runtime suite
 is qualified by this sample-only repair. No historical failure cause, new issue
 or campaign closure is claimed.
 
-### A01 — Populated spectator schema boundaries, 2026-11-16
+### A01 populated spectator schema boundaries 2026-11-16
 
 Existing #826; one separately authorized session after the completed trial.
 Base: `86a8ce50010e171a3996fe5f7b91f63b546d6ac4`.

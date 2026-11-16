@@ -434,5 +434,5 @@ The completed trial and its assessment remain unchanged. The new control checks
 populated spectator snapshots, legal roster events, reconnect replay and nested
 results. A wrong spectator item reference passes the old empty-roster control
 and fails the new guard. No production/schema defect is established.
-See [the audit evidence](production-correctness-audit.md#a01--populated-spectator-schema-boundaries-2026-11-16).
+See [the audit evidence](production-correctness-audit.md#a01-populated-spectator-schema-boundaries-2026-11-16).
 Full runtime projection and campaign acceptance remain open. #826 owns delivery.
