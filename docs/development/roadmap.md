@@ -307,7 +307,7 @@ Compare local-loop and CI timings only for equivalent environments and workloads
 | 1 | Debt | [#1244][i1244] / [#1672](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1672) | Four current-source Godot 4.3 controls pass; historical cause remains open. |
 | 2 | Debt | [#1441][i1441] / [#1673](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1673) | Temporary-index p95 1,039→877 ms; actual-index timing still misses. |
 | 3 | Debt | [#1224][i1224] / [#1674](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1674) | Existing issue completed: 61 lint findings fixed, owning tests and hosted controls pass. |
-| 4 | Debt | [#1501][i1501] / delivery pending | Upstream repair and constraints assessed; original warning remains unreproduced. |
+| 4 | Debt | [#1501][i1501] / [#1675](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/1675) | Upstream repair and constraints assessed; original warning remains unreproduced. |
 | 5 | Exploration | Pending | Not started |
 | 6 | Debt | Pending | Not started |
 | 7 | Debt | Pending | Not started |
