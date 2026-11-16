@@ -436,3 +436,15 @@ results. A wrong spectator item reference passes the old empty-roster control
 and fails the new guard. No production/schema defect is established.
 See [the audit evidence](production-correctness-audit.md#a01-populated-spectator-schema-boundaries-2026-11-16).
 Full runtime projection and campaign acceptance remain open. #826 owns delivery.
+
+## Post-trial session for scheduled mutation evidence
+
+The user separately authorized one bounded task under [#826][i826].
+Six exact faults from the retained scheduled failure now have discriminating
+assertions. New library controls cover endpoint boundaries and named start plans;
+existing allocation controls catch three unused-endpoint copies. One five-part
+numeric-host mutation has a pinned-parser equivalence proof. The scheduled
+library oracle still omits those allocation checks and retains the equivalent
+mutation. No exclusion, policy change or full-campaign pass is claimed.
+See [the audit evidence](production-correctness-audit.md#scheduled-mutation-evidence-assessment).
+The completed trial and unrelated historical failures remain unchanged.
