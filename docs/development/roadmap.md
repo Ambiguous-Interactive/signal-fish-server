@@ -473,3 +473,16 @@ See the [audit record](production-correctness-audit.md#a01-real-socket-metadata-
 and original issue for validation, review and delivery. This is bounded runtime
 acceptance; exhaustive A01, other lifecycle paths, historical causes and campaign
 closure remain open. The ten-slot trial assessment is unchanged.
+
+## Authorized session 727 evidence
+
+Existing [#826][i826] connects populated spectator fixtures to mixed-version
+real socket output in one room. Exact identities, Unicode names and remaining
+rosters qualify join snapshots, shared events and voluntary departures.
+V2 retains full rosters and timestamps; v3 receives full snapshots and slim
+counted events. Both versions retain populated leave replies. A v3 writer
+name fault passes the prior fixture and live shape checks, then fails the
+new exact-value assertion. The writer is restored; no production defect is
+established. See the [audit record](production-correctness-audit.md#a01-mixed-version-spectator-values-on-real-sockets)
+and original issue for validation, review and delivery. Broader A01–A22 and
+historical causes remain open. The completed trial assessment is unchanged.

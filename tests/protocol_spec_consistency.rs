@@ -3218,7 +3218,7 @@ where
     );
 }
 
-mod metadata_runtime {
+mod projection_runtime {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
     use signal_fish_server::websocket::create_router;
@@ -3418,6 +3418,270 @@ mod metadata_runtime {
                 socket.close(None).await.expect("close scenario socket");
             }
             running.shutdown().await;
+        }
+    }
+
+    /// #826: shared room events must keep identities and values when the same
+    /// publication is projected to mixed v2/v3 players and spectators.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spectator_values_reach_mixed_version_snapshots_and_events_on_real_sockets() {
+        let docs = Yaml::load_from_str(&spec_text()).expect("protocol YAML");
+        let root = docs.first().expect("protocol document");
+        let mut protocol = test_helpers::test_protocol_config();
+        protocol.sdk_compatibility.enforce = false;
+        let server = test_helpers::create_test_server_with_config(
+            test_helpers::test_server_config(),
+            protocol,
+        )
+        .await;
+        let router = create_router("http://localhost:3000").with_state(server.clone());
+        let running = test_helpers::RunningTestServer::spawn(server, router).await;
+        let url = format!("ws://{}/ws", running.addr());
+        let mut clients = Vec::new();
+        let mut spectators = Vec::new();
+        let mut players = Vec::new();
+        let mut room_code = Value::Null;
+        let mut room_id = Value::Null;
+        // The later players see populated rosters in both versions. Each
+        // spectator sees its own baseline and publications for later members.
+        for (version, is_spectator, name) in [
+            (2, false, "Host"),
+            (2, true, "Watcher-観客"),
+            (3, true, "Keeper-é"),
+            (3, false, "Member-v3"),
+            (2, false, "Member-v2"),
+            (2, true, "Last-Ω"),
+        ] {
+            let (mut socket, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), connect_async(&url))
+                    .await
+                    .expect("connect deadline")
+                    .expect("connect WebSocket");
+            send(
+                &mut socket,
+                json!({"type":"Authenticate", "data":{
+                    "app_id":"spectator-runtime", "protocol_version":version
+                }}),
+            )
+            .await;
+            receive_exact(&mut socket, "Authenticated").await;
+            let negotiation = receive_exact(&mut socket, "ProtocolInfo").await;
+            assert_eq!(
+                negotiation["data"]["protocol_version"],
+                if version == 3 { json!(3) } else { Value::Null }
+            );
+            let (command, response, id_field) = if is_spectator {
+                (
+                    json!({"type":"JoinAsSpectator", "data":{
+                        "game_name":"spectator-runtime", "room_code":room_code,
+                        "spectator_name":name
+                    }}),
+                    "SpectatorJoined",
+                    "spectator_id",
+                )
+            } else {
+                (
+                    json!({"type":"JoinRoom", "data":{
+                        "game_name":"spectator-runtime", "room_code":room_code,
+                        "player_name":name, "max_players":8, "supports_authority":false
+                    }}),
+                    "RoomJoined",
+                    "player_id",
+                )
+            };
+            send(&mut socket, command).await;
+            let joined = receive_exact(&mut socket, response).await;
+            assert_runtime_shape(root, &joined, version);
+            let id = joined["data"][id_field].clone();
+            assert!(id.as_str().is_some(), "assigned identity: {joined}");
+            if clients.is_empty() {
+                room_code = joined["data"]["room_code"].clone();
+                room_id = joined["data"]["room_id"].clone();
+            }
+            assert_eq!(joined["data"]["room_code"], room_code);
+            assert_eq!(joined["data"]["room_id"], room_id);
+            if is_spectator {
+                spectators.push((id.clone(), name));
+                assert_eq!(joined["data"]["reason"], "joined");
+            } else {
+                players.push((id.clone(), name));
+            }
+            assert_spectator_roster(&joined["data"]["current_spectators"], &spectators, version);
+            assert_roster_values(&joined["data"]["current_players"], &players);
+            for (existing, recipient_version, _) in &mut clients {
+                if is_spectator {
+                    let event = receive_exact(existing, "NewSpectatorJoined").await;
+                    assert_runtime_shape(root, &event, *recipient_version);
+                    assert_spectator_entry(
+                        &event["data"]["spectator"],
+                        &id,
+                        name,
+                        *recipient_version,
+                    );
+                    assert_eq!(event["data"]["reason"], "joined");
+                    assert_fanout_roster(&event, &spectators, *recipient_version);
+                } else {
+                    let event = receive_exact(existing, "PlayerJoined").await;
+                    assert_runtime_shape(root, &event, *recipient_version);
+                    assert_eq!(event["data"]["player"]["id"], id);
+                    assert_eq!(event["data"]["player"]["name"], name);
+                }
+            }
+            if clients.is_empty() {
+                let lobby = receive_exact(&mut socket, "LobbyStateChanged").await;
+                assert_runtime_shape(root, &lobby, version);
+                assert_eq!(lobby["data"]["lobby_state"], "lobby");
+                assert_eq!(lobby["data"]["ready_players"], json!([]));
+                assert_eq!(lobby["data"]["all_ready"], false);
+            }
+            clients.push((socket, version, true));
+        }
+        // Both leave acknowledgments retain a populated roster before the
+        // final spectator leaves. All live members see exact remaining values.
+        for index in [1, 2, 5] {
+            let (departed, _) = spectators.remove(0);
+            send(&mut clients[index].0, json!({"type":"LeaveSpectator"})).await;
+            let left = receive_exact(&mut clients[index].0, "SpectatorLeft").await;
+            let version = clients[index].1;
+            assert_runtime_shape(root, &left, version);
+            assert_eq!(left["data"]["room_id"], room_id);
+            assert_eq!(left["data"]["room_code"], room_code);
+            assert_eq!(left["data"]["reason"], "voluntary_leave");
+            assert_spectator_roster(&left["data"]["current_spectators"], &spectators, version);
+            clients[index].2 = false;
+            for (socket, version, in_room) in &mut clients {
+                // Departed spectators are roomless and get no later fan-out.
+                if !*in_room {
+                    continue;
+                }
+                let event = receive_exact(socket, "SpectatorDisconnected").await;
+                assert_runtime_shape(root, &event, *version);
+                assert_eq!(event["data"]["spectator_id"], departed);
+                assert_eq!(event["data"]["reason"], "voluntary_leave");
+                assert_fanout_roster(&event, &spectators, *version);
+            }
+            // Ping is an ordered barrier, including on roomless sockets. The
+            // exact next JSON frame catches duplicate or unexpected events.
+            for (socket, _, _) in &mut clients {
+                send(socket, json!({"type":"Ping"})).await;
+                receive_exact(socket, "Pong").await;
+            }
+        }
+        for (socket, _, _) in &mut clients {
+            socket
+                .close(None)
+                .await
+                .expect("close spectator scenario socket");
+        }
+        running.shutdown().await;
+    }
+
+    async fn receive_exact(socket: &mut Socket, tag: &str) -> Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let frame = tokio::time::timeout_at(deadline, socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for next {tag}"))
+                .expect("socket remains open")
+                .expect("read spectator scenario frame");
+            match frame {
+                Message::Text(text) => {
+                    let value: Value = serde_json::from_str(&text).expect("raw JSON frame");
+                    assert_eq!(value["type"], tag, "exact next message: {value}");
+                    return value;
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
+                other => panic!("expected next JSON {tag}, got {other:?}"),
+            }
+        }
+    }
+
+    fn assert_runtime_shape(root: &Yaml<'_>, frame: &Value, version: i64) {
+        let tag = frame["type"].as_str().expect("message tag");
+        let schema =
+            mapping_path(root, &["components", "schemas", tag]).expect("reachable server schema");
+        assert!(
+            schema_shape_matches_version(root, schema, frame, Some(version)),
+            "v{version} runtime {tag} schema shape: {frame}"
+        );
+    }
+
+    fn assert_roster_values(roster: &Value, expected: &[(Value, &str)]) {
+        let roster = roster.as_array().expect("roster array");
+        assert_eq!(
+            roster.len(),
+            expected.len(),
+            "exact roster size: {roster:?}"
+        );
+        let actual: std::collections::BTreeSet<_> = roster
+            .iter()
+            .map(|entry| {
+                (
+                    entry["id"].as_str().expect("member UUID"),
+                    entry["name"].as_str().expect("member name"),
+                )
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<_> = expected
+            .iter()
+            .map(|(id, name)| (id.as_str().expect("assigned UUID"), *name))
+            .collect();
+        assert_eq!(actual, expected, "exact roster identities and names");
+    }
+
+    fn assert_spectator_entry(entry: &Value, id: &Value, name: &str, version: i64) {
+        assert_eq!(&entry["id"], id, "exact spectator identity: {entry}");
+        assert_eq!(entry["name"], name, "exact spectator name: {entry}");
+        let keys: std::collections::BTreeSet<_> = entry
+            .as_object()
+            .expect("spectator object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected = if version == 2 {
+            std::collections::BTreeSet::from(["id", "name", "connected_at"])
+        } else {
+            std::collections::BTreeSet::from(["id", "name"])
+        };
+        assert_eq!(keys, expected, "v{version} spectator projection: {entry}");
+        if version == 2 {
+            chrono::DateTime::parse_from_rfc3339(
+                entry["connected_at"].as_str().expect("v2 timestamp"),
+            )
+            .expect("valid v2 timestamp");
+        }
+    }
+
+    fn assert_spectator_roster(roster: &Value, expected: &[(Value, &str)], version: i64) {
+        assert_roster_values(roster, expected);
+        for entry in roster.as_array().expect("spectator roster") {
+            let (id, name) = expected
+                .iter()
+                .find(|(id, _)| entry["id"] == *id)
+                .expect("known spectator");
+            assert_spectator_entry(entry, id, name, version);
+        }
+    }
+
+    fn assert_fanout_roster(frame: &Value, expected: &[(Value, &str)], version: i64) {
+        let data = &frame["data"];
+        if version == 2 {
+            assert!(
+                data.get("spectator_count").is_none(),
+                "frozen v2 count omission: {frame}"
+            );
+            assert_spectator_roster(&data["current_spectators"], expected, version);
+        } else {
+            assert_eq!(
+                data["spectator_count"],
+                expected.len(),
+                "v3 post-change count: {frame}"
+            );
+            assert_eq!(
+                data["current_spectators"],
+                json!([]),
+                "v3 delta roster: {frame}"
+            );
         }
     }
 }
