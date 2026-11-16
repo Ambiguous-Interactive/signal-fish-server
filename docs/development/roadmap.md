@@ -486,3 +486,17 @@ new exact-value assertion. The writer is restored; no production defect is
 established. See the [audit record](production-correctness-audit.md#a01-mixed-version-spectator-values-on-real-sockets)
 and original issue for validation, review and delivery. Broader A01–A22 and
 historical causes remain open. The completed trial assessment is unchanged.
+
+## Authorized session 728 evidence
+
+Existing [#826][i826] receives a changed runtime experiment at base `a32fd7e1`.
+Seven correlated JSON lifecycle replies retain exact operation IDs, identities,
+Unicode names and nested v3 projections. V2 recipients provide independent
+metadata and full-roster controls. Populated and empty spectator leave replies
+and a join-only missing-room refusal pass. Removing only nested join projection
+leaves the prior synthetic schema control passing and fails the new socket test.
+The writer is restored byte-for-byte; all 33 owning schema controls pass.
+See [the bounded audit history](production-correctness-audit.md#a01-correlated-lifecycle-values-on-real-sockets).
+The issue owns final review, check, merge and sync evidence.
+This accepts bounded criteria, not issue closure or a historical repair.
+The trial assessment stays unchanged. No next task is claimed.

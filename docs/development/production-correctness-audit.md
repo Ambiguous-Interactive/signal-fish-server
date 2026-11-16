@@ -234,6 +234,49 @@ The full A01 and A01–A22 acceptance remain open.
 
 ## Bounded histories without a confirmed defect
 
+### A01 Correlated lifecycle values on real sockets
+
+Authorized session 728, existing #826. Base `a32fd7e1a5c4287fe00d404568c31514274eb9ab`,
+Linux aarch64. Synthetic nested-result vectors do not exercise the production writer.
+`correlated_lifecycle_results_preserve_values_on_real_sockets` connects one v3
+operation client, one v2 player and one v2 spectator to the production router.
+It verifies explicit capability negotiation and seven exact operation IDs.
+The results cover a join-only missing-room refusal, member join/leave and two
+spectator join/leave cycles. The two spectator leave replies cover populated
+and empty rosters. Unicode names, room/member/spectator identities and nested
+v3 metadata/timestamp omissions are checked. Legacy snapshots retain exact
+custom metadata; legacy spectator events retain full timestamped rosters.
+Ordered Ping/Pong barriers check roomless sockets and unexpected trailing frames.
+Raw result envelopes match the existing reachable versioned shape oracle.
+This oracle is not a full JSON Schema validator.
+
+The initial fixture used a six-character code with the four-character test
+configuration and failed with `INVALID_ROOM_CODE`. Reusing the valid room code
+under a missing game corrects that fixture; no runtime change is needed.
+Corrected green `54744656` takes 0.104 s after a 1.47 s build.
+For the negative control, replace only the `RoomJoined` arm in
+`project_room_operation_result_for_v3` with an empty arm. The existing
+`nested_result_schema_preserves_version_eligibility` still passes (`439b5ad4`),
+while the new socket control fails the nested v3 schema assertion (`0e58b0d8`).
+The raw reply contains the legacy custom metadata and join timestamps.
+Restore `src/websocket/sending.rs` byte-for-byte before validation.
+All 33 owning schema controls then pass (`d429904f`, 0.484 s; build 7.61 s).
+The issue records review, publication gates and verified-head delivery.
+
+```bash
+bash scripts/dev-loop.sh correlated_lifecycle_results_preserve_values_on_real_sockets --all-features
+bash scripts/dev-loop.sh nested_result_schema_preserves_version_eligibility --all-features
+cargo nextest run --all-features --test protocol_spec_consistency
+```
+
+Accepted criteria are bounded JSON lifecycle/correlation projections.
+No production defect, historical cause, throughput gain or campaign closure
+is established. Reconnect/replay, moderation, concurrent operations, alternate
+encodings, external client runtimes and exhaustive A01–A22 coverage remain open.
+This is internal verification work. Runtime, schema, API and wire bytes stay
+unchanged. No changelog or Rust/.NET/Godot client change applies.
+Raw attempts and independent review remain in ignored `progress/session-728/`.
+
 ### A01 — Trial slot 9 nested version branches
 
 Existing #826. Source: `1af864bdfa603f21ee1374ce3c9c3f3ef26b7d2a` on Linux
