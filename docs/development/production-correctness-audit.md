@@ -18817,3 +18817,65 @@ three handoff recipients per case. It does not qualify every optional value,
 reconnect/replay/correlated operation path, alternate encoding, external client
 runtime, physical metadata endpoint or all A01 fields. A01–A22 and historical failures stay open.
 The schema helper remains a shape oracle, not a full JSON Schema validator.
+
+### A01 Mixed version spectator values on real sockets
+
+Existing #826 owns this bounded session 727 task. Base:
+`fba287cb81241a6ebb2823d944bfe1fe1cd01345`; Linux aarch64 devcontainer.
+The hypothesis is that separate cohort shape checks can miss changed spectator
+values in a shared publication. The completed trial remains unchanged.
+
+`spectator_values_reach_mixed_version_snapshots_and_events_on_real_sockets`
+uses one production-router server with three players and three spectators.
+V2 and v3 recipients share the same room. Later players receive populated
+spectator snapshots in both versions. Spectator joins and all three voluntary
+departures check exact identities, Unicode names and remaining rosters.
+The first two leave replies retain populated rosters in v2 and v3 respectively;
+the final departure checks the empty boundary. Departed spectators remain on
+roomless sockets for ordered Ping/Pong barriers.
+
+V2 recipients retain full event rosters and valid RFC 3339 timestamps, with no
+spectator_count. V3 recipients retain full join snapshots without timestamps;
+join/departure fan-outs carry empty rosters and exact post-change counts.
+Timestamp equality is not asserted. Each receive requires the exact next JSON
+message under one absolute deadline. Ping/Pong barriers after each departure
+also catch duplicate or misrouted room events. Successful cases close all
+sockets and await the shared shutdown drain. All captured lifecycle envelopes
+pass the existing version-aware schema shape oracle; it is not a full JSON
+Schema validator.
+
+Initial corrected green: Nextest `0759ec22`, build 1.39 seconds, test 0.060
+seconds. The first attempt (`29c255dd`) omitted the valid first-host
+LobbyStateChanged frame. The test now asserts that frame and its values.
+This was a fixture error, not production red evidence.
+
+A temporary production-writer fault replaces only the v3 slim join delta's
+spectator name. The prior populated schema control passes, but the new socket
+test fails at the exact name assertion (`af3553cf`, build 7.45 seconds;
+passing/failing tests 0.050/0.067 seconds). The prior separate-cohort live shape
+control also passes with this fault (`9494a0a3`, build 3.16 seconds, test 8.131
+seconds). The writer is restored byte-for-byte before validation/publication.
+This proves a new covered fault, not a production defect or historical cause.
+
+Reproduce with:
+
+```bash
+bash scripts/dev-loop.sh spectator_values_reach_mixed_version_snapshots_and_events_on_real_sockets --all-features
+bash scripts/dev-loop.sh --changed origin/main --all-features
+```
+
+No runtime source, schema, protocol bytes or API changes. This internal test
+needs no changelog entry. Rust, .NET and Godot clients need no change.
+Acceptance is limited to these JSON join/departure histories and values.
+Reconnect/replay, correlated operations, alternate encodings, external client
+runtimes, exhaustive A01 values and A01–A22 remain open. Historical failures
+remain unchanged. No issue closure or performance improvement is claimed.
+The original issue owns review and delivery results. Raw attempts remain in
+ignored `progress/session-727/`.
+
+Restored owning run `31aba71e` passes all 32 controls (build 7.87 seconds,
+tests 0.552 seconds). Full strict all-target/all-feature Clippy, formatting,
+Markdown, doc consistency and shared-renderer anchor control `31818e09` pass.
+Independent review finds no blocker in the code, fault evidence or scope.
+One mistyped policy-package path is a tool failure, not red evidence; the
+corrected policy run is recorded in the original issue. No p95 is claimed.
