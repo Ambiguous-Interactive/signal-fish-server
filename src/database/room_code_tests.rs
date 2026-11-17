@@ -1,5 +1,77 @@
 use super::*;
 
+/// #636: room-cap reads do not compete with member and metadata storage writes.
+#[tokio::test]
+async fn game_room_count_does_not_wait_for_room_table() {
+    let database = InMemoryDatabase::new();
+    database
+        .create_room(
+            "count-game".into(),
+            Some("COUNT1".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let _room_table = database.rooms.write().await;
+    for (game, expected) in [("count-game", 1), ("missing", 0)] {
+        let mut read = Box::pin(database.get_game_room_count(game));
+        let std::task::Poll::Ready(count) = futures_util::poll!(read.as_mut()) else {
+            panic!("room-cap read must use the independent code index");
+        };
+        let count = count.unwrap();
+        assert_eq!(count, expected, "game {game}");
+    }
+}
+
+/// #636: cancellation before an index commit cannot change the room-cap result.
+#[tokio::test]
+async fn game_room_counts_preserve_canceled_storage_commits() {
+    let database = InMemoryDatabase::new();
+    let game = "canceled-count";
+    let room = database
+        .create_room(
+            game.into(),
+            Some("COUNT1".into()),
+            4,
+            true,
+            PlayerId::from_u128(1),
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    {
+        let _index = database.room_codes.write().await;
+        let mut create = Box::pin(database.create_room(
+            game.into(),
+            Some("COUNT2".into()),
+            4,
+            true,
+            PlayerId::from_u128(2),
+            "relay".into(),
+            "test".into(),
+            None,
+        ));
+        assert!(futures_util::poll!(create.as_mut()).is_pending());
+    }
+    assert_eq!(database.get_game_room_count(game).await.unwrap(), 1);
+    {
+        let _index = database.room_codes.write().await;
+        let mut delete = Box::pin(database.delete_room(&room.id));
+        assert!(futures_util::poll!(delete.as_mut()).is_pending());
+    }
+    assert_eq!(database.get_game_room_count(game).await.unwrap(), 1);
+    assert!(database.get_room_by_id(&room.id).await.unwrap().is_some());
+    database.delete_room(&room.id).await.unwrap();
+    assert_eq!(database.get_game_room_count(game).await.unwrap(), 0);
+}
+
 /// #636: compact writes retain the full rotation's registry and failure semantics.
 #[tokio::test(start_paused = true)]
 async fn compact_room_code_rotation_preserves_registry_and_clocks() {

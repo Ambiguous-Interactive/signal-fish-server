@@ -307,6 +307,10 @@ name = "response_time_tracker"
 harness = false
 
 [[bench]]
+name = "game_room_count"
+harness = false
+
+[[bench]]
 name = "relay_allocations"
 harness = false
 required-features = ["allocation-tracking"]
@@ -395,6 +399,10 @@ path = "tests/close_code_semantics_e2e.rs"
 [[test]]
 name = "concurrency_tests"
 path = "tests/concurrency_tests.rs"
+
+[[test]]
+name = "game_room_count"
+path = "tests/game_room_count.rs"
 
 [[test]]
 name = "config_and_endpoints_tests"
