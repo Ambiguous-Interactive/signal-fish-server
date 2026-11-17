@@ -868,6 +868,12 @@ impl ReconnectionManager {
         let mut state = self.lock_record_mutation(&player_id).await;
         let fresh_last_sequence = state.next_sequence;
 
+        if let Some(existing) = state.disconnected_players.get(&player_id) {
+            if existing.disconnected.room_id == room_id && existing.claim.is_some() {
+                return existing.disconnected.token.token.clone();
+            }
+        }
+
         // A same-room re-registration — the player registered a SECOND
         // disconnection for the same room while still pending, so it has NOT
         // reconnected — must preserve everything the client already
@@ -893,21 +899,6 @@ impl ReconnectionManager {
                 deadline: existing.deadline,
                 kicked: existing.kicked,
             });
-
-        // A late teardown from the replaced socket may overlap an in-flight
-        // reconnect. Once the credential is claimed, registration is a strict
-        // no-op: replacing the record would reopen the single-use credential,
-        // invalidate the original claim handle, and could consume the freshly
-        // pre-issued token for the replacement connection's next disconnect.
-        if let Some(existing) = existing_same_room.as_ref() {
-            if state
-                .disconnected_players
-                .get(&player_id)
-                .is_some_and(|record| record.claim.is_some())
-            {
-                return existing.token.clone();
-            }
-        }
 
         // Reuse the token STRING pre-issued at join (the client already holds
         // it — issue #136, F4), re-stamping its expiry so the reconnect gate
@@ -1624,6 +1615,9 @@ impl ReconnectionManager {
             !expired
         });
         let removed = initial_count.saturating_sub(state.disconnected_players.len());
+        if removed == 0 {
+            return 0;
+        }
         let remaining = state.disconnected_players.len();
         let rooms_still_pending: std::collections::HashSet<RoomId> = state
             .disconnected_players
