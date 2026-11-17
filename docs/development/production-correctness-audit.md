@@ -19082,3 +19082,34 @@ A restart loses the room and its queues, so another process must refuse
 recovery without authoritative room state. Rust, .NET, and Godot keep their
 existing signaling and transport-report contracts. This covers local queue
 waiting in A11 and A12. The broader audit remains open.
+
+### F385 — A closing sender waited behind room publication
+
+At base `d956efd0` under #826, the WebRTC offer and transport-report handlers
+held the source lifecycle lock while waiting for the room publication gate.
+Close canceled target queue waits. At this earlier wait, both handlers stayed
+parked and blocked socket teardown from taking the lifecycle lock.
+
+Two paused-clock Linux ARM64 tests call the client-message router with an
+exclusive room publication in progress. They confirm that the live command
+holds the lifecycle lock, request source close, and keep the room gate held.
+Both commands miss the 10 ms completion bound on the base (Nextest
+`f2d7d495`). Both finish within the bound after the repair, release the
+lifecycle lock, and leave both queues empty (Nextest `619c492d`).
+
+The handlers now wait for either source close or room access. When both are
+ready, observed close takes precedence. Live offers still wait for the plan,
+and an offer already queued before close can still arrive. Teardown waits for
+room access before it can capture the reconnect snapshot or change membership.
+
+One authoritative server owns the room gate, source close state, and reconnect
+snapshot. A network partition can leave the handler active until the server
+detects the close. A server restart loses that in-memory state. A different
+server without the room and reconnect record must refuse restoration. Rust,
+.NET, and Godot consume the existing signals and reports without migration.
+
+Matched warm ARM64 allocation probes (`20c95ccd`, `f7ffa645`) show unchanged
+counts and bytes. One offer uses 8 allocations and 3,440 bytes. A report to
+254 peers uses 294 allocations and 459,782 bytes. A 255-member publication
+uses 262 allocations and 549,641 bytes. CPU and throughput remain unmeasured.
+This advances A11 and A12. The broader audit remains open.

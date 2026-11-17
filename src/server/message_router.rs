@@ -782,7 +782,10 @@ impl EnhancedGameServer {
             Snapshot membership without excluding other read-only signaling work.
             Queue-commit checks retain delivery truth after this fence releases.
         */
-        let _room_snapshot_guard = self.message_coordinator.lock_room_signal(&room_id).await;
+        let source_close = self.connection_manager.close_signal_for(player_id)?;
+        let _room_snapshot_guard = self
+            .lock_room_signal_while_open(&room_id, &source_close)
+            .await?;
 
         // Cheap non-consuming preflight before the fallible/O(room) membership
         // snapshot below. The consuming check still happens after recipient

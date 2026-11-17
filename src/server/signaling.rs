@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::coordination::{
-    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
+    ConnectionCloseSignal, RoomEventMutationGuard, RoomMessageTransactionOutcome,
+    RoomRecipientMessages, RoomSignalGuard,
 };
 use crate::protocol::{
     room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage,
@@ -68,6 +69,21 @@ pub(crate) fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usi
 }
 
 impl EnhancedGameServer {
+    // A closed source has no work to publish. Stop waiting so teardown can
+    // take its lifecycle lock even while the room publication is still active.
+    pub(super) async fn lock_room_signal_while_open(
+        &self,
+        room_id: &RoomId,
+        source_close: &ConnectionCloseSignal,
+    ) -> Option<RoomSignalGuard> {
+        let mut close = source_close.subscribe();
+        tokio::select! {
+            biased;
+            _ = close.closed() => None,
+            guard = self.message_coordinator.lock_room_signal(room_id) => Some(guard),
+        }
+    }
+
     /// Revalidate a signal target after the room publication gate. Production
     /// coordinators provide the routed-member snapshot; lightweight
     /// coordinators fall back to the connection's current room assignment.
@@ -280,7 +296,15 @@ impl EnhancedGameServer {
         // `Signal` ahead of that recipient's plan. Holding the shared room
         // fence through dispatch makes plan-before-signal a server guarantee for
         // finalize, re-plan, join, and reconnect publications alike.
-        let signal_publication_guard = self.message_coordinator.lock_room_signal(&from_room).await;
+        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
+            return;
+        };
+        let Some(signal_publication_guard) = self
+            .lock_room_signal_while_open(&from_room, &source_close)
+            .await
+        else {
+            return;
+        };
 
         // Either endpoint can be pruned as slow/closed while this signal waits
         // behind a room publication, before its connection assignment is
@@ -359,9 +383,6 @@ impl EnhancedGameServer {
             return;
         }
 
-        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
-            return;
-        };
         if source_close.requested_reason().is_some() {
             return;
         }
