@@ -78,9 +78,9 @@ struct TransportStatusFanOut {
 impl TransportStatusFanOut {
     /// Deliver outside the lifecycle and room gates. Sender and recipient
     /// membership are revalidated at queue commit, and each leg
-    /// re-checks the recipient's negotiated v3 capability, so a membership
-    /// change or a reconnect identity swap that lands after the snapshot
-    /// cannot direct this v3-only frame at a v2 connection.
+    /// re-checks the sender's close state and the recipient's negotiated v3
+    /// capability. An evicted sender can retain its room assignment until
+    /// teardown completes.
     async fn deliver(&self, server: &EnhancedGameServer) {
         // Deliver to all peers concurrently: one slow room member costs this
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
@@ -155,7 +155,7 @@ impl TransportStatusFanOut {
             server.client_supports_v3(recipient)
                 && server
                     .connection_manager
-                    .membership_generation_in_room(&self.sender, &self.room_id)
+                    .live_membership_generation_in_room(&self.sender, &self.room_id)
                     == Some(self.membership_generation)
         };
         server
@@ -890,6 +890,9 @@ impl EnhancedGameServer {
             return None;
         }
 
+        let membership_generation = self
+            .connection_manager
+            .live_membership_generation_in_room(player_id, &room_id)?;
         let message = Arc::new(ServerMessage::PeerTransportStatus {
             peer_id: *player_id,
             transport,
@@ -898,9 +901,7 @@ impl EnhancedGameServer {
         Some(TransportStatusFanOut {
             sender: *player_id,
             room_id,
-            membership_generation: self
-                .connection_manager
-                .membership_generation_in_room(player_id, &room_id)?,
+            membership_generation,
             recipients,
             message,
         })

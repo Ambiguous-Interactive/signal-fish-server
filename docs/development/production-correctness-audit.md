@@ -55,7 +55,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
-| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
+| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123; exact JSON sizing in F228 |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
@@ -18969,3 +18969,39 @@ Markdown, doc consistency and shared-renderer anchor control `31818e09` pass.
 Independent review finds no blocker in the code, fault evidence or scope.
 One mistyped policy-package path is a tool failure, not red evidence; the
 corrected policy run is recorded in the original issue. No p95 is claimed.
+
+### F382 — An evicted peer could still publish a transport report
+
+At base `4ab2b729` under #826, the server validates a delayed WebRTC report
+against the sender's room generation. A full sender queue can trigger a
+slow-consumer close and route removal while socket teardown still retains that
+generation. The observer then receives a fallback report from the evicted
+peer. The deterministic router test reproduced the exact unexpected frame on
+Linux ARM64 (Nextest `fabf38da`).
+
+The server now checks the sender's physical close state with its room
+generation when it prepares fan-out and when each recipient attempts delivery.
+Two paused-clock histories trigger the production slow-consumer deadline.
+One resumes the report after eviction. The other parks it on a full observer
+queue before eviction and releases capacity afterward. Removing only the
+close-state check reproduces the stale frame in the parked case
+(Nextest `f50d3fbf`). Both cases confirm that live reports reach the observer
+and that eviction removes the reporter's route before its assignment clears.
+The corrected build passes both cases and seven related controls (Nextest
+`024240d2`). The matched live-report allocation probe records identical
+counts and bytes for all 80 samples across 2 to 255 players (Nextest
+`ad1c496e` and `dec10e46`). It does not measure CPU cost.
+
+The same server process owns the close state, room generation, and outbound
+queue. Its liveness check suppresses pending delivery after it sees the close.
+Peers can still observe frames queued before that check, and a network
+partition can delay close detection. A reconnected sender has a fresh
+membership generation. A process restart loses the room and its transient
+reports. During a partition, a replacement process must refuse a restore
+against unavailable room state. A second room authority cannot infer the
+first server's membership or transport status.
+
+Rust and .NET track the advisory event for known peers. Godot exposes the
+same advisory event to scripts. Live events use the existing formats and
+require no client changes. The tests cover local queue admission. They do
+not establish client delivery under every network schedule or complete A12.

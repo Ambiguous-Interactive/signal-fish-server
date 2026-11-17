@@ -861,6 +861,172 @@ async fn transport_status_rechecks_recipient_protocol_after_reconnect() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn pending_transport_report_stops_when_reporter_is_evicted() {
+    assert_evicted_reporter_status_is_canceled(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn parked_transport_report_stops_when_reporter_is_evicted() {
+    assert_evicted_reporter_status_is_canceled(true).await;
+}
+
+async fn assert_evicted_reporter_status_is_canceled(observer_backpressured: bool) {
+    let server = create_test_server().await;
+    let (observer, mut observer_rx) = register_router_test_client(&server).await;
+    let (reporter, reporter_rx) = register_router_test_client(&server).await;
+    let mut room_code = None;
+    for (player, name) in [(observer, "Observer"), (reporter, "Reporter")] {
+        server.set_client_protocol(
+            &player,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![Transport::Relay, Transport::WebRtc],
+                topologies: vec![Topology::Relay, Topology::Mesh],
+            },
+        );
+        server
+            .handle_client_message(
+                &player,
+                ClientMessage::JoinRoom {
+                    game_name: "transport-reporter-eviction".into(),
+                    room_code: room_code.clone(),
+                    player_name: name.into(),
+                    max_players: Some(2),
+                    supports_authority: Some(false),
+                    relay_transport: None,
+                    password: None,
+                    join_only: None,
+                },
+            )
+            .await;
+        if player == observer {
+            let joined = next_routed_test_message(&mut observer_rx, "observer RoomJoined").await;
+            let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+                panic!("expected RoomJoined: {joined:?}");
+            };
+            room_code = Some(payload.room_code.clone());
+        }
+    }
+    drain_until_routed_player_joined(&mut observer_rx, reporter, "reporter join").await;
+    let room_id = server.get_client_room(&reporter).await.unwrap();
+    let sender_stamp = server
+        .connection_manager
+        .current_relay_stamp_in_room(&reporter, &room_id)
+        .unwrap();
+    let close = server
+        .connection_manager
+        .close_signal_for(&reporter)
+        .unwrap();
+    let report = |connected| ClientMessage::TransportStatus {
+        transport: Transport::WebRtc,
+        connected,
+    };
+    server.handle_client_message(&reporter, report(true)).await;
+    assert!(matches!(
+        next_routed_test_message(&mut observer_rx, "live reporter status").await.as_ref(),
+        ServerMessage::PeerTransportStatus { peer_id, connected: true, .. } if *peer_id == reporter
+    ));
+
+    let pause = super::message_router::arm_transport_status_delivery_pause(reporter);
+    let status_server = Arc::clone(&server);
+    let status_task = tokio::spawn(async move {
+        status_server
+            .handle_client_message(&reporter, report(false))
+            .await;
+    });
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("fallback report reaches delivery");
+
+    let coordinator = server.message_coordinator.as_ref();
+    for _ in 0..reporter_rx.capacity() {
+        assert!(coordinator
+            .send_to_player_in_room(&reporter, &room_id, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap());
+    }
+    assert_eq!(reporter_rx.capacity(), 0);
+    let mut evict_reporter = Box::pin(coordinator.send_to_player_in_room(
+        &reporter,
+        &room_id,
+        Arc::new(ServerMessage::Pong),
+    ));
+    assert!(futures_util::poll!(evict_reporter.as_mut()).is_pending());
+
+    if observer_backpressured {
+        // The reporter's capacity deadline expires first. Keep the observer's
+        // report parked until the server requests the reporter's close.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        for _ in 0..observer_rx.max_capacity() {
+            assert!(coordinator
+                .send_to_player_in_room(&observer, &room_id, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap());
+        }
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), async {
+            while server
+                .metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                < 2
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the fallback report waits for observer capacity");
+    }
+
+    assert!(!evict_reporter.await.unwrap());
+    assert_eq!(
+        close.requested_reason(),
+        Some(crate::coordination::CloseReason::SlowConsumer)
+    );
+    assert_eq!(
+        coordinator
+            .routed_player_pair(&room_id, &reporter, &observer)
+            .await
+            .unwrap(),
+        Some([false, true])
+    );
+    assert_eq!(
+        server
+            .connection_manager
+            .current_relay_stamp_in_room(&reporter, &room_id),
+        Some(sender_stamp),
+        "queue eviction runs before connection teardown"
+    );
+
+    if observer_backpressured {
+        for _ in 0..observer_rx.max_capacity() {
+            assert!(matches!(
+                observer_rx.try_recv().unwrap().as_ref(),
+                ServerMessage::Pong
+            ));
+        }
+    } else {
+        pause.release.notify_one();
+    }
+    status_task.await.unwrap();
+    super::message_router::disarm_transport_status_delivery_pause(&reporter);
+    let outcome = observer_rx.try_recv();
+    assert!(
+        matches!(outcome, Err(mpsc::error::TryRecvError::Empty)),
+        "evicted reporter must not publish a fallback: {outcome:?}"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_transport_report_finishes_partial_fanout() {

@@ -1266,13 +1266,17 @@ impl ConnectionManager {
         })
     }
 
-    pub(crate) fn membership_generation_in_room(
+    /// Read a transport report's generation only while its physical socket
+    /// can still participate. Delivery may request a close before teardown
+    /// clears the room assignment.
+    pub(crate) fn live_membership_generation_in_room(
         &self,
         player_id: &PlayerId,
         expected_room: &RoomId,
     ) -> Option<Uuid> {
         let client = self.clients.get(player_id)?;
-        (client.room_id == Some(*expected_room)).then_some(client.membership_generation)
+        (client.room_id == Some(*expected_room) && client.close.requested_reason().is_none())
+            .then_some(client.membership_generation)
     }
 
     /// Read a connection's current epoch in unit tests without advancing it.
