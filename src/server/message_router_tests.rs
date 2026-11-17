@@ -932,7 +932,7 @@ async fn assert_evicted_reporter_status_is_canceled(observer_backpressured: bool
 
     let pause = super::message_router::arm_transport_status_delivery_pause(reporter);
     let status_server = Arc::clone(&server);
-    let status_task = tokio::spawn(async move {
+    let mut status_task = tokio::spawn(async move {
         status_server
             .handle_client_message(&reporter, report(false))
             .await;
@@ -1001,15 +1001,20 @@ async fn assert_evicted_reporter_status_is_canceled(observer_backpressured: bool
         "queue eviction runs before connection teardown"
     );
 
+    if !observer_backpressured {
+        pause.release.notify_one();
+    }
+    timeout(Duration::from_millis(10), &mut status_task)
+        .await
+        .expect("reporter eviction must cancel delivery before observer capacity returns")
+        .unwrap();
     if observer_backpressured {
+        assert_eq!(observer_rx.len(), observer_rx.max_capacity());
         for _ in 0..observer_rx.max_capacity() {
             let filler = observer_rx.try_recv().expect("observer queue filler");
             assert!(matches!(filler.as_ref(), ServerMessage::Pong));
         }
-    } else {
-        pause.release.notify_one();
     }
-    status_task.await.unwrap();
     super::message_router::disarm_transport_status_delivery_pause(&reporter);
     let outcome = observer_rx.try_recv();
     assert!(

@@ -86,8 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Drop delayed WebRTC signals when the server starts closing the sender's connection (#826).
-- Drop delayed P2P transport reports after the server starts closing the sender's connection (#826).
+- Cancel pending WebRTC signals when the sender's connection starts closing so room updates can continue (#826).
+- Cancel pending P2P transport reports when the sender's connection starts closing (#826).
 - Fix the protocol schema to accept a null relay client ID, as the server already does (#826).
 - Correct reconnect examples to include the restored player and the v3 reconnect token (#826).
 - Allow the existing null values for optional join fields in the protocol schema (#826).

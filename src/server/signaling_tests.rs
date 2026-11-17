@@ -8971,6 +8971,14 @@ async fn parked_offer_is_canceled_when_source_is_evicted() {
         Some([false, true])
     );
     assert_eq!(server.get_client_room(&alice).await, Some(room));
+    let publication_gate = timeout(
+        Duration::from_millis(10),
+        coordinator.lock_room_event_mutation(&room),
+    )
+    .await
+    .expect("source eviction must release room publication before target capacity returns");
+    drop(publication_gate);
+    assert_eq!(bob_rx.len(), bob_rx.max_capacity());
     for _ in 0..bob_rx.max_capacity() {
         assert!(matches!(
             recv(&mut bob_rx).await.as_ref(),
