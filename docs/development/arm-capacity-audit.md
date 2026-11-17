@@ -7779,3 +7779,219 @@ Raw attempts, binary identities and the paired driver remain in ignored
 `progress/session-735/`. The disposable executable copies use managed scratch.
 The original issue owns final review and delivery evidence. The broad campaign
 and capacity criteria remain open. No issue closure is claimed.
+
+## Reconnect snapshot and bulk-expiry work — session 736
+
+Existing [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+owns two finite obligations at base `c9b409ed`. The live disconnect path must
+not copy retained player metadata when an active same-room reconnect claim
+makes registration a no-op. The public bulk-expiry helper must not build a
+survivor room set when no record expires. The default server uses durable
+per-record expiry, not this bulk helper. No default housekeeping speed gain is
+claimed from the bulk-helper measurement.
+
+Registration now checks the same-room claim before building `PreservedPending`.
+The same write guard still protects the record. The original token is returned;
+there is no mutation, extra await or metric change. Wrong-room replacement and
+unclaimed registration keep their existing paths. The bulk helper still scans
+eligibility under its write guard, then returns if nothing was removed. Its
+record-removal and replay-release paths are unchanged.
+
+The main-thread allocation target measures each complete public call. It uses
+the existing instrumented system allocator. Original bulk source fails the
+zero-allocation assertion in Nextest `996e0de6`; all exact state assertions
+pass. The live registration control fails its allocation assertion in
+`93fbcbdc`; token, stored snapshot, replay, metrics, epoch, claim retry and
+rotated-token assertions pass. The registration baseline includes only the
+isolated three-line bulk-helper change, which cannot affect registration.
+
+| Unchanged bulk sweep: pending records | Original allocations / bytes | Candidate allocations / bytes |
+| --- | ---: | ---: |
+| 0 | 0 / 0 | 0 / 0 |
+| 1 | 1 / 76 | 0 / 0 |
+| 64 | 1 / 2,184 | 0 / 0 |
+| 1,024 | 1 / 34,824 | 0 / 0 |
+
+| Claimed duplicate disconnect: retained name bytes | Original allocations / bytes | Candidate allocations / bytes |
+| --- | ---: | ---: |
+| 0 | 3 / 76 | 1 / 36 |
+| 64 | 4 / 140 | 1 / 36 |
+| 1,024 | 4 / 1,100 | 1 / 36 |
+| 65,536 | 4 / 65,612 | 1 / 36 |
+
+The one remaining registration allocation holds the returned token. Large
+names are synthetic public-API scaling controls, not default admitted player
+names. The default name limit is 32. These counts do not measure socket latency,
+process memory, throughput or whole-node capacity.
+
+All three allocation histories pass in `e577cd69`. They retain exact replay,
+truncation watermarks, active metrics, original membership and rotated tokens.
+Shared-room expiry retains replay until the last record expires. A standalone
+buffer remains intact. Eight all-feature existing histories pass in `e89f0d3f`:
+active claims, cleanup pins, canceled storage cleanup, room replacement,
+registration ordering, stored disconnect snapshots, rotated tokens and original
+deadlines. The scoped build takes 20.38 seconds and execution takes 33 ms;
+this does not qualify the warm edit-test p95 target. Initial dev-loop discovery
+could not resolve the custom harness functions; direct target-scoped Nextest
+ran them. That discovery failure is not red evidence.
+
+The benchmark uses complete public calls on shared ARM64 Linux, Rust 1.94.0,
+12 logical CPUs and the optimized bench profile. Unchanged sweep fixtures stay
+alive across iterations. Sparse, shared-room and dense expiry cells use 128
+records and exclude per-iteration setup and manager destruction. Registration
+fixtures hold an active claim and a rotated pre-issued token. Every registration
+call returns an owned token; its lifetime is included in timing. Fixture and
+final claim/token assertions stay outside timing.
+
+Independent source and registration-delta review find no blocker. Rust, .NET
+and Godot need no client changes: APIs, wire values, tokens and lifecycle results
+stay unchanged. The broader campaign and its capacity obligations remain open.
+
+The unpinned pilots use 0.5-second warm-up, one-second measurement and 20
+samples. The helper-only candidate is retained below. The first published candidate also
+contains the registration change. All point estimates are nanoseconds.
+
+| Public call / cell | Original | Helper-only candidate | First published candidate |
+| --- | ---: | ---: | ---: |
+| claimed_registration/retained_name_bytes/0 | 912.90 | — | 696.10 |
+| claimed_registration/retained_name_bytes/1024 | 1014.90 | — | 699.05 |
+| claimed_registration/retained_name_bytes/64 | 912.44 | — | 708.69 |
+| claimed_registration/retained_name_bytes/65536 | 2624.88 | — | 727.09 |
+| reconnection_expiry/all_expired | 7753.29 | 8023.97 | 6463.00 |
+| reconnection_expiry/one_expired | 3696.87 | 3738.97 | 3669.56 |
+| reconnection_expiry/shared_room | 3454.76 | 3408.46 | 3207.79 |
+| reconnection_expiry/unchanged/0 | 727.38 | 696.14 | 665.54 |
+| reconnection_expiry/unchanged/1 | 741.72 | 713.80 | 643.47 |
+| reconnection_expiry/unchanged/10000 | 171268.38 | 26159.73 | 23638.92 |
+| reconnection_expiry/unchanged/1024 | 17133.56 | 2600.48 | 2400.43 |
+| reconnection_expiry/unchanged/64 | 1541.92 | 788.18 | 728.16 |
+
+The first helper-only dense-expiry cell is slower than its original pilot;
+other control values also vary. The dense path is unchanged. The repeated
+saved-executable comparison below retains all cells rather than inferring a
+cause from this pilot.
+
+Saved original helper executable SHA-256:
+`659ea60cc5ceeaec430c1a4d6749e3f76b3bef5ecf22773a2976e768f3e3f404`.
+Saved original registration executable SHA-256:
+`aabfb962b0e0045fed23ce03035290b50583ce653d213d3f35736d2fc066d1c3`.
+Saved first published candidate executable SHA-256:
+`49a12822b558d85f76dafc7b4c3174a20bc6454f71e457a3f2455d05fd67f84a`.
+Raw logs and executable copies remain in ignored `progress/session-736`.
+
+```bash
+cargo nextest run --test reconnection_expiry_allocations --success-output immediate
+bash scripts/dev-loop.sh --all-features \
+  expired_but_claimed_reconnection_survives_every_expiry_surface \
+  expired_cleanup_pin_preserves_record_safety_without_blocking_neighbors \
+  expired_membership_cleanup_failure_and_cancellation_retain_retry_state \
+  last_expiry_cleanup_cannot_delete_a_new_registration_gate \
+  same_room_reregistration_preserves_active_claim_and_rotated_token \
+  same_room_reregistration_preserves_disconnect_snapshot \
+  re_registration_from_a_new_room_releases_the_orphaned_old_room_buffer \
+  same_room_reregistration_preserves_original_disconnect_deadline
+cargo bench --locked --bench reconnection_expiry -- \
+  --warm-up-time 0.5 --measurement-time 1 --sample-size 20
+# Run the original and candidate executables for each group, twice in order.
+# Groups: reconnection_expiry and claimed_registration.
+taskset -c 0 <saved-executable> --bench <group> \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30
+```
+
+Two saved-executable pairs run on CPU 0 without intervening builds. Each pair
+runs original helper, candidate helper, original registration and candidate
+registration. Each cell uses one-second warm-up, two-second measurement and
+30 samples. All point estimates are nanoseconds.
+
+| Public call / cell | Original 1 | Candidate 1 | Original 2 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| reconnection_expiry/all_expired | 6547.59 | 6619.89 | 6472.28 | 6474.61 |
+| reconnection_expiry/one_expired | 3368.64 | 3473.96 | 3408.38 | 3285.86 |
+| reconnection_expiry/shared_room | 3121.96 | 3086.99 | 3030.30 | 3014.96 |
+| reconnection_expiry/unchanged/0 | 642.42 | 646.13 | 647.56 | 634.87 |
+| reconnection_expiry/unchanged/1 | 647.76 | 661.82 | 663.47 | 657.79 |
+| reconnection_expiry/unchanged/10000 | 154860.98 | 23792.00 | 159737.46 | 24460.66 |
+| reconnection_expiry/unchanged/1024 | 15121.07 | 2678.22 | 15138.22 | 2370.86 |
+| reconnection_expiry/unchanged/64 | 1391.27 | 711.32 | 1390.78 | 711.90 |
+| claimed_registration/retained_name_bytes/0 | 752.35 | 692.78 | 726.57 | 697.49 |
+| claimed_registration/retained_name_bytes/1024 | 771.17 | 690.93 | 761.77 | 694.43 |
+| claimed_registration/retained_name_bytes/64 | 741.17 | 677.08 | 738.57 | 678.03 |
+| claimed_registration/retained_name_bytes/65536 | 2137.95 | 683.60 | 2134.97 | 698.69 |
+
+The 64-byte-name live registration call improves from 741.17 to 677.08 ns and
+738.57 to 678.03 ns, about 9% and 8%. The synthetic 64 KiB-name call improves
+by about 68% in both pairs. The helper's unchanged 1,024-record sweep improves
+from 15.12 to 2.68 microseconds and 15.14 to 2.37 microseconds. Its 10,000-record
+cell improves by about 85% in both pairs. Empty and one-record timing varies;
+removal-path controls show no consistent general gain. The deterministic
+allocation reductions above remain the resource acceptance result.
+
+These are complete method-call measurements on one shared host. They do not
+establish socket latency, production contention, throughput, process memory or
+whole-node capacity. CPU affinity does not remove every source of variation.
+The bulk helper still scans eligibility and remains linear in pending records.
+The live claim path still returns its existing owned token. No claim or replay
+policy was weakened. Broader #636 acceptance and capacity qualification remain
+open; no issue is closed by these finite results.
+
+Final source inspection found one avoidable lookup in the first published
+candidate `ca3267f8`: the early claim check preceded the snapshot lookup on
+fresh and different-room registration. The revision reuses one stored-record
+borrow for the claim check and snapshot. It adds no lookup to those paths.
+Independent delta review approves this change. All 11 focused all-feature
+histories pass again. The preceding timing tables and executable identities
+remain evidence for the first published candidate, not the revised head.
+The revised executable is measured in new pairs below.
+
+The lookup-reuse revision passes all 11 all-feature controls in Nextest
+`965c4fdb` (21.19-second build; 38 ms execution). Claimed calls still allocate
+only the 36-byte returned token; unchanged bulk sweeps still allocate zero.
+Strict full Clippy passes in 22.68 seconds. Revised executable SHA-256:
+`2ac2cbd52ddad2761ffcc45522f98dc1b7fc57859d012a3ebf009c68c3f8f4e2`.
+
+Two new CPU-0 original/revised pairs use the same one-second warm-up,
+two-second measurement and 30 samples. No build overlaps measurement. All
+point estimates below are nanoseconds. No slower cell is discarded.
+
+| Public call / cell | Original 1 | Revised 1 | Original 2 | Revised 2 |
+| --- | ---: | ---: | ---: | ---: |
+| reconnection_expiry/all_expired | 7126.45 | 8227.80 | 8318.67 | 8251.61 |
+| reconnection_expiry/one_expired | 4286.69 | 4376.70 | 4629.94 | 4421.24 |
+| reconnection_expiry/shared_room | 4463.00 | 3944.32 | 4336.09 | 3999.92 |
+| reconnection_expiry/unchanged/0 | 727.68 | 722.40 | 823.26 | 721.03 |
+| reconnection_expiry/unchanged/1 | 857.31 | 717.06 | 760.48 | 716.88 |
+| reconnection_expiry/unchanged/10000 | 191814.33 | 31568.66 | 210770.87 | 29195.71 |
+| reconnection_expiry/unchanged/1024 | 17151.42 | 3171.02 | 26111.94 | 2668.77 |
+| reconnection_expiry/unchanged/64 | 1542.37 | 945.93 | 1818.22 | 791.09 |
+| claimed_registration/retained_name_bytes/0 | 835.27 | 853.01 | 925.99 | 932.53 |
+| claimed_registration/retained_name_bytes/1024 | 835.05 | 859.47 | 840.86 | 1218.65 |
+| claimed_registration/retained_name_bytes/64 | 836.85 | 919.42 | 840.01 | 1421.12 |
+| claimed_registration/retained_name_bytes/65536 | 2682.66 | 859.40 | 2521.02 | 1240.84 |
+
+Small-name registration is slower in these two full-group pairs. A changed
+experiment compares only the 64-byte cell in original, first-published,
+lookup-reuse order, twice. It uses the same CPU, timings and sample count.
+This distinguishes nearby source variants with less time between observations;
+it is not another full-group retry.
+
+| 64-byte-name call | Original | First published | Lookup reuse |
+| --- | ---: | ---: | ---: |
+| Comparison 1 | 802.29 | 739.44 | 751.48 |
+| Comparison 2 | 996.47 | 746.77 | 758.23 |
+
+The earlier 64-byte loss does not repeat in this comparison. The data does not
+attribute the timing variation. No general small-name registration latency gain
+is claimed for the revised head. The synthetic 64 KiB registration call improves
+in both full-group pairs. Exact allocation savings remain independent of the
+timing result. For the public bulk helper, the 1,024-record unchanged call
+improves from 17.15 to 3.17 microseconds and 26.11 to 2.67 microseconds. The
+10,000-record cell improves from 191.81 to 31.57 microseconds and 210.77 to
+29.20 microseconds. Dense and sparse expiry results vary. No production
+contention, socket latency, throughput or whole-node capacity result is claimed.
+
+```bash
+# Repeat for each of the three saved source variants, twice in order.
+taskset -c 0 <saved-executable> --bench \
+  'claimed_registration/retained_name_bytes/64$' \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30
+```

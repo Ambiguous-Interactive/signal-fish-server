@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server work and memory use for repeated disconnects and bulk reconnect cleanup that removes no records (#636).
 - Reduce server locking for unchanged player names and connection information (#636).
 - Reduce server work and room-table contention when checking application room limits (#636).
 - Reduce server memory use when starting P2P games (#636).

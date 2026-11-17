@@ -278,6 +278,11 @@ path = "tests/reconnection_snapshot_allocations.rs"
 harness = false
 
 [[test]]
+name = "reconnection_expiry_allocations"
+path = "tests/reconnection_expiry_allocations.rs"
+harness = false
+
+[[test]]
 name = "player_join_allocations"
 path = "tests/player_join_allocations.rs"
 harness = false
@@ -316,6 +321,10 @@ harness = false
 
 [[bench]]
 name = "player_metadata"
+harness = false
+
+[[bench]]
+name = "reconnection_expiry"
 harness = false
 
 [[bench]]
