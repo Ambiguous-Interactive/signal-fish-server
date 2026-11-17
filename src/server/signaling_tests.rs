@@ -8906,6 +8906,85 @@ async fn signaling_eligibility_uses_one_current_protocol_profile() {
     assert!(!server.supports_webrtc_signaling(&player));
 }
 
+/// #826: source eviction during target backpressure cancels the offer.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn parked_offer_is_canceled_when_source_is_evicted() {
+    let server = create_test_server().await;
+    let (alice, alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let coordinator = server.message_coordinator.as_ref();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    for (player, capacity) in [
+        (alice, alice_rx.max_capacity()),
+        (bob, bob_rx.max_capacity()),
+    ] {
+        for _ in 0..capacity {
+            assert!(coordinator
+                .send_to_player_in_room(&player, &room, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap());
+        }
+    }
+
+    let eviction = coordinator.send_to_player_in_room(&alice, &room, Arc::new(ServerMessage::Pong));
+    tokio::pin!(eviction);
+    assert!(futures_util::poll!(&mut eviction).is_pending());
+    // Give the offer a later capacity deadline than the source's eviction.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let offer_server = Arc::clone(&server);
+    let offer = tokio::spawn(async move {
+        offer_server
+            .handle_client_message(
+                &alice,
+                ClientMessage::Signal {
+                    to: bob,
+                    generation: uuid::Uuid::new_v4(),
+                    signal: json!({"Offer": "from a closing socket"}),
+                },
+            )
+            .await;
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the offer waits for target capacity");
+
+    assert!(!eviction.await.unwrap());
+    assert_eq!(
+        close.requested_reason(),
+        Some(crate::coordination::CloseReason::SlowConsumer)
+    );
+    assert_eq!(
+        coordinator
+            .routed_player_pair(&room, &alice, &bob)
+            .await
+            .unwrap(),
+        Some([false, true])
+    );
+    assert_eq!(server.get_client_room(&alice).await, Some(room));
+    for _ in 0..bob_rx.max_capacity() {
+        assert!(matches!(
+            recv(&mut bob_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    offer.await.unwrap();
+    let tail = bob_rx.try_recv();
+    assert!(
+        matches!(tail, Err(mpsc::error::TryRecvError::Empty)),
+        "target received an offer after the server evicted its sender: {tail:?}"
+    );
+}
+
 /// A closed target queue must not turn an admitted offer into silent success.
 #[tokio::test]
 async fn closed_signal_target_returns_delivery_failure() {
