@@ -2227,6 +2227,21 @@ pub trait MessageCoordinator: Send + Sync {
             .await
     }
 
+    /// Conditional room delivery with a known seated sender. The in-memory
+    /// coordinator orders queue admission against the sender's close request.
+    /// Coordinators without local connection state rely on the supplied
+    /// predicate to check sender liveness.
+    fn send_to_player_in_room_from_if<'a>(
+        &'a self,
+        player_id: &'a PlayerId,
+        room_id: &'a RoomId,
+        _from: &'a PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>> {
+        self.send_to_player_in_room_if(player_id, room_id, message, should_send)
+    }
+
     /// Snapshot player ids currently published in room routing. `None` means a
     /// lightweight test/distributed implementation does not model local
     /// routing; production returns `Some` under its routing locks.

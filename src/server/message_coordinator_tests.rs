@@ -438,6 +438,54 @@ async fn room_send_cancels_when_sender_changes_during_capacity_wait() {
     );
 }
 
+#[tokio::test]
+async fn room_transport_report_commit_checks_close_after_the_delivery_predicate() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::new_v4();
+    let reporter = PlayerId::new_v4();
+    let recipient = PlayerId::new_v4();
+    let reporter_close = ConnectionCloseSignal::detached();
+    let (reporter_tx, _reporter_rx) = mpsc::channel(1);
+    let (recipient_tx, mut recipient_rx) = mpsc::channel(1);
+    for (player, sender, close) in [
+        (reporter, reporter_tx, reporter_close.clone()),
+        (recipient, recipient_tx, ConnectionCloseSignal::detached()),
+    ] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, close),
+            )
+            .await
+            .expect("player route");
+    }
+    let message = Arc::new(ServerMessage::PeerTransportStatus {
+        peer_id: reporter,
+        transport: crate::protocol::Transport::WebRtc,
+        connected: false,
+    });
+
+    let checks = AtomicUsize::new(0);
+    let eligible = || {
+        if checks.fetch_add(1, Ordering::Relaxed) == 1 {
+            // Queue capacity is reserved. Model a close request immediately
+            // after the caller has decided the report can still be sent.
+            assert!(reporter_close.request_close(CloseReason::SlowConsumer));
+        }
+        true
+    };
+    let delivered = coordinator
+        .send_to_player_in_room_from_if(&recipient, &room_id, &reporter, message, &eligible)
+        .await
+        .expect("conditional transport report");
+
+    assert_eq!(checks.load(Ordering::Relaxed), 2);
+    assert!(!delivered, "the close request won before queue commit");
+    let outcome = recipient_rx.try_recv();
+    assert!(matches!(outcome, Err(mpsc::error::TryRecvError::Empty)));
+}
+
 #[cfg(feature = "trace-validation")]
 #[tokio::test]
 async fn conditional_room_send_keeps_successful_trace_correlation() {
