@@ -480,7 +480,14 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
                 continue
             fi
 
-            # Disallow commit-hash refs.
+            # Shared review workflows execute their own source at this immutable commit.
+            if [[ "$ACTION_NAME" =~ ^Ambiguous-Interactive/review-tools/\.github/workflows/(openai-review|agent-metrics)\.yml$ ]] && [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+                VALID_REF_COUNT=$((VALID_REF_COUNT + 1))
+                record_remote_action_ref "Ambiguous-Interactive/review-tools@${REF}" "${WORKFLOW_NAME}:${line_num} ${ACTION_NAME}@${REF}"
+                continue
+            fi
+
+            # Disallow commit-hash refs for other actions.
             if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
                 error "$WORKFLOW_NAME:$line_num: Action uses commit hash ref (disallowed): $ACTION_NAME@$REF"
                 HASH_REF_COUNT=$((HASH_REF_COUNT + 1))
@@ -512,7 +519,7 @@ for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
 done
 
 if [ "$HASH_REF_COUNT" -eq 0 ] && [ "$FLOATING_REF_COUNT" -eq 0 ] && [ "$INVALID_REF_COUNT" -eq 0 ] && [ "$MALFORMED_REF_COUNT" -eq 0 ]; then
-    success "All $VALID_REF_COUNT GitHub Actions use explicit version tags"
+    success "All $VALID_REF_COUNT GitHub Actions use explicit version tags or approved shared workflow commits"
 fi
 
 if is_truthy "${SIGNAL_FISH_CHECK_ACTION_REF_TAGS:-0}"; then
@@ -526,6 +533,15 @@ if is_truthy "${SIGNAL_FISH_CHECK_ACTION_REF_TAGS:-0}"; then
             action_ref="${action_key#*@}"
             action_url="https://github.com/${action_repo}.git"
             tag_ref="refs/tags/${action_ref}"
+
+            if [[ "$action_ref" =~ ^[0-9a-f]{40}$ ]]; then
+                if ! remote_refs=$(git ls-remote "$action_url" 'refs/heads/*' 'refs/tags/*') ||
+                    ! awk -v expected="$action_ref" '$1 == expected { found = 1 } END { exit !found }' <<< "$remote_refs"; then
+                    error "Shared workflow commit is not advertised upstream: ${action_repo}@${action_ref}"
+                    MISSING_TAG_REF_COUNT=$((MISSING_TAG_REF_COUNT + 1))
+                fi
+                continue
+            fi
 
             if command -v timeout >/dev/null 2>&1; then
                 if ! timeout 15 git ls-remote --exit-code --tags "$action_url" "$tag_ref" >/dev/null 2>&1; then

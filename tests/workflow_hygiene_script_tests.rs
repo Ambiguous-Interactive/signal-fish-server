@@ -1003,3 +1003,52 @@ jobs:
         }
     }
 }
+
+#[test]
+fn test_workflow_hygiene_accepts_shared_review_workflow_commit() {
+    let workflow = r#"name: Shared Review
+on: [push]
+jobs:
+  review:
+    uses: Ambiguous-Interactive/review-tools/.github/workflows/openai-review.yml@e37d0ef1195ee247382c92dd8f6370c0b732960b
+    with:
+      timeout-minutes: 15
+"#;
+    let (success, output) = run_hygiene_with_workflow("shared-review.yml", workflow);
+    assert!(success, "Shared workflow commit must be accepted: {output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_workflow_hygiene_checks_shared_workflow_commit_upstream() {
+    let temp = unique_temp_dir("shared-ref");
+    let fake_bin = temp.path().join("bin");
+    fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_git = fake_bin.join("git");
+    write_file(
+        &fake_git,
+        "#!/bin/sh\nprintf '%s\\trefs/tags/v1.0.0\\n' \"$ADVERTISED_COMMIT\"\n",
+    );
+    let mut perms = fs::metadata(&fake_git)
+        .expect("stat fake git")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_git, perms).expect("chmod fake git");
+    let workflow = "name: Shared Metrics\non: [push]\njobs:\n  metrics:\n    uses: Ambiguous-Interactive/review-tools/.github/workflows/agent-metrics.yml@e37d0ef1195ee247382c92dd8f6370c0b732960b\n    with:\n      timeout-minutes: 15\n";
+    for (advertised, expected) in [
+        ("e37d0ef1195ee247382c92dd8f6370c0b732960b", true),
+        ("0000000000000000000000000000000000000000", false),
+    ] {
+        let (success, output) = run_hygiene_with_fixture_env(
+            "shared-metrics.yml",
+            workflow,
+            &[],
+            &[
+                ("SIGNAL_FISH_CHECK_ACTION_REF_TAGS", "1"),
+                ("ADVERTISED_COMMIT", advertised),
+            ],
+            Some(&fake_bin),
+        );
+        assert_eq!(success, expected, "Unexpected commit validation: {output}");
+    }
+}
