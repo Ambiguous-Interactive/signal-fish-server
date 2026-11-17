@@ -328,6 +328,10 @@ name = "player_removal"
 harness = false
 
 [[bench]]
+name = "room_finalization"
+harness = false
+
+[[bench]]
 name = "reconnection_expiry"
 harness = false
 

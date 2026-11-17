@@ -4036,37 +4036,48 @@ impl GameDatabase for InMemoryDatabase {
         expected: &FinalizeRoomGameExpectation,
     ) -> Result<FinalizeRoomGameOutcome> {
         let mut rooms = self.rooms.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
         let room = rooms
             .get_mut(room_id)
             .ok_or_else(|| anyhow::anyhow!("room not found while finalizing game"))?;
         if room.lobby_state == crate::protocol::LobbyState::Finalized {
             return Ok(FinalizeRoomGameOutcome::AlreadyFinalized);
         }
-        let mut inline_members = [PlayerId::nil(); 16];
-        let mut large_members;
-        let expected_members =
-            if let Some(members) = inline_members.get_mut(..expected.members.len()) {
-                members.copy_from_slice(&expected.members);
-                members
-            } else {
-                large_members = expected.members.clone();
-                &mut large_members
-            };
-        expected_members.sort_unstable();
-        if expected_members.len() != room.players.len()
-            || expected_members
-                .windows(2)
-                .any(|pair| matches!(pair, [left, right] if left == right))
-            || expected_members
-                .iter()
-                .any(|member| !room.players.contains_key(member))
+        if expected.members.len() != room.players.len()
             || room.authority_player != expected.authority_player
             || room.lobby_state != expected.lobby_state
         {
             return Ok(FinalizeRoomGameOutcome::SnapshotChanged);
         }
 
+        let contains_all = |members: &[PlayerId]| {
+            members
+                .iter()
+                .all(|member| room.players.contains_key(member))
+        };
+        // The live coordinator supplies sorted IDs. Direct storage callers can
+        // supply any order, so check uniqueness on both paths.
+        let exact_members = if expected.members.is_sorted_by(|left, right| left < right) {
+            contains_all(&expected.members)
+        } else {
+            let mut inline_members = [PlayerId::nil(); 16];
+            let mut large_members;
+            let sorted = if let Some(members) = inline_members.get_mut(..expected.members.len()) {
+                members.copy_from_slice(&expected.members);
+                members
+            } else {
+                large_members = expected.members.clone();
+                &mut large_members
+            };
+            sorted.sort_unstable();
+            sorted.is_sorted_by(|left, right| left < right) && contains_all(sorted)
+        };
+        if !exact_members {
+            return Ok(FinalizeRoomGameOutcome::SnapshotChanged);
+        }
+
+        // Retain the room fence through validation and acquire liveness before
+        // committing either clock or readiness.
+        let mut liveness = self.room_liveness_monotonic.write().await;
         // The caller is the policy authority that determined every player is
         // ready. Ready state is coordinated separately, so synchronize the
         // persisted player flags as part of the same one-time transition.

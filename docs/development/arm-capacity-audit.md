@@ -8067,3 +8067,60 @@ Saved binaries, complete timing logs, source snapshots, CPU details and test
 logs remain in ignored `progress/session-737`. Independent source review finds
 no blocking issue. This accepts a finite locking improvement only. Broader
 optimization and whole-node capacity criteria in #636 remain open.
+
+## Game-start storage validation
+
+The game-start coordinator passes sorted player IDs to
+`InMemoryDatabase::finalize_room_game`. Storage now uses that slice directly
+when the IDs are strictly increasing. Arbitrary-order storage calls still
+sort a copy and reject duplicates. Both paths check the count and exact
+membership. Storage rejects stale, already-finalized and missing-room
+requests before acquiring the liveness write lock. A valid start holds the
+room lock from validation through commit and acquires the liveness lock
+before changing readiness, lobby state or either activity clock.
+
+The lock-wait regression fails at `e8589948` (Nextest `9c8a4394`). The
+allocation ceiling also fails on that revision for sorted rosters of 17, 64
+and 255 players in both readiness-storage states (Nextest `79b7e2f6`). The
+candidate passes ten storage and concurrent game-start controls (Nextest
+`c90d5cbf`), both allocation tests (Nextest `8c6d59b9`), and five live
+WebSocket cases for mesh, Direct, mixed-version, host departure and late-join
+plans (Nextest `071c7737`).
+
+At 255 sorted players with prepared readiness storage, the measured call
+goes from two allocations totaling 4,240 bytes to one allocation of 176 bytes.
+The roster copy accounts for 4,080 bytes. The boxed storage future increases
+by 16 bytes, which also adds 16 bytes to the small-room and unsorted cases
+without changing their allocation counts.
+
+The `room_finalization` Criterion bench times the public storage call on an
+ARM64 Linux host. It uses one room at a time and creates a fresh lobby
+outside each timed successful call. The unsorted case rotates the ordered
+roster by one position. Each run uses CPU 0, a one-second warm-up, a
+two-second measurement window and 30 samples. Pair 1 runs original then
+candidate. Pair 2 reverses the run order. All point estimates are in
+microseconds.
+
+| Storage call / player count | Original 1 | Candidate 1 | Original 2 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Stale authority / 16 | 1.4326 | 1.0349 | 1.4058 | 1.0603 |
+| Sorted success / 16 | 4.7453 | 4.5002 | 4.9239 | 5.2962 |
+| Unsorted success / 16 | 4.9313 | 5.3804 | 5.1181 | 4.9785 |
+| Stale authority / 255 | 6.2396 | 1.1678 | 6.1495 | 1.1476 |
+| Sorted success / 255 | 11.906 | 11.818 | 13.214 | 14.899 |
+| Unsorted success / 255 | 15.263 | 15.545 | 15.458 | 17.471 |
+
+Stale authority decisions take 25–28% less time at 16 players and 81% less
+at 255. Successful start estimates vary. Both runs show higher estimates for
+the 255-player unsorted control. These figures measure storage calls on one
+host. The capacity targets in #636 still require live load measurements.
+
+```bash
+cargo bench --locked --bench room_finalization --no-run
+# Set saved_executable to a saved binary and run_dir to a fresh result directory.
+CRITERION_HOME="$run_dir" taskset -c 0 "$saved_executable" --bench room_finalization \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
+```
+
+Saved binaries, full timing reports and allocation logs are in ignored
+`progress/session-738`.
