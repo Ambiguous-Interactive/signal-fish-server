@@ -2150,6 +2150,73 @@ async fn signal_dispatch_waits_for_room_plan_publication_gate() {
     assert_silent(&mut alice_rx).await;
 }
 
+/// #826: closing the sender must release its lifecycle before publication resumes.
+async fn assert_close_cancels_room_gate_wait(transport_report: bool) {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let publication = server
+        .message_coordinator
+        .lock_room_event_mutation(&room)
+        .await;
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "waiting for the room plan"}),
+        }
+    };
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if transport_report {
+        // Reports run in an owned task. Wait for the task to record the report
+        // under the lifecycle lock before checking the publication wait.
+        timeout(Duration::from_secs(1), async {
+            while server.metrics.p2p_established.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("report task records the WebRTC connection before waiting");
+    }
+    let next_lifecycle_user = lifecycle.lock_owned();
+    tokio::pin!(next_lifecycle_user);
+    assert!(futures_util::poll!(&mut next_lifecycle_user).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closed sender must finish before the room publication gate opens");
+    assert!(futures_util::poll!(&mut next_lifecycle_user).is_ready());
+    assert!(matches!(
+        alice_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        bob_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    drop(publication);
+}
+
+#[tokio::test(start_paused = true)]
+async fn offer_waiting_for_room_publication_stops_on_sender_close() {
+    assert_close_cancels_room_gate_wait(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_waiting_for_room_publication_stops_on_sender_close() {
+    assert_close_cancels_room_gate_wait(true).await;
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_signal_caller_preserves_admitted_offer() {
