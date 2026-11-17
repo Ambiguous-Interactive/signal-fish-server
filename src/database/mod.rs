@@ -82,6 +82,39 @@ impl RoomCodeIndex {
     }
 }
 
+#[derive(Default)]
+struct ApplicationRoomCounts {
+    counts: HashMap<Uuid, usize>,
+}
+
+impl ApplicationRoomCounts {
+    fn count(&self, application: &Uuid) -> usize {
+        self.counts.get(application).copied().unwrap_or_default()
+    }
+
+    fn replace(&mut self, previous: Option<Uuid>, next: Option<Uuid>) {
+        if previous == next {
+            return;
+        }
+        if let Some(previous) = previous {
+            if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                self.counts.entry(previous)
+            {
+                let remaining = entry.get().saturating_sub(1);
+                if remaining == 0 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() = remaining;
+                }
+            }
+        }
+        if let Some(next) = next {
+            let count = self.counts.entry(next).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
 /// Summary describing how many rooms were removed by the cleanup routine.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RoomCleanupOutcome {
@@ -1494,6 +1527,8 @@ pub struct InMemoryDatabase {
     /// Per-session lifecycle records (issues #708, #763): every create,
     /// join, leave, and close path below funnels through this registry.
     session_records: std::sync::Arc<crate::session_records::SessionRecords>,
+    /// Lock after rooms, codes, liveness and publication; commit without further awaits.
+    application_room_counts: tokio::sync::RwLock<ApplicationRoomCounts>,
     /// Maps (game_name, room_code) -> room_id to allow same room codes across different games
     room_codes: std::sync::Arc<tokio::sync::RwLock<RoomCodeIndex>>,
     /// Missing means published. Lock after rooms, codes, and liveness when
@@ -1816,6 +1851,7 @@ impl InMemoryDatabase {
         let mut room_codes = self.room_codes.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
         let publication = self.room_publication.read().await;
+        let mut application_counts = self.application_room_counts.write().await;
         RoomCleanupLease::new(move |empty_timeout, inactive_timeout, protected| {
             let mut deleted_ids = Vec::new();
             let mut outcome = RoomCleanupOutcome::default();
@@ -1837,6 +1873,7 @@ impl InMemoryDatabase {
                 expired
             }) {
                 room_codes.remove(&room.game_name, &room.code);
+                application_counts.replace(room.application_id, None);
                 let reason = if inactive_timeout.is_some() {
                     if room.has_occupants() {
                         outcome.inactive_rooms_cleaned =
@@ -1864,6 +1901,7 @@ impl InMemoryDatabase {
             fail_update_room_activity_once: std::sync::atomic::AtomicBool::new(false),
             session_records: std::sync::Arc::new(crate::session_records::SessionRecords::new()),
             room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(RoomCodeIndex::default())),
+            application_room_counts: tokio::sync::RwLock::new(ApplicationRoomCounts::default()),
             room_publication: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_liveness_monotonic: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cleanup_events: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -2650,7 +2688,9 @@ impl InMemoryDatabase {
         // (which would silently degrade the room to the wall-clock fallback).
         // The join password rides the same insert: the room is born sealed,
         // so no admission can observe an unlocked row (issue #525).
+        let mut application_counts = self.application_room_counts.write().await;
         rooms.insert(room_id, room.clone());
+        application_counts.replace(None, application_id);
         room_codes.insert(game_name, room_code, room_id);
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         if pending {
@@ -3641,7 +3681,9 @@ impl GameDatabase for InMemoryDatabase {
         let mut liveness = self.room_liveness_monotonic.write().await;
         let mut publication = self.room_publication.write().await;
 
+        let mut application_counts = self.application_room_counts.write().await;
         if let Some(room) = rooms.remove(room_id) {
+            application_counts.replace(room.application_id, None);
             self.session_records
                 .record_closed(room_id, crate::session_records::SessionCloseReason::Deleted);
             let accounting = publication.get(room_id).and_then(|state| match state {
@@ -3768,6 +3810,8 @@ impl GameDatabase for InMemoryDatabase {
         if room.players.len() > 1 || room.players.keys().any(|player_id| player_id != creator_id) {
             return Ok(false);
         }
+        let mut application_counts = self.application_room_counts.write().await;
+        application_counts.replace(room.application_id, None);
         room_codes.remove(&room.game_name, &room.code);
         rooms.remove(room_id);
         liveness.remove(room_id);
@@ -3803,11 +3847,11 @@ impl GameDatabase for InMemoryDatabase {
                 anyhow::bail!("injected application room count failure for test");
             }
         }
-        let rooms = self.rooms.read().await;
-        Ok(rooms
-            .values()
-            .filter(|room| room.application_id == Some(*application_id))
-            .count())
+        Ok(self
+            .application_room_counts
+            .read()
+            .await
+            .count(application_id))
     }
 
     async fn get_total_room_count(&self) -> Result<usize> {
@@ -4107,6 +4151,8 @@ impl GameDatabase for InMemoryDatabase {
         let room = rooms
             .get_mut(room_id)
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let mut application_counts = self.application_room_counts.write().await;
+        application_counts.replace(room.application_id, Some(application_id));
         room.application_id = Some(application_id);
         self.session_records
             .record_application_id_changed(room_id, Some(application_id));
@@ -4123,6 +4169,8 @@ impl GameDatabase for InMemoryDatabase {
         }
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
+            let mut application_counts = self.application_room_counts.write().await;
+            application_counts.replace(room.application_id, None);
             room.application_id = None;
             self.session_records
                 .record_application_id_changed(room_id, None);
@@ -4149,6 +4197,8 @@ impl GameDatabase for InMemoryDatabase {
         if room.application_id != Some(application_id) {
             return Ok(false);
         }
+        let mut application_counts = self.application_room_counts.write().await;
+        application_counts.replace(room.application_id, None);
         room.application_id = None;
         self.session_records
             .record_application_id_changed(room_id, None);
@@ -5086,6 +5136,173 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// #636: application cap reads do not wait for unrelated room storage writes.
+    #[tokio::test]
+    async fn application_room_counts_do_not_wait_for_room_table() {
+        let database = InMemoryDatabase::new();
+        let room = create_test_room(&database, "application-count", "COUNT1")
+            .await
+            .unwrap();
+        let application = Uuid::from_u128(1);
+        database
+            .set_room_application_id(&room.id, application)
+            .await
+            .unwrap();
+        let _rooms = database.rooms.write().await;
+        for (id, expected) in [(application, 1), (Uuid::from_u128(2), 0)] {
+            let mut count = Box::pin(database.get_application_room_count(&id));
+            assert!(
+                matches!(futures_util::poll!(count.as_mut()), std::task::Poll::Ready(Ok(actual)) if actual == expected)
+            );
+        }
+    }
+
+    /// #636: waiting for index admission cannot split a storage commit.
+    #[tokio::test(start_paused = true)]
+    async fn application_room_counts_cancel_before_mutation_commit() {
+        for operation in 0..8 {
+            let database = InMemoryDatabase::new();
+            let room = create_test_room(&database, "count-cancel", "COUNT1")
+                .await
+                .unwrap();
+            let application = Uuid::from_u128(1);
+            database
+                .set_room_application_id(&room.id, application)
+                .await
+                .unwrap();
+            let pending = database
+                .create_pending_room_classified(
+                    "count-cancel".into(),
+                    Some("PENDING".into()),
+                    4,
+                    true,
+                    Uuid::from_u128(2),
+                    "relay".into(),
+                    "test".into(),
+                    Some(application),
+                    None,
+                )
+                .await
+                .unwrap();
+            database
+                .abandon_room(&pending.id, &Uuid::from_u128(2))
+                .await
+                .unwrap();
+            tokio::time::advance(std::time::Duration::from_secs(10)).await;
+            let before = database.rooms.read().await.clone();
+            let fence = database.application_room_counts.write().await;
+            let before_counts = fence.counts.clone();
+            let mut mutation = Box::pin(async {
+                match operation {
+                    0 => {
+                        database
+                            .create_room(
+                                "new".into(),
+                                None,
+                                4,
+                                true,
+                                Uuid::from_u128(3),
+                                "relay".into(),
+                                "test".into(),
+                                Some(application),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    1 => {
+                        database.delete_room(&room.id).await.unwrap();
+                    }
+                    2 => {
+                        database
+                            .set_room_application_id(&room.id, Uuid::from_u128(4))
+                            .await
+                            .unwrap();
+                    }
+                    3 => {
+                        database.clear_room_application_id(&room.id).await.unwrap();
+                    }
+                    4 => {
+                        database
+                            .clear_room_application_id_if_matches(&room.id, application)
+                            .await
+                            .unwrap();
+                    }
+                    5 => {
+                        database.delete_room_if_pending(&pending.id).await.unwrap();
+                    }
+                    6 => {
+                        database
+                            .cleanup_expired_rooms(
+                                chrono::Duration::zero(),
+                                chrono::Duration::zero(),
+                                &HashSet::new(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    _ => {
+                        database.lease_room_cleanup().await.unwrap();
+                    }
+                }
+            });
+            assert!(
+                futures_util::poll!(mutation.as_mut()).is_pending(),
+                "operation {operation} must wait for index admission"
+            );
+            assert!(
+                database.rooms.try_read().is_err(),
+                "operation {operation} owns the primary fence"
+            );
+            drop(mutation);
+            drop(fence);
+            let after = database.rooms.read().await;
+            assert_eq!(after.len(), before.len(), "operation {operation}");
+            for (id, previous) in before {
+                let current = after.get(&id).unwrap();
+                assert_eq!(
+                    current.application_id, previous.application_id,
+                    "operation {operation}"
+                );
+                assert_eq!(current.code, previous.code, "operation {operation}");
+                assert_eq!(
+                    current.last_activity, previous.last_activity,
+                    "operation {operation}"
+                );
+            }
+            assert_eq!(
+                database.application_room_counts.read().await.counts,
+                before_counts,
+                "operation {operation}"
+            );
+        }
+    }
+
+    /// #636: the index retains no entry for an application after its final room leaves.
+    #[tokio::test]
+    async fn application_room_counts_remove_empty_entries() {
+        let database = InMemoryDatabase::new();
+        let room = create_test_room(&database, "count-prune", "COUNT1")
+            .await
+            .unwrap();
+        for id in 0..32 {
+            database
+                .set_room_application_id(&room.id, Uuid::from_u128(id))
+                .await
+                .unwrap();
+            assert_eq!(
+                database.application_room_counts.read().await.counts.len(),
+                1
+            );
+        }
+        database.clear_room_application_id(&room.id).await.unwrap();
+        assert!(database
+            .application_room_counts
+            .read()
+            .await
+            .counts
+            .is_empty());
     }
 
     /// A `delete_room` future dropped while parked on a contended lock must

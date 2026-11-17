@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server work and room-table contention when checking application room limits (#636).
 - Reduce server memory use when starting P2P games (#636).
 - Reduce server work and room-table contention when checking per-game room limits (#636).
 - Reduce server memory use when a live Direct host repeats or replaces its endpoint (#1659, #636).
