@@ -7848,10 +7848,10 @@ and Godot need no client changes: APIs, wire values, tokens and lifecycle result
 stay unchanged. The broader campaign and its capacity obligations remain open.
 
 The unpinned pilots use 0.5-second warm-up, one-second measurement and 20
-samples. The helper-only candidate is retained below. The final candidate also
+samples. The helper-only candidate is retained below. The first published candidate also
 contains the registration change. All point estimates are nanoseconds.
 
-| Public call / cell | Original | Helper-only candidate | Final candidate |
+| Public call / cell | Original | Helper-only candidate | First published candidate |
 | --- | ---: | ---: | ---: |
 | claimed_registration/retained_name_bytes/0 | 912.90 | — | 696.10 |
 | claimed_registration/retained_name_bytes/1024 | 1014.90 | — | 699.05 |
@@ -7875,7 +7875,7 @@ Saved original helper executable SHA-256:
 `659ea60cc5ceeaec430c1a4d6749e3f76b3bef5ecf22773a2976e768f3e3f404`.
 Saved original registration executable SHA-256:
 `aabfb962b0e0045fed23ce03035290b50583ce653d213d3f35736d2fc066d1c3`.
-Saved final candidate executable SHA-256:
+Saved first published candidate executable SHA-256:
 `49a12822b558d85f76dafc7b4c3174a20bc6454f71e457a3f2455d05fd67f84a`.
 Raw logs and executable copies remain in ignored `progress/session-736`.
 
@@ -7933,3 +7933,65 @@ The bulk helper still scans eligibility and remains linear in pending records.
 The live claim path still returns its existing owned token. No claim or replay
 policy was weakened. Broader #636 acceptance and capacity qualification remain
 open; no issue is closed by these finite results.
+
+Final source inspection found one avoidable lookup in the first published
+candidate `ca3267f8`: the early claim check preceded the snapshot lookup on
+fresh and different-room registration. The revision reuses one stored-record
+borrow for the claim check and snapshot. It adds no lookup to those paths.
+Independent delta review approves this change. All 11 focused all-feature
+histories pass again. The preceding timing tables and executable identities
+remain evidence for the first published candidate, not the revised head.
+The revised executable is measured in new pairs below.
+
+The lookup-reuse revision passes all 11 all-feature controls in Nextest
+`965c4fdb` (21.19-second build; 38 ms execution). Claimed calls still allocate
+only the 36-byte returned token; unchanged bulk sweeps still allocate zero.
+Strict full Clippy passes in 22.68 seconds. Revised executable SHA-256:
+`2ac2cbd52ddad2761ffcc45522f98dc1b7fc57859d012a3ebf009c68c3f8f4e2`.
+
+Two new CPU-0 original/revised pairs use the same one-second warm-up,
+two-second measurement and 30 samples. No build overlaps measurement. All
+point estimates below are nanoseconds. No slower cell is discarded.
+
+| Public call / cell | Original 1 | Revised 1 | Original 2 | Revised 2 |
+| --- | ---: | ---: | ---: | ---: |
+| reconnection_expiry/all_expired | 7126.45 | 8227.80 | 8318.67 | 8251.61 |
+| reconnection_expiry/one_expired | 4286.69 | 4376.70 | 4629.94 | 4421.24 |
+| reconnection_expiry/shared_room | 4463.00 | 3944.32 | 4336.09 | 3999.92 |
+| reconnection_expiry/unchanged/0 | 727.68 | 722.40 | 823.26 | 721.03 |
+| reconnection_expiry/unchanged/1 | 857.31 | 717.06 | 760.48 | 716.88 |
+| reconnection_expiry/unchanged/10000 | 191814.33 | 31568.66 | 210770.87 | 29195.71 |
+| reconnection_expiry/unchanged/1024 | 17151.42 | 3171.02 | 26111.94 | 2668.77 |
+| reconnection_expiry/unchanged/64 | 1542.37 | 945.93 | 1818.22 | 791.09 |
+| claimed_registration/retained_name_bytes/0 | 835.27 | 853.01 | 925.99 | 932.53 |
+| claimed_registration/retained_name_bytes/1024 | 835.05 | 859.47 | 840.86 | 1218.65 |
+| claimed_registration/retained_name_bytes/64 | 836.85 | 919.42 | 840.01 | 1421.12 |
+| claimed_registration/retained_name_bytes/65536 | 2682.66 | 859.40 | 2521.02 | 1240.84 |
+
+Small-name registration is slower in these two full-group pairs. A changed
+experiment compares only the 64-byte cell in original, first-published,
+lookup-reuse order, twice. It uses the same CPU, timings and sample count.
+This distinguishes nearby source variants with less time between observations;
+it is not another full-group retry.
+
+| 64-byte-name call | Original | First published | Lookup reuse |
+| --- | ---: | ---: | ---: |
+| Comparison 1 | 802.29 | 739.44 | 751.48 |
+| Comparison 2 | 996.47 | 746.77 | 758.23 |
+
+The earlier 64-byte loss does not repeat in this comparison. The data does not
+attribute the timing variation. No general small-name registration latency gain
+is claimed for the revised head. The synthetic 64 KiB registration call improves
+in both full-group pairs. Exact allocation savings remain independent of the
+timing result. For the public bulk helper, the 1,024-record unchanged call
+improves from 17.15 to 3.17 microseconds and 26.11 to 2.67 microseconds. The
+10,000-record cell improves from 191.81 to 31.57 microseconds and 210.77 to
+29.20 microseconds. Dense and sparse expiry results vary. No production
+contention, socket latency, throughput or whole-node capacity result is claimed.
+
+```bash
+# Repeat for each of the three saved source variants, twice in order.
+taskset -c 0 <saved-executable> --bench \
+  'claimed_registration/retained_name_bytes/64$' \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30
+```

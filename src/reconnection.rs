@@ -868,10 +868,12 @@ impl ReconnectionManager {
         let mut state = self.lock_record_mutation(&player_id).await;
         let fresh_last_sequence = state.next_sequence;
 
-        if let Some(existing) = state.disconnected_players.get(&player_id) {
-            if existing.disconnected.room_id == room_id && existing.claim.is_some() {
-                return existing.disconnected.token.token.clone();
-            }
+        let same_room_record = state
+            .disconnected_players
+            .get(&player_id)
+            .filter(|existing| existing.disconnected.room_id == room_id);
+        if let Some(existing) = same_room_record.filter(|record| record.claim.is_some()) {
+            return existing.disconnected.token.token.clone();
         }
 
         // A same-room re-registration — the player registered a SECOND
@@ -881,24 +883,20 @@ impl ReconnectionManager {
         // fields up front (owned, so the later `players.insert` is
         // unencumbered). A record from a DIFFERENT room, or a genuinely new one,
         // takes fresh values instead.
-        let existing_same_room = state
-            .disconnected_players
-            .get(&player_id)
-            .filter(|existing| existing.disconnected.room_id == room_id)
-            .map(|existing| PreservedPending {
-                unpublished_authority: existing.unpublished_authority,
-                token: existing.disconnected.token.token.clone(),
-                token_created_at: existing.disconnected.token.created_at,
-                token_expires_at: existing.disconnected.token.expires_at,
-                disconnected_at: existing.disconnected.disconnected_at,
-                identity: existing.identity.clone(),
-                last_sequence: existing.disconnected.last_sequence,
-                last_epoch: existing.disconnected.last_epoch,
-                was_authority: existing.disconnected.was_authority,
-                player_info: existing.disconnected.player_info.clone(),
-                deadline: existing.deadline,
-                kicked: existing.kicked,
-            });
+        let existing_same_room = same_room_record.map(|existing| PreservedPending {
+            unpublished_authority: existing.unpublished_authority,
+            token: existing.disconnected.token.token.clone(),
+            token_created_at: existing.disconnected.token.created_at,
+            token_expires_at: existing.disconnected.token.expires_at,
+            disconnected_at: existing.disconnected.disconnected_at,
+            identity: existing.identity.clone(),
+            last_sequence: existing.disconnected.last_sequence,
+            last_epoch: existing.disconnected.last_epoch,
+            was_authority: existing.disconnected.was_authority,
+            player_info: existing.disconnected.player_info.clone(),
+            deadline: existing.deadline,
+            kicked: existing.kicked,
+        });
 
         // Reuse the token STRING pre-issued at join (the client already holds
         // it — issue #136, F4), re-stamping its expiry so the reconnect gate
