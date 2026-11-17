@@ -7535,3 +7535,70 @@ the declaration was added before the passing controls. That setup failure is
 not red regression evidence. Independent review approves the source and index
 invariants. Rust, .NET and Godot need no changes because APIs, wire values and
 limit decisions stay unchanged. The issue owns final check and delivery evidence.
+
+## Game-finalization storage reuse — session 733
+
+Existing [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+owns this finite obligation. Baseline source is `9e6f087d`; the final measurement
+control runs against both original and repaired production code on ARM64 Linux
+with Rust 1.94.0. The process-global allocator runs each history alone on its
+measuring thread. Fixture creation, joins, lobby entry, ready toggles and output
+assertions stay outside each measured region. Each region includes the complete
+public `finalize_room_game` call and its boxed future.
+
+The server uses an inline buffer for up to 16 expected member identities, with
+the existing heap-copy path above that size. Sorting, duplicate rejection and
+exact membership checks stay unchanged. Accepted starts reuse the stored ready
+vector, reserve its required capacity, and rebuild it in current member order.
+No dependency, protocol or public API changes apply.
+
+| Players | Ready storage | Original allocations / bytes | Repaired allocations / bytes |
+| ---: | --- | ---: | ---: |
+| 1 | Empty | 3 / 240 | 2 / 176 |
+| 1 | Prepared | 3 / 240 | 1 / 160 |
+| 2 | Empty | 3 / 256 | 2 / 192 |
+| 2 | Prepared | 3 / 256 | 1 / 160 |
+| 15 | Empty | 3 / 640 | 2 / 400 |
+| 15 | Prepared | 3 / 640 | 1 / 160 |
+| 16 | Empty | 3 / 672 | 2 / 416 |
+| 16 | Prepared | 3 / 672 | 1 / 160 |
+| 17 | Empty | 3 / 704 | 3 / 704 |
+| 17 | Prepared | 3 / 704 | 2 / 432 |
+| 64 | Empty | 3 / 2,208 | 3 / 2,208 |
+| 64 | Prepared | 3 / 2,208 | 2 / 1,184 |
+| 255 | Empty | 3 / 8,320 | 3 / 8,320 |
+| 255 | Prepared | 3 / 8,320 | 2 / 4,240 |
+
+Prepared means every member toggled ready through the public storage API before
+measurement. Empty means no member toggled ready. All measured calls have zero
+reallocations. These are allocated-byte and allocation-count results, not peak
+memory, end-to-end latency, throughput or node-capacity measurements. The
+16-player prepared call saves two allocations and 512 allocated bytes; the
+255-player prepared call saves one allocation and 4,080 allocated bytes.
+
+```bash
+cargo nextest run --test finalized_readiness_allocations --all-features --no-capture
+bash scripts/dev-loop.sh --all-features \
+  finalization_membership_requires_a_permutation_without_duplicates \
+  cancelled_state_change_cannot_separate_room_and_expiry_commit \
+  refused_room_state_changes_preserve_expiry_clocks \
+  room_state_changes_refresh_both_expiry_clocks
+```
+
+The final resource control fails on the original source across 11 of 14 cells
+(Nextest `ff67e224`). Repaired all-feature
+controls pass in `80da091f`. The unchanged large empty-storage cells are retained.
+The control checks exact ready order and flags, final phase, caller snapshot
+identity, finalization time and idempotent repetition. Resource ceilings compare
+with repeated-call overhead and allow only the required heap member copy and
+initial ready storage. The membership history now covers 1, 2, 4, 15, 16, 17, 64
+and 255 players, including duplicate, missing, extra, authority and phase changes.
+Independent source review finds no blocker. Rust, .NET and Godot need no changes:
+wire values, ordering and APIs stay unchanged. Broad campaign criteria remain
+open; no issue closure or historical failure attribution is claimed.
+
+Raw attempts stay in ignored `progress/session-733/`. The development runner
+cannot discover the new manual-harness function by name, so the allocation
+history uses its explicit owning target. That discovery failure is not red
+evidence. Original-source and final-source resource results are retained in the
+issue; hosted checks and final delivery remain required.

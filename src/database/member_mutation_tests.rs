@@ -63,7 +63,7 @@ async fn authority_flag_repair_renews_both_room_clocks_once() {
 /// #636: compare exact membership without a second current-member vector.
 #[tokio::test]
 async fn finalization_membership_requires_a_permutation_without_duplicates() {
-    for count in [1, 4, 255] {
+    for count in [1, 2, 4, 15, 16, 17, 64, 255] {
         let db = InMemoryDatabase::new();
         let room = db
             .create_room(

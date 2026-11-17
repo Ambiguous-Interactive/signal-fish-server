@@ -3994,7 +3994,16 @@ impl GameDatabase for InMemoryDatabase {
         if room.lobby_state == crate::protocol::LobbyState::Finalized {
             return Ok(FinalizeRoomGameOutcome::AlreadyFinalized);
         }
-        let mut expected_members = expected.members.clone();
+        let mut inline_members = [PlayerId::nil(); 16];
+        let mut large_members;
+        let expected_members =
+            if let Some(members) = inline_members.get_mut(..expected.members.len()) {
+                members.copy_from_slice(&expected.members);
+                members
+            } else {
+                large_members = expected.members.clone();
+                &mut large_members
+            };
         expected_members.sort_unstable();
         if expected_members.len() != room.players.len()
             || expected_members
@@ -4012,11 +4021,12 @@ impl GameDatabase for InMemoryDatabase {
         // The caller is the policy authority that determined every player is
         // ready. Ready state is coordinated separately, so synchronize the
         // persisted player flags as part of the same one-time transition.
-        let member_ids: Vec<PlayerId> = room.players.keys().copied().collect();
         for player in room.players.values_mut() {
             player.is_ready = true;
         }
-        room.ready_players = member_ids;
+        room.ready_players.clear();
+        room.ready_players.reserve_exact(room.players.len());
+        room.ready_players.extend(room.players.keys().copied());
         room.lobby_state = crate::protocol::LobbyState::Finalized;
         // Wall clock (durable record): absolute lifecycle stamp.
         room.game_finalized_at = Some(chrono::Utc::now());
