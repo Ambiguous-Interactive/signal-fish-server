@@ -19042,3 +19042,43 @@ Rust and .NET still receive an opaque payload and generation. Godot still
 emits the same signaling event to its mesh and scripts. The server repair
 requires no client change. Queue admission does not prove network delivery or
 complete the A11 audit.
+
+### F384 — A closed sender kept WebRTC delivery waiting for capacity
+
+At base `7bdc6265` under #826, an offer waiting on a full target queue kept
+the room publication gate after the sender's slow-consumer close. A parked
+transport report also kept waiting after its reporter closed. The server
+checked the sender again only when target capacity returned or expired.
+
+Two paused-clock Linux ARM64 tests drive the client-message router and the
+production slow-consumer deadline. The sender closes while the target queue
+stays full and has a later deadline. The original code fails the 10 ms bound
+on room-gate release for the offer (Nextest `0d076aa5`) and on completion for
+the report (Nextest `9ebc29ab`). Both still check that the target receives no
+stale frame.
+
+The in-memory coordinator now waits for sender close alongside target
+capacity. It releases the reservation wait when close wins and still checks
+sender routing and close state at queue commit. A live sender keeps the
+existing target timeout and plan-before-signal ordering. The close watcher
+uses one additional allocation only when target capacity is full.
+
+Matched warm ARM64 allocation probes keep the same allocation counts. A
+signal to one peer uses 3,440 bytes, up from 3,424. A report to 254 peers uses
+459,782 bytes, up from 455,718. Both add 16 bytes per target. An unboxed
+watcher added 352 bytes per target, so the server allocates the watcher only
+when it has to wait. These probes do not measure CPU cost.
+
+The first PR head raised 255-member publication cost from 549,641 to
+557,833 bytes and failed the hosted allocation gate. Returning the original
+shutdown watch future directly restores 549,641 bytes on ARM64 without
+changing the gate. Nextest `0d70afa8` passes all four allocation probes.
+
+One server process owns the sender's close state and room publication.
+Until that process detects a broken link, a partition can still delay
+signaling up to the normal capacity deadline. Frames queued before close may
+still reach peers. Reconnect uses the restored route and its current plan.
+A restart loses the room and its queues, so another process must refuse
+recovery without authoritative room state. Rust, .NET, and Godot keep their
+existing signaling and transport-report contracts. This covers local queue
+waiting in A11 and A12. The broader audit remains open.

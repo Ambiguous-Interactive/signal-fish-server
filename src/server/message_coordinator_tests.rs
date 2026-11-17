@@ -1,7 +1,7 @@
 use super::game_data::broadcast_game_data_with;
 use super::{
-    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, NoDeliveryDrain,
-    RoutingGate, RoutingGateRegistry,
+    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, RoutingGate,
+    RoutingGateRegistry,
 };
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliverySender,
@@ -367,7 +367,7 @@ fn start_control_capacity_wait(
                         .await
                 } else {
                     coordinator
-                        .reserve_one_if(player_id, handle, &|| true, NoDeliveryDrain, None, None)
+                        .reserve_one_if(player_id, handle, &|| true, None, None, None)
                         .await
                 };
                 match reservation {

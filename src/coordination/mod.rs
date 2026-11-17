@@ -2228,7 +2228,8 @@ pub trait MessageCoordinator: Send + Sync {
     }
 
     /// Conditional room delivery with a known seated sender. The in-memory
-    /// coordinator orders queue admission against the sender's close request.
+    /// coordinator cancels capacity waits on sender close and orders queue
+    /// admission against that close request.
     /// Coordinators without local connection state rely on the supplied
     /// predicate to check sender liveness.
     fn send_to_player_in_room_from_if<'a>(
