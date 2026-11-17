@@ -25,6 +25,7 @@ jobs:
       model: ${{ vars.OPENAI_REVIEW_MODEL }}
       effort: ${{ vars.OPENAI_REVIEW_EFFORT }}
       tools-ref: v1.0.0
+      timeout-minutes: 15
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     permissions:
