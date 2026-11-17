@@ -7602,3 +7602,73 @@ cannot discover the new manual-harness function by name, so the allocation
 history uses its explicit owning target. That discovery failure is not red
 evidence. Original-source and final-source resource results are retained in the
 issue; hosted checks and final delivery remain required.
+
+## Indexed application room counts — session 734
+
+Existing [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+owns this finite obligation: count stored rooms per application without scanning
+all rooms or waiting for unrelated room-table writes. Baseline is `d71a19ec`.
+This ARM64 Linux workspace uses Rust 1.94.0. The experiment measures complete
+public storage calls, including runtime entry and the boxed async-trait future.
+It does not qualify whole-node capacity, relay throughput or gameplay latency.
+
+The index stores one count per application with stored rooms. Pending rooms count
+before publication. Creation, ownership changes, both rollback methods, explicit
+deletion, abandoned creation deletion and both GC modes update the index inside
+the existing storage commit. The count guard is acquired last, before any row
+mutation. No storage await follows mutation. Count reads acquire only this guard.
+Zero-count entries are removed; map capacity can retain peak application storage.
+Ownership writes gain a lock and index updates. No dependency or API changes apply.
+
+The new public histories compare counts with independent stored-room snapshots.
+They cover pending publication, ownership replacement and repetition, conditional
+and unconditional rollback, missing rows, collision rejection, code rotation,
+repeated deletion, abandoned creators, protected GC and concurrent ownership churn.
+The unit histories cancel eight mutation paths before index admission and prove
+that neither primary rows nor counts changed. Existing concurrent cap and failed
+publication rollback histories remain required. All nine scoped controls pass in
+Nextest `3389ff89`; the build takes 62 seconds and execution takes 141 ms.
+The original source fails the unrelated room-lock control in `cc265474`.
+This does not establish the repository's warm edit-test p95 target.
+
+Independent source review approves without blockers. Rust, .NET and Godot need
+no changes because API, wire values and admission decisions stay unchanged.
+The broad campaign and capacity criteria remain open. Raw attempts stay in ignored
+`progress/session-734/`; initial target-registration failure is not red evidence.
+
+Criterion uses a one-second warmup, two-second measurement and 20 samples per
+cell. Fixtures contain 1, 1,000 or 10,000 rooms split between two applications.
+The transfer cell alternates the last room's owner. The benchmark then restores
+and checks the exact fixture before measuring present and absent count calls.
+The table records Criterion point estimates from the matched final runs.
+
+| Rooms | Call | Original | Indexed |
+| ---: | --- | ---: | ---: |
+| 1 | Present count | 620.32 ns | 637.94 ns |
+| 1 | Absent count | 615.92 ns | 647.74 ns |
+| 1 | Ownership transfer | 665.59 ns | 744.25 ns |
+| 1,000 | Present count | 2.0638 us | 642.91 ns |
+| 1,000 | Absent count | 2.3983 us | 649.32 ns |
+| 1,000 | Ownership transfer | 668.83 ns | 742.85 ns |
+| 10,000 | Present count | 22.948 us | 633.20 ns |
+| 10,000 | Absent count | 21.137 us | 784.23 ns |
+| 10,000 | Ownership transfer | 817.75 ns | 766.03 ns |
+
+The present count at 10,000 rooms is about 36 times faster; its 95% intervals
+are 22.721–23.282 us before and 626.40–640.63 ns after. The absent count is
+about 27 times faster. One-room count calls cost 18–32 ns more. Ownership
+transfers at 1 and 1,000 rooms cost 74–79 ns more; the 10,000-room transfer
+improves in this run. These results do not prove a general write-speed gain.
+Read work is independent of total room count, with expected constant-time
+HashMap lookup. Index memory scales with distinct applications, including
+retained peak capacity, rather than rooms. No memory-byte reduction is claimed.
+Earlier pilot samples precede the fixture-owner reset and are not used here.
+
+```bash
+cargo bench --locked --bench application_room_count -- \
+  --warm-up-time 1 --measurement-time 2 --sample-size 20
+bash scripts/dev-loop.sh --all-features application_room_counts \
+  application_room_cap_is_atomic_across_games_and_independent_between_apps \
+  legacy_room_claims_share_the_atomic_application_room_cap \
+  unpublished_room_creation_rolls_back_room_and_frees_application_capacity
+```
