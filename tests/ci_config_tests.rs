@@ -9865,7 +9865,7 @@ fn test_dockerfile_uses_docker_version_format() {
 #[test]
 fn test_github_actions_use_version_refs_not_commit_hashes() {
     // Enforce explicit version tags for GitHub Actions (e.g., @v4.2.2, @v2)
-    // and explicitly reject commit-hash and moving channel refs in workflow files.
+    // Shared review workflow releases permit full commits; other hashes and moving refs are rejected.
 
     let root = repo_root();
     let workflows_dir = root.join(".github/workflows");
@@ -9921,6 +9921,11 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
             };
 
             total_actions_found += 1;
+
+            if is_shared_review_workflow_commit(action_name, action_ref) {
+                actions_with_valid_refs += 1;
+                continue;
+            }
 
             if is_commit_hash(action_ref) {
                 violations.push(format!(
@@ -11479,6 +11484,33 @@ fn collect_workflow_files(workflows_dir: &Path) -> Vec<std::fs::DirEntry> {
 /// Return `true` if `reference` is a 40-character hexadecimal commit hash.
 fn is_commit_hash(reference: &str) -> bool {
     reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_shared_review_workflow_commit(action_name: &str, reference: &str) -> bool {
+    matches!(
+        action_name,
+        "Ambiguous-Interactive/review-tools/.github/workflows/openai-review.yml"
+            | "Ambiguous-Interactive/review-tools/.github/workflows/agent-metrics.yml"
+    ) && reference.len() == 40
+        && reference
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+#[test]
+fn test_shared_workflow_commit_allowance_is_narrow() {
+    let sha = "e37d0ef1195ee247382c92dd8f6370c0b732960b";
+    for name in ["openai-review", "agent-metrics"] {
+        let path = format!("Ambiguous-Interactive/review-tools/.github/workflows/{name}.yml");
+        assert!(is_shared_review_workflow_commit(&path, sha));
+        assert!(!is_shared_review_workflow_commit(&path, "main"));
+        assert!(!is_shared_review_workflow_commit(&path, "e37d0ef"));
+    }
+    assert!(!is_shared_review_workflow_commit("actions/checkout", sha));
+    assert!(!is_shared_review_workflow_commit(
+        "Ambiguous-Interactive/review-tools/.github/workflows/other.yml",
+        sha
+    ));
 }
 
 /// Extract `uses:` value from either `uses: ...` or `- uses: ...` YAML styles.
@@ -28903,7 +28935,9 @@ fn test_no_workflow_action_uses_commit_hash_ref() {
                 continue;
             };
 
-            if is_commit_hash(action_ref) {
+            if is_commit_hash(action_ref)
+                && !is_shared_review_workflow_commit(action_name, action_ref)
+            {
                 violations.push(format!(
                     "{filename}:{line_num}: {action_name}@{action_ref}\n  \
                      Commit hashes are not allowed for workflow action refs."
