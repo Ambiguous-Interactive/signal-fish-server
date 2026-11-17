@@ -540,9 +540,9 @@ if is_truthy "${SIGNAL_FISH_CHECK_ACTION_REF_TAGS:-0}"; then
                 if command -v timeout >/dev/null 2>&1; then
                     remote_git_command=(timeout 15 git)
                 fi
-                if ! remote_refs=$("${remote_git_command[@]}" ls-remote "$action_url" 'refs/heads/*' 'refs/tags/*') ||
-                    ! awk -v expected="$action_ref" '$1 == expected { found = 1 } END { exit !found }' <<< "$remote_refs"; then
-                    error "Shared workflow commit is not advertised upstream: ${action_repo}@${action_ref}"
+                if ! remote_refs=$("${remote_git_command[@]}" ls-remote --tags "$action_url" 'refs/tags/v*') ||
+                    ! awk -v expected="$action_ref" '$1 == expected && $2 ~ /^refs\/tags\/v[0-9]/ { found = 1 } END { exit !found }' <<< "$remote_refs"; then
+                    error "Shared workflow commit has no version tag upstream: ${action_repo}@${action_ref}"
                     MISSING_TAG_REF_COUNT=$((MISSING_TAG_REF_COUNT + 1))
                 fi
                 continue
