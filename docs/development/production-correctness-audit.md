@@ -54,7 +54,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
+| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123; exact JSON sizing in F228 |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
@@ -19013,3 +19013,32 @@ Rust and .NET track the advisory event for known peers. Godot exposes the
 same advisory event to scripts. Live events use the existing formats and
 require no client changes. The tests cover local queue admission. They do
 not establish client delivery under every network schedule or complete A12.
+
+### F383 — An evicted sender could still forward a parked WebRTC offer
+
+At base `5a739213` under #826, the server checks both routes before it waits
+for target capacity. Another delivery can close and remove the sender's route
+while the offer waits. When the target drains its queue, the old path still
+enqueues the offer. Linux ARM64 reproduced the unexpected frame with the real
+router and coordinator (Nextest `a293038c`). The source still had a room
+assignment, and the coordinator had already removed its route.
+
+The coordinator now checks the source route and orders the target queue commit
+against the source's physical close request. The source lifecycle guard and
+room publication fence still order subsequent signals, room changes, and plan
+updates. The server forwards an offer only while the source is routed and open.
+If the source stays live and the target misses its capacity deadline, the
+server still closes the target and returns the existing delivery error.
+
+These guarantees require one authoritative process for the room. After the
+server detects a partition and starts closing the source, the server declines
+pending signals from that socket. A peer can still receive a frame that entered
+its queue before the close, and clients still check the generation against
+their current plan. A reconnect can send new signals from its restored route.
+A restart loses in-memory room state and its pending queues. A different
+instance must refuse signaling or recovery without that room state.
+
+Rust and .NET still receive an opaque payload and generation. Godot still
+emits the same signaling event to its mesh and scripts. The server repair
+requires no client change. Queue admission does not prove network delivery or
+complete the A11 audit.

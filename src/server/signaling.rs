@@ -93,7 +93,8 @@ impl EnhancedGameServer {
     }
 
     /// Relay one generation-fenced opaque WebRTC signal.
-    /// Once admitted, delivery continues if the caller is canceled.
+    /// Once dispatched, delivery continues if the caller is canceled.
+    /// The source must still be routed and open when the recipient queues it.
     ///
     /// The server deliberately does not interpret or topology-gate the
     /// generation: it preserves the same room-ordered dumb-plumbing contract
@@ -358,33 +359,45 @@ impl EnhancedGameServer {
             return;
         }
 
+        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
+            return;
+        };
+        if source_close.requested_reason().is_some() {
+            return;
+        }
+
         // Count the signal as relayed here, at dispatch — after every same-room +
         // transport + rate-limit check has passed — matching the best-effort
         // "relayed = dispatched" semantics of the send below (a rejected
         // cross-room / rate-limited signal returns earlier and is never counted).
         self.metrics.increment_signals_relayed();
 
-        // Delivery follows the server-wide contract (`deliver_or_disconnect`):
-        // never a silent drop — a backpressured recipient stalls this send for
-        // up to the slow-consumer grace window and is then loudly disconnected
-        // (metrics + close), abandoning its queue only with the connection.
+        // The room event fence orders plans and normal membership changes.
+        // Eviction or physical close can still win during the capacity wait.
+        // Revalidate under the coordinator's routing and close guards at enqueue.
         let coordinator = Arc::clone(&self.message_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
         let from = *from;
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
+            let source_is_open = || source_close.requested_reason().is_none();
             let result = coordinator
-                .send_to_player_in_room(
+                .send_to_player_in_room_from_if(
                     &to,
                     &from_room,
+                    &from,
                     Arc::new(ServerMessage::Signal {
                         from,
                         generation,
                         signal,
                     }),
+                    &source_is_open,
                 )
                 .await;
             drop(signal_publication_guard);
+            if !source_is_open() {
+                return Ok(());
+            }
             let (message, code) = match result {
                 Ok(true) => return Ok(()),
                 Ok(false) => (
