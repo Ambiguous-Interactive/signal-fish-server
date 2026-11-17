@@ -160,9 +160,10 @@ impl TransportStatusFanOut {
         };
         server
             .message_coordinator
-            .send_to_player_in_room_if(
+            .send_to_player_in_room_from_if(
                 recipient,
                 &self.room_id,
+                &self.sender,
                 Arc::clone(&self.message),
                 &delivery_is_current,
             )

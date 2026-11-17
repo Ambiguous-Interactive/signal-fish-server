@@ -4870,6 +4870,152 @@ impl InMemoryMessageCoordinator {
 
         Ok(outcome)
     }
+
+    async fn send_conditional_room_message(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        from: Option<&PlayerId>,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<bool> {
+        let handle = {
+            let _routing = self.room_routing_gates.read(*room_id).await;
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            room_players
+                .get(room_id)
+                .filter(|players| players.contains(player_id))
+                .and_then(|_| clients.get(player_id).cloned())
+        };
+        let Some(handle) = handle else {
+            return Ok(false);
+        };
+        #[cfg(feature = "trace-validation")]
+        let trace_close = handle.close.clone();
+        #[cfg(feature = "trace-validation")]
+        let trace_id = trace_close.begin_trace_delivery(message.as_ref());
+        #[cfg(feature = "trace-validation")]
+        let record_full = || {
+            trace_close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::SendFull,
+                trace_id,
+                None,
+            );
+        };
+        #[cfg(feature = "trace-validation")]
+        let on_full: Option<&(dyn Fn() + Send + Sync)> = Some(&record_full);
+        #[cfg(not(feature = "trace-validation"))]
+        let on_full = None;
+        let reservation = self
+            .reserve_one_if(
+                *player_id,
+                handle,
+                should_send,
+                NoDeliveryDrain,
+                Some(*room_id),
+                on_full,
+            )
+            .await;
+        let (sender, permit, stats, backpressured, mut accounting) = match reservation {
+            ConditionalDeliveryReservation::Reserved {
+                sender,
+                permit,
+                stats,
+                backpressured,
+                accounting,
+                ..
+            } => (sender, permit, stats, backpressured, accounting),
+            ConditionalDeliveryReservation::SlowConsumer { sender, .. } => {
+                #[cfg(feature = "trace-validation")]
+                trace_close.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::Unsupported,
+                    trace_id,
+                    Some("conditional-room-slow-consumer"),
+                );
+                self.remove_client_if_same_sender(*player_id, &sender).await;
+                return Ok(false);
+            }
+            ConditionalDeliveryReservation::ChannelClosed { .. }
+            | ConditionalDeliveryReservation::Canceled => {
+                #[cfg(feature = "trace-validation")]
+                trace_close.record_trace(
+                    crate::trace_validation::DeliveryTraceAction::Unsupported,
+                    trace_id,
+                    Some("conditional-room-canceled"),
+                );
+                return Ok(false);
+            }
+        };
+
+        let _routing = self.room_routing_gates.read(*room_id).await;
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        let members = room_players.get(room_id);
+        let recipient_matches = members.is_some_and(|players| players.contains(player_id))
+            && clients
+                .get(player_id)
+                .is_some_and(|current| current.sender.same_channel(&sender));
+        if !recipient_matches || !should_send() {
+            accounting.defuse();
+            self.record_canceled_delivery(*player_id);
+            #[cfg(feature = "trace-validation")]
+            trace_close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_id,
+                Some("conditional-room-canceled"),
+            );
+            return Ok(false);
+        }
+
+        accounting.defuse();
+        let result = if let Some(from) = from {
+            // The routing fence pins the sender's route. Keep its close
+            // state pinned only for the synchronous queue commit.
+            members
+                .filter(|players| players.contains(from) && !self.is_spectator_route(from))
+                .and_then(|_| clients.get(from))
+                .and_then(|source| source.close.commit_if_open(|| permit.send(message)))
+        } else {
+            Some(permit.send(message))
+        };
+        let delivered = match result {
+            Some(Ok(outcome)) if outcome.enqueued => {
+                self.metrics.increment_websocket_deliveries_enqueued();
+                if let Some(stats) = &stats {
+                    stats
+                        .sent_to_you
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                true
+            }
+            Some(Ok(_)) | None => {
+                self.record_canceled_delivery(*player_id);
+                false
+            }
+            Some(Err(_)) => {
+                self.metrics.increment_websocket_deliveries_channel_closed();
+                false
+            }
+        };
+        #[cfg(feature = "trace-validation")]
+        trace_close.record_trace(
+            if delivered {
+                if backpressured {
+                    crate::trace_validation::DeliveryTraceAction::ParkedEnqueue
+                } else {
+                    crate::trace_validation::DeliveryTraceAction::SendFast
+                }
+            } else {
+                crate::trace_validation::DeliveryTraceAction::Unsupported
+            },
+            trace_id,
+            (!delivered).then_some("conditional-room-enqueue-failed"),
+        );
+        #[cfg(not(feature = "trace-validation"))]
+        let _ = backpressured;
+        Ok(delivered)
+    }
 }
 
 #[async_trait::async_trait]
@@ -4993,145 +5139,25 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         message: Arc<ServerMessage>,
         should_send: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<bool> {
-        let handle = {
-            let _routing = self.room_routing_gates.read(*room_id).await;
-            let room_players = self.room_players.read().await;
-            let clients = self.local_clients.read().await;
-            room_players
-                .get(room_id)
-                .filter(|players| players.contains(player_id))
-                .and_then(|_| clients.get(player_id).cloned())
-        };
-        let Some(handle) = handle else {
-            return Ok(false);
-        };
-        #[cfg(feature = "trace-validation")]
-        let trace_close = handle.close.clone();
-        #[cfg(feature = "trace-validation")]
-        let trace_id = trace_close.begin_trace_delivery(message.as_ref());
-        #[cfg(feature = "trace-validation")]
-        let record_full = || {
-            trace_close.record_trace(
-                crate::trace_validation::DeliveryTraceAction::SendFull,
-                trace_id,
-                None,
-            );
-        };
-        #[cfg(feature = "trace-validation")]
-        let on_full: Option<&(dyn Fn() + Send + Sync)> = Some(&record_full);
-        #[cfg(not(feature = "trace-validation"))]
-        let on_full = None;
-        let reservation = self
-            .reserve_one_if(
-                *player_id,
-                handle,
-                should_send,
-                NoDeliveryDrain,
-                Some(*room_id),
-                on_full,
-            )
-            .await;
-        let (sender, permit, stats, backpressured, mut accounting) = match reservation {
-            ConditionalDeliveryReservation::Reserved {
-                sender,
-                permit,
-                stats,
-                backpressured,
-                accounting,
-                ..
-            } => (sender, permit, stats, backpressured, accounting),
-            ConditionalDeliveryReservation::SlowConsumer { sender, .. } => {
-                #[cfg(feature = "trace-validation")]
-                trace_close.record_trace(
-                    crate::trace_validation::DeliveryTraceAction::Unsupported,
-                    trace_id,
-                    Some("conditional-room-slow-consumer"),
-                );
-                self.remove_client_if_same_sender(*player_id, &sender).await;
-                return Ok(false);
-            }
-            ConditionalDeliveryReservation::ChannelClosed { .. }
-            | ConditionalDeliveryReservation::Canceled => {
-                #[cfg(feature = "trace-validation")]
-                trace_close.record_trace(
-                    crate::trace_validation::DeliveryTraceAction::Unsupported,
-                    trace_id,
-                    Some("conditional-room-canceled"),
-                );
-                return Ok(false);
-            }
-        };
+        self.send_conditional_room_message(player_id, room_id, None, message, should_send)
+            .await
+    }
 
-        let _routing = self.room_routing_gates.read(*room_id).await;
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
-        let members = room_players.get(room_id);
-        let recipient_matches = members.is_some_and(|players| players.contains(player_id))
-            && clients
-                .get(player_id)
-                .is_some_and(|current| current.sender.same_channel(&sender));
-        if !recipient_matches || !should_send() {
-            accounting.defuse();
-            self.record_canceled_delivery(*player_id);
-            #[cfg(feature = "trace-validation")]
-            trace_close.record_trace(
-                crate::trace_validation::DeliveryTraceAction::Unsupported,
-                trace_id,
-                Some("conditional-room-canceled"),
-            );
-            return Ok(false);
-        }
-
-        accounting.defuse();
-        let result = match message.as_ref() {
-            ServerMessage::PeerTransportStatus { peer_id, .. } => {
-                // The routing fence pins the sender's route. Keep its close
-                // state pinned only for the synchronous queue commit.
-                members
-                    .filter(|players| {
-                        players.contains(peer_id) && !self.is_spectator_route(peer_id)
-                    })
-                    .and_then(|_| clients.get(peer_id))
-                    .and_then(|source| source.close.commit_if_open(|| permit.send(message)))
-            }
-            _ => Some(permit.send(message)),
-        };
-        let delivered = match result {
-            Some(Ok(outcome)) if outcome.enqueued => {
-                self.metrics.increment_websocket_deliveries_enqueued();
-                if let Some(stats) = &stats {
-                    stats
-                        .sent_to_you
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                true
-            }
-            Some(Ok(_)) | None => {
-                self.record_canceled_delivery(*player_id);
-                false
-            }
-            Some(Err(_)) => {
-                self.metrics.increment_websocket_deliveries_channel_closed();
-                false
-            }
-        };
-        #[cfg(feature = "trace-validation")]
-        trace_close.record_trace(
-            if delivered {
-                if backpressured {
-                    crate::trace_validation::DeliveryTraceAction::ParkedEnqueue
-                } else {
-                    crate::trace_validation::DeliveryTraceAction::SendFast
-                }
-            } else {
-                crate::trace_validation::DeliveryTraceAction::Unsupported
-            },
-            trace_id,
-            (!delivered).then_some("conditional-room-enqueue-failed"),
-        );
-        #[cfg(not(feature = "trace-validation"))]
-        let _ = backpressured;
-        Ok(delivered)
+    fn send_to_player_in_room_from_if<'a>(
+        &'a self,
+        player_id: &'a PlayerId,
+        room_id: &'a RoomId,
+        from: &'a PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>> {
+        Box::pin(self.send_conditional_room_message(
+            player_id,
+            room_id,
+            Some(from),
+            message,
+            should_send,
+        ))
     }
 
     async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {

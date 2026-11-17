@@ -476,7 +476,7 @@ async fn room_transport_report_commit_checks_close_after_the_delivery_predicate(
         true
     };
     let delivered = coordinator
-        .send_to_player_in_room_if(&recipient, &room_id, message, &eligible)
+        .send_to_player_in_room_from_if(&recipient, &room_id, &reporter, message, &eligible)
         .await
         .expect("conditional transport report");
 

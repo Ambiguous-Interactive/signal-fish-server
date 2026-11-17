@@ -18982,7 +18982,9 @@ Linux ARM64 (Nextest `fabf38da`).
 The server checks the sender's physical close state and room generation when
 it prepares fan-out and when each recipient attempts delivery. At queue
 commit, the coordinator pins the sender's seated route and holds its close
-state through the synchronous enqueue.
+state through the synchronous enqueue. Only delivery with a known sender uses
+this fence. Generic conditional sends can still deliver frames about peers
+without local routes.
 Two paused-clock histories trigger the production slow-consumer deadline.
 One resumes the report after eviction. The other parks it on a full observer
 queue before eviction and releases capacity afterward. Removing only the
@@ -18991,10 +18993,12 @@ close-state check reproduces the stale frame in the parked case
 and that eviction removes the reporter's route before its assignment clears.
 A separate coordinator test requests close after the last eligibility check.
 The first patch still queues the report (Nextest `21ff03d1`).
-The final build passes all three cases and eight related controls (Nextest
-`72a53eb1`). The matched live-report allocation probe records identical
-counts and bytes for all 80 samples across 2 to 255 players (Nextest
-`ad1c496e` and `c961a7c5`). It does not measure CPU cost.
+The matched ARM64 live-report allocation probe finds the same allocation
+counts across 80 samples at room sizes from 2 to 255. The sender-aware future
+adds 48 bytes per recipient, or 12,192 bytes in the 255-player case
+(443,526 to 455,718 bytes per warm report). Generic delivery retains its
+one-allocation contract (Nextest `ad1c496e` and `85f68c49`). The probe does
+not measure CPU cost.
 
 The same server process owns the close state, room generation, and outbound
 queue. A close request that wins the queue commit race cancels the report.
