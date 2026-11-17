@@ -3499,10 +3499,10 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::bail!("injected update_player_name failure for test");
         }
         let mut rooms = self.rooms.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if let Some(player) = room.players.get_mut(player_id) {
                 if player.name != name {
+                    let mut liveness = self.room_liveness_monotonic.write().await;
                     name.clone_into(&mut player.name);
                     room.update_activity();
                     liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
@@ -3532,10 +3532,10 @@ impl GameDatabase for InMemoryDatabase {
             self.release_update_player_connection_info.notified().await;
         }
         let mut rooms = self.rooms.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if let Some(player) = room.players.get_mut(player_id) {
                 if player.connection_info.as_ref() != Some(&connection_info) {
+                    let mut liveness = self.room_liveness_monotonic.write().await;
                     player.connection_info = Some(connection_info);
                     room.update_activity();
                     liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
@@ -3556,14 +3556,15 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
     ) -> Result<bool> {
         let mut rooms = self.rooms.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
         let Some(room) = rooms.get_mut(room_id) else {
             return Ok(false);
         };
         let Some(player) = room.players.get_mut(player_id) else {
             return Ok(false);
         };
-        if player.connection_info.take().is_some() {
+        if player.connection_info.is_some() {
+            let mut liveness = self.room_liveness_monotonic.write().await;
+            player.connection_info = None;
             room.update_activity();
             liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }

@@ -7672,3 +7672,110 @@ bash scripts/dev-loop.sh --all-features application_room_counts \
   legacy_room_claims_share_the_atomic_application_room_cap \
   unpublished_room_creation_rolls_back_room_and_frees_application_capacity
 ```
+
+## Player metadata liveness admission — session 735
+
+Existing [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+owns this finite obligation at baseline `5085fdc0`: unchanged and missing-row
+player metadata writes must skip the liveness write lock. Name updates,
+connection-info updates and connection-info clears still take the room-table
+write lock. Changed values take liveness before changing metadata or either
+expiry clock. No await follows mutation. A canceled clear retains its metadata.
+There is no new index, dependency, public API or wire change.
+
+The deterministic control holds the liveness write lock and polls nine public
+calls: three operations, each with an unchanged value, missing member and
+missing room. Original source waits in all nine cells (Nextest `2ca1359a`).
+Repaired calls return the exact existing success/refusal result and release the
+room guard. Exact member snapshots, activity and the aged monotonic stamp stay
+unchanged. This removes one of two lock acquisitions from each such call.
+No production path was shown to hold liveness independently of rooms; the forced
+lock control proves dependency removal, not observed production contention.
+
+Eight all-feature controls pass in Nextest `513f3248`, including existing
+metadata expiry, refusal, pre-commit cancellation, stale-socket protection,
+reconnect endpoint clearing and live Direct endpoint atomicity and route fences.
+The scoped build takes 16.41 seconds; execution takes 33 milliseconds. This is
+not a warm edit-test p95 qualification. An initial test failed compilation because
+Room does not implement Serialize. It did not execute and is not red evidence.
+
+`benches/player_metadata.rs` measures complete public calls through a
+current-thread runtime on this shared ARM64 Linux host, Rust 1.94.0, 12 logical
+CPUs, optimized bench profile. Each fixture has one room and one player.
+Name and endpoint change cells alternate two values. Changed clears restore an
+endpoint outside timing with per-iteration setup. Connection cells include
+construction of the owned Direct endpoint. Setup and snapshot assertions stay
+outside timing. Unchanged and missing-row cells retain exact metadata and
+activity; changed cells retain the expected metadata presence.
+
+The first unpinned pass uses a 0.5-second warm-up, one-second measurement and
+20 samples. All point estimates below are nanoseconds. These mixed results
+prompted the repeated experiment; they are not discarded.
+
+| Operation/case | Original | Repaired |
+| --- | ---: | ---: |
+| Clear/changed | 2462.10 | 2679.40 |
+| Clear/missing_member | 798.12 | 854.15 |
+| Clear/missing_room | 774.23 | 799.82 |
+| Clear/unchanged | 797.91 | 838.84 |
+| Connection/changed | 1932.50 | 2017.20 |
+| Connection/missing_member | 800.89 | 728.47 |
+| Connection/missing_room | 771.68 | 741.91 |
+| Connection/unchanged | 819.13 | 740.63 |
+| Name/changed | 1917.20 | 1786.80 |
+| Name/missing_member | 796.07 | 775.59 |
+| Name/missing_room | 767.91 | 721.17 |
+| Name/unchanged | 808.85 | 778.01 |
+
+The follow-up saves both executables and their SHA-256 identities, then runs
+original, repaired, original, repaired on CPU 0 without intervening builds.
+Each cell uses a one-second warm-up, two-second measurement and 30 samples.
+The table retains every point estimate from both pairs, in nanoseconds.
+
+| Operation/case | Original 1 | Repaired 1 | Original 2 | Repaired 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Clear/changed | 2929.06 | 3522.69 | 2330.73 | 2311.91 |
+| Clear/missing_member | 864.84 | 1218.31 | 857.43 | 791.71 |
+| Clear/missing_room | 1111.85 | 1084.91 | 929.03 | 732.24 |
+| Clear/unchanged | 860.84 | 797.31 | 1131.86 | 825.46 |
+| Connection/changed | 2102.27 | 1885.26 | 1884.94 | 2206.96 |
+| Connection/missing_member | 849.69 | 722.37 | 913.04 | 734.64 |
+| Connection/missing_room | 759.63 | 742.71 | 699.54 | 836.84 |
+| Connection/unchanged | 880.30 | 712.67 | 757.05 | 719.22 |
+| Name/changed | 1909.92 | 2215.90 | 1781.57 | 1816.95 |
+| Name/missing_member | 822.15 | 1034.70 | 926.84 | 968.83 |
+| Name/missing_room | 759.29 | 808.65 | 731.45 | 684.43 |
+| Name/unchanged | 840.75 | 905.74 | 1053.40 | 826.55 |
+
+Both repeated unchanged connection-info cells improve: 880.30 to 712.67 ns
+and 757.05 to 719.22 ns, about 19% and 5%. Both missing-member connection cells
+also improve. Several other cells vary, and missing-member name writes are
+slower in both repeated pairs. Changed-write results do not show a general gain.
+The original itself varies substantially between repeated cells. CPU affinity
+does not remove that variation or attribute it. These measurements support only
+the stated call observations. They do not prove general latency, throughput,
+allocation, memory, contention or whole-node capacity gains. The deterministic
+acceptance result is the removed liveness dependency in all nine no-op cells.
+
+```bash
+cargo bench --locked --bench player_metadata -- \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30 --save-baseline original
+# Repeat with repaired source and --baseline original; pin both executables
+# to the same available CPU for paired runs.
+bash scripts/dev-loop.sh --all-features \
+  unchanged_player_metadata_does_not_wait_for_room_liveness \
+  player_metadata_changes_renew_room_expiry \
+  unchanged_and_absent_player_metadata_preserves_expiry \
+  cancelled_player_metadata_preserves_room_and_clock \
+  metadata_route_fence_survives_cancellation_and_duplicate_direct_updates \
+  running_direct_host_endpoint_refresh_is_atomic_serialized_and_cancellation_safe \
+  old_connection_info_cannot_overwrite_rejoined_seat \
+  reconnect_preserves_join_time_but_clears_old_peer_endpoint
+```
+
+Independent source review found no blocker. Rust, .NET and Godot need no changes:
+APIs, wire values, ordering, results, defaults and expiry rules stay unchanged.
+Raw attempts, binary identities and the paired driver remain in ignored
+`progress/session-735/`. The disposable executable copies use managed scratch.
+The original issue owns final review and delivery evidence. The broad campaign
+and capacity criteria remain open. No issue closure is claimed.

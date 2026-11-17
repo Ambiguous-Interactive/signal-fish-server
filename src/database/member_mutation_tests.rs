@@ -255,6 +255,50 @@ async fn unchanged_and_absent_player_metadata_preserves_expiry() {
     }
 }
 
+/// #636: unchanged values and missing rows do not need a liveness write.
+#[tokio::test]
+async fn unchanged_player_metadata_does_not_wait_for_room_liveness() {
+    let mut unnecessary_waits = Vec::new();
+    for operation in ["name", "connection", "clear"] {
+        for missing in ["neither", "member", "room"] {
+            let db = InMemoryDatabase::new();
+            let room = create_test_room(&db, "metadata", "NOLOCK").await.unwrap();
+            let member = *room.players.keys().next().unwrap();
+            assert!(apply_metadata_change(&db, &room, operation, member).await);
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            let mut target = room.clone();
+            if missing == "room" {
+                target.id = Uuid::nil();
+            }
+            let player = if missing == "member" {
+                Uuid::nil()
+            } else {
+                member
+            };
+            let liveness = db.room_liveness_monotonic.write().await;
+            let mut change = Box::pin(apply_metadata_change(&db, &target, operation, player));
+            let result = futures_util::poll!(&mut change);
+            if result != std::task::Poll::Ready(missing == "neither") {
+                unnecessary_waits.push(format!("{operation}, missing {missing}: {result:?}"));
+            }
+            drop(change);
+            assert!(db.rooms.try_write().is_ok(), "room guard must be released");
+            let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+            assert_eq!(after.last_activity, before.last_activity);
+            assert_eq!(
+                serde_json::to_value(&after.players).unwrap(),
+                serde_json::to_value(&before.players).unwrap()
+            );
+            assert!(matches!(liveness[&room.id], RoomLiveness::AgedFor(_)));
+        }
+    }
+    assert!(
+        unnecessary_waits.is_empty(),
+        "unnecessary liveness waits: {unnecessary_waits:?}"
+    );
+}
+
 /// #1309: a cancelled metadata write cannot commit before its expiry lock.
 #[tokio::test]
 async fn cancelled_player_metadata_preserves_room_and_clock() {

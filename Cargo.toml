@@ -315,6 +315,10 @@ name = "game_room_count"
 harness = false
 
 [[bench]]
+name = "player_metadata"
+harness = false
+
+[[bench]]
 name = "relay_allocations"
 harness = false
 required-features = ["allocation-tracking"]
