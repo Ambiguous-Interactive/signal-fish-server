@@ -535,7 +535,12 @@ if is_truthy "${SIGNAL_FISH_CHECK_ACTION_REF_TAGS:-0}"; then
             tag_ref="refs/tags/${action_ref}"
 
             if [[ "$action_ref" =~ ^[0-9a-f]{40}$ ]]; then
-                if ! remote_refs=$(git ls-remote "$action_url" 'refs/heads/*' 'refs/tags/*') ||
+                # Released pins remain advertised by their protected version tags.
+                remote_git_command=(git)
+                if command -v timeout >/dev/null 2>&1; then
+                    remote_git_command=(timeout 15 git)
+                fi
+                if ! remote_refs=$("${remote_git_command[@]}" ls-remote "$action_url" 'refs/heads/*' 'refs/tags/*') ||
                     ! awk -v expected="$action_ref" '$1 == expected { found = 1 } END { exit !found }' <<< "$remote_refs"; then
                     error "Shared workflow commit is not advertised upstream: ${action_repo}@${action_ref}"
                     MISSING_TAG_REF_COUNT=$((MISSING_TAG_REF_COUNT + 1))
