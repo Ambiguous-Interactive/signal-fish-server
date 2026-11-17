@@ -18979,22 +18979,26 @@ generation. The observer then receives a fallback report from the evicted
 peer. The deterministic router test reproduced the exact unexpected frame on
 Linux ARM64 (Nextest `fabf38da`).
 
-The server now checks the sender's physical close state with its room
-generation when it prepares fan-out and when each recipient attempts delivery.
+The server checks the sender's physical close state and room generation when
+it prepares fan-out and when each recipient attempts delivery. At queue
+commit, the coordinator pins the sender's seated route and holds its close
+state through the synchronous enqueue.
 Two paused-clock histories trigger the production slow-consumer deadline.
 One resumes the report after eviction. The other parks it on a full observer
 queue before eviction and releases capacity afterward. Removing only the
 close-state check reproduces the stale frame in the parked case
 (Nextest `f50d3fbf`). Both cases confirm that live reports reach the observer
 and that eviction removes the reporter's route before its assignment clears.
-The corrected build passes both cases and seven related controls (Nextest
-`024240d2`). The matched live-report allocation probe records identical
+A separate coordinator test requests close after the last eligibility check.
+The first patch still queues the report (Nextest `21ff03d1`).
+The final build passes all three cases and eight related controls (Nextest
+`72a53eb1`). The matched live-report allocation probe records identical
 counts and bytes for all 80 samples across 2 to 255 players (Nextest
-`ad1c496e` and `dec10e46`). It does not measure CPU cost.
+`ad1c496e` and `c961a7c5`). It does not measure CPU cost.
 
 The same server process owns the close state, room generation, and outbound
-queue. Its liveness check suppresses pending delivery after it sees the close.
-Peers can still observe frames queued before that check, and a network
+queue. A close request that wins the queue commit race cancels the report.
+Peers can still observe frames queued before the close request, and a network
 partition can delay close detection. A reconnected sender has a fresh
 membership generation. A process restart loses the room and its transient
 reports. During a partition, a replacement process must refuse a restore

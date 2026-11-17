@@ -5065,9 +5065,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let _routing = self.room_routing_gates.read(*room_id).await;
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
-        let recipient_matches = room_players
-            .get(room_id)
-            .is_some_and(|players| players.contains(player_id))
+        let members = room_players.get(room_id);
+        let recipient_matches = members.is_some_and(|players| players.contains(player_id))
             && clients
                 .get(player_id)
                 .is_some_and(|current| current.sender.same_channel(&sender));
@@ -5084,8 +5083,21 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         }
 
         accounting.defuse();
-        let delivered = match permit.send(message) {
-            Ok(outcome) if outcome.enqueued => {
+        let result = match message.as_ref() {
+            ServerMessage::PeerTransportStatus { peer_id, .. } => {
+                // The routing fence pins the sender's route. Keep its close
+                // state pinned only for the synchronous queue commit.
+                members
+                    .filter(|players| {
+                        players.contains(peer_id) && !self.is_spectator_route(peer_id)
+                    })
+                    .and_then(|_| clients.get(peer_id))
+                    .and_then(|source| source.close.commit_if_open(|| permit.send(message)))
+            }
+            _ => Some(permit.send(message)),
+        };
+        let delivered = match result {
+            Some(Ok(outcome)) if outcome.enqueued => {
                 self.metrics.increment_websocket_deliveries_enqueued();
                 if let Some(stats) = &stats {
                     stats
@@ -5094,11 +5106,11 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 }
                 true
             }
-            Ok(_) => {
+            Some(Ok(_)) | None => {
                 self.record_canceled_delivery(*player_id);
                 false
             }
-            Err(_) => {
+            Some(Err(_)) => {
                 self.metrics.increment_websocket_deliveries_channel_closed();
                 false
             }

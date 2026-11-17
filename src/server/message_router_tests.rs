@@ -1003,10 +1003,8 @@ async fn assert_evicted_reporter_status_is_canceled(observer_backpressured: bool
 
     if observer_backpressured {
         for _ in 0..observer_rx.max_capacity() {
-            assert!(matches!(
-                observer_rx.try_recv().unwrap().as_ref(),
-                ServerMessage::Pong
-            ));
+            let filler = observer_rx.try_recv().expect("observer queue filler");
+            assert!(matches!(filler.as_ref(), ServerMessage::Pong));
         }
     } else {
         pause.release.notify_one();

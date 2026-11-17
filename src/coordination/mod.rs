@@ -2213,6 +2213,8 @@ pub trait MessageCoordinator: Send + Sync {
     /// Implementations that wait for recipient capacity must evaluate
     /// `should_send` again under their routing gate at queue commit. The
     /// fallback is for simple coordinators with immediate room sends.
+    /// The in-memory implementation also orders peer transport reports
+    /// against the reporting socket's close request.
     async fn send_to_player_in_room_if(
         &self,
         player_id: &PlayerId,
