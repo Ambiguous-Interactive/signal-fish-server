@@ -324,6 +324,10 @@ name = "player_metadata"
 harness = false
 
 [[bench]]
+name = "player_removal"
+harness = false
+
+[[bench]]
 name = "reconnection_expiry"
 harness = false
 

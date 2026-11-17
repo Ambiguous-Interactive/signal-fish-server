@@ -7995,3 +7995,75 @@ taskset -c 0 <saved-executable> --bench \
   'claimed_registration/retained_name_bytes/64$' \
   --warm-up-time 1 --measurement-time 2 --sample-size 30
 ```
+
+## Absent-player departure liveness admission — session 737
+
+Existing [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+owns this finite server-work obligation at base `ce43c7c8`.
+`InMemoryDatabase::remove_player_from_room` no longer acquires the liveness
+write lock for a missing room or absent member. It still holds the room write
+lock while checking membership and applying `Room::remove_player`.
+Absent-member removal still prunes stale readiness, including duplicate entries.
+Real removal takes both locks before changing membership, clocks or accounting.
+It adds one membership lookup. No API, wire value or lifecycle result changes.
+Rust, .NET and Godot clients need no changes for that reason.
+
+The original lock-wait regression fails in Nextest `4c744b4c`: even a missing
+room waits behind held liveness. The actual-removal cancellation control passes
+on that source. Candidate `ac7071c8` passes both new controls. All-feature
+`67c358d2` passes all six new and existing expiry, readiness and storage-fence
+controls. The absent-member control retains legitimate readiness and removes
+two stale entries. It preserves player values, authority, room state, both
+clocks and departure accounting. The real-removal control cancels before the
+second lock, checks unchanged state, then completes a retry with the exact
+removed record, authority clearing, readiness pruning and one counted departure.
+
+The new `player_removal` Criterion target measures full public calls through a
+current-thread Tokio runtime. Fixtures contain one room with one or sixteen
+players. Successful-call setup restores the removed member outside timing.
+The original creator's authority is cleared on the first removal; steady-state
+successful samples measure ordinary departures. No-op timing starts from an
+empty readiness list; the separate regression covers stale-readiness repair.
+
+Two saved-executable pairs run original then candidate on CPU 0, without
+concurrent builds. Each cell uses one-second warm-up, two-second measurement
+and thirty samples. This host is Linux ARM64 with Rust 1.94.0. All point
+estimates below are nanoseconds, including normalized microsecond output.
+Every measured cell is retained; no earlier pilot was discarded.
+
+| Full public call / player count | Original 1 | Candidate 1 | Original 2 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| missing_room/1 | 786.48 | 672.41 | 697.64 | 694.74 |
+| absent_member/1 | 732.66 | 753.99 | 752.30 | 693.61 |
+| removed/1 | 2642.90 | 2380.70 | 2601.40 | 2226.60 |
+| missing_room/16 | 710.71 | 671.28 | 698.78 | 675.96 |
+| absent_member/16 | 741.08 | 705.07 | 764.99 | 694.83 |
+| removed/16 | 2377.10 | 2219.40 | 2223.00 | 2208.40 |
+
+The sixteen-player absent-member cells decrease from 741.08 to 705.07 ns and
+764.99 to 694.83 ns. The one-player absent-member cell is slower in the first
+pair and faster in the second. Missing-room cells decrease in both pairs, but
+some differences are small. Successful-removal controls vary. These samples
+do not establish a general latency, throughput, allocation, process-memory or
+whole-node capacity gain. The deterministic resource gain is one write lock
+instead of two for absent departures, with no wait behind unrelated liveness
+work while retaining the room write lock. No contention timing is claimed.
+
+```bash
+bash scripts/dev-loop.sh --all-features \
+  absent_player_removal_skips_liveness_and_preserves_room_state \
+  player_removal_waits_for_liveness_before_commit_and_survives_cancellation \
+  remove_player_from_room_refreshes_last_activity \
+  test_remove_player_from_room_prunes_ready_players \
+  every_activity_path_refreshes_monotonic_liveness \
+  readiness_storage_lease_blocks_room_invalidation_until_commit
+cargo bench --locked --bench player_removal --no-run
+# Save each revision's executable, then run original/candidate twice in order.
+taskset -c 0 <saved-executable> --bench player_removal \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30
+```
+
+Saved binaries, complete timing logs, source snapshots, CPU details and test
+logs remain in ignored `progress/session-737`. Independent source review finds
+no blocking issue. This accepts a finite locking improvement only. Broader
+optimization and whole-node capacity criteria in #636 remain open.

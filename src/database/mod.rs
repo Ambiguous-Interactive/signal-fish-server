@@ -3345,8 +3345,12 @@ impl GameDatabase for InMemoryDatabase {
         }
 
         let mut rooms = self.rooms.write().await;
-        let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
+            let mut liveness = if room.players.contains_key(player_id) {
+                Some(self.room_liveness_monotonic.write().await)
+            } else {
+                None
+            };
             let removed_player = room.remove_player(player_id);
 
             // A real departure is activity, and it starts the empty-room clock:
@@ -3356,7 +3360,7 @@ impl GameDatabase for InMemoryDatabase {
             // deleting it immediately off a stale `created_at` (BUG-1). Guarded
             // on an ACTUAL removal — a no-op remove (player already gone) is not
             // activity and must not keep an otherwise-stale room alive.
-            if removed_player.is_some() {
+            if let Some(liveness) = &mut liveness {
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
                 self.session_records.record_player_left(room_id);
             }
@@ -6011,6 +6015,139 @@ mod tests {
         assert!(
             is_fresh(after.last_activity),
             "joining must refresh last_activity so an active room is not reaped mid-game"
+        );
+    }
+
+    /// #636: absent departures retain readiness repair without waiting for liveness.
+    #[tokio::test]
+    async fn absent_player_removal_skips_liveness_and_preserves_room_state() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "absent-removal", "ABSENT")
+            .await
+            .unwrap();
+        let creator = *room.players.keys().next().unwrap();
+        assert!(db.transition_room_to_lobby(&room.id).await.unwrap());
+        db.toggle_player_ready(&room.id, &creator)
+            .await
+            .unwrap()
+            .unwrap();
+        let absent = Uuid::nil();
+        db.rooms
+            .write()
+            .await
+            .get_mut(&room.id)
+            .unwrap()
+            .ready_players
+            .extend([absent, absent]);
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        let before_left = db.session_records.snapshot().active[0].players_left;
+        let liveness = db.room_liveness_monotonic.write().await;
+        for target_room in [Uuid::nil(), room.id] {
+            let mut removal = Box::pin(db.remove_player_from_room(&target_room, &absent));
+            assert!(
+                matches!(
+                    futures_util::poll!(removal.as_mut()),
+                    std::task::Poll::Ready(Ok(None))
+                ),
+                "absent departure must not wait for liveness: {target_room}"
+            );
+        }
+        assert!(
+            matches!(liveness[&room.id], RoomLiveness::AgedFor(age) if age == std::time::Duration::from_secs(7200))
+        );
+        let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(after.last_activity, before.last_activity);
+        assert_eq!(after.authority_player, before.authority_player);
+        assert_eq!(after.lobby_state, before.lobby_state);
+        assert_eq!(
+            serde_json::to_value(&after.players).unwrap(),
+            serde_json::to_value(&before.players).unwrap()
+        );
+        assert_eq!(
+            after.ready_players,
+            before
+                .ready_players
+                .iter()
+                .copied()
+                .filter(|id| *id != absent)
+                .collect::<Vec<_>>(),
+            "absent removal must prune stale readiness and retain current readiness"
+        );
+        assert_eq!(
+            db.session_records.snapshot().active[0].players_left,
+            before_left
+        );
+        assert!(
+            db.rooms.try_write().is_ok(),
+            "no room lock may remain after a no-op"
+        );
+    }
+
+    /// #636: a real departure keeps membership, clocks and accounting atomic.
+    #[tokio::test(start_paused = true)]
+    async fn player_removal_waits_for_liveness_before_commit_and_survives_cancellation() {
+        let db = InMemoryDatabase::new();
+        let room = create_test_room(&db, "removal-commit", "COMMIT")
+            .await
+            .unwrap();
+        let creator = *room.players.keys().next().unwrap();
+        let peer = member("remaining peer");
+        assert!(db.add_player_to_room(&room.id, peer.clone()).await.unwrap());
+        assert!(db.transition_room_to_lobby(&room.id).await.unwrap());
+        db.toggle_player_ready(&room.id, &creator)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .update_room_authority(&room.id, Some(creator))
+            .await
+            .unwrap());
+        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        let before_left = db.session_records.snapshot().active[0].players_left;
+        let liveness = db.room_liveness_monotonic.write().await;
+        let mut removal = Box::pin(db.remove_player_from_room(&room.id, &creator));
+        assert!(futures_util::poll!(removal.as_mut()).is_pending());
+        drop(removal);
+        assert!(
+            matches!(liveness[&room.id], RoomLiveness::AgedFor(age) if age == std::time::Duration::from_secs(7200))
+        );
+        let canceled = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(canceled.last_activity, before.last_activity);
+        assert_eq!(canceled.authority_player, before.authority_player);
+        assert_eq!(canceled.ready_players, before.ready_players);
+        assert_eq!(canceled.lobby_state, before.lobby_state);
+        assert_eq!(
+            serde_json::to_value(&canceled.players).unwrap(),
+            serde_json::to_value(&before.players).unwrap()
+        );
+        assert_eq!(
+            db.session_records.snapshot().active[0].players_left,
+            before_left
+        );
+        let mut removal = Box::pin(db.remove_player_from_room(&room.id, &creator));
+        assert!(futures_util::poll!(removal.as_mut()).is_pending());
+        drop(liveness);
+        let removed = removal.await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&removed).unwrap(),
+            serde_json::to_value(&before.players[&creator]).unwrap()
+        );
+        let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert!(!after.players.contains_key(&creator));
+        assert!(after.players.contains_key(&peer.id));
+        assert!(!after.ready_players.contains(&creator));
+        assert_eq!(after.authority_player, None);
+        assert!(after.players.values().all(|player| !player.is_authority));
+        assert!(after.last_activity > before.last_activity);
+        assert!(matches!(
+            db.room_liveness_monotonic.read().await[&room.id],
+            RoomLiveness::Live(_)
+        ));
+        assert_eq!(
+            db.session_records.snapshot().active[0].players_left,
+            before_left + 1
         );
     }
 
