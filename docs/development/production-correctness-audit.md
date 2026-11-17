@@ -19069,6 +19069,11 @@ signal to one peer uses 3,440 bytes, up from 3,424. A report to 254 peers uses
 watcher added 352 bytes per target, so the server allocates the watcher only
 when it has to wait. These probes do not measure CPU cost.
 
+The first PR head raised 255-member publication cost from 549,641 to
+557,833 bytes and failed the hosted allocation gate. Returning the original
+shutdown watch future directly restores 549,641 bytes on ARM64 without
+changing the gate. Nextest `0d70afa8` passes all four allocation probes.
+
 One server process owns the sender's close state and room publication.
 Until that process detects a broken link, a partition can still delay
 signaling up to the normal capacity deadline. Frames queued before close may

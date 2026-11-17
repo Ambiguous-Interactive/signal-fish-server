@@ -2819,7 +2819,7 @@ impl Drop for RoutingGate {
 
 trait DeliveryCancellation: Send {
     fn is_canceled(&self) -> bool;
-    fn canceled(&mut self) -> impl std::future::Future<Output = ()> + Send + '_;
+    fn changed(&mut self) -> impl Future<Output = Result<(), watch::error::RecvError>> + Send + '_;
 }
 
 impl DeliveryCancellation for watch::Receiver<bool> {
@@ -2827,8 +2827,8 @@ impl DeliveryCancellation for watch::Receiver<bool> {
         *self.borrow()
     }
 
-    async fn canceled(&mut self) {
-        let _ = self.changed().await;
+    fn changed(&mut self) -> impl Future<Output = Result<(), watch::error::RecvError>> + Send + '_ {
+        watch::Receiver::changed(self)
     }
 }
 
@@ -2838,13 +2838,14 @@ impl DeliveryCancellation for Option<ConnectionCloseSignal> {
             .is_some_and(|close| close.requested_reason().is_some())
     }
 
-    fn canceled(&mut self) -> impl Future<Output = ()> + Send + '_ {
+    fn changed(&mut self) -> impl Future<Output = Result<(), watch::error::RecvError>> + Send + '_ {
         use futures_util::future::Either;
         match self {
             // Only a full queue needs a watch future. Keep its storage out
             // of each healthy send in a transport report fan-out.
             Some(close) => Either::Left(Box::pin(async move {
                 let _ = close.subscribe().closed().await;
+                Ok(())
             })),
             None => Either::Right(std::future::pending()),
         }
@@ -4304,8 +4305,10 @@ impl InMemoryMessageCoordinator {
                     // Cancellation wins over expiry or capacity. Expiry
                     // then wins an exact-boundary race with returned capacity.
                     biased;
-                    () = cancellation.canceled() => {
-                        tracing::debug!(%player_id, "Conditional delivery reservation canceled");
+                    changed = cancellation.changed() => {
+                        if changed.is_ok() && cancellation.is_canceled() {
+                            tracing::debug!(%player_id, "Conditional delivery reservation canceled");
+                        }
                         self.record_canceled_delivery(player_id);
                         ConditionalDeliveryReservation::Canceled
                     }

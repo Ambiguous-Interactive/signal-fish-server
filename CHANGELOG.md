@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Cancel pending WebRTC signals when the sender's connection starts closing so room updates can continue (#826).
+- Keep room updates moving when the sender of a pending WebRTC signal disconnects (#826).
 - Cancel pending P2P transport reports when the sender's connection starts closing (#826).
 - Fix the protocol schema to accept a null relay client ID, as the server already does (#826).
 - Correct reconnect examples to include the restored player and the v3 reconnect token (#826).
