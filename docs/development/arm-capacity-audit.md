@@ -7462,3 +7462,76 @@ the required allocation feature stopped before test execution; it is not red
 regression evidence. The broad campaign remains open. Rust, .NET and Godot
 clients need no changes: wire values, ordering, deadlines, configuration and
 public production APIs stay unchanged. The issue owns final review and delivery.
+
+## Session 732 — indexed per-game room-cap reads
+
+Existing #636 receives one finite algorithmic obligation at base `b3f3f2c`:
+remove the full room-table scan from each per-game room-limit read. The shipped
+`InMemoryDatabase` now reads the existing game bucket length in `RoomCodeIndex`.
+This changes expected query work from O(total rooms) to O(1), without a new
+counter, cache or write-path allocation. Custom adapters keep their own count
+implementation. Full campaign capacity qualification remains open.
+
+Creation, explicit deletion, pending deletion, cleanup extraction and code
+rotation already update the index under its write lock. The count linearizes
+against that lock and needs no room-table lock. Pending and abandoned rows
+continue to count until deletion. No production path changes a stored game name.
+
+`benches/game_room_count.rs` measures the public async count call, including
+runtime entry and future overhead. Fixtures use 1, 1,000 and 10,000 published
+rooms, split between `target` and `other`; `missing` has no rooms. Fixture
+creation and exact count assertions run outside timing. Both builds use Rust
+1.94.0, the optimized bench profile and the same shared ARM64 Linux host with
+12 logical CPUs. Each cell has a 300 ms warm-up, 20 samples and one second of
+measurement. The baseline uses the original production scan with the new harness.
+
+| Total rooms | Game | Original count time | Indexed count time |
+| ---: | --- | ---: | ---: |
+| 1 | target | 694.44 ns | 711.34 ns |
+| 1 | missing | 702.71 ns | 719.26 ns |
+| 1,000 | target | 3.1365 µs | 738.50 ns |
+| 1,000 | missing | 1.8352 µs | 721.27 ns |
+| 10,000 | target | 67.485 µs | 775.03 ns |
+| 10,000 | missing | 18.255 µs | 784.60 ns |
+
+These are Criterion point estimates. At 10,000 rooms the present-game call is
+about 87 times faster. Its original 95% interval is 66.874–68.156 µs; the indexed
+interval is 754.84–788.79 ns. Criterion reports improvement for all four larger
+cells. The one-room target has no detected change; the one-room missing-game
+change is within the noise threshold. Hash layouts and room identities vary
+between fixtures. These results prove count-call savings, not whole-creation
+latency, relay throughput, node capacity or resident-memory reduction.
+
+```bash
+cargo bench --locked --bench game_room_count -- \
+  --warm-up-time 0.3 --measurement-time 1 --sample-size 20 --save-baseline scan
+# After replacing the original scan with the indexed read:
+cargo bench --locked --bench game_room_count -- \
+  --warm-up-time 0.3 --measurement-time 1 --sample-size 20 --baseline scan
+bash scripts/dev-loop.sh --all-features game_room_count \
+  test_max_rooms_per_game_cap_is_enforced_under_concurrency \
+  max_room_cap_denial_releases_join_coordination_locks \
+  cleanup_extraction_preserves_protected_pending_and_live_room_indexes
+```
+
+The final lock control fails against the original scan (Nextest `cc06175c`)
+and passes after the change (`08c5750d`). It polls while the room table is
+exclusively held, so its result does not depend on a timing threshold.
+The new public lifecycle history compares each count with an independent
+room-table count. It covers Unicode game names, game isolation, pending
+visibility, publication, failed creation and rotation collisions, successful
+rotation, pending and repeated explicit deletion, code reuse, empty and inactive
+cleanup, and pending/protected retention. A separate control cancels creation
+and deletion before index admission and checks unchanged counts.
+
+All six scoped all-feature controls pass in Nextest `1decd824`, including the
+existing concurrent per-game cap and denial lock-release histories. The scoped
+build takes 34.56 seconds; test execution takes 24 ms. This is not a claim that
+the repository's warm edit-test p95 target is met.
+
+Raw attempts remain in `progress/session-732/`. One test invocation stopped
+before execution because the new target was not yet declared in Cargo.toml;
+the declaration was added before the passing controls. That setup failure is
+not red regression evidence. Independent review approves the source and index
+invariants. Rust, .NET and Godot need no changes because APIs, wire values and
+limit decisions stay unchanged. The issue owns final check and delivery evidence.

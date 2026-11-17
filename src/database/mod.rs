@@ -54,6 +54,10 @@ impl RoomCodeIndex {
         self.games.get(game)?.get(code)
     }
 
+    fn room_count(&self, game: &str) -> usize {
+        self.games.get(game).map_or(0, HashMap::len)
+    }
+
     fn insert(&mut self, game: String, code: String, room: RoomId) {
         self.games.entry(game).or_default().insert(code, room);
     }
@@ -3777,12 +3781,7 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn get_game_room_count(&self, game_name: &str) -> Result<usize> {
-        let rooms = self.rooms.read().await;
-        let count = rooms
-            .values()
-            .filter(|room| room.game_name == game_name)
-            .count();
-        Ok(count)
+        Ok(self.room_codes.read().await.room_count(game_name))
     }
 
     async fn get_application_room_count(&self, application_id: &Uuid) -> Result<usize> {
