@@ -2196,14 +2196,10 @@ async fn assert_close_cancels_room_gate_wait(transport_report: bool) {
         .await
         .expect("closed sender must finish before the room publication gate opens");
     assert!(futures_util::poll!(&mut next_lifecycle_user).is_ready());
-    assert!(matches!(
-        alice_rx.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
-    ));
-    assert!(matches!(
-        bob_rx.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
-    ));
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
     drop(publication);
 }
 
