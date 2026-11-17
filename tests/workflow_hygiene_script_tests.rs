@@ -1027,7 +1027,7 @@ fn test_workflow_hygiene_checks_shared_workflow_commit_upstream() {
     let fake_git = fake_bin.join("git");
     write_file(
         &fake_git,
-        "#!/bin/sh\nprintf '%s\\trefs/tags/v1.0.0\\n' \"$ADVERTISED_COMMIT\"\n",
+        "#!/bin/sh\n[ \"$1\" = ls-remote ] || exit 1\nprintf '%s\\trefs/tags/v1.0.0\\n' \"$ADVERTISED_COMMIT\"\n",
     );
     let mut perms = fs::metadata(&fake_git)
         .expect("stat fake git")
