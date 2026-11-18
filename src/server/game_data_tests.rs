@@ -476,7 +476,7 @@ mod handler_honesty {
             // route and capacity. Only the source close prevents admission.
             let prefill = target_receiver.try_recv().unwrap();
             expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
-            let pause = arm_relay_admission_pause(source, RelayAdmissionStage::BeforeRoomBudget);
+            let pause = arm_relay_admission_pause(source, RelayAdmissionStage::StampBoundary);
             let relay = async {
                 if binary {
                     server
@@ -505,7 +505,7 @@ mod handler_honesty {
             assert!(futures_util::poll!(&mut relay).is_pending());
             timeout(Duration::from_millis(10), pause.reached.notified())
                 .await
-                .expect("relay has entered budget admission");
+                .expect("relay is ready to stamp");
             assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
             pause.release.notify_one();
             timeout(Duration::from_millis(10), relay).await.unwrap();
@@ -518,6 +518,103 @@ mod handler_honesty {
             let canceled = target_receiver.try_recv();
             assert!(matches!(canceled, Err(TryReceiveError::Empty)));
         }
+    }
+
+    async fn assert_closing_relay_releases_early_wait(
+        binary: bool,
+        budget: Option<crate::server::game_data::RelayAdmissionStage>,
+    ) {
+        use crate::coordination::outbound_queue::TryReceiveError;
+        use crate::server::game_data::arm_relay_admission_pause;
+
+        let RelayOrderFixture {
+            server,
+            source,
+            room,
+            mut target_receiver,
+            ..
+        } = relay_order_fixture().await;
+        let lifecycle = server.connection_manager.client_lifecycle(&source).unwrap();
+        let close = server.connection_manager.close_signal_for(&source).unwrap();
+        let pause = budget.map(|stage| arm_relay_admission_pause(source, stage));
+        let storage = if budget.is_none() {
+            tokio::time::advance(server.config.heartbeat_throttle).await;
+            let database = server
+                .database
+                .as_any()
+                .downcast_ref::<InMemoryDatabase>()
+                .unwrap();
+            Some(database.hold_room_writes_for_test().await)
+        } else {
+            None
+        };
+        let mut relay = Box::pin(async {
+            if binary {
+                server
+                    .handle_game_data_binary_from_lifecycle(
+                        &source,
+                        GameDataEncoding::MessagePack,
+                        Bytes::from_static(b"early"),
+                        Arc::clone(&lifecycle),
+                    )
+                    .await;
+            } else {
+                server
+                    .handle_client_message_from_lifecycle(
+                        &source,
+                        crate::protocol::ClientMessage::GameData {
+                            data: serde_json::json!("early"),
+                            class: None,
+                            key: None,
+                        },
+                        Arc::clone(&lifecycle),
+                    )
+                    .await;
+            }
+        });
+        assert!(futures_util::poll!(relay.as_mut()).is_pending());
+        if let Some(pause) = pause {
+            timeout(Duration::from_millis(10), pause.reached.notified())
+                .await
+                .expect("relay reaches the selected budget");
+        }
+        let mut teardown = Box::pin(lifecycle.lock());
+        assert!(futures_util::poll!(teardown.as_mut()).is_pending());
+        assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+        timeout(Duration::from_millis(10), relay)
+            .await
+            .expect("close must release relay admission while the wait stays blocked");
+        assert!(futures_util::poll!(teardown.as_mut()).is_ready());
+        let stamp = server
+            .connection_manager
+            .current_relay_stamp_in_room(&source, &room)
+            .unwrap();
+        assert_eq!(stamp.seq, 0);
+        assert_eq!(server.metrics.game_data_messages.load(Ordering::Relaxed), 0);
+        let prefill = target_receiver.try_recv().unwrap();
+        expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
+        let remaining = target_receiver.try_recv();
+        assert!(matches!(remaining, Err(TryReceiveError::Empty)));
+        drop(storage);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_relay_releases_pending_byte_budgets() {
+        use crate::server::game_data::RelayAdmissionStage;
+        for binary in [false, true] {
+            for budget in [
+                RelayAdmissionStage::BeforeSenderBudget,
+                RelayAdmissionStage::BeforeRoomBudget,
+            ] {
+                assert_closing_relay_releases_early_wait(binary, Some(budget)).await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn closing_binary_relay_releases_pending_activity_storage() {
+        assert_closing_relay_releases_early_wait(true, None).await;
     }
 
     #[tokio::test(start_paused = true)]

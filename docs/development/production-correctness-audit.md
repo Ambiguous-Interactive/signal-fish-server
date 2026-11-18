@@ -19429,6 +19429,12 @@ An uncontended control requests close just before the source's stamp.
 Removing only the source close fence wrongly consumes sequence 1
 (Nextest `30a4ccc1`). The restored fence preserves sequence 0 and
 leaves the open recipient's queue empty for JSON and binary.
+The same source close signal also cancels waits for either byte budget
+or for binary activity persistence. Both controls miss the
+10 ms bound before the repair (`b1f1bc23`). After the repair, close
+releases the lifecycle while the test still holds the wait. The relay
+leaves the stamp and recipient queue unchanged (`442c71fa`). Completed
+budget charges and activity updates can stand.
 
 The room's home process owns membership and relay stamps. The server
 delays live work while routing is busy and can finish an admitted relay
