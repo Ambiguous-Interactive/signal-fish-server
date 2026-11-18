@@ -788,7 +788,7 @@ cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 lychee --dump .lychee.toml
 
 # For .markdownlint.json
-markdownlint-cli2 --help  # Validates config on load
+./scripts/check-markdown.sh
 ```
 
 #### 7. Panic Policy Check Failing

@@ -118,25 +118,21 @@ if ($WorkflowTools) {
     }
 
     $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json -AsHashtable
-    $requiredMarkdownlint = $manifest["devDependencies"]?["markdownlint-cli2"]
+    $requiredMarkdownlint = $manifest["devDependencies"]?["markdownlint"]
     if ($requiredMarkdownlint -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
-        $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2"
-        if ($IsWindows) {
-            $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2.cmd"
-        }
-
+        $localMarkdownlint = Join-Path $repoRoot "node_modules/markdownlint/package.json"
         if (Test-Path -LiteralPath $localMarkdownlint) {
-            $version = (& $localMarkdownlint --version 2>$null) -join "`n"
-            if ($version -match '([0-9]+\.[0-9]+\.[0-9]+)' -and $Matches[1] -eq $requiredMarkdownlint) {
-                Ok "Pinned markdownlint-cli2 $requiredMarkdownlint is installed locally."
+            $installed = Get-Content -LiteralPath $localMarkdownlint -Raw | ConvertFrom-Json -AsHashtable
+            if ($installed["version"] -eq $requiredMarkdownlint) {
+                Ok "Pinned markdownlint $requiredMarkdownlint is installed locally."
             } else {
-                Warn "Local markdownlint-cli2 version does not match package.json ($requiredMarkdownlint)."
+                Warn "Local markdownlint version does not match package.json ($requiredMarkdownlint)."
             }
         } else {
-            Warn "Pinned markdownlint-cli2 is not installed locally. Run npm ci before local CI checks."
+            Warn "Pinned markdownlint is not installed locally. Run npm ci before local CI checks."
         }
     } else {
-        Warn "package.json must pin markdownlint-cli2 to an exact version."
+        Warn "package.json must pin markdownlint to an exact version."
     }
 }
 

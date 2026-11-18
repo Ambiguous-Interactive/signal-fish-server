@@ -1,12 +1,12 @@
 # Markdown Linting Workflow
 #
 # Validates all Markdown files for consistency, formatting, and best practices
-# using markdownlint-cli2 with project-specific rules.
+# using markdownlint with project-specific rules.
 #
 # Configuration:
 #   - .markdownlint.json: Rule configuration
 #   - .markdownlintignore: Files/directories to exclude
-#   - package.json and package-lock.json: pinned markdownlint-cli2 version
+#   - package.json and package-lock.json: pinned markdownlint version
 #
 # Runs on:
 #   - Pull requests to main (only for changed Markdown files)
@@ -23,6 +23,8 @@ on:
       - "package.json"
       - "package-lock.json"
       - "scripts/check-markdown.sh"
+      - "scripts/check-markdown-files.mjs"
+      - "scripts/check-markdown-files.test.mjs"
       - "scripts/check-markdown-link-text.sh"
       - ".github/workflows/markdownlint.yml"
 
@@ -46,7 +48,9 @@ jobs:
         uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
-      - name: Install pinned markdownlint-cli2
+      - name: Install pinned markdownlint
         run: npm ci --no-audit --no-fund
+      - name: Test the Markdown runner
+        run: node --test scripts/check-markdown-files.test.mjs
       - name: Run markdown checks
         run: bash scripts/check-markdown.sh

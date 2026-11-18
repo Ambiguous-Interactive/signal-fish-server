@@ -88,7 +88,7 @@ This is a paragraph...
 ### Table Formatting (Project Style)
 
 Keep table formatting readable and consistent even when not enforced by a specific
-markdownlint rule. Use `markdownlint-cli2 --fix` for basic normalization, then
+markdownlint rule. Use `markdownlint --fix` for basic normalization, then
 manually align difficult tables if needed.
 
 ### Lint Test Fixtures
@@ -107,7 +107,7 @@ project-wide.
 # Install the pinned markdownlint version
 npm ci
 # Or install the same version globally from the repository root.
-npm install -g "markdownlint-cli2@$(node -p 'require("./package.json").devDependencies["markdownlint-cli2"]')"
+npm install -g "markdownlint@$(node -p 'require("./package.json").devDependencies["markdownlint"]')"
 
 # Run markdown linting (uses pinned version enforcement)
 ./scripts/check-markdown.sh
@@ -172,7 +172,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: DavidAnson/markdownlint-cli2-action@v22.0.0
+      - uses: DavidAnson/markdownlint-action@v22.0.0
         with:
           globs: |
             **/*.md

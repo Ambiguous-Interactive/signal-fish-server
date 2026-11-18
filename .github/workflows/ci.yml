@@ -669,7 +669,7 @@ jobs:
                 RELEVANT="true"
                 break
                 ;;
-              **/package.json|**/package-lock.json)
+              package.json|package-lock.json|**/package.json|**/package-lock.json)
                 RELEVANT="true"
                 break
                 ;;
