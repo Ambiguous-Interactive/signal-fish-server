@@ -940,7 +940,18 @@ impl EnhancedGameServer {
             "Rejected WebRTC signal"
         );
 
-        match self.rate_limiter.check_signal_error(from).await {
+        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
+            return;
+        };
+        // This check may wait for the shared limiter. Once it has charged
+        // the budget, keep the existing owned reply completion.
+        let Some(reply_budget) = source_close
+            .while_open(self.rate_limiter.check_signal_error(from))
+            .await
+        else {
+            return;
+        };
+        match reply_budget {
             Ok(()) => {
                 self.send_signal_error(from, message, error_code, lifecycle_guard)
                     .await

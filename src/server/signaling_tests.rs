@@ -2409,6 +2409,55 @@ async fn reserved_offer_waiting_for_delivery_routing_stops_on_sender_close() {
     assert_close_cancels_delivery_routing(false).await;
 }
 
+/// #826: a pending refusal must release the source lifecycle on close.
+#[tokio::test(start_paused = true)]
+async fn signal_refusal_waiting_for_reply_budget_stops_on_sender_close() {
+    let server = create_test_server_with_signal_limits(600, 1).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let refusal = |player| ClientMessage::Signal {
+        to: player,
+        generation: uuid::Uuid::new_v4(),
+        signal: json!({"Offer": "self signal"}),
+    };
+
+    let entries = server.rate_limiter.hold_player_entries_for_test().await;
+    let dispatch = server.handle_client_message(&alice, refusal(alice));
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    // The same pending refusal waits for the budget while its source is live.
+    let live_dispatch = server.handle_client_message(&bob, refusal(bob));
+    tokio::pin!(live_dispatch);
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), &mut dispatch)
+        .await
+        .expect("closed sender must finish before the refusal budget unlocks");
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+    drop(entries);
+
+    live_dispatch.await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    server.handle_client_message(&bob, refusal(bob)).await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::SignalRateLimited)
+    );
+    assert!(server.rate_limiter.check_signal_error(&alice).await.is_ok());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_signal_caller_preserves_admitted_offer() {
