@@ -3773,6 +3773,42 @@ impl InMemoryMessageCoordinator {
         .await;
     }
 
+    /// Finish a committed slow-consumer eviction without holding a closing
+    /// source's lifecycle or publication guard across the routing write.
+    async fn prune_conditional_delivery_recipient(
+        &self,
+        player_id: PlayerId,
+        sender: DeliverySender,
+        source_close: Option<&ConnectionCloseSignal>,
+    ) {
+        let prune = self.remove_client_if_same_sender(player_id, &sender);
+        let Some(close) = source_close else {
+            prune.await;
+            return;
+        };
+        if close.while_open(prune).await.is_some() {
+            return;
+        }
+
+        // Canceling the routing wait releases its guards. The recipient was
+        // already closed, so retry the queue-identity check in owned work.
+        let clients = Arc::clone(&self.local_clients);
+        let player_rooms = Arc::clone(&self.player_rooms);
+        let player_gates = self.player_routing_gates.clone();
+        let room_gates = self.room_routing_gates.clone();
+        tokio::spawn(async move {
+            Self::remove_owned_client_if_same_sender(
+                &clients,
+                &player_rooms,
+                &player_gates,
+                &room_gates,
+                player_id,
+                &sender,
+            )
+            .await;
+        });
+    }
+
     /// Prune one failed physical queue while preserving replacement routes.
     async fn remove_owned_client_if_same_sender(
         local_clients: &RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
@@ -5018,7 +5054,12 @@ impl InMemoryMessageCoordinator {
                     trace_id,
                     Some("conditional-room-slow-consumer"),
                 );
-                self.remove_client_if_same_sender(*player_id, &sender).await;
+                self.prune_conditional_delivery_recipient(
+                    *player_id,
+                    sender,
+                    source_close.as_ref(),
+                )
+                .await;
                 return Ok(false);
             }
             ConditionalDeliveryReservation::ChannelClosed { .. }

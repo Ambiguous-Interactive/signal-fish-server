@@ -19271,3 +19271,37 @@ A partition can delay observation. Reconnect still requires the room and
 pending record on their home server. Another or restarted server declines
 recovery when it lacks that state. The regression measures the ordering of
 these steps with a paused clock. The broader audit remains open.
+
+### F391 — A closing WebRTC sender waited for recipient cleanup
+
+At `06fd64db` under #826, a full recipient queue could pass the slow-consumer
+deadline and close the recipient. The same delivery then waited to prune
+the route. Closing the sender could leave the offer holding the source
+lifecycle and publication guards. A transport report waited in the same
+cleanup path with its report-order guard.
+
+Two Linux ARM64 tests submit an offer and a report through the message
+router, fill the recipient queue, and hold the real room routing writer.
+Both see the recipient close with the route still present. On the base,
+sender close misses the 10 ms paused-clock bound (Nextest `16f53a58`).
+The fix releases the sender before the writer unlocks. Once it unlocks,
+the pending cleanup prunes the timed-out route. Neither message enters
+the full queue.
+
+A live sender still waits for cleanup after a recipient timeout. If the
+sender closes during that wait, the server retries the prune independently.
+It matches the physical queue before removal, so a replacement route
+survives. The close and drop accounting commit once, at the timeout.
+
+Matched ARM64 probes use eight allocations and 3,312 bytes per live offer.
+Live reports to one recipient use six allocations and 3,056 bytes. Reports
+to 254 recipients use 294 allocations and 427,526 bytes. All measured live
+cells match the base (`11324313`, `50469c68`). A canceled prune can add a task
+on the timeout path. The probes do not measure its cost, CPU, or throughput.
+
+One authoritative server owns the room, route, and pending reconnect record.
+A partition can delay close detection, and a frame queued before close can
+still arrive. If a client reconnects on the home server, it uses the restored
+route and current session plan. The server declines restoration after a
+restart or on another instance without that record. A11 and A12 advance.
+The broader audit remains open.
