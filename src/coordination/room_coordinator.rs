@@ -15,8 +15,8 @@ use crate::database::{AuthorityDenial, AuthorityOutcome};
 use crate::protocol::{PeerConnectionInfo, PlayerId, PlayerInfo, RoomId};
 
 use super::{
-    MessageCoordinator, RoomEventCompletion, RoomEventMutationGuard, RoomMessageTransactionOutcome,
-    RoomRecipientMessages,
+    ConnectionCloseSignal, MessageCoordinator, RoomEventCompletion, RoomEventMutationGuard,
+    RoomMemberRouteLease, RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 
 /// Snapshot of a room at finalization, used to build the capability-aware
@@ -658,98 +658,9 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         player_id: &PlayerId,
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
-        let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-        let route_lease = self
-            .coordinator
-            .lease_room_member_route(room_id, player_id)
-            .await?;
-
-        // From the first durable mutation onward this owned task retains the
-        // room mutation guard. Dropping the caller only detaches its join
-        // handle; the database result still reaches the synchronous FIFO enqueue.
-        let coordinator = self.clone();
-        let room_id = *room_id;
-        let player_id = *player_id;
-        let transaction = tokio::spawn(async move {
-            tracing::info!(%room_id, %player_id, %become_authority, "InMemory: Processing authority request");
-
-            let authority_result = if route_lease.is_routed.unwrap_or(true) {
-                coordinator
-                    .database
-                    .request_room_authority(&room_id, &player_id, become_authority)
-                    .await
-            } else {
-                Ok(AuthorityOutcome::Denied(AuthorityDenial::NotAMember))
-            };
-            drop(route_lease);
-            let (result, response, authority_change) = match authority_result {
-                Ok(outcome) => {
-                    // The single site that turns a storage decision into the
-                    // client's `AuthorityResponse`. Both fields come from the
-                    // same typed denial, so the code can never contradict the
-                    // reason, and a losing claimant is told it lost a contest
-                    // (`AUTHORITY_CONFLICT`) rather than that it lacks
-                    // permission.
-                    let denial = outcome.denial();
-                    let response = crate::protocol::ServerMessage::AuthorityResponse {
-                        granted: outcome.granted(),
-                        reason: denial.map(|denial| denial.reason().to_string()),
-                        error_code: denial.map(AuthorityDenial::error_code),
-                    };
-                    let authority_change = outcome.granted().then_some(if become_authority {
-                        Some(player_id)
-                    } else {
-                        None
-                    });
-                    if outcome.granted() {
-                        tracing::info!(%room_id, %player_id, %become_authority, "Authority request granted (in-memory)");
-                    } else {
-                        tracing::info!(%room_id, %player_id, %become_authority, ?denial, "Authority request denied (in-memory)");
-                    }
-
-                    (outcome, response, authority_change)
-                }
-                Err(e) => {
-                    tracing::error!(%room_id, %player_id, %become_authority, "Authority request failed: {}", e);
-                    let denial = AuthorityDenial::StorageError;
-                    (
-                        AuthorityOutcome::Denied(denial),
-                        crate::protocol::ServerMessage::AuthorityResponse {
-                            granted: false,
-                            reason: Some(denial.reason().to_string()),
-                            error_code: Some(denial.error_code()),
-                        },
-                        None,
-                    )
-                }
-            };
-            let delivery = if let Some(authority_player) = authority_change {
-                coordinator
-                    .enqueue_authority_result(
-                        &room_id,
-                        player_id,
-                        response,
-                        authority_player,
-                        mutation_guard,
-                    )
-                    .await
-                    .map(|_| ())
-            } else {
-                drop(mutation_guard);
-                coordinator
-                    .coordinator
-                    .send_to_player(&player_id, Arc::new(response))
-                    .await
-            };
-            if let Err(error) = delivery {
-                tracing::error!(%room_id, %player_id, %error, "Failed to emit authority result");
-            }
-            result
-        });
-
-        transaction
+        let admission = self.prepare_authority_request(room_id, player_id).await?;
+        self.complete_authority_request(room_id, player_id, become_authority, admission)
             .await
-            .map_err(|error| anyhow::anyhow!("Owned authority request task failed: {error}"))
     }
 
     async fn handle_player_ready(
@@ -882,6 +793,138 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
 }
 
 impl InMemoryRoomOperationCoordinator {
+    async fn prepare_authority_request(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<(RoomEventMutationGuard, RoomMemberRouteLease)> {
+        let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
+        let route_lease = self
+            .coordinator
+            .lease_room_member_route(room_id, player_id)
+            .await?;
+        Ok((mutation_guard, route_lease))
+    }
+
+    /// Stop waiting on a closing socket until the request enters the owned transaction.
+    pub(crate) async fn handle_socket_authority_request(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        become_authority: bool,
+        close: &ConnectionCloseSignal,
+    ) -> Result<Option<AuthorityOutcome>> {
+        let Some(admission) = close
+            .while_open(self.prepare_authority_request(room_id, player_id))
+            .await
+        else {
+            return Ok(None);
+        };
+        // The optimistic poll can finish as close is requested. Order admission
+        // against close after both guards are available and before storage can change.
+        let Some(admission) = close.commit_if_open(|| admission) else {
+            return Ok(None);
+        };
+        self.complete_authority_request(room_id, player_id, become_authority, admission?)
+            .await
+            .map(Some)
+    }
+
+    async fn complete_authority_request(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        become_authority: bool,
+        (mutation_guard, route_lease): (RoomEventMutationGuard, RoomMemberRouteLease),
+    ) -> Result<AuthorityOutcome> {
+        // From the first durable mutation onward this owned task retains the
+        // room mutation guard. Dropping the caller only detaches its join
+        // handle; the database result still reaches the synchronous FIFO enqueue.
+        let coordinator = self.clone();
+        let room_id = *room_id;
+        let player_id = *player_id;
+        let transaction = tokio::spawn(async move {
+            tracing::info!(%room_id, %player_id, %become_authority, "InMemory: Processing authority request");
+
+            let authority_result = if route_lease.is_routed.unwrap_or(true) {
+                coordinator
+                    .database
+                    .request_room_authority(&room_id, &player_id, become_authority)
+                    .await
+            } else {
+                Ok(AuthorityOutcome::Denied(AuthorityDenial::NotAMember))
+            };
+            drop(route_lease);
+            let (result, response, authority_change) = match authority_result {
+                Ok(outcome) => {
+                    // The single site that turns a storage decision into the
+                    // client's `AuthorityResponse`. Both fields come from the
+                    // same typed denial, so the code can never contradict the
+                    // reason, and a losing claimant is told it lost a contest
+                    // (`AUTHORITY_CONFLICT`) rather than that it lacks
+                    // permission.
+                    let denial = outcome.denial();
+                    let response = crate::protocol::ServerMessage::AuthorityResponse {
+                        granted: outcome.granted(),
+                        reason: denial.map(|denial| denial.reason().to_string()),
+                        error_code: denial.map(AuthorityDenial::error_code),
+                    };
+                    let authority_change = outcome.granted().then_some(if become_authority {
+                        Some(player_id)
+                    } else {
+                        None
+                    });
+                    if outcome.granted() {
+                        tracing::info!(%room_id, %player_id, %become_authority, "Authority request granted (in-memory)");
+                    } else {
+                        tracing::info!(%room_id, %player_id, %become_authority, ?denial, "Authority request denied (in-memory)");
+                    }
+
+                    (outcome, response, authority_change)
+                }
+                Err(e) => {
+                    tracing::error!(%room_id, %player_id, %become_authority, "Authority request failed: {}", e);
+                    let denial = AuthorityDenial::StorageError;
+                    (
+                        AuthorityOutcome::Denied(denial),
+                        crate::protocol::ServerMessage::AuthorityResponse {
+                            granted: false,
+                            reason: Some(denial.reason().to_string()),
+                            error_code: Some(denial.error_code()),
+                        },
+                        None,
+                    )
+                }
+            };
+            let delivery = if let Some(authority_player) = authority_change {
+                coordinator
+                    .enqueue_authority_result(
+                        &room_id,
+                        player_id,
+                        response,
+                        authority_player,
+                        mutation_guard,
+                    )
+                    .await
+                    .map(|_| ())
+            } else {
+                drop(mutation_guard);
+                coordinator
+                    .coordinator
+                    .send_to_player(&player_id, Arc::new(response))
+                    .await
+            };
+            if let Err(error) = delivery {
+                tracing::error!(%room_id, %player_id, %error, "Failed to emit authority result");
+            }
+            result
+        });
+
+        transaction
+            .await
+            .map_err(|error| anyhow::anyhow!("Owned authority request task failed: {error}"))
+    }
+
     /// Evaluate and publish a start while holding the room mutation gate.
     pub(crate) async fn start_game_under_room_gate(
         &self,

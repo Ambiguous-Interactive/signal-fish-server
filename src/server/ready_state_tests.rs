@@ -1768,6 +1768,19 @@ async fn check_lobby_command_admission(message: ClientMessage, action: SocketAct
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn real_socket_teardown_reaches_room_gate_while_ready_waits() {
+    check_socket_teardown_at_room_gate(ClientMessage::PlayerReady).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_reaches_room_gate_while_authority_waits() {
+    check_socket_teardown_at_room_gate(ClientMessage::AuthorityRequest {
+        become_authority: false,
+    })
+    .await;
+}
+
+async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
     use crate::coordination::CloseReason;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -1795,11 +1808,11 @@ async fn real_socket_teardown_reaches_room_gate_while_ready_waits() {
         .expect("WebSocket upgrade deadline")
         .expect("WebSocket upgrade succeeds");
     let join = ClientMessage::JoinRoom {
-        game_name: "closing-ready".into(),
+        game_name: "closing-command".into(),
         room_code: None,
         player_name: "Closing".into(),
         max_players: Some(2),
-        supports_authority: Some(false),
+        supports_authority: Some(matches!(command, ClientMessage::AuthorityRequest { .. })),
         relay_transport: None,
         password: None,
         join_only: None,
@@ -1823,14 +1836,14 @@ async fn real_socket_teardown_reaches_room_gate_while_ready_waits() {
         .lock_room_event_mutation(&joined.room_id)
         .await;
     let attempts = gate.mutation_attempt_count_for_test();
-    let ready = serde_json::to_string(&ClientMessage::PlayerReady).unwrap();
-    socket.send(Message::text(ready)).await.unwrap();
+    let command = serde_json::to_string(&command).unwrap();
+    socket.send(Message::text(command)).await.unwrap();
     timeout(
         bound,
         gate.wait_for_mutation_attempt_after_for_test(attempts),
     )
     .await
-    .expect("the socket ready command must queue for room mutation");
+    .expect("the socket command must queue for room mutation");
     let attempts = gate.mutation_attempt_count_for_test();
     assert!(server
         .connection_manager

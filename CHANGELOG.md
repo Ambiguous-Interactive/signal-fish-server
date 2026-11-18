@@ -86,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancel pending room authority requests when the server requests a WebSocket close (#826).
 - Cancel ready and start commands waiting for room access when the server requests a WebSocket close (#826).
 - Cancel gameplay relays waiting for admission, routing, or send order when the server requests a WebSocket close
   (#826).
