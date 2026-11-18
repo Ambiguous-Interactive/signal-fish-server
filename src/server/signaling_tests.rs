@@ -2283,6 +2283,132 @@ async fn transport_report_waiting_for_routing_admission_stops_on_sender_close() 
     assert_close_cancels_routing_admission(true).await;
 }
 
+/// #826: close must cancel routing waits on both sides of capacity reservation.
+async fn assert_close_cancels_delivery_routing(transport_report: bool) {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let metrics = &coordinator.metrics;
+    let pause =
+        transport_report.then(|| super::message_router::arm_transport_status_delivery_pause(alice));
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        for _ in 0..bob_rx.max_capacity() {
+            assert!(coordinator
+                .send_to_player_in_room(&bob, &room, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap());
+        }
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "waiting to commit"}),
+        }
+    };
+    let canceled_before = metrics
+        .websocket_deliveries_canceled
+        .load(Ordering::Relaxed);
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if let Some(pause) = &pause {
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("the report must finish admission");
+    } else {
+        timeout(Duration::from_secs(1), async {
+            while metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the offer must wait for recipient capacity");
+    }
+
+    let routing_writer = coordinator.room_routing_gates.write(room).await;
+    if let Some(pause) = &pause {
+        super::message_router::disarm_transport_status_delivery_pause(&alice);
+        pause.release.notify_one();
+    } else {
+        let freed_slot = bob_rx.try_recv().unwrap();
+        assert!(matches!(freed_slot.as_ref(), ServerMessage::Pong));
+        timeout(Duration::from_secs(1), async {
+            while bob_rx.capacity() != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the offer must own the available slot before routing resumes");
+    }
+    assert!(
+        timeout(Duration::from_millis(1), &mut dispatch)
+            .await
+            .is_err(),
+        "live delivery waits for the held routing writer"
+    );
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closed sender must finish before delivery routing resumes");
+    let publication = coordinator.lock_room_event_mutation(&room);
+    tokio::pin!(publication);
+    assert!(futures_util::poll!(&mut publication).is_ready());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    if !transport_report {
+        assert_eq!(
+            bob_rx.capacity(),
+            1,
+            "cancel must release the reserved slot"
+        );
+        for _ in 1..bob_rx.max_capacity() {
+            let queued = bob_rx.try_recv().unwrap();
+            assert!(matches!(queued.as_ref(), ServerMessage::Pong));
+        }
+    }
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        canceled_before + u64::from(!transport_report),
+        "record a canceled delivery only when there was an attempt"
+    );
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(routing_writer);
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_waiting_for_delivery_routing_stops_on_sender_close() {
+    assert_close_cancels_delivery_routing(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reserved_offer_waiting_for_delivery_routing_stops_on_sender_close() {
+    assert_close_cancels_delivery_routing(false).await;
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_signal_caller_preserves_admitted_offer() {

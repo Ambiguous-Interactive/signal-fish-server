@@ -69,6 +69,7 @@ pub(super) fn disarm_transport_status_delivery_pause(player_id: &crate::protocol
 /// has released its lifecycle gate.
 struct TransportStatusFanOut {
     sender: PlayerId,
+    source_close: crate::coordination::ConnectionCloseSignal,
     room_id: crate::protocol::RoomId,
     membership_generation: uuid::Uuid,
     recipients: Vec<PlayerId>,
@@ -160,10 +161,11 @@ impl TransportStatusFanOut {
         };
         server
             .message_coordinator
-            .send_to_player_in_room_from_if(
+            .send_to_player_in_room_from_socket_if(
                 recipient,
                 &self.room_id,
                 &self.sender,
+                &self.source_close,
                 Arc::clone(&self.message),
                 &delivery_is_current,
             )
@@ -901,6 +903,7 @@ impl EnhancedGameServer {
         });
         Some(TransportStatusFanOut {
             sender: *player_id,
+            source_close,
             room_id,
             membership_generation,
             recipients,

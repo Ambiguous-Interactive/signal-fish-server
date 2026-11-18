@@ -398,10 +398,11 @@ impl EnhancedGameServer {
             let _lifecycle_guard = lifecycle_guard;
             let source_is_open = || source_close.requested_reason().is_none();
             let result = coordinator
-                .send_to_player_in_room_from_if(
+                .send_to_player_in_room_from_socket_if(
                     &to,
                     &from_room,
                     &from,
+                    &source_close,
                     Arc::new(ServerMessage::Signal {
                         from,
                         generation,

@@ -19148,3 +19148,37 @@ and 294 for 254 recipients. The final close watcher adds 256 bytes per report
 in both cases, from 2,808 to 3,064 and from 429,302 to 429,558. A contended
 admission also allocates the close watcher while parked. These probes do not
 measure CPU or throughput. The broader A11 and A12 audit remains open.
+
+### F387 — A closing sender waited for delivery routing
+
+At base `840d4afb` under #826, the server could finish WebRTC admission and
+then wait again for a routing read. A transport report could wait before
+looking up its recipient. An offer could wait after reserving the recipient's
+last free slot. The offer still held the room publication and source lifecycle
+gates. Source close did not wake either read.
+
+Two Linux ARM64 tests drive the client-message router with the in-memory
+routing writer held. They check that a live delivery waits, request source
+close, and keep the writer held. Both miss the 10 ms paused-clock bound
+on the base (Nextest `dc30f507`). The server now cancels both read waits
+using the source socket's close signal. Cancellation after reservation
+releases the slot and counts one canceled attempt. A replacement socket
+cannot commit an older send. A target timeout that already closes the
+recipient still completes its route cleanup.
+
+One server owns the routing and close state. A partition can defer close
+detection. Live sends wait for the route snapshot, and peers can still
+receive frames already queued at close. Reconnect may resume only on a
+current route after the local server restores membership. Restart loses
+that in-memory authority, so another server with no recovery record refuses
+restore. Rust and .NET keep the same generation and advisory status
+semantics. Godot reads the same signal and status events.
+
+Matched warm ARM64 all-feature probes keep allocation counts. One offer uses
+3,312 bytes, down from 3,440. A report to one recipient uses 3,056 bytes, down
+from 3,184. A report to 254 recipients uses 427,526 bytes, down from 460,038.
+A 255-member publication uses the same 549,641 bytes. The first repair added
+237 watcher allocations for a 254-recipient report when Tokio deferred lock
+polling to yield. The final repair yields before its immediate routing read.
+A contended read can still allocate a watcher. CPU cost and throughput remain
+unmeasured. A11 and A12 advance. The broader audit remains open.
