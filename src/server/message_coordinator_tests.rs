@@ -486,6 +486,87 @@ async fn room_transport_report_commit_checks_close_after_the_delivery_predicate(
     assert!(matches!(outcome, Err(mpsc::error::TryRecvError::Empty)));
 }
 
+/// #826: a replacement route cannot lend its live close signal to an older send.
+#[tokio::test]
+async fn conditional_room_send_rejects_a_replaced_source_socket() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::new_v4();
+    let source = PlayerId::new_v4();
+    let recipient = PlayerId::new_v4();
+    let source_close = ConnectionCloseSignal::detached();
+    let (source_tx, _source_rx) = mpsc::channel(1);
+    let (recipient_tx, mut recipient_rx) = mpsc::channel(1);
+    recipient_tx
+        .try_send(Arc::new(ServerMessage::Pong))
+        .unwrap();
+    for (player, sender, close) in [
+        (source, source_tx, source_close.clone()),
+        (recipient, recipient_tx, ConnectionCloseSignal::detached()),
+    ] {
+        coordinator
+            .register_local_client(player, Some(room), ClientDeliveryHandle::new(sender, close))
+            .await
+            .unwrap();
+    }
+    let message = Arc::new(ServerMessage::Pong);
+    let mut delivery = coordinator.send_to_player_in_room_from_socket_if(
+        &recipient,
+        &room,
+        &source,
+        &source_close,
+        Arc::clone(&message),
+        &|| true,
+    );
+    assert!(futures_util::poll!(&mut delivery).is_pending());
+
+    let replacement_close = ConnectionCloseSignal::detached();
+    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+    coordinator
+        .register_local_client(
+            source,
+            Some(room),
+            ClientDeliveryHandle::new(replacement_tx, replacement_close.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(source_close.requested_reason().is_none());
+    let freed_slot = recipient_rx.try_recv().unwrap();
+    assert!(matches!(freed_slot.as_ref(), ServerMessage::Pong));
+    assert!(
+        !delivery.await.unwrap(),
+        "cancel at the fresh routing snapshot"
+    );
+    assert!(
+        !coordinator
+            .send_to_player_in_room_from_socket_if(
+                &recipient,
+                &room,
+                &source,
+                &source_close,
+                Arc::clone(&message),
+                &|| true,
+            )
+            .await
+            .unwrap(),
+        "reject a stale source at initial routing"
+    );
+    let stale = recipient_rx.try_recv();
+    assert!(matches!(stale, Err(mpsc::error::TryRecvError::Empty)));
+    assert!(coordinator
+        .send_to_player_in_room_from_socket_if(
+            &recipient,
+            &room,
+            &source,
+            &replacement_close,
+            message,
+            &|| true,
+        )
+        .await
+        .unwrap());
+    let delivered = recipient_rx.try_recv().unwrap();
+    assert!(matches!(delivered.as_ref(), ServerMessage::Pong));
+}
+
 #[cfg(feature = "trace-validation")]
 #[tokio::test]
 async fn conditional_room_send_keeps_successful_trace_correlation() {

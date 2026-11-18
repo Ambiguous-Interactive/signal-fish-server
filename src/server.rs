@@ -2706,6 +2706,12 @@ struct RoutingReadGuard {
     _gate: Arc<RoutingGate>,
 }
 
+type RoomDeliveryReadGuards<'a> = (
+    RoutingReadGuard,
+    tokio::sync::RwLockReadGuard<'a, HashMap<RoomId, HashSet<PlayerId>>>,
+    tokio::sync::RwLockReadGuard<'a, HashMap<PlayerId, ClientDeliveryHandle>>,
+);
+
 struct RoutingWriteGuard {
     guard: Option<OwnedRwLockWriteGuard<()>>,
     _gate: Arc<RoutingGate>,
@@ -4873,18 +4879,56 @@ impl InMemoryMessageCoordinator {
         Ok(outcome)
     }
 
+    async fn read_room_delivery_routes(
+        &self,
+        room_id: RoomId,
+        source_close: Option<&ConnectionCloseSignal>,
+    ) -> Option<RoomDeliveryReadGuards<'_>> {
+        let read_routes = async {
+            let routing = self.room_routing_gates.read(room_id).await;
+            let room_players = self.room_players.read().await;
+            let clients = self.local_clients.read().await;
+            (routing, room_players, clients)
+        };
+        let Some(close) = source_close else {
+            return Some(read_routes.await);
+        };
+
+        // Yield for cooperative scheduling before trying the locks. A budget
+        // yield alone does not need to allocate a watcher for each recipient.
+        tokio::task::consume_budget().await;
+        if close.requested_reason().is_some() {
+            return None;
+        }
+        let try_read_routes = || {
+            Some((
+                self.room_routing_gates.try_read(room_id)?,
+                self.room_players.try_read().ok()?,
+                self.local_clients.try_read().ok()?,
+            ))
+        };
+        if let Some(routes) = try_read_routes() {
+            return Some(routes);
+        }
+        close.while_open(read_routes).await
+    }
+
     async fn send_conditional_room_message(
         &self,
         player_id: &PlayerId,
         room_id: &RoomId,
         from: Option<&PlayerId>,
+        expected_close: Option<&ConnectionCloseSignal>,
         message: Arc<ServerMessage>,
         should_send: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<bool> {
         let (handle, source_close) = {
-            let _routing = self.room_routing_gates.read(*room_id).await;
-            let room_players = self.room_players.read().await;
-            let clients = self.local_clients.read().await;
+            let Some((_routing, room_players, clients)) = self
+                .read_room_delivery_routes(*room_id, expected_close)
+                .await
+            else {
+                return Ok(false);
+            };
             let Some(members) = room_players.get(room_id) else {
                 return Ok(false);
             };
@@ -4898,6 +4942,9 @@ impl InMemoryMessageCoordinator {
                 let Some(source) = clients.get(from).filter(|_| members.contains(from)) else {
                     return Ok(false);
                 };
+                if expected_close.is_some_and(|close| !close.same_connection(&source.close)) {
+                    return Ok(false);
+                }
                 Some(source.close.clone())
             } else {
                 None
@@ -4925,7 +4972,7 @@ impl InMemoryMessageCoordinator {
                 *player_id,
                 handle,
                 should_send,
-                source_close,
+                source_close.clone(),
                 Some(*room_id),
                 on_full,
             )
@@ -4961,9 +5008,19 @@ impl InMemoryMessageCoordinator {
             }
         };
 
-        let _routing = self.room_routing_gates.read(*room_id).await;
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
+        let Some((_routing, room_players, clients)) = self
+            .read_room_delivery_routes(*room_id, source_close.as_ref())
+            .await
+        else {
+            // The permit and its armed accounting guard cancel on drop.
+            #[cfg(feature = "trace-validation")]
+            trace_close.record_trace(
+                crate::trace_validation::DeliveryTraceAction::Unsupported,
+                trace_id,
+                Some("conditional-room-canceled"),
+            );
+            return Ok(false);
+        };
         let members = room_players.get(room_id);
         let recipient_matches = members.is_some_and(|players| players.contains(player_id))
             && clients
@@ -4988,6 +5045,11 @@ impl InMemoryMessageCoordinator {
             members
                 .filter(|players| players.contains(from) && !self.is_spectator_route(from))
                 .and_then(|_| clients.get(from))
+                .filter(|source| {
+                    source_close
+                        .as_ref()
+                        .is_some_and(|close| close.same_connection(&source.close))
+                })
                 .and_then(|source| source.close.commit_if_open(|| permit.send(message)))
         } else {
             Some(permit.send(message))
@@ -5152,7 +5214,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         message: Arc<ServerMessage>,
         should_send: &(dyn Fn() -> bool + Send + Sync),
     ) -> anyhow::Result<bool> {
-        self.send_conditional_room_message(player_id, room_id, None, message, should_send)
+        self.send_conditional_room_message(player_id, room_id, None, None, message, should_send)
             .await
     }
 
@@ -5168,6 +5230,26 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             player_id,
             room_id,
             Some(from),
+            None,
+            message,
+            should_send,
+        ))
+    }
+
+    fn send_to_player_in_room_from_socket_if<'a>(
+        &'a self,
+        player_id: &'a PlayerId,
+        room_id: &'a RoomId,
+        from: &'a PlayerId,
+        source_close: &'a ConnectionCloseSignal,
+        message: Arc<ServerMessage>,
+        should_send: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>> {
+        Box::pin(self.send_conditional_room_message(
+            player_id,
+            room_id,
+            Some(from),
+            Some(source_close),
             message,
             should_send,
         ))
