@@ -5271,25 +5271,25 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
     // Supply-chain hardening policy:
     //   - No npx runtime downloads
     //   - No Docker latest fallback for markdownlint
-    //   - Enforce pinned markdownlint version via .markdownlint-version
+    //   - Enforce pinned markdownlint version via package.json
     let root = repo_root();
     let script = root.join("scripts/check-markdown.sh");
     let content = read_file(&script);
     // Presence checks assert against the live view (the script's header comment
-    // names `.markdownlint-version`); the npx/docker MUST-NOT-appear checks below
+    // names `package.json`); the npx/docker MUST-NOT-appear checks below
     // stay on raw `content`.
     let content_live = strip_comment_lines(&content);
 
     assert!(
-        content_live.contains(".markdownlint-version"),
-        "check-markdown.sh must read required version from .markdownlint-version.\n\
+        content_live.contains(r#"require("./package.json").devDependencies["markdownlint"]"#),
+        "check-markdown.sh must read the exact markdownlint pin from package.json.\n\
          Missing pinned version reference in {}",
         script.display()
     );
 
     assert!(
-        content_live.contains("command -v markdownlint-cli2"),
-        "check-markdown.sh must still detect locally available markdownlint-cli2.\n\
+        content_live.contains(r#"use_markdownlint "$REPO_ROOT/node_modules/markdownlint""#),
+        "check-markdown.sh must still detect locally available markdownlint.\n\
          Missing detection logic in {}",
         script.display()
     );
@@ -5310,15 +5310,15 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
     );
 
     assert!(
-        content_live.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
-            && content_live.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
+        content_live.contains(r#"echo "  npm ci""#)
+            && content_live.contains("npm install -g markdownlint@${REQUIRED_MARKDOWNLINT_VERSION}"),
         "check-markdown.sh should document both local and global pinned markdownlint installation paths.\n\
          Update install guidance in {}",
         script.display()
     );
 
     assert!(
-        content_live.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
+        content_live.contains("Detected runner mode: ${MARKDOWNLINT_MODE:-none}"),
         "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
          Update mismatch guidance in {}",
         script.display()
@@ -5479,17 +5479,16 @@ fn test_run_local_ci_fails_closed_when_markdownlint_is_unavailable() {
     let content_live = strip_comment_lines(&content);
 
     assert!(
-        content_live.contains(
-            "FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)",
-        ),
-        "scripts/run-local-ci.sh must mark markdown as FAIL when markdownlint-cli2 is unavailable.\n\
+        content_live
+            .contains("FAIL${NC}: markdown (pinned markdownlint unavailable or version mismatch)",),
+        "scripts/run-local-ci.sh must mark markdown as FAIL when markdownlint is unavailable.\n\
          Missing fail-closed markdown status in {}",
         script_path.display()
     );
 
     assert!(
-        !content.contains("SKIP${NC}: markdown (pinned markdownlint-cli2 unavailable)"),
-        "scripts/run-local-ci.sh should not skip markdown checks when pinned markdownlint-cli2 is unavailable."
+        !content.contains("SKIP${NC}: markdown (pinned markdownlint unavailable)"),
+        "scripts/run-local-ci.sh should not skip markdown checks when pinned markdownlint is unavailable."
     );
 }
 
@@ -5517,10 +5516,22 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
             strip_comment_lines(&raw)
         };
 
-        if !content.contains("npm install --save-dev --save-exact markdownlint-cli2@") {
+        if !content.contains("npm ci") {
             missing_local.push(relative_path.to_string());
         }
-        if !content.contains("npm install -g markdownlint-cli2@") {
+        let has_global_guidance = match relative_path {
+            "scripts/check-markdown.sh" => {
+                content.contains("npm install -g markdownlint@${REQUIRED_MARKDOWNLINT_VERSION}")
+            }
+            "scripts/enable-hooks.sh" => content
+                .contains("or global: see the Markdownlint section of docs/git-hooks-guide.md"),
+            _ => {
+                content.contains(r#"npm install -g "markdownlint@$(node -p "#)
+                    && content
+                        .contains(r#"require("./package.json").devDependencies["markdownlint"]"#)
+            }
+        };
+        if !has_global_guidance {
             missing_global.push(relative_path.to_string());
         }
     }
@@ -5628,42 +5639,32 @@ fn test_git_hook_skill_external_code_sample_links_exist() {
 }
 
 #[test]
-fn test_markdownlint_version_file_exists_and_is_semver() {
+fn test_markdownlint_manifest_pins_the_locked_version() {
     let root = repo_root();
-    let version_file = root.join(".markdownlint-version");
-
-    assert!(
-        version_file.exists(),
-        ".markdownlint-version must exist to pin markdownlint-cli2 version for local automation."
-    );
-
-    let version = read_file(&version_file).trim().to_string();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read_live_file(&root.join("package.json")))
+            .expect("package.json must parse as JSON");
+    let version = manifest["devDependencies"]["markdownlint"]
+        .as_str()
+        .expect("package.json must pin markdownlint");
     let semver_pattern = regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("valid semver regex");
     assert!(
-        semver_pattern.is_match(&version),
-        ".markdownlint-version must contain a plain semantic version (X.Y.Z).\n\
-         Found: '{version}'"
+        semver_pattern.is_match(version),
+        "package.json must pin markdownlint to a plain version (X.Y.Z). Found: '{version}'"
     );
 
-    // scripts/check-markdown.sh requires the installed markdownlint-cli2 to
-    // equal .markdownlint-version exactly, and prefers the npm-installed
-    // runner. The two pins must move in the same commit or the Markdownlint
-    // CI job fails on version mismatch.
     let lock: serde_json::Value =
         serde_json::from_str(&read_live_file(&root.join("package-lock.json")))
             .unwrap_or_else(|error| panic!("package-lock.json must parse as JSON: {error}"));
     let installed = lock
         .get("packages")
-        .and_then(|packages| packages.get("node_modules/markdownlint-cli2"))
+        .and_then(|packages| packages.get("node_modules/markdownlint"))
         .and_then(|entry| entry.get("version"))
         .and_then(|version| version.as_str())
-        .expect("package-lock.json must install markdownlint-cli2");
+        .expect("package-lock.json must install markdownlint");
     assert_eq!(
         version, installed,
-        ".markdownlint-version ({version}) and the npm-installed markdownlint-cli2 \
-         ({installed}) must match exactly.\n\
-         Fix: bump both pins in the same commit (package.json + `npm install` \
-         + .markdownlint-version)."
+        "The package.json markdownlint pin ({version}) must match the lockfile ({installed})."
     );
 }
 
@@ -6851,10 +6852,9 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
         if filter == path {
             return true;
         }
-        // A `**/name` pattern (bash `case` semantics: `*` crosses `/`)
-        // covers the file at any depth, the repo root included.
+        // In Bash case patterns, the slash is literal even when * spans directories.
         if let Some(name) = filter.strip_prefix("**/") {
-            return path == name || path.ends_with(&format!("/{name}"));
+            return path.ends_with(&format!("/{name}"));
         }
         // A directory pattern covers deeper inputs only at a path boundary.
         filter.ends_with("/**") && path.starts_with(&format!("{}/", filter.trim_end_matches("/**")))
@@ -6880,6 +6880,8 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
     for required in [
         "Cargo.toml",
         "Cargo.lock",
+        "package.json",
+        "package-lock.json",
         "deny.toml",
         ".cargo/**",
         ".github/workflows/ci.yml",
@@ -13270,11 +13272,11 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
     let content = read_live_file(&workflow);
     let script_content = read_live_file(&root.join("scripts/check-markdown.sh"));
 
-    // Verify workflow uses markdownlint-cli2-action
+    // Verify workflow uses markdownlint-action
     assert!(
-        content.contains("DavidAnson/markdownlint-cli2-action")
-            || content.contains("markdownlint-cli2"),
-        "markdownlint.yml must use markdownlint-cli2"
+        content.contains("bash scripts/check-markdown.sh")
+            && content.contains("scripts/check-markdown-files.mjs"),
+        "markdownlint.yml must run and watch the repository markdownlint runner"
     );
 
     // Verify workflow excludes common directories
@@ -25649,7 +25651,7 @@ fn test_hook_readiness_default_is_required_hook_health_only() {
         content.contains("[switch]$WorkflowTools")
             && content[..workflow_tools_gate].contains("$requiredTools = @(\"git\", \"pwsh\")")
             && content[workflow_tools_gate..].contains("$optionalTools = @(")
-            && content[workflow_tools_gate..].contains(".markdownlint-version"),
+            && content[workflow_tools_gate..].contains("package.json"),
         "scripts/check-hook-readiness.ps1 default mode must check only required hook \
          health. Optional workflow tools and markdownlint version probes belong behind \
          -WorkflowTools so native hook setup stays fast and dependency-light."
@@ -29878,7 +29880,7 @@ fn npm_version_triple(version: &str) -> (u64, u64, u64) {
 fn test_root_npm_lock_resolves_patched_smol_toml() {
     // GHSA-7w5x-hrqm-74c2: smol-toml <=1.7.0 has a high-severity DoS via
     // malformed TOML documents. The temporary root `override` is gone:
-    // markdownlint-cli2 0.23.3 declares smol-toml 1.8.0 itself (issue #603).
+    // markdownlint 0.23.3 declares smol-toml 1.8.0 itself (issue #603).
     // This pin keeps the installed graph honest and flags the vulnerable
     // range if it ever sneaks back in.
     let root = repo_root();
@@ -29906,8 +29908,7 @@ fn test_root_npm_lock_resolves_patched_smol_toml() {
         "package-lock.json resolves smol-toml versions in the vulnerable \
          GHSA-7w5x-hrqm-74c2 range (<=1.7.0): {vulnerable:?}.\n\
          Fix: raise every smol-toml source to a patched release (>=1.7.1) — \
-         prefer a markdownlint-cli2 bump that declares it — and regenerate \
-         the lockfile."
+         update the declaring dependency and regenerate the lockfile."
     );
 }
 
@@ -29942,7 +29943,7 @@ fn test_markdownlint_workflow_uses_supported_node_runtime() {
 
     assert!(
         setup_node_index.is_some_and(|setup| npm_ci_index.is_some_and(|install| setup < install)),
-        "markdownlint.yml must install Node 22 before `npm ci`; the pinned markdownlint-cli2 \
+        "markdownlint.yml must install Node 22 before `npm ci`; the pinned markdownlint \
          requires that runtime.\nFix: add a pinned actions/setup-node step with node-version: \"22\" \
          before the dependency-install step."
     );

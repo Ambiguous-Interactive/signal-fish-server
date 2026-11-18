@@ -86,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancel gameplay relays waiting for routing or send order when the server requests a WebSocket close (#826).
 - Let closing WebSockets stop waiting to refresh activity from incoming frames (#826).
 - Cancel pending peer connection metadata updates when the sender starts closing (#826).
 - Release closing connections that are waiting to process a P2P transport report (#826).

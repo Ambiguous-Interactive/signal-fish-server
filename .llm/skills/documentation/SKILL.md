@@ -180,7 +180,7 @@ Tables must have consistent column alignment:
 ```
 
 Install the pinned markdownlint version for local checks:
-`npm install -g markdownlint-cli2@$(cat .markdownlint-version)`
+`npm ci`
 
 Git hooks are last-resort staged-file guards and do not run markdownlint.
 Run markdown checks through agent workflow, local CI, or GitHub CI.

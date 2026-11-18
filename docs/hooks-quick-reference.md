@@ -50,11 +50,10 @@ local-CI tools.
 ## Markdownlint
 
 Markdownlint is fail-closed in local CI and CI, not in git hooks. Install the
-pinned version with either:
+pinned version from the repository root:
 
 ```bash
-npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+npm ci
 ```
 
 ## Bypass Hooks

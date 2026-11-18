@@ -195,7 +195,6 @@ INTERNAL_PATHS=(
     ".markdownlintrc"
     ".markdownlint.json"
     ".markdownlintignore"
-    ".markdownlint-version"
     ".lychee.toml"
     ".lycheecache"
     ".typos.toml"

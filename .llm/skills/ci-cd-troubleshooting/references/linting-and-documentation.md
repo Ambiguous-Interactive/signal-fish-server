@@ -209,14 +209,14 @@ ERROR: typos found: HashiCorp (did you mean: Hashicorp?)
 # Find code blocks without language identifiers
 grep -r '^```$' --include="*.md" .
 
-# Auto-fix with markdownlint-cli2:
+# Auto-fix with markdownlint:
 ./scripts/check-markdown.sh fix
 ```
 
 **B. Run markdown linting locally:**
 
 ```bash
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+npm ci
 ./scripts/check-markdown.sh  # Check ALL files, not just docs/
 ```
 

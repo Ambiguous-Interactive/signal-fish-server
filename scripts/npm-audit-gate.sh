@@ -38,7 +38,7 @@ set -euo pipefail
 # graph; when an advisory disappears, remove the entry.
 ROOT_ALLOWED_ADVISORIES=(
     # GHSA-238p-pmpm-9mq7 (katex 0.11.0-0.18.1, prototype pollution can bypass
-    # trust restrictions): the chain markdownlint-cli2 -> markdownlint ->
+    # trust restrictions): the chain markdownlint ->
     # micromark-extension-math 3.1.0 (latest) pins katex ^0.16.0, and every
     # patched katex (0.18.2+) is outside that range, so the fix is unreachable
     # without an upstream release. Dev tooling only: markdownlint lints

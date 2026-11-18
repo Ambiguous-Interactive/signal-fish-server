@@ -2666,6 +2666,22 @@ pub trait MessageCoordinator: Send + Sync {
         })
     }
 
+    /// Let an observed socket close release pre-stamp routing waits.
+    ///
+    /// Coordinators that own an uninterrupted enqueue and finish can keep
+    /// their existing behavior. The in-memory coordinator ends only the
+    /// wait for routing and keeps any delivery that already has a stamp.
+    #[doc(hidden)]
+    fn enqueue_relay_broadcast_after_contention_with_close<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        _source_close: Option<&'a ConnectionCloseSignal>,
+        build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> Pin<Box<dyn Future<Output = RelayEnqueueOutcome<'a>> + Send + 'a>> {
+        self.enqueue_relay_broadcast_after_contention(room_id, except_player, build_message)
+    }
+
     async fn register_local_client(
         &self,
         player_id: PlayerId,
