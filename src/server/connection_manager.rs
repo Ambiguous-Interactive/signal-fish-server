@@ -1236,14 +1236,18 @@ impl ConnectionManager {
         {
             return None;
         }
+        let client = client.value_mut();
         let Some(next_seq) = client.game_data_seq.checked_add(1) else {
             tracing::error!(%player_id, %expected_room, "Relay sequence exhausted; canceling delivery");
             return None;
         };
-        client.game_data_seq = next_seq;
-        Some(RelayStamp {
-            seq: client.game_data_seq,
-            epoch: client.game_data_epoch,
+        // A stamped frame owns delivery even if the source closes later.
+        client.close.commit_if_open(|| {
+            client.game_data_seq = next_seq;
+            RelayStamp {
+                seq: next_seq,
+                epoch: client.game_data_epoch,
+            }
         })
     }
 

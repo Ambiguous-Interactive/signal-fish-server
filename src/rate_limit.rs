@@ -493,7 +493,7 @@ impl RoomRateLimiter {
         entries
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) async fn hold_player_entries_for_test(&self) -> impl Drop + '_ {
         self.entries.write().await
     }

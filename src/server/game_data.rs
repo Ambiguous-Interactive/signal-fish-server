@@ -754,6 +754,12 @@ impl EnhancedGameServer {
         // two families are intentionally not interchangeable.
         self.metrics.increment_game_data_messages();
         let coordinator = self.message_coordinator.as_ref();
+        let source_close = || {
+            source_lifecycle.and_then(|lifecycle| {
+                self.connection_manager
+                    .close_signal_for_lifecycle(player_id, lifecycle)
+            })
+        };
         use crate::coordination::{ImmediateGameDataBroadcast, RelayEnqueueOutcome};
         loop {
             let wait = match coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
@@ -769,10 +775,16 @@ impl EnhancedGameServer {
                 }
                 ImmediateGameDataBroadcast::OrderingBlocked(wait) => wait,
                 ImmediateGameDataBroadcast::Unavailable => {
-                    match coordinator
-                        .enqueue_relay_broadcast_after_contention(room_id, player_id, build_message)
-                        .await
-                    {
+                    let close = source_close();
+                    let outcome = coordinator
+                        .enqueue_relay_broadcast_after_contention_with_close(
+                            room_id,
+                            player_id,
+                            close.as_ref(),
+                            build_message,
+                        )
+                        .await;
+                    match outcome {
                         RelayEnqueueOutcome::Finished(result) => return result,
                         RelayEnqueueOutcome::AwaitFinish(completion) => {
                             drop(source_gate);
@@ -782,11 +794,23 @@ impl EnhancedGameServer {
                     }
                 }
             };
+            let close = source_close();
             drop(source_gate.take());
-            wait.await;
-            source_gate = match source_lifecycle {
-                Some(lifecycle) => Some(lifecycle.lock().await),
-                None => None,
+            let wait_and_reacquire = async {
+                wait.await;
+                match source_lifecycle {
+                    Some(lifecycle) => Some(lifecycle.lock().await),
+                    None => None,
+                }
+            };
+            source_gate = match close {
+                Some(close) => {
+                    let Some(guard) = close.while_open(wait_and_reacquire).await else {
+                        return Ok(());
+                    };
+                    guard
+                }
+                None => wait_and_reacquire.await,
             };
             if !self.relay_source_is_current(player_id, source_lifecycle) {
                 return Ok(());

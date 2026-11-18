@@ -19409,3 +19409,28 @@ routed offer samples and 82 transport report samples (Nextest `f05ce833`,
 `d4c0113f`). The routed offer uses eight allocations and 3,184 bytes in
 rooms of 2, 16 and 64 players. The probes cover exact delivery and warm heap
 use. Contended allocations, CPU and throughput were outside the measurement.
+
+### F395 — An unstamped gameplay relay could hold a closing socket
+
+At `8eb58bda` under #826, the socket dispatch path waited for room routing
+while holding the source lifecycle. It could also wait for a previous relay
+after dropping that guard. Both close cases miss a 10 ms paused-clock bound
+with the respective guard held. The live control waits, then delivers the
+exact next stamp (Linux ARM64, Nextest `e65f7f56`).
+
+The in-memory coordinator cancels the routing wait before stamping. Send
+order waits and lifecycle reacquisition stop on the same physical close
+signal. The connection manager orders stamp allocation against close, so
+closing first consumes no sequence and adds no frame. A stamped frame
+retains its owned delivery. The held-gate tests cover JSON and binary and
+check the unchanged watermark and empty recipient queue after cancellation.
+Six focused tests pass on Linux ARM64 (Nextest `27d440e9`).
+
+The room's home process owns membership and relay stamps. The server
+delays live work while routing is busy and can finish an admitted relay
+after detecting close. A partition can delay that detection. A restored
+socket advances the epoch, and its reconnect snapshot omits old gameplay
+data. A process without the pending record declines restoration. Nine
+real WebSocket and process controls pass on Linux ARM64, including
+mixed-version sequencing, reconnect, restart and directional blackholes
+(Nextest `cf2a9da8`). This advances A04 and A13. The campaign stays open.

@@ -306,6 +306,149 @@ mod handler_honesty {
         }
     }
 
+    // Exercise both socket dispatch paths at the last wait before stamping a relay.
+    async fn assert_socket_relay_wait_observes_close(
+        binary: bool,
+        wait_for_order: bool,
+        close_source: bool,
+    ) {
+        let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+        let server =
+            crate::server::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+                ServerConfig::default(),
+                coordinator.clone(),
+                Arc::new(InMemoryDistributedLock::new()),
+                Arc::new(InMemoryDatabase::new()),
+            )
+            .await;
+        let (source, mut source_rx) = register_client(&server).await;
+        let (recipient, mut recipient_rx) = register_client(&server).await;
+        for (player, name) in [(source, "source"), (recipient, "recipient")] {
+            server
+                .handle_join_room(
+                    &player,
+                    "relay-close".into(),
+                    Some("CLOSE1".into()),
+                    name.into(),
+                    Some(2),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        drain_setup_messages(&mut source_rx);
+        drain_setup_messages(&mut recipient_rx);
+        let room = server.get_client_room(&source).await.unwrap();
+        assert_eq!(server.get_client_room(&recipient).await, Some(room));
+        let close = server.connection_manager.close_signal_for(&source).unwrap();
+        let lifecycle = server.connection_manager.client_lifecycle(&source).unwrap();
+        let dispatch_lifecycle = Arc::clone(&lifecycle);
+        let before = server
+            .connection_manager
+            .current_relay_stamp_in_room(&source, &room)
+            .unwrap();
+        let (route_writer, prior_relay) = if wait_for_order {
+            (
+                None,
+                Some(coordinator.relay_order_gates.try_write(source).unwrap()),
+            )
+        } else {
+            (Some(coordinator.room_routing_gates.write(room).await), None)
+        };
+        let relay = async {
+            if binary {
+                server
+                    .handle_game_data_binary_from_lifecycle(
+                        &source,
+                        GameDataEncoding::MessagePack,
+                        Bytes::from_static(b"exact"),
+                        dispatch_lifecycle,
+                    )
+                    .await;
+            } else {
+                server
+                    .handle_client_message_from_lifecycle(
+                        &source,
+                        crate::protocol::ClientMessage::GameData {
+                            data: serde_json::json!("exact"),
+                            class: None,
+                            key: None,
+                        },
+                        dispatch_lifecycle,
+                    )
+                    .await;
+            }
+        };
+        tokio::pin!(relay);
+        assert!(futures_util::poll!(&mut relay).is_pending());
+        assert_eq!(server.metrics.game_data_messages.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            recipient_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        if close_source {
+            assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+            timeout(Duration::from_millis(10), &mut relay)
+                .await
+                .expect("the closing sender must stop before relay routing or order resumes");
+            let teardown = lifecycle.lock_owned();
+            tokio::pin!(teardown);
+            assert!(futures_util::poll!(&mut teardown).is_ready());
+            let after = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!((after.epoch, after.seq), (before.epoch, before.seq));
+            assert!(matches!(
+                recipient_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+        drop(route_writer);
+        drop(prior_relay);
+
+        if !close_source {
+            timeout(Duration::from_millis(10), relay)
+                .await
+                .expect("a live sender must finish once the gate opens");
+            expect_ordered_payload(
+                crate::coordination::outbound_queue::OutboundPayload::Message(
+                    recipient_rx.try_recv().unwrap(),
+                ),
+                source,
+                before.epoch,
+                before.seq + 1,
+                "exact",
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn socket_relay_waiting_for_room_routing_stops_on_close() {
+        for binary in [false, true] {
+            assert_socket_relay_wait_observes_close(binary, false, true).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn socket_relay_waiting_for_send_order_stops_on_close() {
+        for binary in [false, true] {
+            assert_socket_relay_wait_observes_close(binary, true, true).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_socket_relay_delivers_after_route_or_order_gate_opens() {
+        for binary in [false, true] {
+            for wait_for_order in [false, true] {
+                assert_socket_relay_wait_observes_close(binary, wait_for_order, false).await;
+            }
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn concurrent_reliable_relays_preserve_stamp_order_after_capacity_release() {
         for binary in [false, true] {
