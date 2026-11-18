@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 #[cfg(signal_fish_repository_tests)]
 use tokio::sync::Notify;
 
+use crate::coordination::ConnectionCloseSignal;
 use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessage};
 
 use super::{ClientLifecycle, EnhancedGameServer, TransportStatusUpdate};
@@ -69,7 +70,7 @@ pub(super) fn disarm_transport_status_delivery_pause(player_id: &crate::protocol
 /// has released its lifecycle gate.
 struct TransportStatusFanOut {
     sender: PlayerId,
-    source_close: crate::coordination::ConnectionCloseSignal,
+    source_close: ConnectionCloseSignal,
     room_id: crate::protocol::RoomId,
     membership_generation: uuid::Uuid,
     recipients: Vec<PlayerId>,
@@ -206,6 +207,28 @@ impl EnhancedGameServer {
             .await;
     }
 
+    async fn refresh_routed_activity(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<&Arc<ClientLifecycle>>,
+    ) -> bool {
+        let _source_guard = match source_lifecycle {
+            Some(lifecycle) => Some(lifecycle.lock().await),
+            None => None,
+        };
+        if source_lifecycle.is_some_and(|lifecycle| {
+            lifecycle.player_id() != *player_id
+                || !self
+                    .connection_manager
+                    .lifecycle_matches(player_id, lifecycle)
+        }) {
+            return false;
+        }
+        self.record_client_activity(player_id);
+        self.maybe_update_last_seen(player_id).await;
+        true
+    }
+
     async fn handle_client_message_with_lifecycle(
         self: &Arc<Self>,
         player_id: &PlayerId,
@@ -214,21 +237,24 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        {
-            let _source_guard = match source_lifecycle.as_ref() {
-                Some(lifecycle) => Some(lifecycle.lock().await),
-                None => None,
-            };
-            if source_lifecycle.as_ref().is_some_and(|lifecycle| {
-                lifecycle.player_id() != *player_id
-                    || !self
-                        .connection_manager
-                        .lifecycle_matches(player_id, lifecycle)
-            }) {
+        let report_close = if matches!(message, ClientMessage::TransportStatus { .. }) {
+            let Some(close) = source_lifecycle.as_ref().and_then(|lifecycle| {
+                self.connection_manager
+                    .close_signal_for_lifecycle(player_id, lifecycle)
+            }) else {
                 return;
-            }
-            self.record_client_activity(player_id);
-            self.maybe_update_last_seen(player_id).await;
+            };
+            Some(close)
+        } else {
+            None
+        };
+        let activity = self.refresh_routed_activity(player_id, source_lifecycle.as_ref());
+        let is_current = match &report_close {
+            Some(close) => close.while_open(activity).await.unwrap_or(false),
+            None => activity.await,
+        };
+        if !is_current {
+            return;
         }
         #[cfg(all(test, signal_fish_repository_tests))]
         if let Some((_, pause)) = SOCKET_DISPATCH_PAUSES.remove(player_id) {
@@ -564,8 +590,10 @@ impl EnhancedGameServer {
                 transport,
                 connected,
             } => {
-                self.handle_transport_status(player_id, transport, connected, source_lifecycle)
-                    .await;
+                if let (Some(lifecycle), Some(close)) = (source_lifecycle, report_close) {
+                    self.handle_transport_status(player_id, transport, connected, lifecycle, close)
+                        .await;
+                }
             }
         }
     }
@@ -641,18 +669,14 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
-        source_lifecycle: Option<Arc<ClientLifecycle>>,
+        lifecycle: Arc<ClientLifecycle>,
+        source_close: ConnectionCloseSignal,
     ) {
-        let Some(lifecycle) =
-            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
-        else {
-            return;
-        };
         let server = Arc::clone(self);
         let player_id = *player_id;
         let transaction = tokio::spawn(async move {
             server
-                .transport_status_owned(&player_id, transport, connected, lifecycle)
+                .transport_status_owned(&player_id, transport, connected, lifecycle, source_close)
                 .await;
         });
         if let Err(error) = transaction.await {
@@ -666,19 +690,29 @@ impl EnhancedGameServer {
         transport: crate::protocol::Transport,
         connected: bool,
         lifecycle: Arc<ClientLifecycle>,
+        source_close: ConnectionCloseSignal,
     ) {
-        let _report_guard = lifecycle.lock_transport_reports().await;
-        let lifecycle_guard = lifecycle.lock().await;
+        let Some((_report_guard, lifecycle_guard)) = source_close
+            .while_open(async {
+                let report_guard = lifecycle.lock_transport_reports().await;
+                let lifecycle_guard = lifecycle.lock().await;
+                (report_guard, lifecycle_guard)
+            })
+            .await
+        else {
+            return;
+        };
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
                 .lifecycle_matches(player_id, &lifecycle)
+            || source_close.requested_reason().is_some()
         {
             return;
         }
 
         let Some(fan_out) = self
-            .handle_transport_status_under_lifecycle(player_id, transport, connected)
+            .handle_transport_status_under_lifecycle(player_id, transport, connected, source_close)
             .await
         else {
             return;
@@ -701,6 +735,7 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
+        source_close: ConnectionCloseSignal,
     ) -> Option<TransportStatusFanOut> {
         use crate::protocol::Transport;
 
@@ -779,7 +814,6 @@ impl EnhancedGameServer {
         // (including its first report). No room ⇒ nothing to fan out — the
         // generation-scoped state was still recorded above.
         let room_id = room_id?;
-        let source_close = self.connection_manager.close_signal_for(player_id)?;
         let _room_snapshot_guard = source_close
             .while_open(self.message_coordinator.lock_room_signal(&room_id))
             .await?;
