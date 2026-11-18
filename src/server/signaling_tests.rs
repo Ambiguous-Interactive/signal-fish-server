@@ -2572,10 +2572,8 @@ async fn signal_error_reply_exhaustion_closes_without_waiting_for_advisory_route
     let teardown = lifecycle.lock_owned();
     tokio::pin!(teardown);
     assert!(futures_util::poll!(&mut teardown).is_ready());
-    assert!(matches!(
-        alice_rx.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
-    ));
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
     drop(routes);
 }
 
