@@ -2458,6 +2458,59 @@ async fn signal_refusal_waiting_for_reply_budget_stops_on_sender_close() {
     assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
 }
 
+#[tokio::test(start_paused = true)]
+async fn signal_refusal_waiting_for_reply_routing_stops_on_sender_close() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let refusal = |player| ClientMessage::Signal {
+        to: player,
+        generation: uuid::Uuid::new_v4(),
+        signal: json!({"Offer": "self signal"}),
+    };
+
+    // Neither the refusal limiter nor the outbound queues are contended.
+    let routes = coordinator.local_clients.write().await;
+    let closing_dispatch = server.handle_client_message(&alice, refusal(alice));
+    let live_dispatch = server.handle_client_message(&bob, refusal(bob));
+    tokio::pin!(closing_dispatch, live_dispatch);
+    assert!(timeout(Duration::from_millis(1), &mut closing_dispatch)
+        .await
+        .is_err());
+    assert!(timeout(Duration::from_millis(1), &mut live_dispatch)
+        .await
+        .is_err());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), &mut closing_dispatch)
+        .await
+        .expect("closed sender must finish before the reply route unlocks");
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+    drop(routes);
+
+    live_dispatch.await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_signal_caller_preserves_admitted_offer() {

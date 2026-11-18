@@ -19206,3 +19206,42 @@ socket lifecycle, so a canceled refusal does not follow the player ID onto a
 replacement socket. A restarted or separate server without the room's pending
 reconnect state refuses recovery. Rust, .NET and Godot use the same live error
 and disconnect events and require no migration. The wider A11 audit remains open.
+
+### F389 — A closing sender waited for the signal reply route
+
+At `bfc76dbf` under #826, a WebRTC refusal could pass both reply budgets
+and park on the coordinator's client-map read. The owned reply held the
+sender's lifecycle until the read finished, even after close was requested.
+
+On Linux ARM64, run `bash scripts/dev-loop.sh --all-features
+signal_refusal_waiting_for_reply_routing_stops_on_sender_close`. The
+test holds the real client-map writer and submits a self-targeted signal
+from each of two connected sockets. The budgets and queues have room.
+The base misses the 10 ms paused-clock deadline after the first source
+closes (Nextest `ef9b9d4c`). With the repair, the sender's dispatch and
+lifecycle become available before the writer unlocks. The live source
+still waits. It receives exactly one target refusal after unlock.
+
+The server now uses the physical socket's close signal during reply route
+lookup and checks the route still refers to that socket. It uses the
+same path for a refusal after a target delivery failure. An active sender
+still waits for its route, and an admitted reply retains its delivery and
+slow-consumer cleanup. Cancellation during routing leaves budget charges
+with the closing socket.
+
+One authoritative server owns the route, lifecycle and reconnect record.
+A partition can delay close detection. Clients can still receive a reply
+that entered the queue before close. A canceled route lookup does not
+follow a restored player ID. After restart or on another instance, the
+server must decline reconnect if it lacks the recovery record. Rust treats
+the last server error at disconnect as optional. .NET reports server
+errors and disconnects separately. Godot decodes the same error envelope
+and reads the close reason from the transport.
+
+The eight scoped controls pass (Nextest `057d1cb0`). Matched warm ARM64
+allocation probes (`964f7c23`, `0508e5b6`) keep healthy targeted replies
+at one allocation and 504 bytes. Live signals in 2-, 16- and 64-player
+rooms use eight allocations and 3,312 bytes in both revisions. An early
+repair added 56 bytes to the ordinary reply future. The final repair
+keeps the close-aware wait outside that future. These probes measure
+allocations only. A11 and #826 remain open.

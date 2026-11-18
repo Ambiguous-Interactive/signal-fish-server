@@ -86,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Cancel pending WebRTC signals, signal refusals, and P2P transport reports when the sender disconnects (#826).
+- Cancel pending WebRTC signaling and P2P transport reports when the sender disconnects, including signal replies
+  waiting for a route (#826).
 - Fix the protocol schema to accept a null relay client ID, as the server already does (#826).
 - Correct reconnect examples to include the restored player and the v3 reconnect token (#826).
 - Allow the existing null values for optional join fields in the protocol schema (#826).
