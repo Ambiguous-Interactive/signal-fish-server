@@ -1600,6 +1600,109 @@ async fn signal_delivered_to_same_room_peer_preserving_payload() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn closing_inbound_signal_stops_waiting_for_activity_gate() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let lifecycle = server.client_lifecycle(&alice).unwrap();
+    let activity_gate = lifecycle.lock().await;
+    let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+        &alice,
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::nil(),
+            signal: json!({"Offer": "waiting for activity admission"}),
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(dispatch.as_mut()).is_pending());
+
+    assert!(server
+        .connection_manager
+        .request_close_for(&alice, crate::coordination::CloseReason::Unregistered));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closing signal must return while activity admission stays blocked");
+    drop(activity_gate);
+    let queued = bob_rx.try_recv();
+    assert!(
+        matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+        "a canceled signal left a frame for the recipient: {queued:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn inbound_signal_activity_write_respects_socket_close() {
+    for closing in [false, true] {
+        let server = create_test_server().await;
+        let (alice, _alice_rx) = register_client(&server).await;
+        let (bob, mut bob_rx) = register_client(&server).await;
+        let room_id = create_db_room(&server, alice).await;
+        for player in [alice, bob] {
+            server.set_client_protocol(&player, v3_webrtc());
+            server.assign_client_to_room(&player, room_id).await;
+        }
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .unwrap();
+        let storage = database.hold_room_writes_for_test().await;
+        let lifecycle = server.client_lifecycle(&alice).unwrap();
+        let payload = json!({"Offer": "waiting for room activity storage"});
+        let generation = uuid::Uuid::from_u128(1);
+        let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+            &alice,
+            ClientMessage::Signal {
+                to: bob,
+                generation,
+                signal: payload.clone(),
+            },
+            Arc::clone(&lifecycle),
+        ));
+        assert!(futures_util::poll!(dispatch.as_mut()).is_pending());
+        let mut teardown = Box::pin(lifecycle.lock());
+        assert!(futures_util::poll!(teardown.as_mut()).is_pending());
+        let queued = bob_rx.try_recv();
+        assert!(
+            matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+            "a signal reached the recipient before the activity write: {queued:?}"
+        );
+
+        let bound = Duration::from_millis(10);
+        if closing {
+            assert!(server
+                .connection_manager
+                .request_close_for(&alice, crate::coordination::CloseReason::Unregistered));
+            timeout(bound, dispatch)
+                .await
+                .expect("closing signal must return while the activity write stays blocked");
+            let _guard = timeout(bound, teardown)
+                .await
+                .expect("teardown can take the lifecycle");
+            drop(storage);
+            let queued = bob_rx.try_recv();
+            assert!(
+                matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+                "a canceled signal left a frame for the recipient: {queued:?}"
+            );
+        } else {
+            drop(teardown);
+            drop(storage);
+            timeout(bound, dispatch)
+                .await
+                .expect("live signal finishes after storage unlocks");
+            assert!(matches!(
+                recv(&mut bob_rx).await.as_ref(),
+                ServerMessage::Signal { from, generation: actual, signal }
+                    if *from == alice && *actual == generation && *signal == payload
+            ));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn signal_from_a_replaced_connection_lifecycle_is_discarded() {
     let server = create_test_server().await;
     let (alice, _alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
