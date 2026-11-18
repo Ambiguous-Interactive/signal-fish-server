@@ -158,7 +158,7 @@ impl EnhancedGameServer {
                 Ok(false) => {
                     tracing::debug!(
                         %player_id,
-                        "Shutdown GoingAway advisory skipped: queue full or connection gone"
+                        "Shutdown GoingAway advisory was not queued"
                     );
                 }
                 Err(err) => {
