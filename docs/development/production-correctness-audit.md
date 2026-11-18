@@ -19182,3 +19182,27 @@ A 255-member publication uses the same 549,641 bytes. The first repair added
 polling to yield. The final repair yields before its immediate routing read.
 A contended read can still allocate a watcher. CPU cost and throughput remain
 unmeasured. A11 and A12 advance. The broader audit remains open.
+
+### F388 — A closing sender waited for the signal refusal budget
+
+At base `513bf998` under #826, a rejected WebRTC signal held the source
+lifecycle while waiting for the shared player budget. Other requests and the
+periodic budget cleanup use the same lock. If the socket started closing,
+unregistration could not take the lifecycle until the budget check resumed.
+
+A Linux ARM64 router test submits two self-targeted signals with the real
+budget lock held. It closes one sender and leaves the other connected. The
+original handler misses the 10 ms paused-clock bound before the budget
+unlocks (Nextest `b5c5248c`). The handler now watches the physical socket's
+close signal while it waits for the budget. The canceled check releases the
+lifecycle without charging a refusal or queuing a reply. After the lock
+opens, the live sender receives the existing target error and spends one
+refusal slot. An admitted reply still uses its owned queue completion.
+
+One server owns the socket lifecycle and refusal budget. A partition can delay
+close detection. Live refusals still wait for the authoritative budget, and a
+reply queued before close can still reach its recipient. Reconnect takes a new
+socket lifecycle, so a canceled refusal does not follow the player ID onto a
+replacement socket. A restarted or separate server without the room's pending
+reconnect state refuses recovery. Rust, .NET and Godot use the same live error
+and disconnect events and require no migration. The wider A11 audit remains open.
