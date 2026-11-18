@@ -94,7 +94,7 @@ jobs:
       - name: Generate auto-commit GitHub App token from client ID
         id: app-token-client
         if: steps.app-credentials.outputs.mode == 'client-id'
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3.4.0
         with:
           client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}
@@ -104,7 +104,7 @@ jobs:
       - name: Generate auto-commit GitHub App token from App ID
         id: app-token-id
         if: steps.app-credentials.outputs.mode == 'app-id'
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3.4.0
         with:
           app-id: ${{ secrets.AUTO_COMMIT_APP_ID }}
           private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}

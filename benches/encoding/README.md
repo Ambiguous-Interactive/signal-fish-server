@@ -86,7 +86,7 @@ The [relay compression decision](COMPRESSION.md) covers the separate #773 study.
 
 The checked-in bindings make benchmark builds independent of schema compilers.
 `flatc` 25.12.19 generated the FlatBuffers binding. The Cap'n Proto compiler
-0.9.2 and `capnpc-rust` 0.27.0 generated the Cap'n Proto binding. `Cargo.lock`
+0.9.2 and `capnpc-rust` 0.28.1 generated the Cap'n Proto binding. `Cargo.lock`
 pins the measured Rust implementations.
 
 To regenerate, install those compiler versions and run from the repository
@@ -94,7 +94,7 @@ root:
 
 ```bash
 flatc --rust -o benches/encoding/generated benches/encoding/schema/game.fbs
-cargo install capnpc --version 0.27.0 --locked
+cargo install capnpc --version 0.28.1 --locked
 capnp compile -orust:benches/encoding/generated --src-prefix=benches/encoding/schema benches/encoding/schema/game.capnp
 cargo fmt --manifest-path benches/encoding/Cargo.toml
 ```

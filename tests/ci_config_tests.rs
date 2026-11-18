@@ -7166,7 +7166,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     assert_eq!(permissions.trim(), "contents: read");
     for required in [
         "Require default branch dispatch",
-        "actions/create-github-app-token@v3.3.0",
+        "actions/create-github-app-token@v3.4.0",
         "permission-contents: write",
         "permission-pull-requests: write",
         "ref: ${{ github.sha }}",
@@ -7256,7 +7256,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
             [
                 "id: app-token-client",
                 "if: steps.app-credentials.outputs.mode == 'client-id'",
-                "uses: actions/create-github-app-token@v3.3.0",
+                "uses: actions/create-github-app-token@v3.4.0",
                 "client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
                 "private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
                 "permission-contents: write",
@@ -7269,7 +7269,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
             [
                 "id: app-token-id",
                 "if: steps.app-credentials.outputs.mode == 'app-id'",
-                "uses: actions/create-github-app-token@v3.3.0",
+                "uses: actions/create-github-app-token@v3.4.0",
                 "app-id: ${{ secrets.AUTO_COMMIT_APP_ID }}",
                 "private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
                 "permission-contents: write",
@@ -7293,7 +7293,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     }
     assert_eq!(
         prepare
-            .matches("uses: actions/create-github-app-token@v3.3.0")
+            .matches("uses: actions/create-github-app-token@v3.4.0")
             .count(),
         2,
         "prepare-release.yml must have exactly one mutually exclusive token action per \

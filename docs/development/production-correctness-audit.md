@@ -19504,3 +19504,23 @@ can delay physical close detection. A request admitted before close can
 commit and publish. After reconnect, the snapshot gives the current
 role. A restarted or separate process without the pending record must
 refuse restoration. This advances A04, A08, and A11.
+
+### F398 — A pending Pong could hold a closing socket
+
+At `0be2f774` under #826, an application Ping held its source lifecycle
+while waiting to read the reply route. A paused-clock regression holds
+that route after dispatch. Close misses the 10 ms deadline, while the
+live control waits and replies once (Linux ARM64, Nextest `b701420a`).
+
+The server now checks the physical connection before and during the
+lifecycle and route waits. Close releases the pending route wait and
+the lifecycle while the routing lock is still held. A live Ping still
+refreshes liveness and returns one Pong. The existing delivery path
+completes accounting for replies already admitted. The regression and
+live controls pass with the original dependency lock (Nextest `8c9b0337`).
+
+Pong describes one physical connection. A partition can delay close
+detection, and a reply already admitted may still reach the old socket.
+A replacement socket can send a fresh Ping. Pong carries no durable
+room state and is not replayed after reconnect or process restart. This
+advances A04 and A11. The broader audit stays open.

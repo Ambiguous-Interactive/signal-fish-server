@@ -229,7 +229,7 @@ criterion = "0.8.2"
 stats_alloc = "0.1.10"
 libtest-mimic = "0.8.2"
 syn = { version = "3.0.9", features = ["full", "visit"] }
-trybuild = "1.0.122"
+trybuild = "1.0.125"
 # YAML 1.2 parser used by tests/ci_config_tests.rs to validate workflow files by
 # actually parsing them, rather than approximating a parser with fragile quote/
 # indent heuristics. `default-features = false` drops the encoding_rs dependency
