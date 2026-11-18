@@ -19432,7 +19432,9 @@ leaves the open recipient's queue empty for JSON and binary.
 
 The room's home process owns membership and relay stamps. The server
 delays live work while routing is busy and can finish an admitted relay
-after detecting close. A partition can delay that detection. A restored
+after detecting close. While dispatch waits, the reader has yet to read the
+next peer frame. Server close requests wake dispatch through the socket's
+close signal. A partition can delay detection. A restored
 socket advances the epoch, and its reconnect snapshot omits old gameplay
 data. A process without the pending record declines restoration. Nine
 real WebSocket and process controls pass on Linux ARM64, including

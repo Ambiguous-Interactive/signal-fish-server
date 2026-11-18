@@ -411,6 +411,19 @@ mod handler_honesty {
                 .await
                 .expect("a live sender must finish once the gate opens");
             let delivered = recipient_rx.try_recv().unwrap();
+            assert!(
+                matches!(
+                    (binary, delivered.as_ref()),
+                    (
+                        true,
+                        ServerMessage::GameDataBinary {
+                            encoding: GameDataEncoding::MessagePack,
+                            ..
+                        }
+                    ) | (false, ServerMessage::GameData { .. })
+                ),
+                "the relay must preserve the source frame's lane: {delivered:?}"
+            );
             expect_ordered_payload(
                 crate::coordination::outbound_queue::OutboundPayload::Message(delivered),
                 source,
