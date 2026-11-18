@@ -612,11 +612,39 @@ struct ConnectionCloseRequest {
 }
 
 impl ConnectionCloseSignal {
-    /// Observe close requests during connection admission.
+    /// Observe close requests for this connection.
     pub(crate) fn subscribe(&self) -> ConnectionCloseListener {
         ConnectionCloseListener {
             rx: self.tx.subscribe(),
         }
+    }
+
+    /// Run cancel-safe work until the connection starts closing.
+    pub(crate) async fn while_open<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        if self.requested_reason().is_some() {
+            return None;
+        }
+        tokio::pin!(work);
+        if let std::task::Poll::Ready(result) = futures_util::poll!(&mut work) {
+            return Some(result);
+        }
+
+        // Only pending work needs a listener. Keep its future out of
+        // the allocation for every transport report task.
+        let mut close = self.subscribe();
+        tokio::select! {
+            biased;
+            _ = Box::pin(close.closed()) => None,
+            result = &mut work => Some(result),
+        }
+    }
+
+    /// Whether two signals address the same physical connection.
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
     }
 
     /// Create a connected signal/listener pair for one connection.
@@ -2196,6 +2224,26 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Send a reply while the caller holds the source lifecycle.
+    ///
+    /// The default checks close before delegating to the existing send.
+    /// A coordinator with a blocking route lookup should override this method
+    /// to cancel the lookup on close and check the route's socket identity.
+    /// Keep delivery and cleanup owned after the send starts, because the
+    /// existing send contract permits side effects before completion.
+    #[doc(hidden)]
+    async fn send_to_player_on_socket(
+        &self,
+        player_id: &PlayerId,
+        close: &ConnectionCloseSignal,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        if close.requested_reason().is_some() {
+            return Ok(());
+        }
+        self.send_to_player(player_id, message).await
+    }
+
     /// Deliver only while `player_id` is currently routed in `room_id`.
     /// Production also generation-scopes the enqueue, so a leave/reconnect
     /// after recipient lookup cancels the stale delivery at queue commit.
@@ -2225,6 +2273,37 @@ pub trait MessageCoordinator: Send + Sync {
         }
         self.send_to_player_in_room(player_id, room_id, message)
             .await
+    }
+
+    /// Conditional room delivery with a known seated sender. The in-memory
+    /// coordinator cancels capacity waits on sender close and orders queue
+    /// admission against that close request.
+    /// Coordinators without local connection state rely on the supplied
+    /// predicate to check sender liveness.
+    fn send_to_player_in_room_from_if<'a>(
+        &'a self,
+        player_id: &'a PlayerId,
+        room_id: &'a RoomId,
+        _from: &'a PlayerId,
+        message: Arc<ServerMessage>,
+        should_send: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>> {
+        self.send_to_player_in_room_if(player_id, room_id, message, should_send)
+    }
+
+    /// Conditional delivery with the source socket already known to the caller.
+    /// A local coordinator can observe its close even before resolving routes.
+    #[doc(hidden)]
+    fn send_to_player_in_room_from_socket_if<'a>(
+        &'a self,
+        player_id: &'a PlayerId,
+        room_id: &'a RoomId,
+        from: &'a PlayerId,
+        _source_close: &'a ConnectionCloseSignal,
+        message: Arc<ServerMessage>,
+        should_send: &'a (dyn Fn() -> bool + Send + Sync),
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'a>> {
+        self.send_to_player_in_room_from_if(player_id, room_id, from, message, should_send)
     }
 
     /// Snapshot player ids currently published in room routing. `None` means a
@@ -2318,7 +2397,8 @@ pub trait MessageCoordinator: Send + Sync {
     /// neither delay the teardown nor reclassify the close as a
     /// slow-consumer disconnect — the close itself, with its lifecycle
     /// reason, is the authoritative signal. Returns whether the message was
-    /// enqueued.
+    /// enqueued. The in-memory coordinator also skips the send if it cannot
+    /// read the route immediately.
     ///
     /// CONTRACT: implementations must not wait on recipient queue capacity.
     /// There is deliberately no default implementation — falling back to the

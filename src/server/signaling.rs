@@ -22,15 +22,40 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::coordination::{
-    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
+    ConnectionCloseSignal, MessageCoordinator, RoomEventMutationGuard,
+    RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 use crate::protocol::{
     room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage,
     SessionGeneration, Transport,
 };
 
+use super::connection_manager::ConnectionManager;
 use super::session_policy::membership_session_decision;
 use super::{ClientLifecycle, EnhancedGameServer};
+
+async fn deliver_signal_error(
+    connections: &ConnectionManager,
+    coordinator: &dyn MessageCoordinator,
+    player_id: &PlayerId,
+    close: &ConnectionCloseSignal,
+    message: String,
+    error_code: ErrorCode,
+) -> anyhow::Result<()> {
+    if close.requested_reason().is_some() || !connections.charge_error_reply(player_id).await {
+        return Ok(());
+    }
+    coordinator
+        .send_to_player_on_socket(
+            player_id,
+            close,
+            Arc::new(ServerMessage::Error {
+                message,
+                error_code: Some(error_code),
+            }),
+        )
+        .await
+}
 
 /// Reuse a routed roster for membership lookup without allocating a second set.
 /// Custom coordinators may return unordered or duplicate player ids.
@@ -93,7 +118,8 @@ impl EnhancedGameServer {
     }
 
     /// Relay one generation-fenced opaque WebRTC signal.
-    /// Once admitted, delivery continues if the caller is canceled.
+    /// Once dispatched, delivery continues if the caller is canceled.
+    /// The source must still be routed and open when the recipient queues it.
     ///
     /// The server deliberately does not interpret or topology-gate the
     /// generation: it preserves the same room-ordered dumb-plumbing contract
@@ -279,18 +305,31 @@ impl EnhancedGameServer {
         // `Signal` ahead of that recipient's plan. Holding the shared room
         // fence through dispatch makes plan-before-signal a server guarantee for
         // finalize, re-plan, join, and reconnect publications alike.
-        let signal_publication_guard = self.message_coordinator.lock_room_signal(&from_room).await;
+        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
+            return;
+        };
+        let Some((signal_publication_guard, routed_pair)) = source_close
+            .while_open(async {
+                let guard = self.message_coordinator.lock_room_signal(&from_room).await;
+                // Routing can wait separately from publication. Cancel both
+                // reads so teardown can take the source lifecycle.
+                let pair = self
+                    .message_coordinator
+                    .routed_player_pair(&from_room, from, &to)
+                    .await;
+                (guard, pair)
+            })
+            .await
+        else {
+            return;
+        };
 
         // Either endpoint can be pruned as slow/closed while this signal waits
         // behind a room publication, before its connection assignment is
         // asynchronously cleared. Revalidate coordinator routing under the gate
         // so neither a removed sender nor a replacement target can act on the
         // stale pre-wait snapshot.
-        let routed_pair = match self
-            .message_coordinator
-            .routed_player_pair(&from_room, from, &to)
-            .await
-        {
+        let routed_pair = match routed_pair {
             Ok(pair) => pair,
             Err(error) => {
                 tracing::warn!(%from_room, %from, %to, %error, "Failed to revalidate signal routing");
@@ -346,7 +385,13 @@ impl EnhancedGameServer {
         }
 
         // 6. Per-connection valid signal rate limit.
-        if let Err(err) = self.rate_limiter.check_signal(from).await {
+        let Some(signal_budget) = source_close
+            .while_open(self.rate_limiter.check_signal(from))
+            .await
+        else {
+            return;
+        };
+        if let Err(err) = signal_budget {
             drop(signal_publication_guard);
             self.send_signal_error(
                 from,
@@ -358,33 +403,43 @@ impl EnhancedGameServer {
             return;
         }
 
+        if source_close.requested_reason().is_some() {
+            return;
+        }
+
         // Count the signal as relayed here, at dispatch — after every same-room +
         // transport + rate-limit check has passed — matching the best-effort
         // "relayed = dispatched" semantics of the send below (a rejected
         // cross-room / rate-limited signal returns earlier and is never counted).
         self.metrics.increment_signals_relayed();
 
-        // Delivery follows the server-wide contract (`deliver_or_disconnect`):
-        // never a silent drop — a backpressured recipient stalls this send for
-        // up to the slow-consumer grace window and is then loudly disconnected
-        // (metrics + close), abandoning its queue only with the connection.
+        // The room event fence orders plans and normal membership changes.
+        // Eviction or physical close can still win during the capacity wait.
+        // Revalidate under the coordinator's routing and close guards at enqueue.
         let coordinator = Arc::clone(&self.message_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
         let from = *from;
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
+            let source_is_open = || source_close.requested_reason().is_none();
             let result = coordinator
-                .send_to_player_in_room(
+                .send_to_player_in_room_from_socket_if(
                     &to,
                     &from_room,
+                    &from,
+                    &source_close,
                     Arc::new(ServerMessage::Signal {
                         from,
                         generation,
                         signal,
                     }),
+                    &source_is_open,
                 )
                 .await;
             drop(signal_publication_guard);
+            if !source_is_open() {
+                return Ok(());
+            }
             let (message, code) = match result {
                 Ok(true) => return Ok(()),
                 Ok(false) => (
@@ -399,12 +454,13 @@ impl EnhancedGameServer {
                     )
                 }
             };
-            super::messaging::send_error_to_player(
+            deliver_signal_error(
                 connection_manager.as_ref(),
                 coordinator.as_ref(),
                 &from,
+                &source_close,
                 message.to_string(),
-                Some(code),
+                code,
             )
             .await
         });
@@ -910,7 +966,18 @@ impl EnhancedGameServer {
             "Rejected WebRTC signal"
         );
 
-        match self.rate_limiter.check_signal_error(from).await {
+        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
+            return;
+        };
+        // This check may wait for the shared limiter. Once it has charged
+        // the budget, keep the existing owned reply completion.
+        let Some(reply_budget) = source_close
+            .while_open(self.rate_limiter.check_signal_error(from))
+            .await
+        else {
+            return;
+        };
+        match reply_budget {
             Ok(()) => {
                 self.send_signal_error(from, message, error_code, lifecycle_guard)
                     .await
@@ -935,18 +1002,22 @@ impl EnhancedGameServer {
         error_code: ErrorCode,
         lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
+        let Some(source_close) = self.connection_manager.close_signal_for(player_id) else {
+            return;
+        };
         let connection_manager = Arc::clone(&self.connection_manager);
         let message_coordinator = Arc::clone(&self.message_coordinator);
         let player_id = *player_id;
         let message = message.into();
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
-            super::messaging::send_error_to_player(
+            deliver_signal_error(
                 connection_manager.as_ref(),
                 message_coordinator.as_ref(),
                 &player_id,
+                &source_close,
                 message,
-                Some(error_code),
+                error_code,
             )
             .await
         });

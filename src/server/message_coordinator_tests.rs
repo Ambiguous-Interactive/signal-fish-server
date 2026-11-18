@@ -1,7 +1,7 @@
 use super::game_data::broadcast_game_data_with;
 use super::{
-    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, NoDeliveryDrain,
-    RoutingGate, RoutingGateRegistry,
+    ConditionalDeliveryReservation, ConnectionManager, InMemoryMessageCoordinator, RoutingGate,
+    RoutingGateRegistry,
 };
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliverySender,
@@ -367,7 +367,7 @@ fn start_control_capacity_wait(
                         .await
                 } else {
                     coordinator
-                        .reserve_one_if(player_id, handle, &|| true, NoDeliveryDrain, None, None)
+                        .reserve_one_if(player_id, handle, &|| true, None, None, None)
                         .await
                 };
                 match reservation {
@@ -436,6 +436,135 @@ async fn room_send_cancels_when_sender_changes_during_capacity_wait() {
             .load(Ordering::Relaxed),
         0
     );
+}
+
+#[tokio::test]
+async fn room_transport_report_commit_checks_close_after_the_delivery_predicate() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::new_v4();
+    let reporter = PlayerId::new_v4();
+    let recipient = PlayerId::new_v4();
+    let reporter_close = ConnectionCloseSignal::detached();
+    let (reporter_tx, _reporter_rx) = mpsc::channel(1);
+    let (recipient_tx, mut recipient_rx) = mpsc::channel(1);
+    for (player, sender, close) in [
+        (reporter, reporter_tx, reporter_close.clone()),
+        (recipient, recipient_tx, ConnectionCloseSignal::detached()),
+    ] {
+        coordinator
+            .register_local_client(
+                player,
+                Some(room_id),
+                ClientDeliveryHandle::new(sender, close),
+            )
+            .await
+            .expect("player route");
+    }
+    let message = Arc::new(ServerMessage::PeerTransportStatus {
+        peer_id: reporter,
+        transport: crate::protocol::Transport::WebRtc,
+        connected: false,
+    });
+
+    let checks = AtomicUsize::new(0);
+    let eligible = || {
+        if checks.fetch_add(1, Ordering::Relaxed) == 1 {
+            // Queue capacity is reserved. Model a close request immediately
+            // after the caller has decided the report can still be sent.
+            assert!(reporter_close.request_close(CloseReason::SlowConsumer));
+        }
+        true
+    };
+    let delivered = coordinator
+        .send_to_player_in_room_from_if(&recipient, &room_id, &reporter, message, &eligible)
+        .await
+        .expect("conditional transport report");
+
+    assert_eq!(checks.load(Ordering::Relaxed), 2);
+    assert!(!delivered, "the close request won before queue commit");
+    let outcome = recipient_rx.try_recv();
+    assert!(matches!(outcome, Err(mpsc::error::TryRecvError::Empty)));
+}
+
+/// #826: a replacement route cannot lend its live close signal to an older send.
+#[tokio::test]
+async fn conditional_room_send_rejects_a_replaced_source_socket() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room = RoomId::new_v4();
+    let source = PlayerId::new_v4();
+    let recipient = PlayerId::new_v4();
+    let source_close = ConnectionCloseSignal::detached();
+    let (source_tx, _source_rx) = mpsc::channel(1);
+    let (recipient_tx, mut recipient_rx) = mpsc::channel(1);
+    recipient_tx
+        .try_send(Arc::new(ServerMessage::Pong))
+        .unwrap();
+    for (player, sender, close) in [
+        (source, source_tx, source_close.clone()),
+        (recipient, recipient_tx, ConnectionCloseSignal::detached()),
+    ] {
+        coordinator
+            .register_local_client(player, Some(room), ClientDeliveryHandle::new(sender, close))
+            .await
+            .unwrap();
+    }
+    let message = Arc::new(ServerMessage::Pong);
+    let mut delivery = coordinator.send_to_player_in_room_from_socket_if(
+        &recipient,
+        &room,
+        &source,
+        &source_close,
+        Arc::clone(&message),
+        &|| true,
+    );
+    assert!(futures_util::poll!(&mut delivery).is_pending());
+
+    let replacement_close = ConnectionCloseSignal::detached();
+    let (replacement_tx, _replacement_rx) = mpsc::channel(1);
+    coordinator
+        .register_local_client(
+            source,
+            Some(room),
+            ClientDeliveryHandle::new(replacement_tx, replacement_close.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(source_close.requested_reason().is_none());
+    let freed_slot = recipient_rx.try_recv().unwrap();
+    assert!(matches!(freed_slot.as_ref(), ServerMessage::Pong));
+    assert!(
+        !delivery.await.unwrap(),
+        "cancel at the fresh routing snapshot"
+    );
+    assert!(
+        !coordinator
+            .send_to_player_in_room_from_socket_if(
+                &recipient,
+                &room,
+                &source,
+                &source_close,
+                Arc::clone(&message),
+                &|| true,
+            )
+            .await
+            .unwrap(),
+        "reject a stale source at initial routing"
+    );
+    let stale = recipient_rx.try_recv();
+    assert!(matches!(stale, Err(mpsc::error::TryRecvError::Empty)));
+    assert!(coordinator
+        .send_to_player_in_room_from_socket_if(
+            &recipient,
+            &room,
+            &source,
+            &replacement_close,
+            message,
+            &|| true,
+        )
+        .await
+        .unwrap());
+    let delivered = recipient_rx.try_recv().unwrap();
+    assert!(matches!(delivered.as_ref(), ServerMessage::Pong));
 }
 
 #[cfg(feature = "trace-validation")]

@@ -742,6 +742,45 @@ async fn direct_room_selects_and_delivers_the_validated_host_endpoint() {
     assert_eq!(client_plan.peers[0].player_id, host_id);
     assert!(client_plan.peers[0].initiate);
 
+    let replacement = DirectEndpoint {
+        host: "192.0.2.20".into(),
+        port: 8888,
+    };
+    send(
+        &mut host,
+        &ClientMessage::ProvideConnectionInfo {
+            connection_info: ConnectionInfo::Direct {
+                host: replacement.host.clone(),
+                port: replacement.port,
+            },
+        },
+    )
+    .await;
+    let mut refreshed_generation = None;
+    for (socket, other, initiate) in [(&mut host, client_id, false), (&mut client, host_id, true)] {
+        let plan = next_matching_server_message_within(
+            socket,
+            SERVER_MESSAGE_TIMEOUT,
+            "refreshed Direct session plan",
+            |message| match message {
+                ServerMessage::SessionPlan(plan) => Some(plan),
+                _ => None,
+            },
+        )
+        .await;
+        assert_ne!(plan.generation, host_plan.generation);
+        assert_eq!(
+            *refreshed_generation.get_or_insert(plan.generation),
+            plan.generation
+        );
+        assert_eq!(plan.host, Some(host_id));
+        assert_eq!(plan.transport, Transport::Direct);
+        assert_eq!(plan.direct_endpoint.as_ref(), Some(&replacement));
+        assert_eq!(plan.peers.len(), 1);
+        assert_eq!(plan.peers[0].player_id, other);
+        assert_eq!(plan.peers[0].initiate, initiate);
+    }
+
     running_server.shutdown().await;
 }
 

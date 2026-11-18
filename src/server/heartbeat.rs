@@ -1,31 +1,52 @@
+use crate::coordination::ConnectionCloseSignal;
 use crate::protocol::{PlayerId, ServerMessage};
 use std::sync::Arc;
 
 use super::{ClientLifecycle, EnhancedGameServer};
 
 impl EnhancedGameServer {
-    /// A transport control frame may resume after its socket loses this ID.
-    /// Keep its liveness writes on the source connection's lifecycle gate.
     pub(crate) async fn record_transport_activity_from_lifecycle(
         &self,
         player_id: &PlayerId,
         source_lifecycle: Arc<ClientLifecycle>,
     ) {
-        let _guard = source_lifecycle.lock().await;
-        if source_lifecycle.player_id() != *player_id
-            || !self
-                .connection_manager
-                .lifecycle_matches(player_id, &source_lifecycle)
-        {
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(player_id, &source_lifecycle)
+        else {
             return;
-        }
-        self.record_transport_activity(player_id).await;
+        };
+        self.refresh_socket_activity(player_id, &source_lifecycle, &close)
+            .await;
     }
 
-    /// Refresh liveness from transport-level WebSocket traffic (a client
-    /// Ping, or a Pong answering our probe) without generating an
-    /// application-level `ServerMessage::Pong` response.
-    pub(crate) async fn record_transport_activity(&self, player_id: &PlayerId) {
+    /// Keep activity on the physical socket's lifecycle. Close can release
+    /// this wait before dispatch, including while activity storage is pending.
+    pub(super) async fn refresh_socket_activity(
+        &self,
+        player_id: &PlayerId,
+        lifecycle: &Arc<ClientLifecycle>,
+        close: &ConnectionCloseSignal,
+    ) -> bool {
+        close
+            .while_open(async {
+                let _guard = lifecycle.lock().await;
+                if lifecycle.player_id() != *player_id
+                    || !self
+                        .connection_manager
+                        .lifecycle_matches(player_id, lifecycle)
+                {
+                    return false;
+                }
+                self.refresh_client_activity(player_id).await;
+                true
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Refresh liveness without sending an application-level Pong.
+    pub(super) async fn refresh_client_activity(&self, player_id: &PlayerId) {
         self.record_client_activity(player_id);
         self.maybe_update_last_seen(player_id).await;
     }
@@ -290,6 +311,34 @@ mod tests {
         let response = receiver.try_recv().unwrap();
         assert!(matches!(response.as_ref(), ServerMessage::Pong));
         assert!(futures_util::poll!(&mut Box::pin(lifecycle.lock())).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn closing_websocket_control_frame_stops_waiting_to_refresh_activity() {
+        let server = create_test_server().await;
+        let player = uuid::Uuid::new_v4();
+        let (sender, _receiver) = mpsc::channel(16);
+        server.connect_client(player, sender).await;
+        let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+        let guard = lifecycle.lock().await;
+        let before = server.metrics.heartbeat_updates.load(Ordering::Relaxed);
+        let mut activity = Box::pin(
+            server.record_transport_activity_from_lifecycle(&player, Arc::clone(&lifecycle)),
+        );
+        assert!(futures_util::poll!(activity.as_mut()).is_pending());
+
+        assert!(server
+            .connection_manager
+            .request_close_for(&player, crate::coordination::CloseReason::Unregistered));
+        timeout(Duration::from_millis(10), activity)
+            .await
+            .expect("close must end the transport activity wait before admission");
+        drop(guard);
+        assert_eq!(
+            server.metrics.heartbeat_updates.load(Ordering::Relaxed),
+            before
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -638,7 +687,7 @@ mod tests {
             "player should look expired before transport Pong"
         );
 
-        server.record_transport_activity(&player_id).await;
+        server.refresh_client_activity(&player_id).await;
 
         assert!(
             server
@@ -763,7 +812,7 @@ mod tests {
                         .await;
                 }
                 ActivityRoute::TransportPong => {
-                    server.record_transport_activity(&spectator_id).await;
+                    server.refresh_client_activity(&spectator_id).await;
                 }
             }
 
@@ -779,7 +828,7 @@ mod tests {
                 "{route:?} must refresh spectator room activity"
             );
 
-            server.record_transport_activity(&spectator_id).await;
+            server.refresh_client_activity(&spectator_id).await;
             let throttled = server
                 .database
                 .get_room_by_id(&room.id)
