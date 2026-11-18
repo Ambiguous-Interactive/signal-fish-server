@@ -4879,6 +4879,31 @@ impl InMemoryMessageCoordinator {
         Ok(outcome)
     }
 
+    /// Start a targeted reply while its route is borrowed.
+    fn start_targeted_delivery(
+        &self,
+        clients: &HashMap<PlayerId, ClientDeliveryHandle>,
+        player_id: &PlayerId,
+        message: &Arc<ServerMessage>,
+        socket: Option<&ConnectionCloseSignal>,
+    ) -> StartedDeliveries {
+        let Some(handle) = clients.get(player_id) else {
+            // Normal during disconnect races; nothing to deliver to.
+            tracing::debug!(%player_id, "Player not registered with coordinator; message unroutable");
+            return StartedDeliveries::default();
+        };
+        if socket.is_some_and(|close| {
+            !close.same_connection(&handle.close) || close.requested_reason().is_some()
+        }) {
+            return StartedDeliveries::default();
+        }
+        self.start_deliveries(std::iter::once((*player_id, handle)), None, |recipient| {
+            crate::coordination::outbound_queue::DeliveryMessage::new(room_message_for_recipient(
+                message, recipient,
+            ))
+        })
+    }
+
     async fn read_room_delivery_routes(
         &self,
         room_id: RoomId,
@@ -5129,7 +5154,6 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .store(times, std::sync::atomic::Ordering::Release);
     }
 
-    /// Start a targeted reply from its borrowed route; retain state only for failed or pending sends.
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
@@ -5137,17 +5161,26 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
     ) -> anyhow::Result<()> {
         let started = {
             let clients = self.local_clients.read().await;
-            let Some(handle) = clients.get(player_id) else {
-                // Normal during disconnect races; nothing to deliver to.
-                tracing::debug!(%player_id, "Player not registered with coordinator; message unroutable");
+            self.start_targeted_delivery(&clients, player_id, &message, None)
+        };
+        self.finish_deliveries(started).await;
+        Ok(())
+    }
+
+    async fn send_to_player_on_socket(
+        &self,
+        player_id: &PlayerId,
+        close: &ConnectionCloseSignal,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        let started = {
+            let Some(clients) = close.while_open(self.local_clients.read()).await else {
                 return Ok(());
             };
-            self.start_deliveries(std::iter::once((*player_id, handle)), None, |recipient| {
-                crate::coordination::outbound_queue::DeliveryMessage::new(
-                    room_message_for_recipient(&message, recipient),
-                )
-            })
+            self.start_targeted_delivery(&clients, player_id, &message, Some(close))
         };
+        // Once started, keep the existing delivery accounting and complete
+        // route cleanup if this delivery closes a slow consumer.
         self.finish_deliveries(started).await;
         Ok(())
     }

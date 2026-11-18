@@ -2224,6 +2224,26 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
+    /// Send a reply while the caller holds the source lifecycle.
+    ///
+    /// The default checks close before delegating to the existing send.
+    /// A coordinator with a blocking route lookup should override this method
+    /// to cancel the lookup on close and check the route's socket identity.
+    /// Keep delivery and cleanup owned after the send starts, because the
+    /// existing send contract permits side effects before completion.
+    #[doc(hidden)]
+    async fn send_to_player_on_socket(
+        &self,
+        player_id: &PlayerId,
+        close: &ConnectionCloseSignal,
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        if close.requested_reason().is_some() {
+            return Ok(());
+        }
+        self.send_to_player(player_id, message).await
+    }
+
     /// Deliver only while `player_id` is currently routed in `room_id`.
     /// Production also generation-scopes the enqueue, so a leave/reconnect
     /// after recipient lookup cancels the stale delivery at queue commit.
