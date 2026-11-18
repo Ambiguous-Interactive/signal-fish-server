@@ -777,14 +777,9 @@ impl EnhancedGameServer {
         // (including its first report). No room ⇒ nothing to fan out — the
         // generation-scoped state was still recorded above.
         let room_id = room_id?;
-
-        /*
-            Snapshot membership without excluding other read-only signaling work.
-            Queue-commit checks retain delivery truth after this fence releases.
-        */
         let source_close = self.connection_manager.close_signal_for(player_id)?;
-        let _room_snapshot_guard = self
-            .lock_room_signal_while_open(&room_id, &source_close)
+        let _room_snapshot_guard = source_close
+            .while_open(self.message_coordinator.lock_room_signal(&room_id))
             .await?;
 
         // Cheap non-consuming preflight before the fallible/O(room) membership
@@ -792,10 +787,9 @@ impl EnhancedGameServer {
         // resolution, immediately before dispatch, so failed lookups and empty
         // fan-outs do not burn a slot while already-over-budget clients cannot
         // keep forcing room scans.
-        if self
-            .rate_limiter
-            .check_signal_available(player_id)
-            .await
+        if source_close
+            .while_open(self.rate_limiter.check_signal_available(player_id))
+            .await?
             .is_err()
         {
             tracing::debug!(
@@ -811,10 +805,9 @@ impl EnhancedGameServer {
         // control-plane budget. Production exposes coordinator routing; the
         // database fallback keeps lightweight/distributed test coordinators
         // compatible without weakening the production source-route check.
-        let recipients: Vec<PlayerId> = match self
-            .message_coordinator
-            .routed_player_ids(&room_id)
-            .await
+        let recipients: Vec<PlayerId> = match source_close
+            .while_open(self.message_coordinator.routed_player_ids(&room_id))
+            .await?
         {
             Ok(Some(routed)) => {
                 if !routed.contains(player_id) {
@@ -828,9 +821,9 @@ impl EnhancedGameServer {
                     })
                     .collect()
             }
-            Ok(None) => match self
-                .transport_status_fallback_recipients(player_id, &room_id)
-                .await
+            Ok(None) => match source_close
+                .while_open(self.transport_status_fallback_recipients(player_id, &room_id))
+                .await?
             {
                 Ok(members) => members,
                 Err(err) => {
@@ -884,7 +877,11 @@ impl EnhancedGameServer {
         // bounded by other means — size cap, connection/room caps, best-effort
         // sends — so this only closes the control-plane consistency gap with
         // `Signal`.)
-        if self.rate_limiter.check_signal(player_id).await.is_err() {
+        if source_close
+            .while_open(self.rate_limiter.check_signal(player_id))
+            .await?
+            .is_err()
+        {
             tracing::debug!(
                 %player_id,
                 ?transport,

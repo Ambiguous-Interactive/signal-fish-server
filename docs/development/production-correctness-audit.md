@@ -19113,3 +19113,38 @@ counts and bytes. One offer uses 8 allocations and 3,440 bytes. A report to
 254 peers uses 294 allocations and 459,782 bytes. A 255-member publication
 uses 262 allocations and 549,641 bytes. CPU and throughput remain unmeasured.
 This advances A11 and A12. The broader audit remains open.
+
+### F386 — A closing sender waited for routing admission
+
+At `33bf2e13` under #826, an offer or P2P transport report could acquire the
+shared publication gate and then wait for the coordinator's separate routing
+read. Closing the sender at that point left both the sender lifecycle and
+publication gates held until the routing read resumed.
+
+Two Linux ARM64 tests hold the in-memory routing writer and submit the
+commands through the message router. Each observes a waiting publication and
+teardown, requests sender close, and keeps the routing writer held. The base
+misses the 10 ms paused-clock bound in both cases (Nextest `c921be22`). The
+repair releases both guards within the bound and leaves both queues empty.
+
+The server now observes close during routing admission. It keeps the live
+offer behind plan publication and keeps live reports in acceptance order.
+Teardown can take the sender lifecycle, then waits for the room access it
+needs to record recovery or remove the member. Delivery-side routing waits
+remain outside this change.
+
+One authoritative server owns routing and reconnect state. When it detects
+a broken link, it drops pending admission from that socket. Until detection,
+a partition can still leave the sender waiting. A frame already queued can
+arrive later. A restart loses room and reconnect state. An instance without
+that state refuses restoration. A restored socket can signal on its current
+route. Rust and .NET consume the existing generation and advisory status.
+Godot decodes the same signal and status events.
+
+ARM64 allocation probes use the same warm workload in both revisions. An
+offer uses 8 allocations and 3,320 bytes. A 255-member publication uses 262
+allocations and 537,361 bytes. Report allocations stay at 6 for one recipient
+and 294 for 254 recipients. The final close watcher adds 256 bytes per report
+in both cases, from 2,808 to 3,064 and from 429,302 to 429,558. A contended
+admission also allocates the close watcher while parked. These probes do not
+measure CPU or throughput. The broader A11 and A12 audit remains open.

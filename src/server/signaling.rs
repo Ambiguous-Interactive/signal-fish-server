@@ -22,8 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::coordination::{
-    ConnectionCloseSignal, RoomEventMutationGuard, RoomMessageTransactionOutcome,
-    RoomRecipientMessages, RoomSignalGuard,
+    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 use crate::protocol::{
     room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage,
@@ -69,21 +68,6 @@ pub(crate) fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usi
 }
 
 impl EnhancedGameServer {
-    // A closed source has no work to publish. Stop waiting so teardown can
-    // take its lifecycle lock even while the room publication is still active.
-    pub(super) async fn lock_room_signal_while_open(
-        &self,
-        room_id: &RoomId,
-        source_close: &ConnectionCloseSignal,
-    ) -> Option<RoomSignalGuard> {
-        let mut close = source_close.subscribe();
-        tokio::select! {
-            biased;
-            _ = close.closed() => None,
-            guard = self.message_coordinator.lock_room_signal(room_id) => Some(guard),
-        }
-    }
-
     /// Revalidate a signal target after the room publication gate. Production
     /// coordinators provide the routed-member snapshot; lightweight
     /// coordinators fall back to the connection's current room assignment.
@@ -299,8 +283,17 @@ impl EnhancedGameServer {
         let Some(source_close) = self.connection_manager.close_signal_for(from) else {
             return;
         };
-        let Some(signal_publication_guard) = self
-            .lock_room_signal_while_open(&from_room, &source_close)
+        let Some((signal_publication_guard, routed_pair)) = source_close
+            .while_open(async {
+                let guard = self.message_coordinator.lock_room_signal(&from_room).await;
+                // Routing can wait separately from publication. Cancel both
+                // reads so teardown can take the source lifecycle.
+                let pair = self
+                    .message_coordinator
+                    .routed_player_pair(&from_room, from, &to)
+                    .await;
+                (guard, pair)
+            })
             .await
         else {
             return;
@@ -311,11 +304,7 @@ impl EnhancedGameServer {
         // asynchronously cleared. Revalidate coordinator routing under the gate
         // so neither a removed sender nor a replacement target can act on the
         // stale pre-wait snapshot.
-        let routed_pair = match self
-            .message_coordinator
-            .routed_player_pair(&from_room, from, &to)
-            .await
-        {
+        let routed_pair = match routed_pair {
             Ok(pair) => pair,
             Err(error) => {
                 tracing::warn!(%from_room, %from, %to, %error, "Failed to revalidate signal routing");
@@ -371,7 +360,13 @@ impl EnhancedGameServer {
         }
 
         // 6. Per-connection valid signal rate limit.
-        if let Err(err) = self.rate_limiter.check_signal(from).await {
+        let Some(signal_budget) = source_close
+            .while_open(self.rate_limiter.check_signal(from))
+            .await
+        else {
+            return;
+        };
+        if let Err(err) = signal_budget {
             drop(signal_publication_guard);
             self.send_signal_error(
                 from,
