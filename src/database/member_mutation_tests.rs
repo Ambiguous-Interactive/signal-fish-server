@@ -60,7 +60,7 @@ async fn authority_flag_repair_renews_both_room_clocks_once() {
     }
 }
 
-/// #636: compare exact membership without a second current-member vector.
+/// #636: check exact membership and return stale decisions without the liveness lock.
 #[tokio::test]
 async fn finalization_membership_requires_a_permutation_without_duplicates() {
     for count in [1, 2, 4, 15, 16, 17, 64, 255] {
@@ -100,40 +100,67 @@ async fn finalization_membership_requires_a_permutation_without_duplicates() {
                         continue;
                     }
                     changed.members[1] = changed.members[0];
+                    if count <= 16 {
+                        changed.members.sort_unstable();
+                    }
                 }
                 "authority" => changed.authority_player = None,
                 "state" => changed.lobby_state = crate::protocol::LobbyState::Lobby,
                 _ => unreachable!(),
             }
-            assert_eq!(
-                db.finalize_room_game(&room.id, &changed).await.unwrap(),
-                FinalizeRoomGameOutcome::SnapshotChanged,
-                "{count}: {invalid}"
+            let liveness = db.room_liveness_monotonic.write().await;
+            let mut finalize = std::pin::pin!(db.finalize_room_game(&room.id, &changed));
+            assert!(
+                matches!(
+                    futures_util::poll!(finalize.as_mut()),
+                    std::task::Poll::Ready(Ok(FinalizeRoomGameOutcome::SnapshotChanged))
+                ),
+                "{count}: {invalid} must return without waiting for liveness"
             );
+            assert!(matches!(liveness[&room.id], RoomLiveness::AgedFor(_)));
+            drop(liveness);
             let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
             assert_eq!(after.last_activity, before.last_activity);
             assert_eq!(after.lobby_state, before.lobby_state);
             assert_eq!(after.ready_players, before.ready_players);
             assert!(after.players.values().all(|player| !player.is_ready));
         }
-        let mut reversed = expected.clone();
-        reversed.members.reverse();
-        let original = reversed.clone();
+        let mut valid = expected.clone();
+        valid.members.sort_unstable();
+        if matches!(count, 4 | 17 | 255) {
+            valid.members.rotate_left(1);
+        }
+        let original = valid.clone();
         assert_eq!(
-            db.finalize_room_game(&room.id, &reversed).await.unwrap(),
+            db.finalize_room_game(&room.id, &valid).await.unwrap(),
             FinalizeRoomGameOutcome::Finalized
         );
-        assert_eq!(reversed, original, "caller snapshot stays unchanged");
+        assert_eq!(valid, original, "caller snapshot stays unchanged");
         let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         assert_eq!(
             after.ready_players, expected.members,
             "stored member order stays unchanged"
         );
         assert!(after.players.values().all(|player| player.is_ready));
-        assert_eq!(
-            db.finalize_room_game(&room.id, &reversed).await.unwrap(),
-            FinalizeRoomGameOutcome::AlreadyFinalized
-        );
+        let liveness = db.room_liveness_monotonic.write().await;
+        let finalized_at = after.game_finalized_at;
+        for (room_id, expected) in [(room.id, &valid), (Uuid::nil(), &valid)] {
+            let mut finalize = std::pin::pin!(db.finalize_room_game(&room_id, expected));
+            match futures_util::poll!(finalize.as_mut()) {
+                std::task::Poll::Ready(Ok(FinalizeRoomGameOutcome::AlreadyFinalized)) => {
+                    assert_eq!(room_id, room.id);
+                }
+                std::task::Poll::Ready(Err(error)) => {
+                    assert_eq!(room_id, Uuid::nil());
+                    assert_eq!(error.to_string(), "room not found while finalizing game");
+                }
+                outcome => panic!("unexpected finalization result for {room_id}: {outcome:?}"),
+            }
+        }
+        assert!(matches!(liveness[&room.id], RoomLiveness::Live(_)));
+        let after_repeat = db.get_room_by_id(&room.id).await.unwrap().unwrap();
+        assert_eq!(after_repeat.game_finalized_at, finalized_at);
+        assert_eq!(after_repeat.last_activity, after.last_activity);
     }
 }
 
