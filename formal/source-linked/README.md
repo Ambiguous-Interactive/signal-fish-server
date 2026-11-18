@@ -858,19 +858,18 @@ counted as a protocol theorem.
 The new external comparison mappings are explicit trusted boundaries:
 
 - UUID 1.29.0 derives comparison on its fixed sixteen-byte field.
-- Chrono 0.4.45 `DateTime::partial_cmp` compares its `NaiveDateTime`. Its derived
-  order reads signed packed date, unsigned seconds, then unsigned fraction.
+- Jiff 1.0.1 compares timestamps using signed seconds followed by signed
+  nanoseconds in jiff-core.
 - The pinned standard tuple comparison checks the first field, then the second
-  on equality. The TimeZone interpretation supplies only the associated type
-  needed by the UTC comparison; it models no timezone conversion operations.
+  on equality.
 
 [`ElectionOrder.lean`](lean/proofs/capability/lean/Capability/Verification/ElectionOrder.lean)
 proves four interpretation lemmas. Numeric timestamp keys preserve field order
 and equality for all modeled scalar values. Numeric UUID keys preserve byte
 order and exact identity for every sixteen-byte array. These lemmas check the
 encodings, not the Rust dependency layouts or implementations. Timestamp inputs
-overapproximate valid Chrono values; construction and calendar validity are not
-claimed. The extractor, standard iterator model and dependency interpretations
+overapproximate valid Jiff values. Timestamp construction and calendar validity
+remain outside the proof. The extractor, standard iterator model and dependency interpretations
 remain trusted even when every axiom audit passes.
 
 Three isolated source faults ignore authority, reverse date priority, and drop

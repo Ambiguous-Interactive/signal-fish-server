@@ -33,8 +33,8 @@ use tokio::sync::{mpsc, watch, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGua
 use tokio::time::Duration;
 use uuid::Uuid;
 
-fn chrono_duration_from_std(duration: Duration) -> chrono::Duration {
-    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+fn signed_duration_from_std(duration: Duration) -> jiff::SignedDuration {
+    jiff::SignedDuration::try_from(duration).unwrap_or(jiff::SignedDuration::MAX)
 }
 
 #[cfg(test)]
@@ -395,8 +395,8 @@ mod duration_conversion_tests {
 
     #[test]
     fn extreme_std_duration_saturates_without_panicking() {
-        let converted = std::panic::catch_unwind(|| chrono_duration_from_std(Duration::MAX));
-        assert_eq!(converted.ok(), Some(chrono::Duration::MAX));
+        let converted = std::panic::catch_unwind(|| signed_duration_from_std(Duration::MAX));
+        assert_eq!(converted.ok(), Some(jiff::SignedDuration::MAX));
     }
 }
 
@@ -751,7 +751,7 @@ pub mod allocation_benchmark {
                         player_id: PlayerId::from_u128(u128::from(index)),
                         player_name: format!("host-election-player-{index}"),
                         is_authority: false,
-                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        joined_at: jiff::Timestamp::UNIX_EPOCH,
                         direct_endpoint: Some(DirectEndpoint {
                             host: "127.0.0.1".to_string(),
                             port: 7777,

@@ -1312,8 +1312,11 @@ struct BorrowedPlayerSnapshot<'a> {
     name: &'a str,
     is_authority: bool,
     is_ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::wall_time::serialize_optional_timestamp"
+    )]
+    connected_at: Option<jiff::Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connection_info: Option<&'a crate::protocol::ConnectionInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2710,7 +2713,7 @@ mod tests {
         ReconnectedPayload, ReplayStatus, RoomId, ServerMessage, SpectatorInfo,
         SpectatorJoinedPayload, V3BinaryGameDataFrame as DecodedV3BinaryGameDataFrame,
     };
-    use chrono::Utc;
+    use jiff::Timestamp;
     use serde::{Deserialize, Serializer};
     use uuid::Uuid;
 
@@ -2738,7 +2741,7 @@ mod tests {
                         name: "Player 魚\n\"".into(),
                         is_authority: true,
                         is_ready: false,
-                        connected_at: info.as_ref().map(|_| chrono::DateTime::UNIX_EPOCH),
+                        connected_at: info.as_ref().map(|_| jiff::Timestamp::UNIX_EPOCH),
                         connection_info: info.clone(),
                         epoch,
                         seq,
@@ -2937,7 +2940,7 @@ mod tests {
             name: "aggregate-player".to_string(),
             is_authority: true,
             is_ready: false,
-            connected_at: Some(Utc::now()),
+            connected_at: Some(Timestamp::now()),
             connection_info: Some(ConnectionInfo::WebRTC {
                 sdp: Some("s".repeat(512)),
                 ice_candidates: vec!["candidate".repeat(32)],
@@ -2997,7 +3000,7 @@ mod tests {
         let spectator = SpectatorInfo {
             id: player_a(),
             name: "spectator".repeat(8),
-            connected_at: Some(Utc::now()),
+            connected_at: Some(Timestamp::now()),
         };
         let message = ServerMessage::SpectatorJoined(Box::new(SpectatorJoinedPayload {
             room_id: RoomId::from_u128(3),
@@ -3034,7 +3037,7 @@ mod tests {
         let spectator = SpectatorInfo {
             id: player_a(),
             name: "Watcher".to_string(),
-            connected_at: Some(Utc::now()),
+            connected_at: Some(Timestamp::now()),
         };
         let countless = ServerMessage::NewSpectatorJoined {
             spectator: spectator.clone(),
@@ -3076,7 +3079,7 @@ mod tests {
     /// leaving spectator's acknowledgement).
     #[test]
     fn correlated_spectator_left_projection_trims_the_v2_only_roster() {
-        let rosters = |connected_at: Option<chrono::DateTime<chrono::Utc>>| {
+        let rosters = |connected_at: Option<jiff::Timestamp>| {
             vec![
                 SpectatorInfo {
                     id: player_a(),
@@ -3094,7 +3097,7 @@ mod tests {
             room_id: None,
             room_code: None,
             reason: None,
-            current_spectators: rosters(Some(Utc::now())),
+            current_spectators: rosters(Some(Timestamp::now())),
         };
         assert!(room_operation_result_needs_v3_projection(&seeded));
         let mut projected = seeded;

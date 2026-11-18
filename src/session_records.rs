@@ -132,7 +132,7 @@ impl SessionRecord {
             region_id: room.region_id.clone(),
             max_players: room.max_players,
             // The room row's own stamp is the single source of truth.
-            created_at_ms: u64::try_from(room.created_at.timestamp_millis()).unwrap_or(0),
+            created_at_ms: u64::try_from(room.created_at.as_millisecond()).unwrap_or(0),
             ended_at_ms: None,
             close_reason: None,
             published,
@@ -219,7 +219,7 @@ impl SessionRecords {
     fn now_ms() -> u64 {
         // Wall clock (durable record): the ended stamp is the storage-removal
         // time on the observability surface; no deadline reads it.
-        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+        u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap_or(0)
     }
 
     /// Record a committed room row. `published` is false for hidden pending
@@ -535,8 +535,8 @@ mod tests {
             relay_type: "mesh".to_string(),
             region_id: "region-1".to_string(),
             application_id: Some(Uuid::nil()),
-            created_at: chrono::Utc::now(),
-            last_activity: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            last_activity: jiff::Timestamp::now(),
             spectators: std::collections::HashMap::new(),
             max_spectators: None,
             password: None,
@@ -646,7 +646,7 @@ mod tests {
         let records = SessionRecords::new();
         let room_id = Uuid::new_v4();
         let mut room = room_fixture(room_id, "ABC");
-        room.created_at = chrono::Utc::now();
+        room.created_at = jiff::Timestamp::now();
         records.record_created(&room, true);
         records.record_closed(&room_id, SessionCloseReason::Empty);
 
@@ -1083,7 +1083,7 @@ mod tests {
         let other_app = Uuid::from_u128(200);
         for index in 1..=6 {
             let mut room = room_fixture(Uuid::from_u128(index), "ROOM");
-            room.created_at = chrono::DateTime::from_timestamp_millis(0).expect("epoch");
+            room.created_at = jiff::Timestamp::from_millisecond(0).expect("epoch");
             room.application_id = match index {
                 1 | 4 => Some(app),
                 2 | 5 => Some(other_app),
@@ -1140,8 +1140,8 @@ mod tests {
         let app = Uuid::from_u128(100);
         for index in (0..1100).rev() {
             let mut room = room_fixture(Uuid::from_u128(index), "ROOM");
-            room.created_at = chrono::DateTime::from_timestamp_millis((index % 7) as i64)
-                .expect("fixture timestamp");
+            room.created_at =
+                jiff::Timestamp::from_millisecond((index % 7) as i64).expect("fixture timestamp");
             room.application_id = (index % 2 == 0).then_some(app);
             records.record_created(&room, true);
             if index % 11 == 0 {

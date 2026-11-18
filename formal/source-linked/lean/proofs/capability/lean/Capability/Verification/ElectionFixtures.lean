@@ -21,12 +21,12 @@ theorem id_order : ElectionOrder.uuidKey lowId < ElectionOrder.uuidKey highId :=
 def early (member : SessionMember) : SessionMember :=
   { member with
     player_id := lowId
-    joined_at := { member.joined_at with seconds := 0#u32, fraction := 0#u32 } }
+    joined_at := { member.joined_at with seconds := 0#i64, fraction := 0#i32 } }
 
 def late (member : SessionMember) : SessionMember :=
   { member with
     player_id := highId
-    joined_at := { member.joined_at with seconds := 1#u32, fraction := 0#u32 } }
+    joined_at := { member.joined_at with seconds := 1#i64, fraction := 0#i32 } }
 
 theorem time_order (member : SessionMember) :
     ElectionOrder.timeKey (early member).joined_at < ElectionOrder.timeKey (late member).joined_at := by

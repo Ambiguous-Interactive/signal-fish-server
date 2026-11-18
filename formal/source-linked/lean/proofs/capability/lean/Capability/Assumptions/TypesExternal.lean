@@ -27,17 +27,9 @@ structure uuid.Uuid where
 
 noncomputable instance : DecidableEq uuid.Uuid := Classical.decEq _
 
-/-- UTC has no stored fields in the locked Chrono dependency. -/
-inductive chrono.offset.utc.Utc where
-  | Utc
-
-/-- External timestamp interpretation for the locked dependency.
-Chrono 0.4.45 stores a packed date, seconds, fraction and offset. This interpretation
-permits every scalar value, including invalid dates. Election ordering uses the
-explicit trusted field interpretation in FunsExternal.lean. Timestamp construction
-and the dependency implementation remain outside the source proof. -/
-structure chrono.datetime.DateTime (Tz Offset : Type) where
-  packedDate : I32
-  seconds : U32
-  fraction : U32
-  offset : Offset
+/-- External interpretation of a Jiff 1.0.1 timestamp. Jiff delegates comparison
+to jiff-core's signed seconds and signed nanoseconds. The model admits every
+scalar pair. Timestamp construction and normalization remain outside the proof. -/
+structure jiff.timestamp.Timestamp where
+  seconds : I64
+  fraction : I32

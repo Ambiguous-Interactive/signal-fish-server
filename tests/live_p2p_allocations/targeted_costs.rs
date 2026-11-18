@@ -183,7 +183,7 @@ pub(crate) fn player_events_do_not_copy_hidden_metadata() {
             name: "Player 🐟\n\"".into(),
             is_authority: true,
             is_ready: false,
-            connected_at: Some(chrono::DateTime::UNIX_EPOCH),
+            connected_at: Some(jiff::Timestamp::UNIX_EPOCH),
             connection_info: Some(ConnectionInfo::Custom {
                 data: serde_json::json!({"nested": ["x".repeat(bytes)]}),
             }),

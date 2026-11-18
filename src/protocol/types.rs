@@ -286,8 +286,12 @@ pub struct PlayerInfo {
     /// SDK 0.13.0+ parses the omitted field tolerantly). Negotiated v2
     /// connections keep the frozen legacy wire shape, which includes this
     /// field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::wall_time::serialize_optional_timestamp"
+    )]
+    pub connected_at: Option<jiff::Timestamp>,
     /// Legacy self-declared peer metadata.
     ///
     /// Server-internal storage feeds the legacy handoff surface
@@ -333,8 +337,12 @@ pub struct SpectatorInfo {
     /// write layer strips it from every v3 spectator snapshot (issue #529
     /// follow-up #539). Negotiated v2 connections keep the frozen legacy
     /// wire shape, which includes this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::wall_time::serialize_optional_timestamp"
+    )]
+    pub connected_at: Option<jiff::Timestamp>,
 }
 
 /// Describes why a spectator state change occurred.
@@ -555,7 +563,7 @@ impl PlayerNameRulesPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
     use serde_json::json;
 
     #[test]
@@ -667,7 +675,7 @@ mod tests {
             name: name.to_string(),
             is_authority,
             is_ready: true,
-            connected_at: Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+            connected_at: Some(Timestamp::new(1_700_000_000, 0).unwrap()),
             connection_info,
             epoch: None,
             seq: None,

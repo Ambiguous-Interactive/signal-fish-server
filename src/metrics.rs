@@ -406,7 +406,8 @@ struct OperationLatencyHistogram {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetricsSnapshot {
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(serialize_with = "crate::wall_time::serialize_timestamp")]
+    pub timestamp: jiff::Timestamp,
     pub connections: ConnectionMetrics,
     pub rooms: RoomMetrics,
     pub race_conditions: RaceConditionMetrics,
@@ -1263,8 +1264,8 @@ impl ServerMetrics {
         }
     }
 
-    pub fn set_dashboard_cache_last_refresh(&self, timestamp: chrono::DateTime<chrono::Utc>) {
-        let epoch = u64::try_from(timestamp.timestamp()).unwrap_or(0);
+    pub fn set_dashboard_cache_last_refresh(&self, timestamp: jiff::Timestamp) {
+        let epoch = u64::try_from(timestamp.as_second()).unwrap_or(0);
         self.dashboard_cache_last_refresh_epoch
             .store(epoch, Ordering::Relaxed);
         self.dashboard_cache_refresh_count
@@ -1589,7 +1590,7 @@ impl ServerMetrics {
         MetricsSnapshot {
             // Wall clock (durable record): absolute snapshot stamp surfaced
             // to dashboard/API consumers.
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             connections: ConnectionMetrics {
                 total_connections: self.total_connections.load(Ordering::Relaxed),
                 active_connections: self.active_connections.load(Ordering::Relaxed),
@@ -1997,6 +1998,14 @@ pub struct DashboardCacheMetrics {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn metrics_snapshot_preserves_fractional_timestamp_bytes() {
+        let mut snapshot = ServerMetrics::new().snapshot().await;
+        snapshot.timestamp = "2024-01-02T03:04:05.100Z".parse().unwrap();
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value["timestamp"], "2024-01-02T03:04:05.100Z");
+    }
 
     #[test]
     fn test_average_matches_full_metrics_for_all_histogram_states() {

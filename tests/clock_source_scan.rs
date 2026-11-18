@@ -20,8 +20,8 @@
 //! reason. Entries marked `test_module_only` additionally require every
 //! match to sit after the file's first `#[cfg(test)]` marker.
 //!
-//! The chrono rule (`Utc::now()` / `Local::now()`) completes the same
-//! convention for wall-clock reads (#498). Production chrono reads are
+//! The jiff rule (`Timestamp::now()` / `Zoned::now()`) completes the same
+//! convention for wall-clock reads (#498). Production jiff reads are
 //! classified at each site as
 //!   1. `durable record` — absolute-time semantics by design (reconnection
 //!      token mints, room lifecycle stamps, TURN credential expiry clients
@@ -31,8 +31,8 @@
 //!   3. `converted` — the decision itself now runs on monotonic tokio time
 //!      or an injected seam.
 //!
-//! A new unallowlisted production chrono read fails
-//! `server_src_reads_chrono_time_only_through_documented_or_injected_seams`;
+//! A new unallowlisted production jiff read fails
+//! `server_src_reads_jiff_time_only_through_documented_or_injected_seams`;
 //! every allowlist entry must still have a live production-region match.
 //!
 //! Scope note: `clients/` is out of scope: its remaining `std` clock sites
@@ -129,13 +129,13 @@ fn std_time_allowlist() -> BTreeMap<&'static str, Exemption> {
     ])
 }
 
-/// Files whose production-region `Utc::now()` / `Local::now()` reads are
+/// Files whose production-region `Timestamp::now()` / `Zoned::now()` reads are
 /// classified (durable record / embedder convenience / observability readout
 /// derived from a durable stamp) instead of converted. Every entry must keep
 /// at least one live production-region match, and each classified site in the
 /// file carries its class at the site (`Wall clock (...):` comments). New
 /// reads anywhere else in `src/` fail the scan.
-fn chrono_clock_allowlist() -> BTreeMap<&'static str, &'static str> {
+fn jiff_clock_allowlist() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (
             "src/database/mod.rs",
@@ -465,39 +465,39 @@ fn classifier_matches_imports_and_qualified_uses_only() {
 }
 
 // ---------------------------------------------------------------------------
-// chrono wall-clock rule (#498)
+// jiff wall-clock rule (#498)
 // ---------------------------------------------------------------------------
 
-/// True if the source line reads a chrono wall clock (`Utc::now()` /
-/// `Local::now()`, qualified or imported) or imports chrono in a form that
+/// True if the source line reads a jiff wall clock (`Timestamp::now()` /
+/// `Zoned::now()`, qualified or imported) or imports jiff in a form that
 /// could re-expose those reads under a hidden name (globs and aliases; an
 /// unclosed rustfmt multi-line brace import can hide an aliased name on a
-/// later line). Plain named chrono imports stay safe: `DateTime<Utc>` typing
+/// later line). Plain named jiff imports stay safe: `Timestamp` typing
 /// is legitimate and a clock read through a plain import is still visible as
-/// `Utc::now()`/`Local::now()`.
+/// `Timestamp::now()`/`Zoned::now()`.
 ///
 /// Matching runs on a copy with `::`-adjacent whitespace squeezed out, so
-/// hand-formatted evasion forms (`Utc :: now()`, `use chrono :: Utc as X;`)
+/// hand-formatted evasion forms (`Timestamp :: now()`, `use jiff :: Timestamp as X;`)
 /// are caught too. The squeeze also mangles string-literal content on the
 /// line — accepted, same safe direction as the `//`-in-string limit of the
 /// std classifier.
-fn references_chrono_clock(line: &str) -> bool {
+fn references_jiff_clock(line: &str) -> bool {
     let code = collapse_path_separators(strip_line_comment(line));
-    // The bare-path form (`Utc::now` without call parens, e.g. passed as a
-    // function reference) is matched too: nothing else in chrono starts with
+    // The bare-path form (`Timestamp::now` without call parens, e.g. passed as a
+    // function reference) is matched too: nothing else in jiff starts with
     // it, so flagging the prefix is safe.
-    if code.contains("Utc::now") || code.contains("Local::now") {
+    if code.contains("Timestamp::now") || code.contains("Zoned::now") {
         return true;
     }
-    let Some(statement_start) = code.find("use chrono") else {
+    let Some(statement_start) = code.find("use jiff") else {
         return false;
     };
-    let rest = code[statement_start + "use chrono".len()..].trim_start();
+    let rest = code[statement_start + "use jiff".len()..].trim_start();
     let Some(path) = rest.strip_prefix("::") else {
         return false;
     };
-    // Glob (`use chrono::*;`, `use chrono::prelude::*;`) and alias
-    // (`use chrono::Utc as Clock;`) imports hide the clock surface.
+    // Glob (`use jiff::*;`, `use jiff::civil::*;`) and alias
+    // (`use jiff::Timestamp as Clock;`) imports hide the clock surface.
     if path.contains('*') || path.contains(" as ") {
         return true;
     }
@@ -505,8 +505,8 @@ fn references_chrono_clock(line: &str) -> bool {
     path.contains('{') && !path.contains('}')
 }
 
-/// Squeeze whitespace away from every `::` separator (`Utc :: now()` becomes
-/// `Utc::now()`).
+/// Squeeze whitespace away from every `::` separator (`Timestamp :: now()` becomes
+/// `Timestamp::now()`).
 fn collapse_path_separators(code: &str) -> String {
     code.split("::")
         .map(|segment| segment.trim())
@@ -882,8 +882,8 @@ fn is_test_gated_module_file(path: &Path) -> bool {
 }
 
 #[test]
-fn server_src_reads_chrono_time_only_through_documented_or_injected_seams() {
-    let allowlist = chrono_clock_allowlist();
+fn server_src_reads_jiff_time_only_through_documented_or_injected_seams() {
+    let allowlist = jiff_clock_allowlist();
     let mut files = Vec::new();
     collect_rs_files(&repo_root().join("src"), &mut files);
     assert!(
@@ -903,7 +903,7 @@ fn server_src_reads_chrono_time_only_through_documented_or_injected_seams() {
         let lines: Vec<&str> = content.lines().collect();
         let (regions, _) = cfg_test_gated_regions(&lines);
         for (line_number, line) in lines.iter().enumerate() {
-            if regions[line_number] || !references_chrono_clock(line) {
+            if regions[line_number] || !references_jiff_clock(line) {
                 continue;
             }
             if allowlist.contains_key(relative.as_str()) {
@@ -926,18 +926,18 @@ fn server_src_reads_chrono_time_only_through_documented_or_injected_seams() {
 
     assert!(
         violations.is_empty(),
-        "unclassified chrono wall-clock reads in server src/ production code (breaks \
+        "unclassified jiff wall-clock reads in server src/ production code (breaks \
          the injectable-time convention, .llm/context-testing.md, #498):\n{}",
         violations.join("\n")
     );
 }
 
-/// Every chrono allowlist entry must still point at a real file with at least
-/// one live production-region chrono read, so converted-away entries are
+/// Every jiff allowlist entry must still point at a real file with at least
+/// one live production-region jiff read, so converted-away entries are
 /// surfaced for cleanup instead of silently outliving their reason.
 #[test]
-fn chrono_allowlist_entries_stay_relevant() {
-    let allowlist = chrono_clock_allowlist();
+fn jiff_allowlist_entries_stay_relevant() {
+    let allowlist = jiff_clock_allowlist();
     assert!(!allowlist.is_empty());
     for (relative, reason) in &allowlist {
         let path = repo_root().join(relative);
@@ -948,51 +948,57 @@ fn chrono_allowlist_entries_stay_relevant() {
         let live_matches = lines
             .iter()
             .zip(&regions)
-            .any(|(line, gated)| !gated && references_chrono_clock(line));
+            .any(|(line, gated)| !gated && references_jiff_clock(line));
         assert!(
             live_matches,
-            "allowlisted file no longer reads a chrono clock in production code; drop \
+            "allowlisted file no longer reads a jiff clock in production code; drop \
              the stale entry from tests/clock_source_scan.rs: {relative} ({reason})"
         );
     }
 }
 
 #[test]
-fn chrono_classifier_matches_clock_reads_and_hiding_imports() {
+fn jiff_classifier_matches_clock_reads_and_hiding_imports() {
     // Direct reads, qualified or imported.
-    assert!(references_chrono_clock("let now = Utc::now();"));
-    assert!(references_chrono_clock("let now = chrono::Utc::now();"));
-    assert!(references_chrono_clock("let now = Local::now();"));
-    assert!(references_chrono_clock(
-        ".then(|| chrono::Utc::now().timestamp())"
+    assert!(references_jiff_clock("let now = Timestamp::now();"));
+    assert!(references_jiff_clock("let now = jiff::Timestamp::now();"));
+    assert!(references_jiff_clock("let now = Zoned::now();"));
+    assert!(references_jiff_clock(
+        ".then(|| jiff::Timestamp::now().as_second())"
     ));
     // Function-reference form without call parens is still a clock read.
-    assert!(references_chrono_clock("timestamps.map(Utc::now)"));
+    assert!(references_jiff_clock("timestamps.map(Timestamp::now)"));
     // Hand-formatted evasion forms (path-separator whitespace).
-    assert!(references_chrono_clock("let now = Utc :: now();"));
-    assert!(references_chrono_clock("let now = chrono :: Utc :: now();"));
-    assert!(references_chrono_clock("let now = Utc:: now();"));
-    assert!(references_chrono_clock("use chrono :: Utc as Clock;"));
+    assert!(references_jiff_clock("let now = Timestamp :: now();"));
+    assert!(references_jiff_clock(
+        "let now = jiff :: Timestamp :: now();"
+    ));
+    assert!(references_jiff_clock("let now = Timestamp:: now();"));
+    assert!(references_jiff_clock("use jiff :: Timestamp as Clock;"));
     // Comments about the convention are not uses of it.
-    assert!(!references_chrono_clock(
-        "// never call Utc::now() in a decision path"
+    assert!(!references_jiff_clock(
+        "// never call Timestamp::now() in a decision path"
     ));
     // Hiding imports.
-    assert!(references_chrono_clock("use chrono::*;"));
-    assert!(references_chrono_clock("use chrono::prelude::*;"));
-    assert!(references_chrono_clock("use chrono::Utc as Clock;"));
-    assert!(references_chrono_clock(
-        "use chrono::{DateTime, Utc as Now};"
+    assert!(references_jiff_clock("use jiff::*;"));
+    assert!(references_jiff_clock("use jiff::civil::*;"));
+    assert!(references_jiff_clock("use jiff::Timestamp as Clock;"));
+    assert!(references_jiff_clock(
+        "use jiff::{SignedDuration, Timestamp as Now};"
     ));
     // rustfmt multi-line brace form hides later lines.
-    assert!(references_chrono_clock("use chrono::{"));
+    assert!(references_jiff_clock("use jiff::{"));
     // Plain named imports are safe: the read stays visible.
-    assert!(!references_chrono_clock("use chrono::Utc;"));
-    assert!(!references_chrono_clock("use chrono::{DateTime, Utc};"));
-    assert!(!references_chrono_clock("use chrono::{TimeZone, Utc};"));
-    // Unrelated chrono types never flag.
-    assert!(!references_chrono_clock(
-        "fn f(x: chrono::Duration) -> chrono::DateTime<chrono::Utc> { todo!() }"
+    assert!(!references_jiff_clock("use jiff::Timestamp;"));
+    assert!(!references_jiff_clock(
+        "use jiff::{SignedDuration, Timestamp};"
+    ));
+    assert!(!references_jiff_clock(
+        "use jiff::{tz::TimeZone, Timestamp};"
+    ));
+    // Unrelated jiff types never flag.
+    assert!(!references_jiff_clock(
+        "fn f(x: jiff::SignedDuration) -> jiff::Timestamp { todo!() }"
     ));
 }
 
@@ -1124,7 +1130,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "    #[cfg(test)]",
         "    AgedFor(std::time::Duration),",
         "}",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(regions, vec![false, false, false, true, false, false]);
@@ -1135,7 +1141,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "    #[cfg(test)]",
         "    only_in_tests: bool,",
         "}",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(regions, vec![false, false, false, true, false, false]);
@@ -1150,7 +1156,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "{",
         "    std::iter::empty()",
         "}",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(
@@ -1168,7 +1174,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "        std::time::Duration,",
         "    ),",
         "}",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(
@@ -1184,7 +1190,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "    #[cfg(test)]",
         "    b: u8,",
         ") {",
-        "    let y = Utc::now();",
+        "    let y = Timestamp::now();",
         "}",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
@@ -1201,7 +1207,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "    u8,",
         "    u8,",
         ");",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(regions, vec![false, true, true, true, true, false]);
@@ -1216,10 +1222,10 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "where",
         "    T: Default,",
         "{",
-        "    let _ = Utc::now();",
+        "    let _ = Timestamp::now();",
         "    x",
         "}",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(
@@ -1255,7 +1261,7 @@ fn cfg_test_region_tracker_handles_items_modules_and_literals() {
         "    #[cfg(test)]",
         "    published(u8),",
         "}",
-        "fn production() { let y = Utc::now(); }",
+        "fn production() { let y = Timestamp::now(); }",
     ];
     let (regions, _) = cfg_test_gated_regions(&lines);
     assert_eq!(regions, vec![false, false, false, true, false, false]);
@@ -1309,7 +1315,7 @@ fn region_lexer_returns_every_src_file_to_depth_zero() {
 }
 
 #[test]
-fn chrono_scan_wiring_flags_unallowlisted_production_reads_only() {
+fn jiff_scan_wiring_flags_unallowlisted_production_reads_only() {
     let allowlist: BTreeMap<&'static str, &'static str> =
         BTreeMap::from([("src/allowlisted.rs", "durable stamps only")]);
 
@@ -1318,7 +1324,7 @@ fn chrono_scan_wiring_flags_unallowlisted_production_reads_only() {
         let (regions, _) = cfg_test_gated_regions(&lines);
         let mut violations = Vec::new();
         for (line_number, line) in lines.iter().enumerate() {
-            if regions[line_number] || !references_chrono_clock(line) {
+            if regions[line_number] || !references_jiff_clock(line) {
                 continue;
             }
             if allowlist.contains_key(relative) {
@@ -1330,13 +1336,13 @@ fn chrono_scan_wiring_flags_unallowlisted_production_reads_only() {
     };
 
     let content = "\
-use chrono::Utc;
+use jiff::Timestamp;
 fn mint() -> i64 {
-    Utc::now().timestamp()
+    Timestamp::now().as_second()
 }
 #[cfg(test)]
 fn test_helper() {
-    let _ = Utc::now();
+    let _ = Timestamp::now();
 }
 ";
     // The gated test read is skipped; the production read flags with its
@@ -1347,7 +1353,7 @@ fn test_helper() {
 
     let violating = "\
 fn mint() -> i64 {
-    Utc::now().timestamp()
+    Timestamp::now().as_second()
 }
 ";
     assert_eq!(classify("src/plain.rs", violating), vec!["src/plain.rs:2"]);

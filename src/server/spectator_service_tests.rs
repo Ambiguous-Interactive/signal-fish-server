@@ -1995,7 +1995,7 @@ async fn retry_disconnected_detaches_publishes_a_correcting_event_for_a_deleted_
             SpectatorInfo {
                 id: ghost_id,
                 name: "Ghost Watcher".to_string(),
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
             },
         )
         .await
@@ -2068,7 +2068,7 @@ async fn ghost_repair_notification_is_retried_after_a_storage_fault() {
             SpectatorInfo {
                 id: ghost_id,
                 name: "Ghost Watcher".to_string(),
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
             },
         )
         .await
@@ -2146,7 +2146,7 @@ async fn ghost_notify_retry_survives_a_later_rollback_for_the_same_identity() {
             SpectatorInfo {
                 id: ghost_id,
                 name: "Ghost Watcher".to_string(),
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
             },
         )
         .await

@@ -11,7 +11,7 @@ set_option maxRecDepth 256
 noncomputable section
 namespace Capability
 
-abbrev ElectionCandidate := chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc × uuid.Uuid
+abbrev ElectionCandidate := jiff.timestamp.Timestamp × uuid.Uuid
 
 def electionKey (candidate : ElectionCandidate) : Lex (Nat × Nat) :=
   toLex (ElectionOrder.timeKey candidate.1, ElectionOrder.uuidKey candidate.2)
@@ -48,9 +48,7 @@ attribute [local irreducible] ElectionOrder.timeKey ElectionOrder.uuidKey
 
 private theorem candidate_comparison (left right : ElectionCandidate) :
     CoreModels.core.Pair.Insts.CoreCmpPartialOrdPair.lt
-      (chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime
-        chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc
-        chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc)
+      jiff.timestamp.Timestamp.Insts.CoreCmpPartialOrdTimestamp
       uuid.Uuid.Insts.CoreCmpPartialOrdUuid left right =
         RustM.ok (decide (electionKey left < electionKey right)) := by
   have compare_keys {A B : Type} (first : A → Nat) (second : B → Nat) (x y : A × B) :
@@ -92,16 +90,16 @@ private theorem election_next_empty (authority : CoreModels.core.option.Option u
   cases current <;>
     simp [elect_host_loop.body, iterator_next, next_empty,
       CoreModels.core.option.Option.map,
-      elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once,
+      elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid.call_once,
       RustOption, Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry]
 
 private theorem election_candidate_callback
     {T I : Type} (iterator : CoreModels.core.iter.traits.collect.IntoIterator
       T SessionMember I) (head : SessionMember) (candidate : ElectionCandidate) :
-      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iterator).call_once
+      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool iterator).call_once
         head candidate = RustM.ok (decide (electionKey (memberCandidate head) < electionKey candidate)) := by
-  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
-  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool
+  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool.call_once
   simp only [memberCandidate]
   -- A compiled source fault leaves this semantic contract unsolved.
   try exact candidate_comparison (head.joined_at, head.player_id) candidate
@@ -120,7 +118,7 @@ theorem election_optional_callback
       T SessionMember I)
     (head : SessionMember) (current : Option ElectionCandidate) :
     CoreModels.core.option.Option.is_none_or
-      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iterator)
+      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool iterator)
       (RustOption current) head = RustM.ok (replacementWanted head current) := by
   cases current with
   | none => rfl

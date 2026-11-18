@@ -20,7 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
 url = "2"
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "1", default-features = false, features = ["std", "serde"] }
 ```
 
 - **tokio** -- async runtime
@@ -29,10 +29,8 @@ chrono = { version = "0.4", features = ["serde"] }
 - **serde + serde_json** -- JSON serialization matching the server protocol
 - **uuid** -- player and room identifiers are UUIDs
 - **url** -- URL parsing for the WebSocket endpoint
-- **chrono** -- timestamps (`connected_at` on `PlayerInfo`/`SpectatorInfo`; the
-  field is v2-only on the wire, so parse it tolerantly); the `serde` feature
-  is required so the `DateTime<Utc>` values round-trip with the server
-  protocol
+- **Jiff** -- parse RFC 3339 timestamps with the `serde` feature.
+  The `connected_at` field is optional and appears only on the v2 wire.
 
 ## Connecting
 
@@ -161,7 +159,7 @@ pub enum ClientMessage {
 Messages received from the server:
 
 ```rust
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// Information about a player in a room.
@@ -174,7 +172,7 @@ pub struct PlayerInfo {
     /// Server-internal join time: present on the v2 wire; v3 snapshots omit
     /// it, so parse it tolerantly (for example `#[serde(default)]`).
     #[serde(default)]
-    pub connected_at: Option<DateTime<Utc>>,
+    pub connected_at: Option<Timestamp>,
     #[serde(default)]
     pub epoch: Option<u32>,
     #[serde(default)]
@@ -197,7 +195,7 @@ pub struct SpectatorInfo {
     /// Server-internal join time: present on the v2 wire; v3 snapshots omit
     /// it, so parse it tolerantly (for example `#[serde(default)]`).
     #[serde(default)]
-    pub connected_at: Option<DateTime<Utc>>,
+    pub connected_at: Option<Timestamp>,
 }
 
 /// Legacy, self-declared peer metadata provided when the game starts.
@@ -1350,7 +1348,7 @@ pub struct PlayerInfo {
     pub is_ready: bool,
     /// v2 wire only; v3 snapshots omit it (parse tolerantly).
     #[serde(default)]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub connected_at: Option<jiff::Timestamp>,
     #[serde(default)]
     pub epoch: Option<u32>,
     #[serde(default)]
@@ -1370,7 +1368,7 @@ pub struct SpectatorInfo {
     pub name: String,
     /// v2 wire only; v3 snapshots omit it (parse tolerantly).
     #[serde(default)]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub connected_at: Option<jiff::Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

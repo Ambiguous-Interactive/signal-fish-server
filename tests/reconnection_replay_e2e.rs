@@ -772,7 +772,7 @@ async fn replayed_player_joined_trims_connection_info_for_v3_and_keeps_it_verbat
                         name: "Legacy".to_string(),
                         is_authority: false,
                         is_ready: false,
-                        connected_at: Some(chrono::Utc::now()),
+                        connected_at: Some(jiff::Timestamp::now()),
                         connection_info: Some(
                             signal_fish_server::protocol::ConnectionInfo::Relay {
                                 host: "relay.example.test".to_string(),

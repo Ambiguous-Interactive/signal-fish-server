@@ -26,7 +26,7 @@ fn make_player(player_id: Uuid) -> PlayerInfo {
         name: format!("Player-{}", &player_id.to_string()[..8]),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: Some(jiff::Timestamp::now()),
         connection_info: None,
         epoch: None,
         seq: None,
@@ -401,8 +401,8 @@ async fn test_cleanup_rooms_atomic_with_creation() {
             barrier.wait().await;
             let protected = std::collections::HashSet::new();
             db.cleanup_expired_rooms(
-                chrono::Duration::zero(),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::ZERO,
+                jiff::SignedDuration::from_hours(1),
                 &protected,
             )
             .await

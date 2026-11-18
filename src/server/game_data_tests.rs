@@ -1477,7 +1477,7 @@ mod handler_honesty {
                     name: "player".to_string(),
                     is_authority: false,
                     is_ready: false,
-                    connected_at: Some(chrono::Utc::now()),
+                    connected_at: Some(jiff::Timestamp::now()),
                     connection_info: None,
                     epoch: None,
                     seq: None,

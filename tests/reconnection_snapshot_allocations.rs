@@ -47,7 +47,7 @@ async fn room_player_projection_preserves_metadata_without_copying_other_members
                         name: "member".repeat(1024),
                         is_authority: false,
                         is_ready: true,
-                        connected_at: Some(chrono::Utc::now()),
+                        connected_at: Some(jiff::Timestamp::now()),
                         connection_info: Some(ConnectionInfo::Custom {
                             data: serde_json::json!({"nested": ["payload".repeat(1024)]}),
                         }),
@@ -66,7 +66,7 @@ async fn room_player_projection_preserves_metadata_without_copying_other_members
                     SpectatorInfo {
                         id: Uuid::from_u128(index + 100),
                         name: "spectator".repeat(1024),
-                        connected_at: Some(chrono::Utc::now()),
+                        connected_at: Some(jiff::Timestamp::now()),
                     },
                 )
                 .await
